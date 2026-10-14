@@ -9,10 +9,29 @@ import json
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import evaluate_candidate_v3 as e
+from static_test_support import historical_namespace, static_temp
 
 
-def receipt(code=0,stdout=b'ok',stderr=b''):
-    return {**{k:True for k in e.PROOF_FLAGS},'exitCode':code,'stdout':stdout,'stderr':stderr,'rootReaped':True,'finalAbsenceVerified':True,'kernelScope':{'finalAbsenceVerified':True},'timedOut':False,'outputExceeded':False,'infrastructureFailure':False,'bounds':{'phase':'runtime'}}
+def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/caller',caller_sha='a'*64,attempt='a'*32,input_pins=None):
+    """Authored inert protocol records; no assertion of a real launch."""
+    import hashlib
+    from test_identity_graph import completed_result
+    raw=completed_result(stdout,stderr,code)
+    raw['bounds']={'phase':phase,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json')}
+    expected=raw['workerProofBindings']['expected'];expected.update(phase=phase,attempt=attempt)
+    if input_pins is not None:
+        target=input_pins[caller];expected.update(targetDevice=target['device'],targetInode=target['inode'])
+    rows=[json.loads(line) for line in raw['workerProofRaw'].splitlines()]
+    for row in rows:row.update(p=phase,a=attempt)
+    rows[0].update(ed=expected['targetDevice'],ei=expected['targetInode'],od=expected['targetDevice'],oi=expected['targetInode'])
+    raw['workerProofRaw']=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in rows)
+    raw['workerProof']['proofSha256']=hashlib.sha256(raw['workerProofRaw']).hexdigest()
+    pins=raw['launchInputPins'];target=pins.pop('/authored/worker');target['sha256']=caller_sha;pins[caller]=target
+    pins['/synthetic/libcandidate.so']={'device':9,'inode':10,'mode':256,'sha256':'c'*64}
+    if input_pins is not None:pins.update(deepcopy(input_pins))
+    raw['workerProofBindings']['targetSha256']=caller_sha
+    raw['workerProofBindings']['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+    return raw
 
 
 def observations():
@@ -38,11 +57,7 @@ class ProcessResults(unittest.TestCase):
         self.assertEqual(e.compare_process(expected,receipt(stdout=b'',stderr=b''))[0],'matched')
 
     def test_historical_missing_stream_match_is_rejected_by_current_source(self):
-        import ast,hashlib
-        old=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/evaluate_candidate_v3.py'
-        raw=old.read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),'40dd84136ed4018b916eb5b461ed0ebb97a0701f0b724056d58f683a97d330fa')
-        functions=[node for node in ast.parse(raw).body if isinstance(node,ast.FunctionDef) and node.name in ('process_observation','compare_process')]
-        namespace={'PROOF_FLAGS':e.PROOF_FLAGS};exec(compile(ast.Module(body=functions,type_ignores=[]),'historical-missing-stream-control','exec'),namespace)
+        namespace=historical_namespace(PROOF_FLAGS=e.PROOF_FLAGS)
         raw=receipt(stdout=b'',stderr=b'');expected=e.process_observation(raw)
         del raw['stdout'];del raw['stderr']
         self.assertEqual(namespace['compare_process'](expected,raw)[0],'matched')
@@ -82,7 +97,7 @@ class ProcessResults(unittest.TestCase):
             changed=deepcopy(rows);changed[0][field]=value
             with self.assertRaises(ValueError):e.summarize(changed,False)
     def test_incomplete_expected_gcc_keeps_declaration_and_both_checks(self):
-        trusted=Path(__file__).resolve().parents[1].parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/static-process'
+        trusted=static_temp('static-process')
         with tempfile.TemporaryDirectory(dir=trusted) as temporary:
             root=Path(temporary);(root/'private').mkdir()
             for name in ('original.c','original.h'):(root/'private'/name).write_text('synthetic only')
@@ -90,7 +105,12 @@ class ProcessResults(unittest.TestCase):
             for name in ('candidate.c','helper','caller','observations.json'):(root/name).write_text('synthetic only')
             def directory(path):path.mkdir(parents=True);return path
             def write(path,value):path.write_text(json.dumps(value))
-            def fake_run(*args,**kwargs):return {'status':'passed'},receipt()
+            def fake_run(argv,work,**kwargs):
+                if '-o' in argv:
+                    target=argv[argv.index('-o')+1]
+                    target=work/Path(target).name
+                    target.write_bytes(b'synthetic compiler output')
+                return {'status':'passed'},receipt()
             def assertions(source,value):
                 if source.name=='expected.i':raise ValueError('missing independent GCC binding')
                 return 'synthetic assertion'
@@ -102,9 +122,51 @@ class ProcessResults(unittest.TestCase):
             self.assertEqual(checks['expected']['status'],'unknown');self.assertEqual(checks['candidate']['status'],'passed')
             self.assertEqual(report['runtimeRequestCount'],0)
 
+    def test_worker_proof_bindings_and_launcher_failures_are_unknown(self):
+        expected=e.process_observation(receipt())
+        for key in ('workerProofRaw','workerProofBindings','launchInputPins','workerTermination','launcherExitCode','provisioningOnly'):
+            raw=receipt();del raw[key]
+            status,obs=e.compare_process(expected,raw)
+            self.assertEqual(status,'unknown',key);self.assertIsNone(obs['termination'])
+        for change in ('wrapper','raw','target','profile','phase'):
+            raw=receipt()
+            if change=='wrapper':raw['launcherExitCode']=1
+            elif change=='raw':raw['workerProofRaw']+=b'x'
+            elif change=='target':raw['workerProofBindings']['targetSha256']='f'*64
+            elif change=='profile':raw['bounds']['profileSha256']=None
+            else:raw=receipt(phase='compiler')
+            self.assertEqual(e.compare_process(expected,raw)[0],'unknown',change)
+        self.assertEqual(e.compare_process(expected,receipt(attempt='b'*32))[0],'matched')
+        forged=deepcopy(expected);forged['termination']['value']=7
+        self.assertFalse(e.observation_complete(forged))
+
+    def test_run_requires_requested_phase_current_profile_and_containment(self):
+        for raw in (receipt(phase='runtime'),receipt(phase='compiler')):
+            phase='compiler' if raw['bounds']['phase']=='runtime' else 'runtime'
+            with patch.object(e,'bounded_run',return_value=raw):
+                status,_=e.run(['/usr/bin/bwrap'],Path('/not-used'),phase=phase)
+            self.assertEqual(status['status'],'unknown')
+        raw=receipt();raw['bounds']['profileSha256']='f'*64
+        with patch.object(e,'bounded_run',return_value=raw):
+            self.assertEqual(e.run(['/usr/bin/bwrap'],Path('/not-used'),phase='runtime')[0]['status'],'unknown')
+        with patch.object(e,'bounded_run',side_effect=AssertionError('must not launch host argv')):
+            self.assertEqual(e.run(['/usr/bin/gcc'],Path('/not-used'))[0]['status'],'unknown')
+
+    def test_compiler_inputs_overlay_exact_isolated_leaf_and_preserve_profile_argv(self):
+        trusted=static_temp('static-process')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            leaf=Path(temporary);source=leaf/'candidate.c';source.write_bytes(b'authored inert source')
+            argv=e.load_profile()['commands']['preprocess']
+            recipe=e.phase_command(leaf,argv,(source,))
+            self.assertEqual(recipe[-len(argv):],argv)
+            at=recipe.index('--bind');self.assertEqual(recipe[at+1:at+3],[str(leaf),'/work'])
+            self.assertIn(['--ro-bind',str(source),'/work/candidate.c'],[recipe[n:n+3] for n in range(len(recipe))])
+            self.assertGreater(recipe.index(str(source)),at)
+            with self.assertRaises(ValueError):e.phase_command(leaf,argv,(e.BASE/'evaluate_candidate_v3.py',))
+
     def test_run_mocked_nonzero_is_complete_failure_not_unknown(self):
         with patch.object(e,'bounded_run',return_value=receipt(7)),patch.object(e,'public_result',side_effect=lambda r:r):
-            status,result=e.run(['synthetic'],Path('/not-used'),phase='runtime')
+            status,result=e.run(['/usr/bin/bwrap'],Path('/not-used'),phase='runtime')
         self.assertEqual(status['status'],'failed');self.assertTrue(e.process_observation(result)['completed'])
 
 

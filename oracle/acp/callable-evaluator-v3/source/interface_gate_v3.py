@@ -1,10 +1,13 @@
 """Independent export and structural declaration admission; never loads a library."""
 import json
+import os
+import shutil
+import tempfile
 import re
 from importlib.metadata import version
 import fastjsonschema
 from pathlib import Path
-from bounded_runtime import bounded_run, public_result, digest
+from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete
 from build_contract import profile, load_profile
 REQUIRED = {'acp_mix','acp_pair_scale','acp_update','acp_apply','acp_fold','acp_state'}
 # Stable Clang builtin kinds; width alone never identifies a C integer type.
@@ -52,17 +55,68 @@ def _validate_raw_helper(value):
 
 
 def _complete_execution(result):
-    """Only complete OS-owned runner observations may support tool admission."""
-    if not isinstance(result, dict) or type(result.get('exitCode')) is not int:
-        return False
-    facts = ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted',
-             'captureComplete','waitComplete','cleanupVerified','rootReaped','finalAbsenceVerified')
-    if any(result.get(key) is not True for key in facts):
-        return False
-    if any(result.get(key) is not False for key in ('timedOut','outputExceeded','infrastructureFailure')):
-        return False
-    return isinstance(result.get('kernelScope'), dict) and result['kernelScope'].get('finalAbsenceVerified') is True
+    """Require authenticated worker exec/termination and complete containment receipts."""
+    return worker_execution_complete(result)
 
+
+
+class owned_worker_leaf:
+    """Explicit attempt lifetime; unknown worker absence retains the owned leaf."""
+    def __init__(self, root, prefix):
+        workspace = root/'worker-work'
+        workspace.mkdir(mode=0o700,exist_ok=True)
+        if workspace.is_symlink() or workspace.resolve() != workspace:
+            raise ValueError('worker workspace is not canonical')
+        self.path = Path(tempfile.mkdtemp(prefix=prefix,dir=workspace))
+        metadata = self.path.lstat()
+        self.identity = {'path':str(self.path),'device':metadata.st_dev,'inode':metadata.st_ino,
+                         'uid':metadata.st_uid,'mode':metadata.st_mode}
+        self.launched = False
+        self.result = None
+
+    def __enter__(self):
+        return self
+
+    def run(self, runner, *args, **kwargs):
+        self.launched = True
+        try:
+            self.result = runner(*args, **kwargs)
+            return self.result
+        except BaseException as error:
+            self.result = getattr(error,'bounded_result',None)
+            raise
+
+    def __exit__(self, kind, error, traceback):
+        result = self.result
+        absence = (isinstance(result,dict) and
+                   all(result.get(key) is True for key in ('cleanupVerified','rootReaped','finalAbsenceVerified')) and
+                   isinstance(result.get('kernelScope'),dict) and
+                   result['kernelScope'].get('finalAbsenceVerified') is True)
+        facts = {'identity':self.identity,'retained':True,'deletionAttempted':False,
+                 'absenceVerified':absence,'prelaunch':not self.launched}
+        try:
+            current = self.path.lstat()
+            if (current.st_dev,current.st_ino,current.st_uid,current.st_mode) != tuple(self.identity[k] for k in ('device','inode','uid','mode')):
+                facts['reason']='leaf identity changed; no deletion'
+            elif not self.launched or absence:
+                facts['deletionAttempted']=True
+                shutil.rmtree(self.path)
+                facts['retained']=False
+            else:
+                facts['reason']='worker absence unverified; leaf retained'
+        except Exception as cleanup_error:
+            facts['reason']='leaf deletion/identity error'
+            facts['secondaryError']=type(cleanup_error).__name__+': '+str(cleanup_error)[:300]
+        if isinstance(result,dict):
+            result['leafCleanup']=facts
+        if error is not None:
+            error.leafCleanup=facts
+        elif facts.get('secondaryError') or facts.get('reason'):
+            failure=ValueError('worker leaf cleanup incomplete')
+            failure.bounded_result=result
+            failure.leafCleanup=facts
+            raise failure
+        return False
 
 def _raw_from_receipt(receipt):
     """Raw helper roots are closed; only this reader may add these two fields."""
@@ -299,7 +353,7 @@ def probe(source, helper, work, environment):
 
 def export_inventory(library, expected_state_bytes, work, environment):
     bounds=load_profile()['bounds']
-    r = bounded_run(['/usr/bin/readelf','--dyn-syms','--wide',str(library)],work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
+    r = bounded_run(contained_command(['/usr/bin/readelf','--dyn-syms','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
     if not _complete_execution(r):
         return {'status':'unknown','accepted':False,'reason':'incomplete export inspection','execution':public_result(r)}
     symbols = []
@@ -307,7 +361,7 @@ def export_inventory(library, expected_state_bytes, work, environment):
         parts = line.split()
         if len(parts) == 8 and parts[0].rstrip(':').isdigit():
             symbols.append(dict(zip(('number','value','size','type','binding','visibility','index','name'),parts)))
-    sections_result=bounded_run(['/usr/bin/readelf','--section-headers','--wide',str(library)],work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
+    sections_result=bounded_run(contained_command(['/usr/bin/readelf','--section-headers','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
     if not _complete_execution(sections_result):
         return {'status':'unknown','accepted':False,'reason':'incomplete section inspection','execution':public_result(r),'sectionsExecution':public_result(sections_result)}
     section_flags={}

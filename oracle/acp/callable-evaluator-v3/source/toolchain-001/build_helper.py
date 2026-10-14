@@ -1,43 +1,109 @@
 """Build the v3 helper only when explicitly invoked; importing is inert."""
 from pathlib import Path
 import json
+import os
+import stat
+import struct
+import tempfile
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from bounded_runtime import bounded_run, public_result, digest
+from bounded_runtime import bounded_run, public_result, digest, contained_command
 from build_contract import load_profile
-from interface_gate_v3 import _complete_execution
+from interface_gate_v3 import _complete_execution, owned_worker_leaf
+
+
+def read_output(path, limit, elf=False):
+    """Read only bounded stable regular worker output after verified cleanup."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                or not 0 < before.st_size <= limit):
+            raise ValueError('invalid bounded helper output')
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            data = stream.read(before.st_size + 1)
+        after = os.fstat(fd)
+        identity = lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        if identity(before) != identity(after) or len(data) != before.st_size:
+            raise ValueError('helper output changed')
+        if elf:
+            if (len(data) < 64 or data[:7] != b'\x7fELF\x02\x01\x01' or
+                    struct.unpack_from('<HHI', data, 16) not in ((2,62,1),(3,62,1))):
+                raise ValueError('invalid helper ELF')
+            phoff = struct.unpack_from('<Q', data, 32)[0]
+            ehsize, phsize, phnum = struct.unpack_from('<HHH', data, 52)
+            if ehsize != 64 or phsize != 56 or not 1 <= phnum <= 128 or phoff < 64 or phoff + phsize*phnum > len(data):
+                raise ValueError('invalid bounded helper ELF headers')
+            for offset in range(phoff, phoff+phsize*phnum, phsize):
+                segment_offset, filesz = struct.unpack_from('<Q',data,offset+8)[0], struct.unpack_from('<Q',data,offset+32)[0]
+                if segment_offset+filesz > len(data):
+                    raise ValueError('helper ELF segment outside output')
+        return data
+    finally:
+        os.close(fd)
+
+
+def publish(path, data, mode):
+    """Controller publication; worker never mounts this destination directory."""
+    descriptor, temporary = tempfile.mkstemp(prefix='.helper-publish-',dir=path.parent)
+    try:
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchmod(stream.fileno(),mode)
+        os.replace(temporary,path)
+    finally:
+        if os.path.lexists(temporary):os.unlink(temporary)
 
 
 def build(receipt_name):
-    work = ROOT / 'toolchain-001'
-    output = work / receipt_name
-    if output.parent.resolve() != work.resolve():
+    destination = ROOT / 'toolchain-001'
+    output = destination / receipt_name
+    if output.parent.resolve() != destination.resolve():
         raise ValueError('helper receipt outside owned toolchain root')
-    argv = ['/usr/lib/llvm/23/bin/clang++', '-std=c++17', '-MD', '-MF',
-            str(work / 'helper-dependencies.d'), '-I/usr/lib/llvm/23/include',
-            str(ROOT / 'record_identity_probe.cpp'), '-L/usr/lib/llvm/23/lib64',
-            '-Wl,-rpath,/usr/lib/llvm/23/lib64', '-lclang-cpp', '-lLLVM',
-            '-o', str(work / 'record_identity_probe')]
-    env = {'PATH':'/usr/bin:/bin', 'LANG':'C', 'LC_ALL':'C', 'TMPDIR':str(work)}
     bounds = load_profile()['bounds']
-    execution = bounded_run(argv, work, env,
-                           timeout=bounds['helperBuildSeconds'],
-                           output_limit=bounds['helperOutputBytesPerStream'],
-                           managed_scope=True, phase='helper-build')
-    if not _complete_execution(execution):
-        error = ValueError('incomplete helper build execution')
-        error.bounded_result = execution
-        raise error
-    result = public_result(execution)
-    result.update(schemaVersion=3, sourceSha256=digest(ROOT / 'record_identity_probe.cpp'),
-                  helperSchemaSha256=digest(ROOT / 'contracts/helper-schema.json'),
-                  binarySha256=digest(work / 'record_identity_probe') if result['exitCode'] == 0 else None)
-    with output.open('x') as stream:
-        json.dump(result, stream, indent=2)
-        stream.write('\n')
-    return result
+    source = ROOT / 'record_identity_probe.cpp'
+    source_hash = digest(source)
+    schema_hash = digest(ROOT/'contracts/helper-schema.json')
+    with owned_worker_leaf(ROOT,'helper-build-') as leaf:
+        work = leaf.path
+        binary = work/'record_identity_probe'
+        depfile = work/'helper-dependencies.d'
+        argv = ['/usr/lib/llvm/23/bin/clang++', '-std=c++17', '-MD', '-MF',
+                str(depfile), '-I/usr/lib/llvm/23/include', str(source),
+                '-L/usr/lib/llvm/23/lib64', '-Wl,-rpath,/usr/lib/llvm/23/lib64',
+                '-lclang-cpp', '-lLLVM', '-o', str(binary)]
+        env = {'PATH':'/usr/bin:/bin', 'LANG':'C', 'LC_ALL':'C', 'TMPDIR':str(work)}
+        execution = leaf.run(bounded_run,contained_command(argv,work,read_only_files=(source,),environment=env),
+                                work,env,timeout=bounds['helperBuildSeconds'],
+                                output_limit=bounds['helperOutputBytesPerStream'],
+                                managed_scope=True,phase='helper-build')
+        if not _complete_execution(execution):
+            error = ValueError('incomplete helper build execution')
+            error.bounded_result = execution
+            raise error
+        if source_hash != digest(source) or schema_hash != digest(ROOT/'contracts/helper-schema.json'):
+            raise ValueError('helper build source/schema drift')
+        result = public_result(execution)
+        binary_hash = None
+        if execution['exitCode'] == 0:
+            binary_data = read_output(binary,bounds['fileSizeBytes'],elf=True)
+            dependency_data = read_output(depfile,bounds['fileSizeBytes'])
+            import hashlib
+            binary_hash = hashlib.sha256(binary_data).hexdigest()
+            publish(destination/'helper-dependencies.d',dependency_data,0o600)
+            publish(destination/'record_identity_probe',binary_data,0o700)
+        result.update(schemaVersion=3,sourceSha256=source_hash,helperSchemaSha256=schema_hash,
+                      binarySha256=binary_hash,workerArgv=argv,workerCwd=str(work),
+                      publication={'binary':str(destination/'record_identity_probe'),
+                                   'dependencies':str(destination/'helper-dependencies.d'),
+                                   'published':execution['exitCode']==0})
+        with output.open('x') as stream:
+            json.dump(result,stream,indent=2)
+            stream.write('\n')
+        return result
 
 
 if __name__ == '__main__':

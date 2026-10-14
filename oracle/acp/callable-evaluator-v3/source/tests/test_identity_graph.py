@@ -55,8 +55,25 @@ def remap(value, mapping):
 
 
 def completed_result(stdout=b'', stderr=b'', exit_code=0):
-    return {'exitCode':exit_code,'stdout':stdout,'stderr':stderr,
-            **{key:True for key in ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted','captureComplete','waitComplete','cleanupVerified','rootReaped','finalAbsenceVerified')},
+    import hashlib
+    pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':'0'*64},
+          '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64}}
+    bindings={'protocolVersion':1,'expected':{'attempt':'a'*32,'phase':'runtime','reportDevice':1,
+        'reportInode':2,'reaperDevice':3,'reaperInode':4,'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8},
+        **{key:'0'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256')},
+        'launchPinsSha256':hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()}
+    execution={'v':1,'t':'exec','s':1,'a':'a'*32,'p':'runtime','c':3,'ed':7,'ei':8,'od':7,'oi':8,
+               'w':(4<<16)|(5<<8)|127,'cf':1,'dp':0,'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
+    termination={'v':1,'t':'term','s':2,'a':'a'*32,'p':'runtime','c':3,
+                 'r':exit_code<<8 if exit_code>=0 else -exit_code,'k':'exit' if exit_code>=0 else 'signal','n':abs(exit_code)}
+    raw=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in (execution,termination))
+    return {'workerProofRaw':raw,'bounds':{'phase':'runtime','profileSha256':'0'*64},'launchInputPins':pins,'workerProofBindings':bindings,'exitCode':exit_code,'stdout':stdout,'stderr':stderr,
+            'launcherExitCode':0,'provisioningOnly':False,
+            'workerTermination':{'kind':'exit' if exit_code>=0 else 'signal',
+                                 'value':abs(exit_code),'rawWaitStatus':exit_code<<8 if exit_code>=0 else -exit_code},
+            'workerProof':{'protocolVersion':1,'status':'verified','proofSha256':hashlib.sha256(raw).hexdigest(),
+                           'fileIdentityVerified':True,'pinsUnchanged':True},
+            **{key:True for key in ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted','captureComplete','waitComplete','cleanupVerified','rootReaped','finalAbsenceVerified','workerExecVerified','workerTerminationVerified')},
             **{key:False for key in ('timedOut','outputExceeded','infrastructureFailure')},
             'kernelScope':{'finalAbsenceVerified':True}}
 
@@ -186,7 +203,7 @@ class IdentityGraph(unittest.TestCase):
             build=builder['build']
             from unittest.mock import Mock
             runner=Mock(return_value=completed_result())
-            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576}},bounded_run=runner):
+            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576,'fileSizeBytes':16777216}},bounded_run=runner,read_output=lambda path,limit,elf=False:b'NOT EXECUTABLE'):
                 result=build('receipt.json')
             self.assertEqual(runner.call_args.kwargs['phase'],'helper-build')
             self.assertEqual(result['schemaVersion'],3)
@@ -194,7 +211,7 @@ class IdentityGraph(unittest.TestCase):
             self.assertEqual(result['helperSchemaSha256'],gate.digest(work/'contracts/helper-schema.json'))
             self.assertEqual(result['sourceSha256'],gate.digest(work/'record_identity_probe.cpp'))
             incomplete=completed_result();incomplete['cleanupVerified']=False
-            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576}},bounded_run=lambda *args,**kwargs:incomplete):
+            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576,'fileSizeBytes':16777216}},bounded_run=lambda *args,**kwargs:incomplete):
                 with self.assertRaisesRegex(ValueError,'incomplete helper build') as failure:build('not-created.json')
                 self.assertIs(failure.exception.bounded_result,incomplete)
                 self.assertFalse((work/'toolchain-001/not-created.json').exists())
@@ -302,14 +319,15 @@ class IdentityGraph(unittest.TestCase):
             for field in ('timedOut','outputExceeded','infrastructureFailure'):
                 result=completed_result();result[field]=True
                 self.assertFalse(gate._complete_execution(result))
+            (work/'inert.so').write_bytes(b'NOT EXECUTABLE')
             result=completed_result();result['captureComplete']=False
             with patch.object(gate,'bounded_run',return_value=result) as runner:
-                exported=gate.export_inventory(work/'inert.so',8,work,{})
+                exported=gate.export_inventory(work/'inert.so',8,work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'})
                 self.assertEqual(exported['status'],'unknown');self.assertFalse(exported['accepted'])
                 self.assertEqual(runner.call_count,1)
                 self.assertEqual(runner.call_args.kwargs['phase'],'elf-inspection')
             with patch.object(gate,'bounded_run',side_effect=[completed_result(),result]) as runner:
-                exported=gate.export_inventory(work/'inert.so',8,work,{})
+                exported=gate.export_inventory(work/'inert.so',8,work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'})
                 self.assertEqual(exported['status'],'unknown');self.assertFalse(exported['accepted'])
                 self.assertEqual(runner.call_count,2)
 

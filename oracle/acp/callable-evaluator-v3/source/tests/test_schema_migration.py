@@ -12,6 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import evaluate_candidate_v3 as e
 import freeze_v3 as f
 from test_process_results import receipt, observations
+from static_test_support import historical_namespace, static_temp
 
 
 def report_fixture():
@@ -19,7 +20,7 @@ def report_fixture():
     summary=e.summarize(rows,True);status=summary.pop('behaviorStatus')
     phases={key:{'status':'passed','reason':'synthetic','evidenceSha256':None} for key in e.PHASES}
     phases['load']={'status':'unverified','value':None};phases['behavior']['status']=status
-    return {'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':'a'*64,'profileSha256':'b'*64,'phases':phases,'admitted':True,**summary,'scenarios':rows,'evidenceFiles':{'synthetic.json':'a'*64},'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
+    return {'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':'a'*64,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json'),'runtimeInputs':{'caller':{'path':'/synthetic/caller','sha256':'a'*64},'library':{'path':'/synthetic/libcandidate.so','sha256':'c'*64}},'phases':phases,'admitted':True,**summary,'scenarios':rows,'evidenceFiles':{'synthetic.json':'a'*64},'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
 
 
 class SchemaMigration(unittest.TestCase):
@@ -41,13 +42,27 @@ class SchemaMigration(unittest.TestCase):
             schema=json.loads((e.BASE/'contracts'/(name+'-schema.json')).read_bytes())
             self.assertFalse(schema['additionalProperties']);self.assertEqual(schema['properties']['schemaVersion']['const'],3)
     def test_reference_incomplete_and_old_shape_refuse(self):
-        value={'schemaVersion':3,'sourceSha256':'a'*64,'callerSha256':'b'*64,'observations':[{**o,'evidenceSha256':'c'*64} for o in observations()]}
+        value={'schemaVersion':3,'sourceSha256':'a'*64,'callerSha256':'a'*64,'callerPath':'/synthetic/caller','libraryPath':'/synthetic/libcandidate.so','librarySha256':'c'*64,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json'),'observations':[{**o,'evidenceSha256':'c'*64} for o in observations()]}
         e.validate_exchange('reference-observations',value)
         value['observations'][0]['process']['completed']=False
         with self.assertRaises(Exception):e.validate_exchange('reference-observations',value)
         value['observations'][0]['process']['completed']=True
         value['observations'][0]['exitCode']=0
         with self.assertRaises(Exception):e.validate_exchange('reference-observations',value)
+    def test_completed_rows_require_protected_proof_and_bound_inputs(self):
+        for field in ('workerExecVerified','workerTerminationVerified','workerProof','workerProofRawHex','workerProofBindings','launchInputPins','launcherExitCode','rootReaped','scopeAbsenceVerified'):
+            report=report_fixture();del report['scenarios'][0]['process'][field]
+            with self.assertRaises(Exception,msg=field):e.validate_exchange('report',report)
+        for change in ('terminal','raw','caller','library','profile','launcher'):
+            report=report_fixture();process=report['scenarios'][0]['process']
+            if change=='terminal':process['termination']['value']=7
+            elif change=='raw':process['workerProofRawHex']=''
+            elif change=='caller':report['runtimeInputs']['caller']['sha256']='d'*64
+            elif change=='library':report['runtimeInputs']['library']['sha256']='d'*64
+            elif change=='profile':report['profileSha256']='d'*64
+            else:process['launcherExitCode']=1
+            with self.assertRaises(Exception,msg=change):e.validate_exchange('report',report)
+
     def test_freeze_public_source_cannot_seal(self):
         with self.assertRaisesRegex(ValueError,'trusted v3'):
             f.freeze(*([Path('/synthetic')]*7))
@@ -71,24 +86,60 @@ class SchemaMigration(unittest.TestCase):
             for key,item in (('schemaVersion',2),('unexpected',True)):
                 changed=deepcopy(value);changed[key]=item
                 with self.assertRaises(Exception,msg=name):e.validate_exchange(name,changed)
-    def test_nonzero_reference_binds_caller_source_and_raw_receipts(self):
-        trusted=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/static-process'
+    def test_nonzero_reference_binds_actual_selected_preparation_and_raw_receipts(self):
+        import bounded_runtime as runtime
+        trusted=static_temp('static-process')
         with tempfile.TemporaryDirectory(dir=trusted) as temporary:
             root=Path(temporary);(root/'private').mkdir();(root/'private/original.c').write_text('synthetic source only')
-            caller=root/'caller';caller.write_bytes(b'not executable')
+            prep=root/'preparation';prep.mkdir();(prep/'reference').mkdir()
+            caller=prep/'caller';caller.write_bytes(b'authored inert caller')
+            library=prep/'reference/libcandidate.so';library.write_bytes(b'authored inert shared-library file')
             shutil.copytree(e.BASE/'contracts',root/'contracts')
+            # Actual bounded input reader supplies physical metadata. These wire
+            # records remain authored parser fixtures, not native worker proof.
+            pins=runtime._pin_files((caller,library))
             rows=[]
             for i,family in enumerate(e.SCENARIO_FAMILIES):
-                raw=receipt(7);path=root/('reference-process-'+str(i)+'.json')
+                raw=receipt(7,caller=str(caller),caller_sha=e.digest(caller),input_pins=pins)
+                path=prep/('reference-process-'+str(i)+'.json')
                 path.write_text(json.dumps({'status':'failed','execution':e.public_result(raw)}))
                 rows.append({'id':i,'family':family,'process':e.process_observation(raw),'evidenceSha256':e.digest(path)})
-            path=root/'reference-observations.json';path.write_text(json.dumps({'schemaVersion':3,'sourceSha256':e.digest(root/'private/original.c'),'callerSha256':e.digest(caller),'observations':rows}))
+            path=prep/'reference-observations.json'
+            value={'schemaVersion':3,'sourceSha256':e.digest(root/'private/original.c'),'callerSha256':e.digest(caller),'callerPath':str(caller),'libraryPath':str(library),'librarySha256':e.digest(library),'profileSha256':e.digest(root/'contracts/candidate-build-profile.json'),'observations':rows}
+            def write():path.write_text(json.dumps(value))
+            write()
             with patch.object(e,'BASE',root):
-                self.assertEqual(len(e.validated_observations(path,caller)),24)
-                (root/'reference-process-0.json').write_text('{}')
-                with self.assertRaisesRegex(ValueError,'receipt drift'):e.validated_observations(path,caller)
-                caller.write_bytes(b'changed')
-                with self.assertRaisesRegex(ValueError,'fixture/caller'):e.validated_observations(path,caller)
+                self.assertEqual(len(e.validated_observations(path,caller,prep)),24)
+                rp=prep/'reference-process-0.json';retained=rp.read_bytes();rp.write_bytes(b'{}')
+                with self.assertRaisesRegex(ValueError,'receipt drift'):e.validated_observations(path,caller,prep)
+                rp.write_bytes(retained)
+                caller_bytes=caller.read_bytes();caller.write_bytes(b'changed caller')
+                with self.assertRaisesRegex(ValueError,'fixture/caller'):e.validated_observations(path,caller,prep)
+                caller.write_bytes(caller_bytes)
+                original=root/'private/original.c';original_bytes=original.read_bytes();original.write_bytes(b'changed source generation')
+                with self.assertRaisesRegex(ValueError,'fixture/caller'):e.validated_observations(path,caller,prep)
+                original.write_bytes(original_bytes)
+                saved=library.read_bytes();library.rename(prep/'reference/retained-old-library.so')
+                with self.assertRaises((OSError,ValueError)):e.validated_observations(path,caller,prep)
+                library.write_bytes(saved) # same bytes, different physical identity
+                with self.assertRaisesRegex(ValueError,'physical identity'):e.validated_observations(path,caller,prep)
+                # Rebuild authored receipts from newly admitted actual metadata.
+                for row in rows:
+                    raw=receipt(7,caller=str(caller),caller_sha=e.digest(caller),input_pins=runtime._pin_files((caller,library)))
+                    rp=prep/('reference-process-'+str(row['id'])+'.json');rp.write_text(json.dumps({'status':'failed','execution':e.public_result(raw)}))
+                    row.update(process=e.process_observation(raw),evidenceSha256=e.digest(rp))
+                write();self.assertEqual(len(e.validated_observations(path,caller,prep)),24)
+                library.write_bytes(b'changed shared-library bytes')
+                with self.assertRaisesRegex(ValueError,'fixture/caller'):e.validated_observations(path,caller,prep)
+                library.write_bytes(saved)
+                value['libraryPath']='/synthetic/nonexistent.so';write()
+                with self.assertRaises(ValueError):e.validated_observations(path,caller,prep)
+                value['libraryPath']=str(library);write()
+                other=root/'other-preparation';other.mkdir()
+                with self.assertRaisesRegex(ValueError,'independently selected'):e.validated_observations(path,caller,other)
+                value['profileSha256']='f'*64;write()
+                with self.assertRaises(ValueError):e.validated_observations(path,caller,prep)
+
 
     def test_accounting_and_unverified_activity_tamper_refuse(self):
         for key,value in (('matchedScenarioProcessCount',0),('processBehaviorRate',0),('admitted',False)):
@@ -99,7 +150,7 @@ class SchemaMigration(unittest.TestCase):
         report=report_fixture();report['scenarios'][0]['apiEntryObservation']['status']='not-attempted'
         with self.assertRaises(ValueError):e.validate_exchange('report',report)
     def test_nonfinite_duplicate_and_bounded_exchange_read(self):
-        trusted=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/static-process'
+        trusted=static_temp('static-process')
         with tempfile.TemporaryDirectory(dir=trusted) as temporary:
             path=Path(temporary)/'input.json'
             for raw in ('{"schemaVersion":3,"schemaVersion":2}', '{"value":NaN}', 'xxxxxxxxx'):
@@ -113,13 +164,18 @@ class SchemaMigration(unittest.TestCase):
         value['untrustedExtra']=True
         with self.assertRaises(Exception):e.validate_exchange('helper',value)
     def test_unknown_positive_control_is_not_accepted(self):
-        trusted=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3'
-        spec=importlib.util.spec_from_file_location('trusted_prepare_static',trusted/'templates-current/prepare_v3.py')
-        module=importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules,{'generate_controls_v3':type('Stub',(),{'generate':lambda *_:None})}):
-            spec.loader.exec_module(module)
         report=report_fixture();report['matchedScenarioProcessCount']=0;report['unknownScenarioProcessCount']=24
-        self.assertFalse(module.control_passed({'expected':'matched'},report))
+        self.assertFalse(e.control_passed({'expected':'matched'},report))
+        self.assertTrue(e.control_passed({'expected':'matched'},report_fixture()))
+        report=report_fixture();report['mismatchedScenarioProcessCount']=1;report['phases']['behavior']['status']='failed'
+        self.assertTrue(e.control_passed({'expected':'mismatched'},report))
+        report=report_fixture();report['unknownScenarioProcessCount']=1
+        self.assertTrue(e.control_passed({'expected':'unknown'},report))
+        report=report_fixture();report.update(admitted=False,runtimeRequestCount=0,admissionRefusedCount=24)
+        report['phases']['declarations']['status']='refused'
+        self.assertTrue(e.control_passed({'expected':'refused','stage':'declarations'},report))
+        report['runtimeRequestCount']=1
+        self.assertFalse(e.control_passed({'expected':'refused','stage':'declarations'},report))
     def test_static_pin_cannot_be_upgraded_by_native_claim_text(self):
         native_claim='Native qualification: **QUALIFIED** '+('a'*64)+' '+('b'*64)
         pin={'schemaVersion':3,'status':'static-recording-unqualified','nativeQualificationClaim':native_claim}
@@ -129,7 +185,7 @@ class SchemaMigration(unittest.TestCase):
             f.require_qualified_pin({'status':'invented-qualified','nativeQualificationClaim':native_claim})
 
     def test_source_checkpoint_precedes_preflight_and_output(self):
-        trusted=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/static-process-correction-001'
+        trusted=static_temp('static-process-correction-001')
         with tempfile.TemporaryDirectory(dir=trusted) as temporary:
             root=Path(temporary);preflight=root/'preflight';preflight.mkdir();output=root/'no-seal-created'
             matrix={'schemaVersion':3,'status':'preflight-only-independent-review-required','freezeCreated':False,'allControlsPassed':True,'executionDependenciesUnchanged':True,'rows':[{'name':'synthetic','expected':'matched','expectedStage':'behavior','passed':True,'receipt':'synthetic','receiptSha256':'a'*64,'runtimeRequestCount':24,'completedScenarioProcessCount':24,'unknownScenarioProcessCount':0}]}
@@ -151,15 +207,24 @@ class SchemaMigration(unittest.TestCase):
         self.assertIsNone(rows[0]['process']['stdoutHex']);self.assertEqual(rows[0]['process']['stderrHex'],'')
         self.assertIsNone(report['processBehaviorRate'])
 
+    def test_unprepared_launcher_unknown_proof_retains_diagnostics(self):
+        raw=receipt();raw.update(exitCode=None,workerExecVerified=False,workerTerminationVerified=False,workerTermination=None,
+             workerProofRaw=b'',workerProofBindings=None,launchInputPins=None,
+             workerProof={'protocolVersion':1,'status':'unknown','proofSha256':None,'fileIdentityVerified':False,'pinsUnchanged':False,'reason':'launch-not-prepared'})
+        report=report_fixture();rows=[e.scenario_entry(o,raw,True,'a'*64) for o in observations()]
+        summary=e.summarize(rows,True);report.update({key:value for key,value in summary.items() if key!='behaviorStatus'})
+        report['scenarios']=rows;report['phases']['behavior']['status']=summary['behaviorStatus']
+        e.validate_exchange('report',report)
+        self.assertEqual(report['unknownScenarioProcessCount'],24)
+        self.assertIsNone(rows[0]['process']['termination'])
+        self.assertEqual(rows[0]['process']['workerProof']['reason'],'launch-not-prepared')
+
     def test_historical_load_pass_acceptance_is_rejected_by_current_exchange(self):
-        import ast,hashlib
-        old=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/evaluate_candidate_v3.py'
-        raw=old.read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),'40dd84136ed4018b916eb5b461ed0ebb97a0701f0b724056d58f683a97d330fa')
-        function=next(node for node in ast.parse(raw).body if isinstance(node,ast.FunctionDef) and node.name=='validate_exchange')
-        namespace={'BASE':old.parent,'json':json,'summarize':e.summarize}
-        exec(compile(ast.Module(body=[function],type_ignores=[]),'historical-load-claim-control','exec'),namespace)
+        namespace=historical_namespace(summarize=e.summarize)
         report=report_fixture();report['phases']['load']={'status':'passed','reason':'unsupported claim','evidenceSha256':None}
         self.assertEqual(namespace['validate_exchange']('report',report),report)
+        malformed=deepcopy(report);malformed['phases']['load']['status']='invented'
+        with self.assertRaises(ValueError):namespace['validate_exchange']('report',malformed)
         with self.assertRaises(Exception):e.validate_exchange('report',report)
 
     def test_load_phase_and_api_claims_refuse_for_both_admission_states(self):
@@ -168,7 +233,7 @@ class SchemaMigration(unittest.TestCase):
             if not admitted:
                 rows=[e.scenario_entry(o) for o in observations()];summary=e.summarize(rows,False)
                 report.update({key:value for key,value in summary.items() if key!='behaviorStatus'})
-                report.update(admitted=False,scenarios=rows)
+                report.update(admitted=False,scenarios=rows,runtimeInputs=None)
                 for name in e.PHASES:report['phases'][name]={'status':'not-attempted','reason':'synthetic','evidenceSha256':None}
                 report['phases']['load']={'status':'not-attempted','value':None}
             e.validate_exchange('report',report)
@@ -183,7 +248,7 @@ class SchemaMigration(unittest.TestCase):
 
 class BoundedTrees(unittest.TestCase):
     def setUp(self):
-        self.trusted=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/static-process-correction-001'
+        self.trusted=static_temp('static-process-correction-001')
         self.temporary=tempfile.TemporaryDirectory(dir=self.trusted);self.addCleanup(self.temporary.cleanup)
         self.root=Path(self.temporary.name)
 
@@ -302,17 +367,8 @@ class BoundedTrees(unittest.TestCase):
         self.assertEqual((self.root/'output/file').read_bytes(),b'abcdefg');self.assertTrue(all(n<=2 for n in calls))
 
     def test_historical_inventory_counterexample_is_preserved_and_current_stops_early(self):
-        import ast,hashlib
         from types import SimpleNamespace
-        old=e.BASE.parents[3]/'build/acp-decomp-effectiveness/callable-library-v3/freeze_v3.py'
-        raw=old.read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),'aaa3b29b7f35b3b90dd77dfeb8b6fb63504d9092937a366278e6e1bbe93389ca')
-        node=next(n for n in ast.parse(raw).body if isinstance(n,ast.FunctionDef) and n.name=='inventory')
-        # Rescale only historical numeric ceilings to tiny caps; preserve its
-        # enumeration/sort/check ordering. No historical file is rewritten.
-        class TinyCaps(ast.NodeTransformer):
-            def visit_Constant(self,n):
-                return ast.copy_location(ast.Constant(3 if n.value==20000 else 8 if n.value==536870912 else n.value),n)
-        module=ast.fix_missing_locations(ast.Module(body=[TinyCaps().visit(node)],type_ignores=[]));counts={'yielded':0,'checked':0}
+        counts={'yielded':0,'checked':0}
         class Entry:
             def __init__(self,n):self.name=str(n)
             def __lt__(self,other):return self.name<other.name
@@ -322,7 +378,7 @@ class BoundedTrees(unittest.TestCase):
         class Root:
             def rglob(self,pattern):
                 for n in range(50):counts['yielded']+=1;yield Entry(n)
-        namespace={'digest':lambda _: 'a'*64};exec(compile(module,'historical-inventory-tinycaps','exec'),namespace)
+        namespace=historical_namespace(digest=lambda _: 'a'*64)
         with self.assertRaises(ValueError):namespace['inventory'](Root())
         self.assertEqual(counts['yielded'],50);self.assertGreater(counts['yielded'],4)
 

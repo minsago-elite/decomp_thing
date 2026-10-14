@@ -76,7 +76,20 @@
     "helperGraphDepth": 64,
     "defaultWallSeconds": 15,
     "captureReadBytes": 8192,
-    "waitFloorSeconds": 0.001
+    "waitFloorSeconds": 0.001,
+    "workerProofRecords": 2,
+    "workerProofRecordBytes": 512,
+    "workerProofBytes": 1024,
+    "workerBarrierSeconds": 1,
+    "workerBarrierPollSeconds": 0.01,
+    "workerBarrierAttempts": 100,
+    "workerProcEntries": 256,
+    "workerFdEntries": 66,
+    "workerNumericFds": 64,
+    "workerMetadataBytes": 4096,
+    "workerMonitorProcesses": 1,
+    "workerLaunchPinEntries": 256,
+    "workerLaunchPinFileBytes": 16777216
   },
   "toolchainEnvironmentPinSha256": "df06d577d23d2f147671412434577eaa560ec6edeac91158a6e6d62c076ba0a6",
   "gccIdentity": {
@@ -110,7 +123,11 @@
       "path": "/tmp",
       "bytes": 16777216
     },
-    "hostPathsOutsideMounts": "inaccessible"
+    "hostPathsOutsideMounts": "inaccessible",
+    "readOnlySystemFiles": [
+      "/etc/ld.so.cache"
+    ],
+    "explicitReadOnlyFileInputs": "exact regular files at original absolute paths, overlaid read-only even within writable work; no parent inference or control-source work tree"
   },
   "limitSemantics": {
     "cpuSeconds": "RLIMIT_CPU soft=hard per process; not aggregate cgroup CPU",
@@ -119,7 +136,8 @@
     "resourceLimits": "soft=hard; units are bytes, seconds or descriptor count as named",
     "streamOutput": "independent cap for stdout and stderr; excess makes capture incomplete",
     "cleanup": "wait and subsequent absence-verification each have a distinct 5-second ceiling",
-    "helperBuild": "60-second wall supervisor bound; the same 30-second per-process CPU RLIMIT still applies"
+    "helperBuild": "60-second wall supervisor bound; the same 30-second per-process CPU RLIMIT still applies",
+    "workerExecProof": "barrier and monitor overhead are inside the original phase wall/resource budgets; proof file is independent of untrusted stdout/stderr"
   },
   "limitAudit": [
     {
@@ -250,6 +268,39 @@
         "temporaryFilesystemBytes"
       ],
       "scope": "/tmp tmpfs; exact environment/namespaces/mount and writable-work contract below"
+    },
+    {
+      "phase": "worker-exec-proof",
+      "source": "bounded_runtime.py/scope_gate.py/worker_exec_monitor.c",
+      "keys": [
+        "workerProofRecords",
+        "workerProofRecordBytes",
+        "workerProofBytes",
+        "workerBarrierSeconds",
+        "workerBarrierPollSeconds",
+        "workerBarrierAttempts",
+        "workerProcEntries",
+        "workerFdEntries",
+        "workerNumericFds",
+        "workerMetadataBytes",
+        "workerMonitorProcesses",
+        "workerLaunchPinEntries",
+        "workerLaunchPinFileBytes"
+      ],
+      "scope": "closed 2-record proof, bounded pre-worker proc/FD barrier, one monitor inside existing aggregate task budget"
     }
-  ]
+  ],
+  "workerExecProof": {
+    "protocolVersion": 1,
+    "monitorInsidePath": "/_worker_exec_monitor",
+    "manifestPath": "toolchain-001/worker-exec-monitor.json",
+    "receiptRoot": "exec-proof-receipts",
+    "receiptFile": "worker-proof.jsonl",
+    "reportDescriptor": 4,
+    "receiptMode": 384,
+    "receiptDirectoryMode": 448,
+    "workerPhases": "all require fresh contained monitor exec/terminal proof",
+    "taskBudget": "existing aggregate32 includes reaper and one extra monitor; no extra candidate resources",
+    "provisioningException": "fixed public monitor source/compiler command only; channel-free provisioning-only, never candidate acceptance"
+  }
 }

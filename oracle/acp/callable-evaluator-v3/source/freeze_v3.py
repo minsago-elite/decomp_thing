@@ -306,10 +306,11 @@ class CopyPlan:
 def execution_source_paths():
     """Fixed nonrecursive scopes; charge ignored entries before filtering too."""
     budget=TreeBudget();paths=set()
-    scopes=((BASE,lambda n:n.endswith('.py') or n in ('record_identity_probe.cpp','preservation-manifest.json')),
+    scopes=((BASE,lambda n:n.endswith('.py') or n in ('record_identity_probe.cpp','preservation-manifest.json','worker_exec_monitor.c')),
             (BASE/'contracts',lambda n:n.endswith('.json')),
             (BASE/'toolchain-001',lambda n:n.endswith('.py')),
-            (BASE/'tests',lambda n:n.startswith('test') and n.endswith('.py')),
+            (BASE/'tests',lambda n:(n.startswith('test') and n.endswith('.py')) or n in ('run_static_tests.py','static_test_support.py','qualify_worker_exec.py','worker_exec_barrier_harness.c')),
+            (BASE/'tests/fixtures',lambda n:n=='historical_counterexamples.py'),
             (BASE/'private',lambda n:n in ('original.c','original.h','caller.c','cases.json')))
     for directory,select in scopes:
         budget.node(0);budget.kind(stat.S_IFDIR);fd=_open_directory(directory)
@@ -324,8 +325,19 @@ def execution_source_paths():
                         paths.add(str(_absolute(directory/entry.name)))
             if _identity(os.fstat(fd))!=before:raise ValueError('source scope changed during enumeration')
         finally:os.close(fd)
-    required={'record_identity_probe.cpp','preservation-manifest.json'}
-    if not required.issubset({Path(p).name for p in paths}):raise ValueError('missing execution source')
+    required={
+        'record_identity_probe.cpp','preservation-manifest.json',
+        'worker_exec_monitor.c','worker_exec_proof.py',
+        'contracts/worker-exec-proof-schema.json',
+        'toolchain-001/build_worker_monitor.py','toolchain-001/monitor_inputs.py',
+        'tests/qualify_worker_exec.py','tests/worker_exec_barrier_harness.c',
+        'tests/run_static_tests.py','tests/static_test_support.py',
+        'tests/fixtures/historical_counterexamples.py',
+        'tests/test_runtime_worker_proof.py','tests/test_worker_exec_proof.py',
+        'tests/test_worker_proof_consumers.py',
+    }
+    if not required.issubset({str(Path(p).relative_to(BASE)) for p in paths}):
+        raise ValueError('missing execution source')
     return paths
 
 

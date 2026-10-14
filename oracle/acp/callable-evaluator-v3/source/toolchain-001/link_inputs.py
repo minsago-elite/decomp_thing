@@ -103,12 +103,16 @@ class Resolver:
                 parts.append(part)
         return '/' + '/'.join(parts), links
 
-    def file(self, name, *, text=False, link_input=False):
+    def file(self, name, *, text=False, link_input=False, binary_data=False, maximum=None):
         name = logical(name, self.cwd)
         real, links = self.resolve(name)
         physical = self.root / real.lstrip('/')
         metadata = physical.stat()
         size = metadata.st_size
+        if maximum is not None and size > maximum:
+            raise Refusal("operational role byte budget before descriptor read")
+        if binary_data and size > 16 * 1024 * 1024:
+            raise Refusal("ELF byte budget before descriptor read")
         if not stat.S_ISREG(metadata.st_mode) or size < 0 or size > MAX_BYTES:
             raise Refusal('not a bounded regular link input')
         fresh = name not in self.files
@@ -122,11 +126,27 @@ class Resolver:
             self.bytes += size
         hasher = hashlib.sha256()
         chunks = []
-        with physical.open('rb') as stream:
+        # Open every resolved component relative to a retained root descriptor.
+        # No swapped symlink parent may redirect a machine input outside that root.
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            parts = real.lstrip('/').split('/')
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+                os.close(directory); directory = child
+            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+        finally:
+            os.close(directory)
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        def same(a, b): return all(getattr(a, key) == getattr(b, key) for key in fields)
+        with os.fdopen(descriptor, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not same(metadata, before):
+                raise Refusal('input changed before descriptor read')
             first = stream.read(min(8, size + 1))
             binary = first.startswith((b'\x7fELF', b'!<arch>\n', b'!<thin>\n'))
-            keep = text or (link_input and not binary)
-            if keep and size > MAX_TEXT:
+            keep = text or binary_data or (link_input and not binary)
+            if keep and not binary_data and size > MAX_TEXT:
                 raise Refusal('linker script text budget before full read')
             total = len(first)
             hasher.update(first)
@@ -142,9 +162,12 @@ class Resolver:
                 hasher.update(block)
                 if keep:
                     chunks.append(block)
-            if total != size:
-                raise Refusal('link input changed size')
+            if total != size or not same(before, os.fstat(stream.fileno())):
+                raise Refusal('link input changed during descriptor read')
+        if self.resolve(name) != (real, links) or not same(before, physical.stat(follow_symlinks=False)):
+            raise Refusal('input path changed after descriptor read')
         value = {'logicalPath':name, 'realpath':real, 'sha256':hasher.hexdigest(),
+                 'identity': {key: getattr(before, 'st_' + key) for key in ('dev', 'ino', 'mode', 'uid', 'gid', 'nlink')},
                  'bytes':size, 'symlinks':links}
         if name in self.files and self.files[name] != value:
             raise Refusal('link input changed during closure resolution')
@@ -511,7 +534,7 @@ def recorded_command(text):
 
 def validate_manifest(manifest):
     exact(manifest, ('schemaVersion', 'driverArgv', 'dryRun', 'workingDirectory', 'environment',
-                     'tools', 'specs', 'configurationRoots', 'generatedFiles'))
+                     'tools', 'specs', 'configurationRoots', 'generatedFiles', 'monitor', 'inspection'))
     if type(manifest['schemaVersion']) is not int or manifest['schemaVersion'] != 3:
         raise Refusal('recorded link manifest version')
     expected = ['/usr/bin/gcc', '-shared', '-Wl,-z,relro,-z,now,-z,noexecstack,--no-undefined',
@@ -543,9 +566,9 @@ def validate_manifest(manifest):
     return command
 
 
-def collect(manifest, filesystem_root):
+def collect(manifest, filesystem_root, *, resolver=None):
     command = validate_manifest(manifest)
-    resolver = Resolver(filesystem_root)
+    resolver = resolver if resolver is not None else Resolver(filesystem_root)
     base_generated = {'/work/candidate.o', '/work/libcandidate.so'}
     if len(set(manifest['generatedFiles'])) != len(manifest['generatedFiles']):
         raise Refusal('duplicate generated input identity')

@@ -2,6 +2,8 @@
 import ast
 import copy
 import io
+import hashlib
+import os
 import json
 import sys
 import tempfile
@@ -31,9 +33,11 @@ class Process:
     pid = 123
     def __init__(self, code=7):
         self.stdin = Stream(12); self.stdout = Stream(10); self.stderr = Stream(11)
-        self.code = code; self.waits = []
+        self.code = code; self.waits = []; self.returncode = None; self.wait_hook = None
     def wait(self, timeout):
-        self.waits.append(timeout); return self.code
+        self.waits.append(timeout)
+        if self.wait_hook is not None:self.wait_hook(len(self.waits),timeout)
+        self.returncode = self.code; return self.code
 
 
 class Selector:
@@ -144,7 +148,10 @@ class ProfileLimits(unittest.TestCase):
         gate_keys = {n.slice.value for n in ast.walk(gate) if isinstance(n,ast.Subscript) and isinstance(n.value,ast.Name) and n.value.id == 'bounds' and isinstance(n.slice,ast.Constant)}
         self.assertTrue({'scopeAdmissionSeconds','scopeAdmissionPollSeconds'} <= gate_keys)
         helper = ast.parse((SOURCE/'toolchain-001/build_helper.py').read_text())
-        calls = [n for n in ast.walk(helper) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='bounded_run']
+        calls = [n for n in ast.walk(helper) if isinstance(n,ast.Call) and
+                 ((isinstance(n.func,ast.Name) and n.func.id=='bounded_run') or
+                  (isinstance(n.func,ast.Attribute) and n.func.attr=='run' and n.args and
+                   isinstance(n.args[0],ast.Name) and n.args[0].id=='bounded_run'))]
         self.assertEqual(1,len(calls)); keywords={k.arg:k.value for k in calls[0].keywords}
         for argument, key in [('timeout','helperBuildSeconds'),('output_limit','helperOutputBytesPerStream')]:
             node = keywords[argument]
@@ -153,49 +160,195 @@ class ProfileLimits(unittest.TestCase):
         self.assertEqual(60,p['bounds']['helperBuildSeconds'])
         self.assertEqual(1048576,p['bounds']['helperOutputBytesPerStream'])
 
-    def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False, managed_scope=False):
+    def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False,
+                 wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0):
+        import worker_exec_proof as parser
         stack = ExitStack(); self.addCleanup(stack.close)
-        process = Process(); blocks = {10:[output,b''],11:[b'err',b'']}
-        stack.enter_context(patch.object(runtime.subprocess,'Popen',return_value=process))
-        stack.enter_context(patch.object(runtime,'private_directory',return_value=TEMP))
+        temporary = Path(stack.enter_context(tempfile.TemporaryDirectory(dir=TEMP)))
+        base = temporary / 'trusted'; base.mkdir(mode=0o700)
+        work = temporary / 'work'; work.mkdir(mode=0o700)
+        stack.enter_context(patch.object(runtime, 'BASE', base))
+        process = Process(wrapper); self.last_process=process; now=[100.0]
+        if late_cleanup_wait:
+            process.wait_hook=lambda count,timeout: now.__setitem__(0,now[0]+6.0) if count==2 else None
+        blocks = {10:[output,b''],11:[b'err',b'']}
+        popen = stack.enter_context(patch.object(runtime.subprocess,'Popen',return_value=process))
+        self.last_popen = popen
+        lifetime=work/'authored-launcher-handle';lifetime.write_bytes(b'public mocked lifetime')
+        stack.enter_context(patch.object(runtime.os,'pidfd_open',side_effect=lambda pid:os.open(lifetime,os.O_RDONLY)))
+        stack.enter_context(patch.object(runtime,'_kill_launcher',side_effect=lambda fd:now.__setitem__(0,now[0]+cleanup_prework)))
+        stack.enter_context(patch.object(runtime,'_kill_owned_scope'))
+        if setup_failure:
+            popen.side_effect = OSError('mocked launch refusal')
         stack.enter_context(patch.object(runtime,'process_identity',return_value={'pid':123,'start':9,'pgid':123,'sid':123}))
-        stack.enter_context(patch.object(runtime,'scope_processes',return_value=[]))
-        owned = [[],[],[{'pid':123}]] if cleanup_failure else None
-        stack.enter_context(patch.object(runtime,'owned_processes',side_effect=owned,return_value=[]))
+        def scoped(evidence):
+            if late_absence:now[0]+=6.0
+            return []
+        stack.enter_context(patch.object(runtime,'scope_processes',side_effect=scoped))
+        stack.enter_context(patch.object(runtime,'owned_processes',return_value=[{'pid':123}] if cleanup_failure else []))
+        if cleanup_failure:
+            stack.enter_context(patch.object(runtime,'kill_exact'))
+            stack.enter_context(patch.object(runtime.time,'sleep'))
         stack.enter_context(patch.object(runtime.selectors,'DefaultSelector',return_value=Selector()))
         stack.enter_context(patch.object(runtime.os,'set_blocking'))
         stack.enter_context(patch.object(runtime.os,'read',side_effect=lambda fd,size:blocks[fd].pop(0) if blocks[fd] else b''))
-        stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock,return_value=100.0))
-        return runtime.bounded_run(['mock-only'],TEMP,{},phase='runtime',output_limit=limit,managed_scope=managed_scope)
+        stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock if clock is not None else lambda:now[0]))
+        stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
+        pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
+              '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64}}
+        stack.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
+        def prepare(argv,cwd,bounds,receipt,provisioning,deadline=None):
+            runtime.write_json(receipt['directory']/'launch.json', {'mock':True})
+            expected = {'attempt':receipt['directory'].name,'phase':'runtime','reportDevice':receipt['device'],
+                        'reportInode':receipt['inode'],'reaperDevice':3,'reaperInode':4,
+                        'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8}
+            config_sha=runtime.digest(receipt['directory']/'launch.json')
+            binding={'protocolVersion':1,'expected':expected,'launchConfigSha256':config_sha,
+                     **{key:'0'*64 for key in ('environmentPinSha256','monitorBinarySha256','monitorSourceSha256',
+                                               'protocolSha256','parserSha256','manifestSha256','targetSha256')},
+                     'launchPinsSha256':runtime._canonical_pin_digest(pins)}
+            return {'argv':['mock-no-execution'],'unit':'mock.scope','expected':expected,'pins':pins,
+                    'configSha256':config_sha,'proofBinding':None if provisioning else binding}
+        stack.enter_context(patch.object(runtime,'_prepare_launch',side_effect=prepare))
+        def admit(receipt,launch,bounds):
+            if not admission:
+                return None
+            if provisioning:
+                self.assertIsNone(receipt['fd']); self.assertFalse(receipt['path'].exists())
+                return {'finalAbsenceVerified':False}
+            e = {'v':1,'t':'exec','s':1,'a':launch['expected']['attempt'],'p':'runtime','c':3,
+                 'ed':7,'ei':8,'od':7,'oi':8,'w':parser.EXEC_WAIT_STATUS,'cf':1,'dp':0,
+                 'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
+            term = {'v':1,'t':'term','s':2,'a':e['a'],'p':'runtime','c':3,'r':139<<8,'k':'exit','n':139}
+            if proof_kind == 'signal': term.update(r=11,k='signal',n=11)
+            records = [e,term] if proof_kind in ('complete','signal') else [e] if proof_kind == 'exec-only' else []
+            if proof_kind == 'terminal-only': records=[term]
+            raw = b''.join((json.dumps(record,separators=(',',':'))+'\n').encode() for record in records)
+            if proof_kind == 'overflow': raw=b'x'*1025
+            os.pwrite(receipt['fd'],raw,0)
+            if proof_kind == 'replaced':
+                receipt['path'].unlink(); receipt['path'].write_bytes(raw); receipt['path'].chmod(0o600)
+            return {'finalAbsenceVerified':False}
+        stack.enter_context(patch.object(runtime,'_admit_scope',side_effect=admit))
+        if provisioning:
+            return runtime._run_scoped(['mock-fixed-provisioner'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},b'',
+                                       runtime.execution_bounds(output_limit=limit,managed_scope=True,phase='runtime'),provisioning=True)
+        return runtime.bounded_run(['mock-only'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},
+                                   phase='runtime',output_limit=limit,managed_scope=True)
 
-    def test_mock_success_separates_launcher_scope_capture_wait_and_cleanup(self):
+    def test_mock_complete_proof_separates_worker_from_launcher_and_public_bytes(self):
         result = self.simulate()
-        for key in ['launcherCreated','launcherPidIdentityVerified','captureComplete','waitComplete','cleanupVerified']:
-            self.assertTrue(result[key],key)
-        self.assertFalse(result['scopeVerified']); self.assertFalse(result['scopeAdmitted'])
-        self.assertEqual(7,result['exitCode']); self.assertEqual(b'err',result['stderr'])
-        self.assertEqual(3,result['bounds']['schemaVersion'])
+        self.assertTrue(runtime.worker_execution_complete(result))
+        self.assertEqual(0,result['launcherExitCode']); self.assertEqual(139,result['exitCode'])
+        self.assertEqual(b'err',result['stderr']); self.assertTrue(result['workerProofRaw'])
+        public = runtime.public_result(result)
+        self.assertNotIn('workerProofRaw',public)
+        self.assertEqual(result['workerProofRaw'].hex(),public['workerProofRawHex'])
+        self.assertTrue(runtime.worker_execution_complete(public))
+        self.assertIs(self.last_popen.call_args.kwargs['close_fds'], True)
+        self.assertFalse('pass_fds' in self.last_popen.call_args.kwargs)
+        result = self.simulate(proof_kind='signal')
+        self.assertEqual(-11,result['exitCode']); self.assertTrue(runtime.worker_execution_complete(result))
 
-    def test_mock_completed_launcher_without_scope_proof_is_infrastructure_failure(self):
-        with self.assertRaises(AssertionError) as caught: self.simulate(managed_scope=True)
-        result = caught.exception.bounded_result
+    def test_mock_provisioning_is_channel_free_and_never_worker_completion(self):
+        result=self.simulate(provisioning=True,wrapper=7)
+        self.assertTrue(result['provisioningOnly']);self.assertEqual(7,result['exitCode'])
+        self.assertFalse(result['workerExecVerified']);self.assertFalse(result['workerTerminationVerified'])
+        self.assertIsNone(result['workerProof']);self.assertEqual(b'',result['workerProofRaw'])
+        self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertTrue(result['cleanupVerified']);self.assertTrue(result['scopeAdmitted'])
+
+    def test_wrapper_status_without_both_proofs_never_becomes_worker_exit(self):
+        for wrapper in (0,1,137):
+            for kind in ('missing','exec-only','terminal-only','overflow','replaced'):
+                with self.subTest(wrapper=wrapper,kind=kind):
+                    result=self.simulate(wrapper=wrapper,proof_kind=kind)
+                    self.assertEqual(wrapper,result['launcherExitCode']); self.assertIsNone(result['exitCode'])
+                    self.assertFalse(runtime.worker_execution_complete(result))
+                    self.assertTrue(result['infrastructureFailure'])
+                    self.assertEqual(kind=='exec-only',result['workerExecVerified'])
+        # Even an authenticated complete terminal cannot repair a failed wrapper transport.
+        result=self.simulate(wrapper=1)
+        self.assertTrue(result['workerTerminationVerified']); self.assertIsNone(result['exitCode'])
+
+    def test_mock_prelaunch_and_no_admission_retain_raw_refusal_and_cleanup(self):
+        with self.assertRaises(OSError) as caught: self.simulate(setup_failure=True)
+        result=caught.exception.bounded_result
+        self.assertFalse(result['launcherCreated']); self.assertIsNone(result['exitCode'])
+        self.assertEqual(b'',result['stdout']); self.assertFalse(result['cleanupVerified'])
+        self.assertFalse(result['finalAbsenceVerified'])
+        with self.assertRaises(AssertionError) as caught: self.simulate(admission=False)
+        result=caught.exception.bounded_result
         self.assertTrue(result['captureComplete']); self.assertTrue(result['waitComplete'])
         self.assertFalse(result['scopeVerified']); self.assertFalse(result['scopeAdmitted'])
         self.assertTrue(result['infrastructureFailure']); self.assertTrue(result['cleanupVerified'])
-        self.assertEqual(b'err', result['stderr'])
+        self.assertEqual(b'err',result['stderr']); self.assertIsNone(result['exitCode'])
 
     def test_mock_partial_output_retains_limit_and_cleanup_without_completion(self):
         with self.assertRaises(ValueError) as caught: self.simulate(output=b'overflow',limit=1)
         result=caught.exception.bounded_result
         self.assertEqual(b'o',result['stdout']); self.assertTrue(result['outputExceeded'])
         self.assertFalse(result['captureComplete']); self.assertFalse(result['waitComplete']); self.assertTrue(result['cleanupVerified'])
+        self.assertIsNone(result['exitCode']); self.assertFalse(runtime.worker_execution_complete(result))
 
     def test_mock_timeout_and_cleanup_failure_remain_partial_or_unknown(self):
         import itertools
-        with self.assertRaises(TimeoutError) as caught: self.simulate(clock=itertools.chain([0,100],itertools.repeat(100)))
-        self.assertTrue(caught.exception.bounded_result['timedOut']); self.assertTrue(caught.exception.bounded_result['cleanupVerified'])
-        with self.assertRaises(AssertionError) as caught: self.simulate(cleanup_failure=True)
+        with self.assertRaises(TimeoutError) as caught:
+            self.simulate(clock=itertools.chain([0,0,0,0,100],itertools.repeat(100)))
+        self.assertTrue(caught.exception.bounded_result['timedOut'])
+        with self.assertRaises(TimeoutError) as caught:
+            self.simulate(cleanup_failure=True,clock=itertools.count(0,0.2))
+        result=caught.exception.bounded_result
+        self.assertFalse(result['cleanupVerified']); self.assertIsNone(result['exitCode'])
+        self.assertFalse(result['workerExecVerified'])
+
+    def test_cleanup_wait_receives_only_remaining_absolute_window(self):
+        result=self.simulate(cleanup_prework=2.0)
+        self.assertEqual(3.0,self.last_process.waits[-1])
+        self.assertTrue(result['cleanupVerified']);self.assertEqual(2.0,result['cleanupElapsedSeconds'])
+        with self.assertRaises(TimeoutError) as caught:self.simulate(cleanup_prework=5.0)
         self.assertFalse(caught.exception.bounded_result['cleanupVerified'])
+        self.assertEqual(1,len(self.last_process.waits))  # original wrapper wait only; no renewed cleanup budget
+
+    def test_late_successful_cleanup_wait_and_final_absence_never_verify(self):
+        for kind in ('wait','absence'):
+            with self.subTest(kind=kind),self.assertRaises(TimeoutError) as caught:
+                self.simulate(late_cleanup_wait=kind=='wait',late_absence=kind=='absence')
+            result=caught.exception.bounded_result
+            self.assertEqual(0,result['launcherExitCode']);self.assertEqual(b'ok',result['stdout'])
+            self.assertEqual(b'err',result['stderr']);self.assertTrue(result['waitComplete'])
+            self.assertFalse(result['cleanupVerified']);self.assertFalse(result['finalAbsenceVerified'])
+            self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
+            self.assertTrue(result['infrastructureFailure'])
+
+    def test_host_direct_and_unscoped_requests_refuse_before_subprocess(self):
+        env={'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'}
+        with self.assertRaises(ValueError): runtime.bounded_run(['/usr/bin/true'],TEMP,env)
+        with self.assertRaises(ValueError) as caught:
+            runtime.bounded_run(['/usr/bin/true'],TEMP,env,managed_scope=True)
+        self.assertFalse(caught.exception.bounded_result['launcherCreated'])
+
+    def test_completion_requires_all_controller_facts_and_exact_streams(self):
+        value=self.simulate()
+        for key in ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted','captureComplete',
+                    'waitComplete','cleanupVerified','rootReaped','finalAbsenceVerified','workerExecVerified','workerTerminationVerified'):
+            changed=copy.deepcopy(value);changed[key]=False
+            with self.subTest(key=key): self.assertFalse(runtime.worker_execution_complete(changed))
+        for key in ('timedOut','outputExceeded','infrastructureFailure','provisioningOnly'):
+            changed=copy.deepcopy(value);changed[key]=True
+            with self.subTest(key=key): self.assertFalse(runtime.worker_execution_complete(changed))
+        for mutate in (lambda v:v['kernelScope'].update(finalAbsenceVerified=False),
+                       lambda v:v.update(stdout='text'),lambda v:v.update(stdoutHex='00'),
+                       lambda v:v['workerProof'].update(pinsUnchanged=False),
+                       lambda v:v.update(workerProofRaw=b'forged'),
+                       lambda v:v['workerProofBindings']['expected'].update(targetInode=999),
+                       lambda v:v['launchInputPins']['/authored/worker'].update(inode=999),
+                       lambda v:v['bounds'].update(phase='compiler'),
+                       lambda v:v['workerProof'].update(fileIdentityVerified=False),
+                       lambda v:v['workerTermination'].update(rawWaitStatus=11)):
+            changed=copy.deepcopy(value);mutate(changed);self.assertFalse(runtime.worker_execution_complete(changed))
+        public=runtime.public_result(value); public['stdoutHex']='GG'
+        self.assertFalse(runtime.worker_execution_complete(public))
 
 
 if __name__ == '__main__':
