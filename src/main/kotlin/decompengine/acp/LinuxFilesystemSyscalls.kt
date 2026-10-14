@@ -437,19 +437,20 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
+                    cancellationCheck()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                    }
+                    if (count == 0L) return total
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    output.write(buffer.getByteArray(0, count.toInt()))
+                    cancellationCheck()
                 }
-                if (count == 0L) return total
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                output.write(buffer.getByteArray(0, count.toInt()))
-                cancellationCheck()
             }
         }
     }
@@ -463,34 +464,35 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
-                }
-                if (count == 0L) {
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
                     cancellationCheck()
-                    call("synchronize private runtime file") { libc.fsync(destination.fd) }
-                    cancellationCheck()
-                    return total
-                }
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                var offset = 0L
-                while (offset < count) {
-                    val written = retryOnInterrupted("write private runtime file") {
-                        libc.write(
-                            destination.fd,
-                            buffer.share(offset),
-                            NativeLong(count - offset),
-                        ).toLong()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
                     }
-                    if (written <= 0L) throw syscallFailure("write private runtime file")
-                    offset += written
-                    cancellationCheck()
+                    if (count == 0L) {
+                        cancellationCheck()
+                        call("synchronize private runtime file") { libc.fsync(destination.fd) }
+                        cancellationCheck()
+                        return total
+                    }
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    var offset = 0L
+                    while (offset < count) {
+                        val written = retryOnInterrupted("write private runtime file") {
+                            libc.write(
+                                destination.fd,
+                                buffer.share(offset),
+                                NativeLong(count - offset),
+                            ).toLong()
+                        }
+                        if (written <= 0L) throw syscallFailure("write private runtime file")
+                        offset += written
+                        cancellationCheck()
+                    }
                 }
             }
         }
