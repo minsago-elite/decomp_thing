@@ -173,6 +173,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
             build/ci-jdk-*/final.json
             build/ci-jdk-*/receipts
             build/ci-jdk-*/selections
@@ -288,6 +289,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
             build/ci-jdk-*/final.json
             build/ci-jdk-*/receipts
             build/ci-jdk-*/selections
@@ -343,14 +345,17 @@ jobs:
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
-      - name: Verify installed direct-API Ghidra without an external installation
+      - name: Verify direct-API Ghidra and offline bundle contents in one owned context
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
         run: |
           unset GHIDRA_HOME
-          python3 -B scripts/ci-owned-jdk.py run -- ./gradlew --no-daemon test \
+          python3 -B scripts/ci-owned-jdk.py run -- bash -euc '
+            "$@"
+            ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+          ' -- ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
@@ -360,8 +365,6 @@ jobs:
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
-      - name: Verify ZIP and TAR bundle contents and native executable modes
-        run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -370,6 +373,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
             build/ci-jdk-*/final.json
             build/ci-jdk-*/receipts
             build/ci-jdk-*/selections
@@ -419,6 +423,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
             build/ci-jdk-*/final.json
             build/ci-jdk-*/receipts
             build/ci-jdk-*/selections

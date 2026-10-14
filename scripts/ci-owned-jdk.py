@@ -17,6 +17,10 @@ MAX_ENTRIES = 20000
 MAX_BYTES = 4 * 1024**3
 MAX_DEPTH = 64
 NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
+# Longest default-java.io.tmpdir bind suffix among the six audited Unix socket fixtures.
+# NativeMeasurementFixture uses its separate explicit build/nrm parent.
+SOCKET_FIXTURE_SUFFIX = '/pinned-docker-runtime-' + '9' * 20 + '/runtime/docker.sock'
+UNIX_SOCKET_PATH_BYTES = 107
 
 
 def require(ok, message):
@@ -67,6 +71,21 @@ def secure_directory(path):
         return fd
     except BaseException:
         os.close(fd); raise
+
+
+def socket_scratch(repo):
+    # The hosted canonical checkout is43bytes; even a one-character child is too long.
+    # Temp APIs create fresh independent files/directories here, without any short alias.
+    require(len(os.fsencode(repo)) + len(SOCKET_FIXTURE_SUFFIX.encode('ascii')) <= UNIX_SOCKET_PATH_BYTES,
+            'repository path exceeds audited Unix socket fixture byte budget')
+    fd = secure_directory(repo)
+    try:
+        value = os.fstat(fd)
+        return {'path': str(repo), 'dev': value.st_dev, 'ino': value.st_ino, 'uid': value.st_uid,
+                'mode': stat.S_IMODE(value.st_mode), 'maximumSocketSuffix': SOCKET_FIXTURE_SUFFIX,
+                'maximumSocketPathBytes': UNIX_SOCKET_PATH_BYTES}
+    finally:
+        os.close(fd)
 
 
 def provision(repo: Path, source: Path):
@@ -310,7 +329,8 @@ def verify_jvms(receipt):
         require(props == {**{k: str(v) for k, v in {
             'home': receipt['home'], 'command': receipt['home'] + '/bin/java', 'dev': receipt['launcherIdentity'][0],
             'ino': receipt['launcherIdentity'][1], 'uid': receipt['uid'], 'mode': '755', 'sha256': receipt['launcherSha256'],
-            'callerUid': receipt['callerUid'], 'callerGid': receipt['callerGid']}.items()},
+            'callerUid': receipt['callerUid'], 'callerGid': receipt['callerGid'],
+            'scratch': str(Path(receipt['container']).parent.parent)}.items()},
             'pid': props.get('pid'), 'task': props.get('task')}, 'actual Test JVM identity mismatch')
         require(re.fullmatch(r'[1-9][0-9]{0,18}', props['pid']) and re.fullmatch(r':[A-Za-z0-9:_-]{1,160}', props['task']), 'invalid actual Test JVM fields')
         require(read_regular(path.with_suffix('.closed'), 7) == b'closed\n', 'Test JVM session did not close')
@@ -327,10 +347,12 @@ def verify_jvms(receipt):
 
 def run(repo, source, command):
     require(command and not (repo / 'gradle/gradle-daemon-jvm.properties').exists(), 'unsupported daemon selector')
+    scratch = socket_scratch(repo)
     receipt = provision(repo, source)
     container = Path(receipt['container']); home = receipt['home']
-    options = ['-XX:-UsePerfData', '-XX:+DisableAttachMechanism', '-Djava.io.tmpdir=' + str(container / 'tmp'),
-               '-Djna.tmpdir=' + str(container / 'tmp'), '-Duser.home=' + str(container / 'home'),
+    write_json(container / 'scratch.json', scratch)
+    options = ['-XX:-UsePerfData', '-XX:+DisableAttachMechanism', '-Djava.io.tmpdir=' + scratch['path'],
+               '-Djna.tmpdir=' + scratch['path'], '-Duser.home=' + str(container / 'home'),
                '-Djava.util.prefs.userRoot=' + str(container / 'preferences'), '-Djava.util.prefs.systemRoot=' + str(container / 'preferences')]
     gradle = ['-Dorg.gradle.daemon=false', '-Dorg.gradle.java.home=' + home,
               '-Dorg.gradle.java.installations.auto-detect=false', '-Dorg.gradle.java.installations.auto-download=false',
@@ -340,10 +362,10 @@ def run(repo, source, command):
     for name in ['_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS']:
         env.pop(name, None)
     env.update(JAVA_HOME=home, PATH=home + '/bin:' + env.get('PATH', ''), HOME=str(container / 'home'),
-               GRADLE_USER_HOME=str(container / 'gradle'), TMPDIR=str(container / 'tmp'), TMP=str(container / 'tmp'),
-               TEMP=str(container / 'tmp'), XDG_CACHE_HOME=str(container / 'cache'), JAVA_OPTS=shlex.join(options),
+               GRADLE_USER_HOME=str(container / 'gradle'), TMPDIR=scratch['path'], TMP=scratch['path'],
+               TEMP=scratch['path'], XDG_CACHE_HOME=str(container / 'cache'), JAVA_OPTS=shlex.join(options),
                JAVA_TOOL_OPTIONS=' '.join(options), GRADLE_OPTS=shlex.join(gradle),
-               ORG_GRADLE_PROJECT_ciAcpFixtureJdkHome=home, ORG_GRADLE_PROJECT_ciAcpFixtureJdkReceipt=str(container / 'provision.properties'),
+               ORG_GRADLE_PROJECT_ciAcpFixtureJvmScratch=scratch['path'], ORG_GRADLE_PROJECT_ciAcpFixtureJdkHome=home, ORG_GRADLE_PROJECT_ciAcpFixtureJdkReceipt=str(container / 'provision.properties'),
                **{'ORG_GRADLE_PROJECT_kotlin.compiler.execution.strategy': 'in-process',
                   'ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-detect': 'false',
                   'ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download': 'false',
@@ -353,6 +375,7 @@ def run(repo, source, command):
     status = subprocess.run(command, cwd=repo, env=env).returncode
     final = {'exitCode': status, 'sourceUnchanged': False, 'actualTestJvms': 0}
     try:
+        require(socket_scratch(repo) == scratch, 'owned JVM scratch identity changed')
         verify_source(receipt); final['sourceUnchanged'] = True
         final['actualTestJvms'] = verify_jvms(receipt)
     finally:

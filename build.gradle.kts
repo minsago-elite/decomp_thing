@@ -189,12 +189,26 @@ tasks.withType<Test>().configureEach {
         require(receiptPath.parent == selected.parent && receiptPath.toRealPath() == receiptPath)
         val fixture = Properties().also { values -> Files.newInputStream(receiptPath).use(values::load) }
         require(fixture.getProperty("home") == selected.toString() && fixture.getProperty("java") == selected.resolve("bin/java").toString())
+        val state = selected.parent
+        val scratch = Path.of(providers.gradleProperty("ciAcpFixtureJvmScratch").get())
+        val repository = rootProject.layout.projectDirectory.asFile.toPath().toRealPath()
+        require(state.fileName.toString().matches(Regex("ci-jdk-[0-9a-f-]{36}")) &&
+            state.parent.fileName.toString() == "build" && state.parent.parent == repository)
+        require(scratch == repository && listOf("TMPDIR", "TMP", "TEMP").all { System.getenv(it) == repository.toString() }) {
+            "CI Test scratch must equal the admitted canonical repository root"
+        }
+        require(scratch.isAbsolute && scratch.toRealPath() == scratch &&
+            scratch.toString().toByteArray(StandardCharsets.UTF_8).size +
+            ("/pinned-docker-runtime-" + "9".repeat(20) + "/runtime/docker.sock").length <= 107)
+        val scratchAttrs = Files.readAttributes(scratch, "unix:uid,mode", LinkOption.NOFOLLOW_LINKS)
+        require(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS) &&
+            scratchAttrs.getValue("uid").toString() == fixture.getProperty("uid") &&
+            (scratchAttrs.getValue("mode") as Number).toInt() and 0x12 == 0)
         executable = selected.resolve("bin/java").toString()
         systemProperty("decompengine.ci.fixture.receipt", receiptPath.toString())
         systemProperty("decompengine.ci.fixture.task", path)
-        val state = selected.parent
-        jvmArgs("-XX:-UsePerfData", "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=${state.resolve("tmp")}",
-            "-Djna.tmpdir=${state.resolve("tmp")}", "-Duser.home=${state.resolve("home")}",
+        jvmArgs("-XX:-UsePerfData", "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=$scratch",
+            "-Djna.tmpdir=$scratch", "-Duser.home=${state.resolve("home")}",
             "-Djava.util.prefs.userRoot=${state.resolve("preferences")}", "-Djava.util.prefs.systemRoot=${state.resolve("preferences")}")
         outputs.upToDateWhen { false }
         outputs.cacheIf("owned fixture requires actual Test JVM identity evidence") { false }

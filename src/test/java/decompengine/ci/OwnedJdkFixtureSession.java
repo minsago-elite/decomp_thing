@@ -80,6 +80,17 @@ public final class OwnedJdkFixtureSession implements LauncherSessionListener {
             actual.put("mode", Integer.toOctalString(((Number)attrs.get("mode")).intValue() & 07777));
             actual.put("sha256", hash(java)); actual.putAll(caller());
             for (String key : List.of("dev", "ino", "uid", "mode", "sha256", "callerUid", "callerGid")) require(actual.get(key).equals(expected.get(key)));
+            Path state = receipt.getParent();
+            require(state.getFileName().toString().matches("ci-jdk-[0-9a-f-]{36}") && state.getParent().getFileName().toString().equals("build"));
+            Path scratch = state.getParent().getParent();
+            require(scratch.isAbsolute() && scratch.toRealPath().equals(scratch) &&
+                scratch.toString().getBytes(StandardCharsets.UTF_8).length + 63 <= 107);
+            require(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS));
+            var scratchAttrs = Files.readAttributes(scratch, "unix:uid,mode", LinkOption.NOFOLLOW_LINKS);
+            require(scratchAttrs.get("uid").equals(attrs.get("uid")) && (((Number)scratchAttrs.get("mode")).intValue() & 0022) == 0);
+            for (String key : List.of("java.io.tmpdir", "jna.tmpdir")) require(scratch.toString().equals(System.getProperty(key)));
+            for (String key : List.of("TMPDIR", "TMP", "TEMP")) require(scratch.toString().equals(System.getenv(key)));
+            actual.put("scratch", scratch.toString());
             String task = System.getProperty("decompengine.ci.fixture.task"); require(task != null && task.matches(":[A-Za-z0-9:_-]{1,160}"));
             actual.put("pid", Long.toString(ProcessHandle.current().pid())); actual.put("task", task);
             Path output = Path.of(expected.get("receipts"));

@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.ci.ownedJvmChild
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
@@ -1327,7 +1328,7 @@ class FullTreeFunctionObservationOperationJournalTest {
             System.getProperty("java.class.path"),
             FullTreeFunctionObservationJournalLockProbe::class.java.name,
             root.toString(),
-        ).redirectErrorStream(true).start()
+        ).redirectErrorStream(true).ownedJvmChild().start()
         val output = process.inputStream.bufferedReader()
         val reader = Executors.newSingleThreadExecutor()
         try {

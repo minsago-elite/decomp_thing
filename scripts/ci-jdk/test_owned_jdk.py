@@ -80,8 +80,46 @@ class OwnedJdkTest(unittest.TestCase):
                      'Pid: 123\nUid: 1 1 1\nGid: 1 1 1 1\n',
                      'Pid: 123\nUid: 1 1 1 1\nUid: 2 2 2 2\nGid: 1 1 1 1\n', 'x' * 65537]:
             with self.subTest(text=text[:20]), self.assertRaises(ValueError): fixture.credentials(text,123)
+    def test_socket_budget_is_encoded_bytes_and_accepts_hosted_root_only(self):
+        hosted = Path('/home/runner/work/decomp_thing/decomp_thing')
+        self.assertEqual(63, len(fixture.SOCKET_FIXTURE_SUFFIX.encode('ascii')))
+        self.assertEqual(106, len(os.fsencode(hosted)) + 63)
+        # Exercise actual canonical ownership independently of this checkout's length.
+        with mock.patch.object(fixture, 'UNIX_SOCKET_PATH_BYTES', 4096):
+            result = fixture.socket_scratch(ROOT)
+            self.assertEqual(str(ROOT), result['path'])
+            self.assertEqual(os.geteuid(), result['uid'])
+        for path in [Path('/' + 'x' * 44), Path('/' + 'é' * 22)]:
+            with self.assertRaisesRegex(ValueError, 'byte budget'):
+                fixture.socket_scratch(path)
+        with mock.patch.object(fixture, 'secure_directory', return_value=os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY)):
+            self.assertEqual(str(hosted), fixture.socket_scratch(hosted)['path'])
+        with self.assertRaisesRegex(ValueError, 'byte budget'):
+            fixture.socket_scratch(hosted / 't')
+    def test_socket_scratch_refuses_symlink_or_writable_directory(self):
+        # Keep this independent of the checkout's actual path length.
+        with mock.patch.object(fixture, 'UNIX_SOCKET_PATH_BYTES', 4096):
+            target = self.repo / 'scratch'; target.mkdir(); alias = self.repo / 'alias'; alias.symlink_to(target)
+            with self.assertRaises(ValueError): fixture.socket_scratch(alias)
+            target.chmod(0o777)
+            with self.assertRaises(ValueError): fixture.socket_scratch(target)
+
     def test_missing_actual_test_jvm_proof_refused(self):
         with self.assertRaises(ValueError): fixture.verify_jvms(fixture.provision(self.repo, self.source))
+    def test_actual_worker_scratch_must_equal_exact_repository(self):
+        result = fixture.provision(self.repo, self.source); container = Path(result['container'])
+        expected = fixture.parse_properties(container / 'provision.properties')
+        props = {k: v for k,v in expected.items() if k not in ('java','receipts')}
+        props.update(command=result['home'] + '/bin/java', pid='123', task=':test', scratch=str(self.repo))
+        file = container / 'receipts/test.properties'
+        def write(): file.write_text(''.join(k+'='+v+'\n' for k,v in props.items()))
+        write(); file.with_suffix('.closed').write_text('closed\n')
+        (container / 'selections/test.properties').write_text('task=:test\nhome='+result['home']+'\njava='+result['home']+'/bin/java\n')
+        self.assertEqual(1, fixture.verify_jvms(result))
+        for substitute in [str(self.repo.parent), '/home/june']:
+            props['scratch'] = substitute; write()
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'): fixture.verify_jvms(result)
+
     def test_byte_equal_command_at_source_cannot_substitute_clone(self):
         result = fixture.provision(self.repo, self.source); container = Path(result['container'])
         expected = fixture.parse_properties(container / 'provision.properties')

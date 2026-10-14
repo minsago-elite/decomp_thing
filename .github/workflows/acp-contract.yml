@@ -63,6 +63,7 @@ jobs:
             build/provider-guardian-qualification
             build/provider-dns-native-qualification
             build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
             build/ci-jdk-*/final.json
             build/ci-jdk-*/receipts
             build/ci-jdk-*/selections
