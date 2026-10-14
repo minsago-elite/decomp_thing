@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fetch locked GCC bytes without overwrites. Requires an unused Unix main-thread alarm."""
+"""Standalone CLI fetch with an unused/unblocked Unix main-thread alarm.
+
+An actual total alarm exits124 without Python cleanup, retaining staged bytes;
+fetch_artifact is not a general in-process library API. Attempt unwind remains
+under the original total alarm. Never treat retained staging as verified cache.
+"""
 
 from __future__ import annotations
 
@@ -49,6 +54,7 @@ class FetchClock:
         self.now = monotonic
         self.total_end = self.end = monotonic() + FETCH_TOTAL_SECONDS
         self.phase = 'total'
+        self.closing = False
 
     def check(self):
         now = self.now()
@@ -59,7 +65,19 @@ class FetchClock:
         return self.end - now
 
     def _expired(self, *unused):
-        raise FetchDeadline('total' if self.now() >= self.total_end else self.phase)
+        if self.closing:
+            return
+        remaining = self.total_end - self.now()
+        if remaining <= 0:
+            # No budget remains for Python context-manager unwind. This standalone
+            # CLI terminates without I/O/finalizers; only owned staging may remain.
+            os._exit(124)
+            raise RuntimeError('fatal fetch deadline exit unexpectedly returned')
+        if remaining > 0:
+            # The fired one-shot no longer protects response/file/temp __exit__ calls.
+            # Keep the ORIGINAL total end armed before beginning exception unwind.
+            signal.setitimer(signal.ITIMER_REAL,remaining)
+        raise FetchDeadline('total' if remaining <= 0 else self.phase)
 
     def arm(self, attempt=False):
         self.phase = 'attempt' if attempt else 'total'
@@ -67,26 +85,35 @@ class FetchClock:
         signal.setitimer(signal.ITIMER_REAL, self.check())
 
     def __enter__(self):
-        if (not hasattr(signal,'setitimer') or not hasattr(signal,'SIGALRM') or
+        if (not hasattr(signal,'setitimer') or not hasattr(signal,'SIGALRM') or not hasattr(signal,'pthread_sigmask') or
+                not hasattr(signal,'sigpending') or not hasattr(signal,'sigtimedwait') or
                 threading.current_thread() is not threading.main_thread()):
             raise VerificationError('GCC fetch requires Unix main-thread deadline support')
+        inherited_mask = signal.pthread_sigmask(signal.SIG_BLOCK,[])
+        if signal.SIGALRM in inherited_mask or signal.SIGALRM in signal.sigpending():
+            raise VerificationError('GCC fetch refuses blocked or pending SIGALRM')
         if signal.getitimer(signal.ITIMER_REAL) != (0.0,0.0):
             raise VerificationError('GCC fetch refuses a preexisting alarm')
         self.previous = signal.getsignal(signal.SIGALRM)
         signal.signal(signal.SIGALRM,self._expired)
         try:
             self.arm()
-        except BaseException:
-            signal.setitimer(signal.ITIMER_REAL,0)
-            signal.signal(signal.SIGALRM,self.previous)
+        except BaseException as error:
+            self.__exit__(type(error),error,error.__traceback__)
             raise
         return self
 
     def __exit__(self, kind, failure, traceback):
+        self.closing = True
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGALRM})
         try:
             signal.setitimer(signal.ITIMER_REAL,0)
-        finally:
+            # Standard signals coalesce; consume any owned pending alarm while blocked,
+            # before restoring a prior/default disposition. Never wait for a new signal.
+            signal.sigtimedwait({signal.SIGALRM},0)
             signal.signal(signal.SIGALRM,self.previous)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
         if failure is None:
             self.check()  # Never accept a result observed late, even during guard teardown.
         return False

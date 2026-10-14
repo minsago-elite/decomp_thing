@@ -51,9 +51,12 @@ class GccOracleSourceFetchTest(unittest.TestCase):
     }
 
     def setUp(self):
+        (REPOSITORY_ROOT/'build').mkdir(mode=0o700,parents=True,exist_ok=True)
         # No real alarms/signals/network: retain actual guard logic with fake timer APIs.
         module = fetch_artifact.__globals__['signal']
-        for name,value in [('getitimer',(0.0,0.0)),('getsignal',module.SIG_DFL),('signal',None),('setitimer',(0.0,0.0))]:
+        exit_patch=mock.patch.object(FETCHER['os'],'_exit',side_effect=AssertionError('unexpected real/fatal exit'))
+        self.fatal_exit=exit_patch.start();self.addCleanup(exit_patch.stop)
+        for name,value in [('pthread_sigmask',set()),('sigpending',set()),('sigtimedwait',None),('getitimer',(0.0,0.0)),('getsignal',module.SIG_DFL),('signal',None),('setitimer',(0.0,0.0))]:
             patcher=mock.patch.object(module,name,return_value=value)
             setattr(self,name,patcher.start());self.addCleanup(patcher.stop)
 
@@ -130,15 +133,16 @@ class GccOracleSourceFetchTest(unittest.TestCase):
         now=[0.0];calls=[];module=FETCHER['signal']
         def opener(request,**kwargs):
             calls.append(request.full_url)
+            if len(calls)>1:return FakeResponse(request.full_url,self.payload)
             handler=self.signal.call_args.args[1]
             now[0]+=21
             handler(module.SIGALRM,None)
             self.fail('deadline handler returned')
         with tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT/'build',prefix='fetch-deadline-') as temporary:
-            with self.assertRaisesRegex(VerificationError,'deadline'):self.fetch(Path(temporary),opener,now)
-            self.assertFalse((Path(temporary)/self.specification['fileName']).exists())
+            result=self.fetch(Path(temporary),opener,now)
+            self.assertEqual(self.payload,result.read_bytes())
         self.assertEqual(mock.call(module.SIGALRM,module.SIG_DFL),self.signal.call_args)
-        self.assertTrue(calls)
+        self.assertEqual(2,len(calls))
 
     def test_concurrent_corrupt_cache_never_overwritten(self):
         now=[0.0]
@@ -175,6 +179,69 @@ class GccOracleSourceFetchTest(unittest.TestCase):
         self.assertEqual(mock.call(module.ITIMER_REAL,0),self.setitimer.call_args)
         with mock.patch.object(FETCHER['threading'],'current_thread',return_value=object()), self.assertRaisesRegex(VerificationError,'main-thread'):
             with Clock(lambda:0):pass
+
+    def test_attempt_alarm_rearms_original_total_before_context_unwind(self):
+        now=[0.0];module=FETCHER['signal'];observed=[]
+        class ClosingResponse(FakeResponse):
+            def read1(inner,amount):
+                now[0]=21
+                clock._expired()
+            def __exit__(inner,*unused):
+                observed.append(self.setitimer.call_args)
+                self.assertEqual(mock.call(module.ITIMER_REAL,99.0),self.setitimer.call_args)
+        with self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):
+            with FETCHER['FetchClock'](lambda:now[0]) as clock:
+                clock.arm(attempt=True)
+                with ClosingResponse('https://ftp.gnu.org',self.payload) as response:
+                    response.read1(1)
+        self.assertEqual(1,len(observed))
+
+    def test_inherited_blocked_or_pending_alarm_rejected_without_ownership_change(self):
+        module=FETCHER['signal']
+        for mask,pending in [({module.SIGALRM},set()),(set(),{module.SIGALRM})]:
+            self.signal.reset_mock();self.setitimer.reset_mock()
+            with mock.patch.object(module,'pthread_sigmask',return_value=mask), mock.patch.object(module,'sigpending',return_value=pending), self.assertRaisesRegex(VerificationError,'blocked or pending'):
+                with FETCHER['FetchClock'](lambda:0):pass
+            self.signal.assert_not_called();self.setitimer.assert_not_called()
+
+    def test_teardown_blocks_disarms_drains_then_restores_handler_and_mask(self):
+        module=FETCHER['signal'];events=[]
+        self.pthread_sigmask.side_effect=lambda how,mask:events.append(('mask',how,mask)) or set()
+        self.setitimer.side_effect=lambda which,delay:events.append(('timer',delay))
+        self.sigtimedwait.side_effect=lambda signals,timeout:events.append(('drain',signals,timeout))
+        self.signal.side_effect=lambda which,handler:events.append(('handler',handler))
+        with FETCHER['FetchClock'](lambda:0):pass
+        block=events.index(('mask',module.SIG_BLOCK,{module.SIGALRM}))
+        self.assertEqual([('mask',module.SIG_BLOCK,{module.SIGALRM}),('timer',0),('drain',{module.SIGALRM},0),
+                          ('handler',module.SIG_DFL),('mask',module.SIG_SETMASK,set())],events[block:])
+
+    def test_total_alarm_during_attempt_unwind_uses_fatal_exit_without_new_grace(self):
+        now=[0.0];module=FETCHER['signal']
+        class FatalExit(BaseException):pass
+        self.fatal_exit.side_effect=FatalExit
+        class ClosingResponse(FakeResponse):
+            def __exit__(inner,*unused):
+                self.assertEqual(mock.call(module.ITIMER_REAL,99.0),self.setitimer.call_args)
+                now[0]=120
+                clock._expired()
+        with self.assertRaises(FatalExit):
+            with FETCHER['FetchClock'](lambda:now[0]) as clock:
+                clock.arm(attempt=True)
+                with ClosingResponse('https://ftp.gnu.org',self.payload):
+                    now[0]=21
+                    clock._expired()
+        self.fatal_exit.assert_called_once_with(124)
+        self.assertEqual([120,20,99.0,0],[call.args[1] for call in self.setitimer.call_args_list])
+
+    def test_total_alarm_exits_without_cleanup_window_and_cannot_return(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);now[0]=120
+        class FatalExit(BaseException):pass
+        self.fatal_exit.side_effect=FatalExit
+        with self.assertRaises(FatalExit):clock._expired()
+        self.fatal_exit.assert_called_once_with(124)
+        self.setitimer.assert_not_called()  # No new grace or total deadline reset.
+        self.fatal_exit.side_effect=None
+        with self.assertRaisesRegex(RuntimeError,'unexpectedly returned'):clock._expired()
 
     def test_guard_teardown_late_success_is_refused_after_restoration(self):
         now=[0.0];module=FETCHER['signal']
