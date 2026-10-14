@@ -20,6 +20,180 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class AcpProviderBrokerTest {
     @Test
+    fun `duplicate binding revokes idle authority before any further dispatch`() {
+        for (identical in listOf(true, false)) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val originalBinding = bindingHashes(broker)
+                val duplicate = runCatching { broker.bindSession(if (identical) "actual-session" else "other-session", "turn-1") }
+                val afterDuplicate = broker.snapshot()
+                val laterRequest = runCatching { broker.beginRequest(1, cap, body()) }
+                assertEquals(0, backend.starts, "duplicate session binding left provider dispatch authority active")
+                assertFixedRevoked(duplicate)
+                assertIs<AcpProviderBrokerFailure>(laterRequest.exceptionOrNull()).also { assertEquals(AcpProviderTerminalKind.REVOKED, it.kind) }
+                assertTrue(afterDuplicate.revoked)
+                assertNull(afterDuplicate.admissionDenial, "binding failure must not invent a request sequence")
+                assertTrue(afterDuplicate.requests.isEmpty())
+                assertEquals(0L, afterDuplicate.wireRequestBytes)
+                assertEquals(originalBinding, bindingHashes(broker))
+                assertAuthorityRevoked(broker)
+                broker.close()
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(1, cap, body()) }
+                assertEquals(0, backend.starts)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `malformed duplicate identities cannot bypass sticky revocation`() {
+        for ((session, turn) in listOf("" to "turn-2", "session-2" to "", "\n" to "turn-2", "s".repeat(257) to "turn-2", "session-2" to "\uD800")) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val originalBinding = bindingHashes(broker)
+                val duplicate = runCatching { broker.bindSession(session, turn) }
+                val laterRequest = runCatching { broker.beginRequest(1, cap, body()) }
+                assertEquals(0, backend.starts, "malformed duplicate identity left provider dispatch authority active")
+                assertFixedRevoked(duplicate)
+                assertIs<AcpProviderBrokerFailure>(laterRequest.exceptionOrNull()).also { assertEquals(AcpProviderTerminalKind.REVOKED, it.kind) }
+                assertAuthorityRevoked(broker)
+                assertEquals(originalBinding, bindingHashes(broker))
+                assertTrue(broker.snapshot().requests.isEmpty())
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `duplicate binding terminates an active or queued streaming exchange once`() {
+        for (queued in listOf(false, true)) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val exchange = broker.beginRequest(1, cap, body())
+                val receiver = backend.receiver!!
+                if (queued) { backend.headers(); backend.subscribe(); backend.emit(delta("safe candidate!")); assertEquals(1, exchangeQueueSize(exchange)) }
+                assertFixedRevoked(runCatching { broker.bindSession("other-session", "other-turn") })
+                assertEquals(AcpProviderTerminalKind.REVOKED, exchange.terminal, "duplicate binding must terminate the active exchange")
+                assertAuthorityRevoked(broker)
+                assertTrue(backend.ownerCancelled)
+                assertEquals(queued, backend.subscriptionCancelled)
+                assertEquals(0, exchangeQueueSize(exchange))
+                val record = broker.snapshot().requests.single()
+                assertEquals(AcpProviderTerminalKind.REVOKED, record.terminal)
+                assertNull(record.outputTokens)
+                assertEquals(0, record.admittedOutputTokens)
+                receiver.complete(); receiver.failed(); receiver.timedOut(); exchange.cancel()
+                assertEquals(listOf(record), broker.snapshot().requests)
+                assertKind(AcpProviderTerminalKind.REVOKED) { exchange.nextChunk() }
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+                assertEquals(1, backend.starts)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `duplicate binding revokes unread EOF completion without losing known usage`() {
+        for (consumed in 0..1) {
+            val backend = FixtureBackend()
+            val broker = open(backend, policy = policy(AcpProviderTransportBounds(maximumChunkBytes = 256, maximumQueuedChunks = 2)))
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val exchange = broker.beginRequest(1, cap, body())
+                val receiver = backend.receiver!!
+                backend.headers(); backend.subscribe(); backend.emit(delta("x".repeat(70) + "s")); backend.emit(completed(3)); backend.complete()
+                assertEquals(2, exchangeQueueSize(exchange))
+                if (consumed == 1) assertEquals(256, exchange.nextChunk()!!.size)
+                assertEquals(AcpProviderTerminalKind.COMPLETED, exchange.terminal)
+                assertFalse(exchangeRecorded(exchange))
+                assertFixedRevoked(runCatching { broker.bindSession("other-session", "other-turn") })
+                assertEquals(AcpProviderTerminalKind.REVOKED, exchange.terminal)
+                assertAuthorityRevoked(broker)
+                val record = broker.snapshot().requests.single()
+                assertEquals(AcpProviderTerminalKind.REVOKED, record.terminal)
+                assertEquals(3, record.outputTokens)
+                assertEquals(3, record.admittedOutputTokens)
+                assertEquals(1, record.inputTokens)
+                assertEquals(3L, broker.snapshot().outputTokens)
+                assertEquals(0, exchangeQueueSize(exchange))
+                assertTrue(backend.ownerCancelled && backend.subscriptionCancelled)
+                receiver.complete(); receiver.failed(); receiver.timedOut(); exchange.cancel()
+                assertEquals(listOf(record), broker.snapshot().requests)
+                assertEquals(AcpProviderBrokerCleanup.NOT_ATTEMPTED, broker.snapshot().cleanup)
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+                backend.clean = false
+                assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+                backend.clean = true; broker.close()
+                assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+                assertEquals(listOf(record), broker.snapshot().requests)
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+                assertEquals(1, backend.starts)
+            } finally { backend.clean = true; broker.close() }
+        }
+    }
+
+    @Test
+    fun `duplicate binding preserves recorded completion while revoking only its successor`() {
+        for (successor in listOf(false, true)) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val first = broker.beginRequest(1, cap, body())
+                val firstReceiver = backend.receiver!!
+                backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                assertNotNull(first.nextChunk())
+                val completedRecord = broker.snapshot().requests.single()
+                assertEquals(AcpProviderTerminalKind.COMPLETED, completedRecord.terminal)
+                val second = if (successor) broker.beginRequest(2, cap, body()).also { backend.headers(); backend.subscribe() } else null
+                assertFixedRevoked(runCatching { broker.bindSession("other-session", "other-turn") })
+                assertAuthorityRevoked(broker)
+                assertEquals(completedRecord, broker.snapshot().requests.first())
+                assertNull(first.nextChunk())
+                firstReceiver.failed(); firstReceiver.timedOut(); firstReceiver.complete(); first.cancel()
+                if (second != null) {
+                    assertTrue(backend.ownerCancelled && backend.subscriptionCancelled)
+                    assertKind(AcpProviderTerminalKind.REVOKED) { second.nextChunk() }
+                    assertEquals(listOf(AcpProviderTerminalKind.COMPLETED, AcpProviderTerminalKind.REVOKED), broker.snapshot().requests.map { it.terminal })
+                } else assertEquals(listOf(completedRecord), broker.snapshot().requests)
+                broker.close()
+                assertEquals(completedRecord, broker.snapshot().requests.first())
+                assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(if (successor) 3 else 2, cap, body()) }
+                assertEquals(if (successor) 2 else 1, backend.starts)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `malformed initial binding remains unassigned and can be corrected atomically`() {
+        for ((session, turn) in listOf("" to "turn-1", "actual-session" to "", "actual-session" to "\uD800")) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                assertFailsWith<IllegalArgumentException> { broker.bindSession(session, turn) }
+                assertEquals(null to null, bindingHashes(broker))
+                assertFalse(broker.snapshot().revoked)
+                broker.bindSession("actual-session", "turn-1")
+                val exchange = broker.beginRequest(1, capability(broker), body())
+                backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+                assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                assertEquals(1, backend.starts)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
     fun `boolean input item is refused before backend dispatch`() {
         assertInputRefused("[false]")
     }
@@ -1056,6 +1230,25 @@ class AcpProviderBrokerTest {
             assertNull(exchange.nextChunk())
         } finally { broker.close() }
     }
+
+    private fun assertFixedRevoked(result: Result<Unit>) {
+        val failure = assertIs<AcpProviderBrokerFailure>(result.exceptionOrNull())
+        assertEquals(AcpProviderTerminalKind.REVOKED, failure.kind)
+        assertEquals("ACP provider broker: REVOKED", failure.message)
+        assertNull(failure.cause)
+    }
+
+    private fun assertAuthorityRevoked(broker: AcpProviderBroker) {
+        assertTrue(broker.snapshot().revoked)
+        val value = AcpProviderBroker::class.java.getDeclaredField("capability").let { it.isAccessible = true; it.get(broker) as ByteArray }
+        assertTrue(value.all { it == 0.toByte() }, "revoked capability storage must be zeroed")
+        assertKind(AcpProviderTerminalKind.REVOKED) { broker.channelSetupPayload() }
+    }
+
+    private fun bindingHashes(broker: AcpProviderBroker): Pair<Any?, Any?> =
+        listOf("sessionSha256", "turnSha256").map { name ->
+            AcpProviderBroker::class.java.getDeclaredField(name).let { it.isAccessible = true; it.get(broker) }
+        }.let { it[0] to it[1] }
 
     private fun inputMessage(text: String, native: Boolean = false): String = if (native)
         """{"type":"message","role":"user","content":[{"type":"input_text","text":$text}]}"""

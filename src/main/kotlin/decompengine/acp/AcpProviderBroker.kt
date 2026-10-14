@@ -223,9 +223,12 @@ internal class AcpProviderBroker private constructor(
     /** The trusted SDK owner supplies its actual session/turn after negotiation, exactly once. */
     fun bindSession(sessionId: String, turnId: String) = lock.withLock {
         checkActive()
+        if (sessionSha256 != null || turnSha256 != null) {
+            revoke(AcpProviderTerminalKind.REVOKED)
+            throw AcpProviderBrokerFailure(AcpProviderTerminalKind.REVOKED)
+        }
         val sessionBytes = validatedProviderIdentity(sessionId)
         val turnBytes = validatedProviderIdentity(turnId)
-        if (sessionSha256 != null || turnSha256 != null) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.REVOKED)
         sessionSha256 = brokerDigest(sessionBytes)
         turnSha256 = brokerDigest(turnBytes)
     }
