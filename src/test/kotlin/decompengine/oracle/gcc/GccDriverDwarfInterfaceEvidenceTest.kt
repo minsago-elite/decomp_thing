@@ -4,6 +4,7 @@ import decompengine.oracle.core.OracleArtifactLimits
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.BoundedDwarfCanonicalShardWriter
+import decompengine.oracle.fulltree.BoundedDwarfShardLimits
 import decompengine.oracle.fulltree.parseCanonicalDwarfShard
 import decompengine.oracle.structural.DwarfSysvAmd64InterfaceProjection
 import decompengine.oracle.structural.DwarfSysvAmd64Classification
@@ -30,6 +31,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -141,15 +143,20 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertEquals(first.partNames, second.partNames)
         first.partNames.forEach { name -> assertContentEquals(first.partBytes(name), second.partBytes(name), name) }
         val parts = first.partNames.map { it to first.partBytes(it) }
-        GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts)
-        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.dropLast(1)) }
-        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.reversed()) }
+        val policy = checkedAutomaticLocalPolicy(root)
+        GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts, automaticLocalPolicy = policy)
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.dropLast(1), automaticLocalPolicy = policy) }
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.reversed(), automaticLocalPolicy = policy) }
         val changedPart = parts.first().second.copyOf().also { it[it.lastIndex] = 0 }
         assertFailsWith<IllegalArgumentException> {
-            GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to changedPart) + parts.drop(1))
+            GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to changedPart) + parts.drop(1),
+                automaticLocalPolicy = policy)
         }
         val document = OracleJson.parseCanonical(first.canonicalBytes(), GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject
-        assertEquals(JsonPrimitive(3), document.getValue("schemaVersion"))
+        exerciseRehashedDecisionTamper(document, parts, policy)
+        val rehashedDecisionTamperResult = "rehashed-decision-membership-change-rejected"
+        assertEquals(JsonPrimitive(7), document.getValue("schemaVersion"))
+        assertEquals(JsonPrimitive("gcc-driver-dwarf-interface-evidence-v7"), document.getValue("provider"))
         listOf("complete", "scored", "productionVerified", "releaseEligible").forEach {
             assertEquals(JsonPrimitive(false), document.getValue(it), it)
         }
@@ -181,12 +188,33 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertEquals(12_844, records("inventorySelections").size)
         assertTrue(records("inventoryRoots").isNotEmpty())
         assertTrue(records("inventoryTypeCompleteness").isNotEmpty())
+        val rawGlobals = records("globals")
+        val decisions = records(GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND)
+        assertEquals(rawGlobals.size, decisions.size, "every raw variable record must have one decision")
+        val application = document.getValue("automaticLocalPopulation").jsonObject
+        val independentlyExcluded = decisions.count { it.getValue("classification") == JsonPrimitive("excluded") }
+        val independentlyRetained = decisions.size - independentlyExcluded
+        val counts = application.getValue("counts").jsonObject
+        assertEquals(JsonPrimitive(rawGlobals.size), counts.getValue("rawVariableRecords"))
+        assertEquals(JsonPrimitive(independentlyExcluded), counts.getValue("excludedAutomaticLocalRecords"))
+        assertEquals(JsonPrimitive(independentlyRetained), counts.getValue("retainedRawCandidateRecords"))
+        val globalsByLocator = rawGlobals.associateBy { it.getValue("locator").jsonPrimitive.content }
+        decisions.filter { it.getValue("classification") == JsonPrimitive("excluded") }.forEach { decision ->
+            val declaration = globalsByLocator.getValue(decision.getValue("sourceLocator").jsonPrimitive.content)
+                .getValue("declaration").jsonObject
+            val accepted = declaration.getValue("state") == JsonPrimitive("absent") && declaration.getValue("values") == JsonArray(emptyList()) ||
+                declaration.getValue("state") == JsonPrimitive("known") && declaration.getValue("values") == JsonArray(listOf(JsonPrimitive("0")))
+            assertTrue(accepted, "excluded record lacks the closed negative declaration guard")
+        }
+        val declarationVetoed = decisions.count {
+            it.getValue("reason") == JsonPrimitive("declaration-is-not-a-proved-definition")
+        }
         val candidateIds = records("functions").map { it.getValue("locator").jsonPrimitive.content }.toSet()
         records("oracleFunctions").forEach { record ->
             record.getValue("candidateDieLocators").jsonArray.forEach { assertTrue(it.jsonPrimitive.content in candidateIds) }
         }
         val tamperResults = exerciseCheckedInputTampering(root, destination, document) +
-            listOf("missing-shard-rejected", "altered-shard-rejected", "reordered-shards-rejected")
+            listOf(rehashedDecisionTamperResult, "missing-shard-rejected", "altered-shard-rejected", "reordered-shards-rejected")
         first.visitParts { relative, bytes ->
             val path = destination.resolve(relative)
             Files.createDirectories(path.parent, PRIVATE_DIRECTORY)
@@ -195,8 +223,14 @@ class GccDriverDwarfInterfaceEvidenceTest {
         OracleArtifacts.publishAtomically(destination.resolve(GccDriverDwarfInterfaceEvidence.EVIDENCE_NAME), first.canonicalBytes(),
             OracleArtifactLimits(GccDriverDwarfInterfaceEvidence.MAXIMUM_EVIDENCE_BYTES))
         val qualification = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v3"),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v7"),
             "prePolicyInventorySha256" to inventory.getValue("inventorySha256"),
+            "policyInput" to document.getValue("inputs").jsonObject.getValue("automaticLocalPopulationPolicy"),
+            "canonicalPolicySha256" to application.getValue("canonicalPolicySha256"),
+            "automaticLocalPopulationApplicationSha256" to application.getValue("applicationSha256"),
+            "decisionCommitment" to application.getValue("decisionCommitment"),
+            "decisionCounts" to counts,
+            "declarationVetoedOtherwisePositiveRecords" to JsonPrimitive(declarationVetoed),
             "evidenceSha256" to JsonPrimitive(first.sha256), "evidenceBytes" to JsonPrimitive(first.canonicalBytes().size),
             "deterministicRepeat" to JsonPrimitive(true), "deterministicBundleParts" to JsonPrimitive(first.partNames.size), "tamperChecks" to JsonArray(tamperResults.map(::JsonPrimitive)),
             "elapsedMillis" to JsonPrimitive((System.nanoTime() - started) / 1_000_000),
@@ -209,7 +243,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
                 BoundedDwarfInterfaceFacts::class.java, GccDriverDwarfInterfaceEvidence::class.java,
                 DwarfSysvAmd64InterfaceProjection::class.java, DwarfSysvAmd64Classification::class.java,
                 GccDriverDwarfGlobalProjection::class.java, BoundedDwarfCanonicalShardWriter::class.java,
-                BoundedDwarfObservationInventoryV1::class.java,
+                BoundedDwarfObservationInventoryV1::class.java, GccDriverAutomaticLocalPopulationPolicyV1::class.java,
             ).map(::compiledClassIdentity)),
             "identityScope" to JsonPrimitive("bounded classpath resource bytes read during qualification; not a signed or complete runtime closure"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
@@ -226,12 +260,8 @@ class GccDriverDwarfInterfaceEvidenceTest {
             emptyList(), emptyList(), emptyMap(), 0L, 0, true, BoundedDwarfInterfaceFactLimits())
         val inventory = BoundedDwarfObservationInventoryV1.collect(facts, emptyList(), null,
             listOf(BoundedDwarfObservationInput("rich", facts.inputSha256, facts.inputBytes)))
-        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(3),
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3"),
-            "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
-            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-            "prePolicyInventory" to inventory.manifest, "strippedObjectLayout" to JsonNull))
-        val kinds = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "strippedObjects",
+        val base = fixtureManifest(6, inventory.manifest)
+        val kinds = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies", "strippedObjects",
             "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection") +
             BoundedDwarfObservationInventoryV1.RECORD_KINDS
         val groups = kinds.associateWith { mutableListOf<JsonObject>() }
@@ -258,6 +288,11 @@ class GccDriverDwarfInterfaceEvidenceTest {
             GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to altered) + parts.drop(1))
         }
         val manifest = OracleJson.parseCanonical(first.canonicalBytes()).jsonObject
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(
+                OracleJson.canonicalBytes(JsonObject(manifest + ("unknownAuthority" to JsonPrimitive(true)))), parts,
+            )
+        }
         val descriptors = manifest.getValue("parts").jsonArray
         assertEquals(JsonPrimitive(0), descriptors.single {
             it.jsonObject["kind"] == JsonPrimitive("typeChildren")
@@ -278,6 +313,137 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertNotEquals(0, first.partBytes(first.partNames.first())[0].toInt())
     }
 
+    @Test
+    fun `v7 bundle preserves v6 observations and verifies automatic-local decisions`() {
+        val fixture = emptyPolicyBundleFixture()
+        val artifact = fixture.v7
+        val parts = artifact.partNames.map { it to artifact.partBytes(it) }
+        GccDriverDwarfInterfaceEvidence.verifyBundle(artifact.canonicalBytes(), parts,
+            automaticLocalPolicy = fixture.policy)
+        assertEquals(fixture.v6.partNames, artifact.partNames.dropLast(1))
+        fixture.v6.partNames.forEach { name -> assertContentEquals(fixture.v6.partBytes(name), artifact.partBytes(name), name) }
+        val document = OracleJson.parseCanonical(artifact.canonicalBytes()).jsonObject
+        assertEquals(JsonPrimitive(7), document.getValue("schemaVersion"))
+        assertEquals(fixture.inventory.manifest, document.getValue("prePolicyInventory"))
+        assertTrue(document.getValue("prePolicyInventory").jsonObject.getValue("inputs").jsonArray.none {
+            it.jsonObject.getValue("role") == JsonPrimitive("automaticLocalPopulationPolicy")
+        })
+        assertEquals(JsonPrimitive(0), document.getValue("automaticLocalPopulation").jsonObject
+            .getValue("counts").jsonObject.getValue("rawVariableRecords"))
+    }
+
+    @Test
+    fun `v7 rejects rehashed membership and policy substitutions`() {
+        val fixture = emptyPolicyBundleFixture()
+        val artifact = fixture.v7
+        val parts = artifact.partNames.map { it to artifact.partBytes(it) }
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(artifact.canonicalBytes(), parts.dropLast(1),
+                automaticLocalPolicy = fixture.policy)
+        }
+        val manifest = OracleJson.parseCanonical(artifact.canonicalBytes()).jsonObject
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(OracleJson.canonicalBytes(JsonObject(
+                manifest + ("unknownAuthority" to JsonPrimitive(true)),
+            )), parts, automaticLocalPolicy = fixture.policy)
+        }
+        val inputs = manifest.getValue("inputs").jsonObject
+        val policyInput = inputs.getValue("automaticLocalPopulationPolicy").jsonObject
+        val substituted = JsonObject(policyInput + ("sha256" to JsonPrimitive("f".repeat(64))))
+        val changed = JsonObject(manifest + ("inputs" to JsonObject(inputs +
+            ("automaticLocalPopulationPolicy" to substituted))))
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(OracleJson.canonicalBytes(changed), parts,
+                automaticLocalPolicy = fixture.policy)
+        }
+        val shardLimits = BoundedDwarfShardLimits()
+        val largeEnvelope = OracleJson.canonicalBytes(JsonObject(linkedMapOf(
+            "schema" to JsonPrimitive("bounded-dwarf-record-shard-v1"),
+            "kind" to JsonPrimitive(GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND),
+            "ordinal" to JsonPrimitive(0), "recordCount" to JsonPrimitive(300),
+            "records" to JsonArray(List(300) { JsonObject(mapOf(
+                "payload" to JsonPrimitive("x".repeat(14_000)),
+            )) }),
+        )), shardLimits.jsonLimits())
+        assertTrue(largeEnvelope.size > 4 * 1024 * 1024, "fixture must exceed the generic JSON input limit")
+        val parsedLargeEnvelope = parseDecisionEnvelopeForTamper(largeEnvelope)
+        assertEquals(300, parsedLargeEnvelope.getValue("records").jsonArray.size)
+        assertContentEquals(largeEnvelope, canonicalDecisionEnvelopeForTamper(parsedLargeEnvelope))
+    }
+
+    private data class EmptyPolicyBundleFixture(
+        val policy: GccDriverAutomaticLocalPopulationPolicy,
+        val inventory: decompengine.oracle.fulltree.BoundedDwarfObservationInventory,
+        val v6: GccDriverDwarfInterfaceArtifact,
+        val v7: GccDriverDwarfInterfaceArtifact,
+    )
+
+    private fun fixtureManifest(
+        version: Int,
+        inventory: JsonObject,
+        population: JsonObject? = null,
+        inputs: JsonObject = JsonObject(emptyMap()),
+    ): JsonObject {
+        require(version == 6 && population == null || version == 7 && population != null)
+        val fields = linkedMapOf<String, JsonElement>(
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v$version"),
+            "oracleId" to JsonPrimitive("fixture"), "sourceRevision" to JsonPrimitive("0".repeat(40)),
+            "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
+            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+            "configuration" to JsonObject(emptyMap()), "inputs" to inputs,
+            "targetAbi" to JsonObject(emptyMap()), "ruleProfile" to JsonObject(emptyMap()),
+            "ruleProfileSha256" to JsonPrimitive("0".repeat(64)),
+            "coverage" to JsonObject(emptyMap()), "globalCoverage" to JsonObject(emptyMap()),
+            "prePolicyInventory" to inventory,
+            "globalDeclaredTypeCoverage" to JsonObject(emptyMap()),
+            "strippedObjectLayout" to JsonNull, "reviewedExclusions" to JsonObject(emptyMap()),
+            "unresolved" to JsonArray(emptyList()),
+        )
+        if (population != null) fields["automaticLocalPopulation"] = population
+        return JsonObject(fields)
+    }
+
+    private fun emptyPolicyBundleFixture(): EmptyPolicyBundleFixture {
+        val facts = BoundedDwarfInterfaceFacts("0".repeat(64), 1L, "ET_EXEC", 0x400000UL,
+            emptyList(), emptyList(), emptyMap(), 0L, 0, true, BoundedDwarfInterfaceFactLimits())
+        val inventory = BoundedDwarfObservationInventoryV1.collect(facts, emptyList(), null,
+            listOf(BoundedDwarfObservationInput("rich", facts.inputSha256, facts.inputBytes)))
+        val policyPath = repositoryRoot().resolve("oracle/gcc/16.2.0/automatic-local-population-policy-v1.json")
+        val policyBytes = Files.readAllBytes(policyPath)
+        val policy = GccDriverAutomaticLocalPopulationPolicyV1.load(policyBytes)
+        val rawCommitment = inventory.manifest.getValue("rawCommitments").jsonArray.map { it.jsonObject }
+            .single { it.getValue("kind") == JsonPrimitive("globals") }
+        val population = GccDriverAutomaticLocalPopulationPolicyV1.apply(policy, emptySequence(),
+            OracleArtifacts.sha256(policyBytes), policyBytes.size.toLong(),
+            inventory.manifest.getValue("inventorySha256").jsonPrimitive.content, rawCommitment)
+        val v6Document = fixtureManifest(6, inventory.manifest)
+        val v7Document = fixtureManifest(7, inventory.manifest, population.summary, JsonObject(mapOf(
+            "automaticLocalPopulationPolicy" to JsonObject(mapOf(
+                "path" to JsonPrimitive("oracle/gcc/16.2.0/automatic-local-population-policy-v1.json"),
+                "bytes" to JsonPrimitive(policyBytes.size), "sha256" to JsonPrimitive(OracleArtifacts.sha256(policyBytes)),
+            )),
+        )))
+        val v6Kinds = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies", "strippedObjects",
+            "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection") +
+            BoundedDwarfObservationInventoryV1.RECORD_KINDS
+        val groups = v6Kinds.associateWith { mutableListOf<JsonObject>() }
+        val retain: (String, Int, ByteArray, Int) -> Unit = { kind, ordinal, bytes, count ->
+            groups.getValue(kind) += parseCanonicalDwarfShard(bytes, expectedKind = kind,
+                expectedOrdinal = ordinal, expectedRecordCount = count).records
+        }
+        facts.visitCanonicalShards(retain)
+        inventory.visitCanonicalShards(retain)
+        fun bundle(document: JsonObject, v7: Boolean) = GccDriverDwarfInterfaceEvidence.pack(document,
+            automaticLocalPolicy = if (v7) policy else null) { consume ->
+            val writer = BoundedDwarfCanonicalShardWriter(GccDriverDwarfInterfaceEvidence.SHARD_LIMITS, consume)
+            v6Kinds.forEach { writer.write(it, groups.getValue(it).asSequence()) }
+            if (v7) writer.write(GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND, population.decisions.asSequence())
+            writer.finish()
+        }
+        return EmptyPolicyBundleFixture(policy, inventory, bundle(v6Document, false), bundle(v7Document, true))
+    }
+
     private fun exerciseCheckedInputTampering(root: Path, destination: Path, document: JsonObject): List<String> {
         val fixture = Files.createTempDirectory(destination, "tamper-", PRIVATE_DIRECTORY)
         try {
@@ -293,24 +459,75 @@ class GccDriverDwarfInterfaceEvidenceTest {
             val wrongBytes = assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.capture(fixture, scratch) }
             assertTrue(wrongBytes.message.orEmpty().contains("rich differs from its checked identity"))
             flipLastByte(full)
+            val policy = fixture.resolve("oracle/gcc/16.2.0/automatic-local-population-policy-v1.json")
+            flipLastByte(policy)
+            val wrongPolicy = assertFailsWith<IllegalArgumentException> {
+                GccDriverDwarfInterfaceEvidence.capture(fixture, scratch)
+            }
+            assertTrue(wrongPolicy.message.orEmpty().contains("automaticLocalPopulationPolicy differs from its checked identity"))
+            flipLastByte(policy)
             var replaced = false
             val replacedControl = assertFailsWith<FullTreeControlException> {
                 GccDriverDwarfInterfaceEvidence.capture(fixture, scratch) { stage ->
                     if (stage == "before scanning checked GCC driver interfaces") {
-                        val target = fixture.resolve("oracle/targets/sysv-amd64-v1.json")
-                        val saved = target.resolveSibling("old-target.json")
-                        Files.move(target, saved)
-                        Files.copy(saved, target)
+                        val saved = policy.resolveSibling("old-automatic-local-policy.json")
+                        Files.move(policy, saved)
+                        Files.copy(saved, policy)
                         replaced = true
                     }
                 }
             }
             assertTrue(replaced, "retained identity attack did not execute")
-            assertTrue(replacedControl.message.orEmpty().startsWith("before GCC driver interface scan: targetAbi "),
+            assertTrue(replacedControl.message.orEmpty().startsWith("before GCC driver interface scan: automaticLocalPopulationPolicy "),
                 "wrong rejection: ${replacedControl.message}")
-            return listOf("same-size-rich-byte-tamper-rejected", "same-content-control-path-replacement-rejected")
+            return listOf("same-size-rich-byte-tamper-rejected", "same-size-policy-byte-tamper-rejected",
+                "same-content-policy-path-replacement-rejected")
         } finally { deleteTree(fixture) }
     }
+
+    private fun exerciseRehashedDecisionTamper(
+        manifest: JsonObject,
+        parts: List<Pair<String, ByteArray>>,
+        policy: GccDriverAutomaticLocalPopulationPolicy,
+    ) {
+        val index = parts.indexOfFirst { it.first.contains("-${GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND}-") }
+        assertTrue(index >= 0, "decision shard is absent")
+        val envelope = parseDecisionEnvelopeForTamper(parts[index].second)
+        val records = envelope.getValue("records").jsonArray
+        assertTrue(records.isNotEmpty(), "actual qualification must emit policy decisions")
+        val first = records.first().jsonObject
+        val forged = JsonObject(first + mapOf(
+            "classification" to JsonPrimitive(if (first.getValue("classification") == JsonPrimitive("excluded"))
+                "retained-raw-candidate" else "excluded"),
+            "reason" to JsonPrimitive(if (first.getValue("classification") == JsonPrimitive("excluded"))
+                "automatic-local-not-positively-proved" else "positively-proved-automatic-local"),
+        ))
+        val forgedEnvelope = JsonObject(envelope + ("records" to JsonArray(listOf(forged) + records.drop(1))))
+        val forgedBytes = canonicalDecisionEnvelopeForTamper(forgedEnvelope)
+        val parsed = parseCanonicalDwarfShard(forgedBytes)
+        val descriptor = manifest.getValue("parts").jsonArray[index].jsonObject
+        val forgedDescriptor = JsonObject(descriptor + mapOf(
+            "bytes" to JsonPrimitive(forgedBytes.size),
+            "nodes" to JsonPrimitive(parsed.nodeCount),
+            "sha256" to JsonPrimitive(OracleArtifacts.sha256(forgedBytes)),
+        ))
+        val forgedManifest = JsonObject(manifest + ("parts" to JsonArray(
+            manifest.getValue("parts").jsonArray.mapIndexed { selected, value ->
+                if (selected == index) forgedDescriptor else value
+            },
+        )))
+        val forgedParts = parts.mapIndexed { selected, value -> if (selected == index) value.first to forgedBytes else value }
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(OracleJson.canonicalBytes(forgedManifest), forgedParts,
+                automaticLocalPolicy = policy)
+        }
+    }
+
+    private fun parseDecisionEnvelopeForTamper(bytes: ByteArray): JsonObject =
+        OracleJson.parseCanonical(bytes, BoundedDwarfShardLimits().jsonLimits()).jsonObject
+
+    private fun canonicalDecisionEnvelopeForTamper(envelope: JsonObject): ByteArray =
+        OracleJson.canonicalBytes(envelope, BoundedDwarfShardLimits().jsonLimits())
 
     private fun compiledClassIdentity(type: Class<*>): JsonObject {
         val resource = "/${type.name.replace('.', '/')}.class"
@@ -319,6 +536,11 @@ class GccDriverDwarfInterfaceEvidenceTest {
         return JsonObject(mapOf("class" to JsonPrimitive(type.name), "resource" to JsonPrimitive(resource),
             "bytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(OracleArtifacts.sha256(bytes))))
     }
+
+    private fun checkedAutomaticLocalPolicy(root: Path = repositoryRoot()): GccDriverAutomaticLocalPopulationPolicy =
+        GccDriverAutomaticLocalPopulationPolicyV1.load(
+            Files.readAllBytes(root.resolve("oracle/gcc/16.2.0/automatic-local-population-policy-v1.json")),
+        )
 
     private fun flipLastByte(path: Path) = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE).use { channel ->
         val value = ByteBuffer.allocate(1)

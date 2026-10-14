@@ -49,8 +49,10 @@
       },
       {
         "id": "search-directory",
-        "status": "covered",
-        "caseIds": ["environment-search-path"]
+        "status": "unavailable",
+        "caseIds": [],
+        "relatedCaseIds": ["environment-search-path"],
+        "boundary": "The retained environment-search-path case observes COMPILER_PATH forwarding through a mock frontend. It does not invoke -print-search-dirs or supply a search-directory metadata query."
       },
       {
         "id": "help",
@@ -65,8 +67,9 @@
       },
       {
         "id": "missing-input",
-        "status": "covered",
-        "caseIds": ["diagnostic-invalid-input"]
+        "status": "covered-by-mock-frontend-forwarding",
+        "caseIds": ["diagnostic-invalid-input"],
+        "boundary": "The retained stderr is emitted by the staged mock cc1 for missing.c. It verifies driver forwarding and preserves the mock diagnostic; it does not establish a genuine GCC frontend missing-input diagnostic."
       },
       {
         "id": "malformed-input",
@@ -89,6 +92,7 @@
   "productionGap": {
     "productionVerified": false,
     "unavailableGates": [
+      "Distinct search-directory metadata query and genuine frontend diagnostic reference captures under an authenticated execution owner.",
       "Authenticated reconstructed-driver replay for every inventory case, including candidate executable, source/build revision, and run receipt.",
       "Independent candidate comparison of exit code and normalized stdout/stderr, with every mismatch retained as release-blocking evidence.",
       "Malformed-input reference capture required to close the inventory category marked unavailable.",

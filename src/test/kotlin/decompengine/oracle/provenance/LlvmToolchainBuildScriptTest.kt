@@ -83,19 +83,72 @@ class LlvmToolchainBuildScriptTest {
     fun `both workflows use the wrapper without changing frozen provenance or verification gates`() {
         val model = Files.readString(Path.of(".github/workflows/llvm-oracle-model.yml"))
         val rebuild = Files.readString(Path.of(".github/workflows/llvm-oracle-rebuild.yml"))
-        for (workflow in listOf(model, rebuild)) {
+        val ordinaryModel = workflowJob(model, "provenance-artifacts-and-ground-truth")
+        assertEquals("    if: github.event_name != 'workflow_dispatch'",
+            ordinaryModel.lineSequence().first(String::isNotBlank))
+        for (workflow in listOf(ordinaryModel, rebuild)) {
             assertTrue(workflow.contains("bash scripts/ci-build-llvm-toolchain.sh"))
             assertFalse(workflow.contains("docker buildx build"))
             assertTrue(workflow.contains("docker image inspect --format '{{.Id}}'"))
             assertTrue(workflow.contains("decompengine.oracle.provenance.LlvmBuildEnvironmentVerifierCli"))
         }
-        assertTrue(model.contains("timeout-minutes: 45"))
-        assertTrue(model.contains("./gradlew --no-daemon verifyLlvmToolchainReproduction"))
-        assertTrue(model.contains("DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE: \"1\""))
+        assertTrue(ordinaryModel.contains("timeout-minutes: 45"))
+        assertTrue(ordinaryModel.contains("./gradlew --no-daemon verifyLlvmToolchainReproduction"))
+        assertTrue(ordinaryModel.contains("DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE: \"1\""))
         assertEquals("97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291",
             OracleArtifacts.sha256(Files.readAllBytes(Path.of("oracle/llvm/22.1.6/build-toolchain.Dockerfile"))))
         assertEquals("14a383bc5792b7ace786cbbd8964383469c1ffa5a4bb06a99e38c71518643f4f",
             OracleArtifacts.sha256(Files.readAllBytes(Path.of("oracle/llvm/22.1.6/toolchain-reproduction.json"))))
+    }
+
+    @Test
+    fun `manual native measurement builds its own recipe and publishes only separate unapproved candidates`() {
+        val model = Files.readString(Path.of(".github/workflows/llvm-oracle-model.yml"))
+        val measurement = workflowJob(model, "native-runtime-measurement")
+        assertEquals("    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'",
+            measurement.lineSequence().first(String::isNotBlank))
+        val dispatch = model.substringBefore("\njobs:\n")
+        assertTrue(dispatch.contains("never approves a production profile"))
+        assertTrue(dispatch.contains("        default: native-runtime-measurement"))
+        val listenerInput = dispatch.substringAfter("      listener_continuity:\n", missingDelimiterValue = "")
+            .substringBefore("\n\n")
+        assertTrue(listenerInput.contains("        type: boolean"))
+        assertTrue(listenerInput.contains("        required: false"))
+        assertTrue(listenerInput.contains("        default: false"))
+        assertTrue(measurement.contains("docker buildx build"))
+        assertTrue(measurement.contains("--file \"${'$'}root/context/native-runtime-measurement-v2.Dockerfile\""))
+        assertTrue(measurement.contains("--output \"type=oci,dest=${'$'}root/raw-oci,tar=false,rewrite-timestamp=true\""))
+        assertTrue(measurement.contains("--output \"type=docker,dest=${'$'}root/load-image.tar,rewrite-timestamp=true\""))
+        assertTrue(measurement.contains("decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2LiveMain"))
+        assertTrue(measurement.contains("Measure the actual installed raw OCI and fixed Docker export without START"))
+        assertTrue(measurement.contains("\"${'$'}root/evidence/native-runtime-measurement-candidate-v2.json\""))
+        assertTrue(measurement.contains("LISTENER_CONTINUITY: ${'$'}{{ inputs.listener_continuity && 'true' || 'false' }}"))
+        assertTrue(measurement.contains("listener_args=()"))
+        assertTrue(measurement.contains("if [[ \"${'$'}LISTENER_CONTINUITY\" == true ]]; then\n" +
+            "            listener_args=(--listener-continuity)\n" +
+            "            candidate=\"${'$'}root/evidence/native-runtime-measurement-candidate-v3.json\"\n" +
+            "          fi"))
+        assertTrue(measurement.contains("\"${'$'}{listener_args[@]}\" \"${'$'}root/raw-oci\""))
+        assertTrue(measurement.contains("\"${'$'}candidate\" \\\n"))
+        assertTrue(measurement.contains("name: native-runtime-measurement-candidate-${'$'}{{ inputs.listener_continuity && 'v3' || 'v2' }}"))
+        assertTrue(measurement.contains("build/nrm-live/evidence"))
+        assertTrue(measurement.contains("build/nrm-live/raw-oci"))
+        for (frozenQualification in listOf("bash scripts/ci-build-llvm-toolchain.sh", "build-toolchain.Dockerfile",
+            "decomp-llvm-oracle-toolchain:22.1.6", "verifyLlvmToolchainReproduction", "LlvmBuildEnvironmentVerifierCli",
+            "DECOMP_REQUIRE_LLVM_HOSTED_WORKER_IMAGE", "name: llvm-oracle-test-reports")) {
+            assertFalse(measurement.contains(frozenQualification), "manual candidate job must not stand in for frozen V1 qualification")
+        }
+        val recipe = Files.readString(Path.of("oracle/llvm/22.1.6/native-runtime-measurement-v2.Dockerfile"))
+        assertTrue(recipe.contains("org.decompengine.native-runtime.role=\"unapproved-measurement-candidate\""))
+        assertTrue(recipe.contains("org.decompengine.native-runtime.start-authorized=\"false\""))
+    }
+
+    private fun workflowJob(workflow: String, identifier: String): String {
+        val jobs = workflow.substringAfter("\njobs:\n", missingDelimiterValue = "")
+        val headers = Regex("(?m)^  ([A-Za-z0-9_-]+):\\s*$").findAll(jobs).toList()
+        val selected = headers.single { it.groupValues[1] == identifier }
+        val following = headers.firstOrNull { it.range.first > selected.range.first }
+        return jobs.substring(selected.range.last + 1, following?.range?.first ?: jobs.length)
     }
 
     private fun runScript(

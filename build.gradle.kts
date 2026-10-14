@@ -200,6 +200,26 @@ fun registerOracleJavaExecTask(
     mainClass.set(entryPoint)
 }
 
+/** Opt-in raw measurement uses the installed application, never the development classes. */
+tasks.register<JavaExec>("llvmNativeRuntimeMeasurement") {
+    group = "oracle"
+    description = "Measures an unapproved raw runtime candidate; --args='[--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>'"
+    dependsOn(tasks.named("installDist"))
+    mainClass.set("decompengine.MainKt")
+    maxHeapSize = "1g"
+    val installedLib = layout.buildDirectory.dir("install/llm_bin_patch/lib")
+    val applicationJarName = tasks.named<Jar>("jar").flatMap { it.archiveFileName }
+    classpath = files(applicationJarName.map { name -> installedLib.get().file(name) }) + files(provider {
+        installedLib.get().asFile.listFiles().orEmpty()
+            .filter { it.isFile && it.extension == "jar" && it.name != applicationJarName.get() }
+            .sortedBy { it.name }
+    })
+    doFirst {
+        // JavaExec --args replaces configured arguments; keep the production command explicit.
+        setArgs(listOf("llvm-native-runtime-measurement") + args)
+    }
+}
+
 tasks.register<JavaExec>("generatedCRepairQualification") {
     group = "verification"
     description = "Runs the explicitly provisioned generated-C public-factory qualification driver"
@@ -323,6 +343,22 @@ val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_l
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
 val llvmBehaviorHelperCompiler = providers.gradleProperty("llvmBehaviorHelperCompiler").orElse("/usr/bin/cc")
+val analysisIoHelperSource = layout.projectDirectory.file("src/main/c/decomp_analysis_io_helper.c")
+val analysisIoHelperDirectory = layout.buildDirectory.dir("native/analysis")
+val analysisIoHelperBinary = analysisIoHelperDirectory.map { it.file("decomp-analysis-io-helper") }
+val analysisIoHelperChecksum = analysisIoHelperDirectory.map { it.file("decomp-analysis-io-helper.sha256") }
+val analysisIoHelperMetadata = analysisIoHelperDirectory.map { it.dir("analysis-native-io") }
+val analysisIoHelperCompiler = providers.gradleProperty("analysisIoHelperCompiler").orElse("/usr/bin/cc")
+val llvmBehaviorHelperDirectory = layout.buildDirectory.dir("native/behavior")
+val llvmBehaviorHelperSourceCopy = llvmBehaviorHelperDirectory.map { it.file("decomp_llvm_behavior_helper.c") }
+val llvmBehaviorHelperBuildRecord = llvmBehaviorHelperDirectory.map { it.file("decomp-llvm-behavior-helper-build-v2.json") }
+val llvmBehaviorHelperReference = llvmBehaviorHelperDirectory.map { it.file("llvm-behavior-native-helper-deployment-reference-v1.json") }
+val llvmBehaviorHelperBootstrapResources = layout.buildDirectory.dir("generated/native-helper-bootstrap-resources")
+val stageLlvmBehaviorHelperBootstrapResources = tasks.register<Sync>("stageLlvmBehaviorHelperBootstrapResources") {
+    into(llvmBehaviorHelperBootstrapResources)
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    from(layout.projectDirectory.file("src/main/resources/oracle-native-libraries-v1.properties"))
+}
 val kotlinBootRuntimeDirectory = layout.buildDirectory.dir("oracle/gcc/kotlin-boot-runtime")
 val oracleNativeLibraryDirectory = layout.buildDirectory.dir("native/oracle")
 val oracleNativeLibraryPolicy = layout.projectDirectory.file("src/main/resources/oracle-native-libraries-v1.properties")
@@ -1030,49 +1066,87 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     }
 }
 
-val buildLlvmBehaviorHelper = tasks.register<Exec>("buildLlvmBehaviorHelper") {
+val buildLlvmBehaviorHelper = tasks.register<JavaExec>("buildLlvmBehaviorHelper") {
     group = "build"
-    description = "Builds the non-authoritative static LLVM behavior runtime helper prerequisite"
+    description = "Runs the bounded Kotlin helper compiler owner and records actual deployment provenance"
+    val kotlinCompilation = tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlin")
+    val javaCompilation = tasks.named<JavaCompile>("compileJava")
+    dependsOn(kotlinCompilation, javaCompilation, stageLlvmBehaviorHelperBootstrapResources, stageOracleNativeLibraries)
+    // Deliberately exclude SourceSet runtimeClasspath/classes/JAR and processed resources: those
+    // must package this task's output later, and would make the resource-generation cycle circular.
+    classpath = files(kotlinCompilation.flatMap { it.destinationDirectory },
+        javaCompilation.flatMap { it.destinationDirectory }, llvmBehaviorHelperBootstrapResources,
+        configurations.runtimeClasspath)
+    mainClass.set("decompengine.oracle.behavior.LlvmBehaviorNativeHelperBuildV2Cli")
     inputs.file(llvmBehaviorHelperSource)
     inputs.property("compiler", llvmBehaviorHelperCompiler)
     inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
-    outputs.file(llvmBehaviorHelperBinary)
+    outputs.files(llvmBehaviorHelperBinary, llvmBehaviorHelperChecksum, llvmBehaviorHelperSourceCopy,
+        llvmBehaviorHelperBuildRecord, llvmBehaviorHelperReference)
     // The compiler identity is security-relevant but is not represented by its configured path.
     outputs.upToDateWhen { false }
 
     doFirst {
         val osName = System.getProperty("os.name", "").lowercase()
         val architecture = System.getProperty("os.arch", "")
-        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
-            "the LLVM behavior helper supports only Linux x86-64 or aarch64"
+        require("linux" in osName && architecture in setOf("amd64", "x86_64")) {
+            "the Kotlin LLVM behavior-helper producer requires the pinned Linux x86-64 oracle native profile"
         }
         val configuredCompiler = file(llvmBehaviorHelperCompiler.get()).toPath().toAbsolutePath().normalize()
         val compiler = configuredCompiler.toRealPath()
         require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
             "LLVM behavior-helper compiler is not an executable regular file: $compiler"
         }
-        val output = llvmBehaviorHelperBinary.get().asFile.toPath()
-        Files.createDirectories(output.parent)
-        commandLine(
-            compiler.toString(),
-            "-std=c11",
-            "-O2",
-            "-static",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-Wformat=2",
-            "-Wl,--build-id=none",
-            llvmBehaviorHelperSource.asFile.absolutePath,
-            "-o",
-            output.toString(),
-        )
+        val output = llvmBehaviorHelperDirectory.get().asFile.toPath()
+        val scratch = layout.buildDirectory.dir("native-helper-bootstrap-runtime").get().asFile.toPath()
+        listOf(output, scratch.resolve("tmp"), scratch.resolve("home")).forEach { Files.createDirectories(it) }
+        val nativeDirectory = oracleNativeLibraryDirectory.get().asFile.absolutePath
+        jvmArgs("-XX:-UsePerfData", "-Djava.io.tmpdir=${scratch.resolve("tmp")}",
+            "-Duser.home=${scratch.resolve("home")}", "-Djna.tmpdir=${scratch.resolve("tmp")}",
+            "-Djna.nosys=true", "-Djna.nounpack=true", "-Djna.boot.library.path=$nativeDirectory")
+        environment("HOME", scratch.resolve("home").toString())
+        environment("TMPDIR", scratch.resolve("tmp").toString())
+        setArgs(listOf(compiler.toString(), llvmBehaviorHelperSource.asFile.absolutePath, output.toString()))
     }
-    doLast {
-        Files.setPosixFilePermissions(
-            llvmBehaviorHelperBinary.get().asFile.toPath(),
-            PosixFilePermissions.fromString("rwxr-xr-x"),
-        )
+}
+
+val buildAnalysisIoHelper = tasks.register<JavaExec>("buildAnalysisIoHelper") {
+    group = "build"
+    description = "Builds the fixed static analysis I/O endpoint and records its actual source/build tuple"
+    val kotlinCompilation = tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlin")
+    val javaCompilation = tasks.named<JavaCompile>("compileJava")
+    dependsOn(kotlinCompilation, javaCompilation, stageOracleNativeLibraries)
+    // Explicit compiler destinations and dependency JARs avoid a resource-generation cycle.
+    // No SourceSet runtimeClasspath, classes task, processed resources or application JAR.
+    classpath = files(kotlinCompilation.flatMap { it.destinationDirectory },
+        javaCompilation.flatMap { it.destinationDirectory }, configurations.runtimeClasspath)
+    mainClass.set("decompengine.analysis.AnalysisIoHelperBuildV1Cli")
+    inputs.file(analysisIoHelperSource)
+    inputs.property("compiler", analysisIoHelperCompiler)
+    inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
+    outputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
+    outputs.dir(analysisIoHelperMetadata)
+    outputs.upToDateWhen { false }
+    doFirst {
+        require(System.getProperty("os.name") == "Linux" &&
+            System.getProperty("os.arch") in setOf("amd64", "x86_64")) {
+            "analysis I/O helper production requires the pinned Linux x86-64 native bootstrap"
+        }
+        val compiler = file(analysisIoHelperCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
+        require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler))
+        val output = analysisIoHelperDirectory.get().asFile.toPath()
+        val scratch = layout.buildDirectory.dir("analysis-io-bootstrap-runtime").get().asFile.toPath()
+        listOf(output, scratch.resolve("tmp"), scratch.resolve("home")).forEach { Files.createDirectories(it) }
+        val nativeDirectory = oracleNativeLibraryDirectory.get().asFile.absolutePath
+        jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
+            "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=${scratch.resolve("tmp")}",
+            "-Duser.home=${scratch.resolve("home")}", "-Djna.tmpdir=${scratch.resolve("tmp")}",
+            "-Djna.nosys=true", "-Djna.nounpack=true", "-Djna.boot.library.path=$nativeDirectory")
+        listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach { environment.remove(it) }
+        environment("HOME", scratch.resolve("home").toString())
+        environment("TMPDIR", scratch.resolve("tmp").toString())
+        environment("XDG_CACHE_HOME", scratch.resolve("cache").toString())
+        setArgs(listOf(compiler.toString(), analysisIoHelperSource.asFile.absolutePath, output.toString()))
     }
 }
 
@@ -1289,10 +1363,8 @@ val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHel
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(Files.readAllBytes(helper))
             .joinToString("") { byte -> "%02x".format(byte) }
-        Files.writeString(
-            llvmBehaviorHelperChecksum.get().asFile.toPath(),
-            "$digest  decomp-llvm-behavior-helper\n",
-        )
+        require(Files.readString(llvmBehaviorHelperChecksum.get().asFile.toPath()) ==
+            "$digest  decomp-llvm-behavior-helper\n") { "Kotlin helper owner emitted a mismatched checksum" }
     }
 }
 
@@ -1316,6 +1388,22 @@ distributions {
                 filePermissions { unix("rwxr-xr-x") }
             }
             from(llvmBehaviorHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(analysisIoHelperBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
+            from(analysisIoHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(analysisIoHelperMetadata) {
+                into("libexec/analysis-native-io")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(files(llvmBehaviorHelperSourceCopy, llvmBehaviorHelperBuildRecord, llvmBehaviorHelperReference)) {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
@@ -1347,14 +1435,17 @@ distributions {
 }
 
 // Resident checks use process-wide RSS/high-water data. Keep these callback-boundary tests out
-// of the shared core-suite worker when CI requests isolated execution.
+// of the shared core-suite worker when CI requests isolated execution, including
+// the census test whose authenticated whole-run bound includes earlier RSS peaks.
 private val v3BoundaryIsolatedTestMethods = listOf(
     "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 final staging recheck rejects rewriting an earlier shard",
     "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 publication retains member guards through rename and revokes raced output",
+    "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 rederives observation census and preserves one score row per RVA",
 )
 private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3BoundaryTests")
     .map { it == "true" }
     .orElse(false)
+private val gccCompilerEnginePlanningTestClass = "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
 
 private fun configureOracleTestRuntime(testTask: Test) {
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
@@ -1389,6 +1480,9 @@ private fun configureOracleTestRuntime(testTask: Test) {
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
+    testTask.dependsOn(buildAnalysisIoHelper)
+    testTask.inputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
+    testTask.inputs.dir(analysisIoHelperMetadata)
     testTask.dependsOn(generateKotlinBootClasspathReference)
     testTask.dependsOn(generateGccBundledGhidraReference)
     testTask.dependsOn(generateLlvmHostedWorkerClasspathReference)
@@ -1396,11 +1490,15 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.inputs.file(acpGateHelperChecksum)
     testTask.inputs.file(llvmBehaviorHelperBinary)
     testTask.inputs.file(llvmBehaviorHelperChecksum)
+    testTask.inputs.files(llvmBehaviorHelperSourceCopy, llvmBehaviorHelperBuildRecord, llvmBehaviorHelperReference)
     testTask.inputs.file(kotlinBootClasspathReference)
     testTask.inputs.file(gccBundledGhidraReference)
     testTask.inputs.file(llvmHostedWorkerClasspathReference)
     testTask.inputs.dir(kotlinBootRuntimeDirectory)
     testTask.doFirst {
+        testTask.systemProperty("decompengine.analysis.io.testHelper", analysisIoHelperBinary.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.analysis.io.helper", analysisIoHelperBinary.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.analysis.io.testCompiler", file(analysisIoHelperCompiler.get()).canonicalPath)
         testTask.systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
         val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
             else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
@@ -1428,6 +1526,9 @@ private fun configureOracleTestRuntime(testTask: Test) {
             "decompengine.oracle.behavior.nativeHelperChecksum",
             llvmBehaviorHelperChecksum.get().asFile.absolutePath,
         )
+        testTask.systemProperty("decompengine.oracle.behavior.nativeHelperBuildDirectory", llvmBehaviorHelperDirectory.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.oracle.behavior.nativeHelperInstalledRoot", layout.buildDirectory.dir("install/llm_bin_patch").get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.oracle.behavior.nativeHelperCompiler", file(llvmBehaviorHelperCompiler.get()).canonicalPath)
         testTask.systemProperty(
             "decompengine.oracle.gcc.bootKeeperClasspathReference",
             kotlinBootClasspathReference.get().asFile.absolutePath,
@@ -1452,6 +1553,8 @@ private fun configureOracleTestRuntime(testTask: Test) {
 }
 
 tasks.test {
+    // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
+    maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
         null -> useJUnitPlatform()
@@ -1462,13 +1565,40 @@ tasks.test {
     if (isolateV3BoundaryTests.get() && shard != "live") {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
+    if (shard != "live") {
+        // Its production RSS monitor observes process-wide history, including earlier tests.
+        filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
+        dependsOn("gccCompilerEnginePlanningIsolated")
+    }
     configureOracleTestRuntime(this)
+}
+
+// Select the entire class, including future methods, in a worker with no earlier suite RSS peak.
+// A dependency of test keeps this required for local check and the full/core CI entry points.
+tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
+    group = "verification"
+    description = "Runs GCC planning RSS-sensitive tests in a fresh bounded test JVM"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { excludeTags("ci-live") }
+    filter {
+        includeTestsMatching(gccCompilerEnginePlanningTestClass)
+        isFailOnNoMatchingTests = true
+    }
+    forkEvery = 1
+    maxParallelForks = 1
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("GCC planning tests must measure a fresh test JVM") { false }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull != "live" }
+    configureOracleTestRuntime(this)
+    // Leave headroom below the unchanged 2 GiB production/fixture RSS cap, even with live env flags.
+    maxHeapSize = "512m"
 }
 
 private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String) =
     tasks.register<Test>(taskName) {
         group = "verification"
-        description = "Runs one V3 publication-boundary test in a fresh test JVM"
+        description = "Runs one V3 resident-memory-sensitive test in a fresh test JVM"
         testClassesDirs = sourceSets["test"].output.classesDirs
         classpath = sourceSets["test"].runtimeClasspath
         useJUnitPlatform { excludeTags("ci-live") }
@@ -1489,8 +1619,12 @@ private val v3BoundaryFinalStagingIsolated = registerV3BoundaryIsolatedTest(
 private val v3BoundaryPublicationIsolated = registerV3BoundaryIsolatedTest(
     "v3BoundaryPublicationIsolated", v3BoundaryIsolatedTestMethods[1],
 )
+private val v3BoundaryCensusIsolated = registerV3BoundaryIsolatedTest(
+    "v3BoundaryCensusIsolated", v3BoundaryIsolatedTestMethods[2],
+)
 v3BoundaryFinalStagingIsolated.configure { shouldRunAfter(tasks.named("test")) }
 v3BoundaryPublicationIsolated.configure { shouldRunAfter(v3BoundaryFinalStagingIsolated) }
+v3BoundaryCensusIsolated.configure { shouldRunAfter(v3BoundaryPublicationIsolated) }
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")
@@ -1507,17 +1641,38 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
-    testImplementation("org.apache.commons:commons-compress:1.28.0")
+    implementation("org.apache.commons:commons-compress:1.28.0")
+    implementation("io.airlift:aircompressor:2.0.3")
 }
 
 tasks.processResources {
+    dependsOn(buildAnalysisIoHelper)
+    from(analysisIoHelperMetadata) {
+        into("analysis-native-io")
+        duplicatesStrategy = DuplicatesStrategy.FAIL
+    }
+    doFirst {
+        val previous = destinationDir.resolve("analysis-native-io")
+        if (previous.exists()) require(previous.deleteRecursively()) { "Cannot clear stale analysis I/O generated resources" }
+    }
+    dependsOn(buildLlvmBehaviorHelper)
+    from(llvmBehaviorHelperDirectory) {
+        include("decomp_llvm_behavior_helper.c", "decomp-llvm-behavior-helper-build-v2.json",
+            "llvm-behavior-native-helper-deployment-reference-v1.json")
+        into("oracle/native-helper")
+    }
+    doFirst {
+        val previous = destinationDir.resolve("oracle/native-helper")
+        check(!previous.exists() || previous.deleteRecursively()) { "Could not remove stale generated native helper resources" }
+    }
     from("oracle") {
-        include("**/*.schema.json", "kotlin-schema-inventory-v1.json")
+        include("**/*.schema.json", "kotlin-schema-inventory-v1.json", "llvm/22.1.6/native-runtime-measurement-v2.Dockerfile")
         into("oracle")
     }
 }
 
 listOf("installDist", "distZip", "distTar").forEach { taskName ->
+    tasks.named(taskName) { dependsOn(buildAnalysisIoHelper) }
     tasks.named(taskName) {
         dependsOn(":ghidra-bridge:stageBundle")
         dependsOn(stageOracleNativeLibraries)
@@ -1598,6 +1753,47 @@ tasks.register("verifyGhidraDistributionArchives") {
             require(observed == expected.keys) { "Distribution omits bundled Ghidra files" }
             require(referenceObserved) { "Distribution omits the bundled Ghidra deployment reference" }
         }
+    }
+}
+
+val verifyAnalysisIoHelperInstalled = tasks.register<JavaExec>("verifyAnalysisIoHelperInstalled") {
+    group = "verification"
+    description = "Exercises the real installed application JAR and its default native report endpoint"
+    dependsOn("installDist", "testClasses")
+    mainClass.set("decompengine.analysis.BoundedAnalysisArtifactStagingProcessTest\$InstalledReportProbe")
+    // Installed application/dependency JARs precede test classes. Only dependency JARs enter from
+    // the test configuration: neither development main classes nor development resources qualify.
+    classpath = files(layout.buildDirectory.dir("install/llm_bin_patch/lib").map {
+        fileTree(it.asFile) { include("*.jar") }
+    }, sourceSets["test"].output.classesDirs,
+        configurations.testRuntimeClasspath.map { entries -> entries.filter { it.isFile && it.extension == "jar" } })
+    doFirst {
+        val installed = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val helper = installed.resolve("decomp-analysis-io-helper")
+        val checksum = installed.resolve("decomp-analysis-io-helper.sha256")
+        require(Files.isRegularFile(helper, LinkOption.NOFOLLOW_LINKS) && Files.size(helper) in 64L..(4L * 1024 * 1024))
+        require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS) && Files.size(checksum) == 92L) {
+            "installed analysis I/O helper checksum is missing or unbounded"
+        }
+        val helperSha256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(helper))
+            .joinToString("") { "%02x".format(it) }
+        require(Files.readString(checksum) == "$helperSha256  decomp-analysis-io-helper\n" &&
+            Files.getPosixFilePermissions(checksum) == PosixFilePermissions.fromString("rw-r--r--")) {
+            "installDist changed the analysis I/O helper checksum or permissions"
+        }
+        val fixture = layout.buildDirectory.dir("analysis-native-io-installed-check").get().asFile.toPath()
+            .toAbsolutePath().normalize()
+        val home = fixture.resolve("jvm-home")
+        val scratch = fixture.resolve("jvm-tmp")
+        listOf(fixture, home, scratch).forEach { Files.createDirectories(it) }
+        systemProperties.remove("decompengine.analysis.io.helper")
+        listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach { environment.remove(it) }
+        environment("HOME", home.toString())
+        environment("TMPDIR", scratch.toString())
+        environment("XDG_CACHE_HOME", fixture.resolve("jvm-cache").toString())
+        jvmArgs("-XX:-UsePerfData", "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash",
+            "-XX:-DumpReplayDataOnError", "-Djava.io.tmpdir=$scratch", "-Djna.tmpdir=$scratch", "-Duser.home=$home")
+        setArgs(listOf(fixture.toString()))
     }
 }
 

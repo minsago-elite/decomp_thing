@@ -271,6 +271,8 @@ private fun verificationCommand(root: Path): List<String> {
     }
     return listOf(
         java.toString(), "-Xmx256m", "-XX:MaxMetaspaceSize=128m", "-XX:+DisableAttachMechanism",
+        "-XX:-UsePerfData",
+    ) + bundledGhidraDirectoryOptions() + listOf(
         "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US",
         "-cp", entries.joinToString(File.pathSeparator), BundledGhidraVerificationWorker::class.java.name, root.toString(),
     )

@@ -17,7 +17,6 @@ import decompengine.reporting.publicationLimitFields
 import java.io.OutputStream
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
-import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 
 data class GhidraAnalysis(
@@ -83,7 +82,9 @@ class GhidraJvmAnalyzer internal constructor(
         return deadline.enforceDuring("analysis and metadata") {
             fun checkpoint(stage: String) = deadline.checkpoint(stage)
             checkpoint("before analysis")
-            val reportsDir = outputDir.resolve("reports").createDirectories()
+            // Native report directory creation belongs to the bounded staging helper. Export
+            // adapters that need this directory retain their own preparation responsibility.
+            val reportsDir = outputDir.resolve("reports")
             checkpoint("before export")
             val programModel = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
                 analyzer.analyzeWithDeadline(binaryPath, outputDir, deadline)

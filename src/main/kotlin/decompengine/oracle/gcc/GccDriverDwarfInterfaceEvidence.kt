@@ -46,9 +46,17 @@ internal object GccDriverDwarfInterfaceEvidence {
     const val QUALIFICATION_NAME = "qualification.json"
     const val MAXIMUM_EVIDENCE_BYTES = 1024 * 1024
     internal val SHARD_LIMITS = BoundedDwarfShardLimits()
-    private val PART_KINDS = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols",
+    private val V6_PART_KINDS = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies",
         "strippedObjects", "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection") +
         BoundedDwarfObservationInventoryV1.RECORD_KINDS
+    private val V7_PART_KINDS = V6_PART_KINDS + GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND
+    private val V6_MANIFEST_KEYS = setOf(
+        "complete", "configuration", "coverage", "globalCoverage", "globalDeclaredTypeCoverage", "inputs",
+        "oracleId", "parts", "prePolicyInventory", "productionVerified", "provider", "releaseEligible",
+        "reviewedExclusions", "ruleProfile", "ruleProfileSha256", "schemaVersion", "scored", "sourceRevision",
+        "strippedObjectLayout", "targetAbi", "unresolved",
+    )
+    private val V7_MANIFEST_KEYS = V6_MANIFEST_KEYS + "automaticLocalPopulation"
     private const val PREFIX = "oracle/gcc/16.2.0/"
     private const val ORACLE_ID = "gcc-driver-16.2.0"
     private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
@@ -95,6 +103,8 @@ internal object GccDriverDwarfInterfaceEvidence {
             "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"),
         "reviewedExclusions" to Pin(PREFIX + "function-recovery-exclusions.json", 21_251,
             "71039d9d5462c54b920d3ebe2cd2aff855faf211389a4e86bab3158bca742031"),
+        "automaticLocalPopulationPolicy" to Pin(PREFIX + "automatic-local-population-policy-v1.json", 1_264,
+            "004811c4231aee9411a4e3c4d20e2e27eb1b6817c8360ab32cec80be13533888"),
     )
     private val artifacts = linkedMapOf(
         "rich" to Pin(PREFIX + "artifacts/gcc-driver.full", 20_713_760, FULL_SHA256),
@@ -125,14 +135,21 @@ internal object GccDriverDwarfInterfaceEvidence {
                     }
                     guard.verifyUnchanged("checked GCC driver $role")
                 }
+            var automaticLocalPolicy: GccDriverAutomaticLocalPopulationPolicy? = null
             val documents = controls.mapNotNull { (role, pin) ->
                 val guard = retain(role, pin)
-                if (role == "toolchainRecipe") null else {
+                if (role == "toolchainRecipe") null else if (role == "automaticLocalPopulationPolicy") {
+                    val bytes = guard.readExactly(0, guard.size.toInt(), "GCC driver $role")
+                    require(gccInterfaceSha256(bytes) == pin.sha256) { "GCC driver $role changed while reading" }
+                    automaticLocalPolicy = GccDriverAutomaticLocalPopulationPolicyV1.load(bytes)
+                    null
+                } else {
                     val bytes = guard.readExactly(0, guard.size.toInt(), "GCC driver $role")
                     require(gccInterfaceSha256(bytes) == pin.sha256) { "GCC driver $role changed while reading" }
                     role to OracleJson.parse(bytes, CONTROL_JSON_LIMITS).jsonObject
                 }
             }.toMap()
+            val populationPolicy = requireNotNull(automaticLocalPolicy) { "GCC driver automatic-local policy was not retained" }
             validateControls(documents)
             val layouts = artifacts.mapValues { (role, pin) ->
                 val guard = retain(role, pin)
@@ -170,14 +187,22 @@ internal object GccDriverDwarfInterfaceEvidence {
             val globalProjection = GccDriverDwarfGlobalProjection.project(facts, strippedObjects, strippedLayout)
             val mapping = mapFunctions(documents.getValue("functionOracle").getValue("functions").jsonArray,
                 facts.functions, projection.functions)
+            val observationInputs = (controls.filterKeys { it != "automaticLocalPopulationPolicy" } + artifacts)
             val inventory = BoundedDwarfObservationInventoryV1.collect(
                 facts, strippedObjects, strippedLayout,
-                (controls + artifacts).map { (role, pin) -> BoundedDwarfObservationInput(role, pin.sha256, pin.bytes) },
+                observationInputs.map { (role, pin) -> BoundedDwarfObservationInput(role, pin.sha256, pin.bytes) },
                 inventorySelections(mapping),
             )
+            val rawGlobalsCommitment = inventory.manifest.getValue("rawCommitments").jsonArray
+                .map { it.jsonObject }.single { it.text("kind") == "globals" }
+            val policyPin = controls.getValue("automaticLocalPopulationPolicy")
+            val population = GccDriverAutomaticLocalPopulationPolicyV1.apply(
+                populationPolicy, facts.globals.asSequence().map { it.toJson() }, policyPin.sha256, policyPin.bytes,
+                inventory.manifest.text("inventorySha256"), rawGlobalsCommitment,
+            )
             val document = publication(documents, mapping, projection, globalProjection.summary,
-                globalProjection.configuration, strippedLayout, inventory.manifest)
-            val artifact = pack(document) { consume ->
+                globalProjection.configuration, strippedLayout, inventory.manifest, population.summary)
+            val artifact = pack(document, authenticatedScan = facts, automaticLocalPolicy = populationPolicy) { consume ->
                 facts.visitCanonicalShards(consume)
                 val writer = BoundedDwarfCanonicalShardWriter(SHARD_LIMITS, consume)
                 writer.write("strippedObjects", strippedObjects.asSequence().map { it.toJson() })
@@ -190,7 +215,12 @@ internal object GccDriverDwarfInterfaceEvidence {
                 writer.write("globalProjection", globalProjection.records.asSequence())
                 writer.finish()
                 inventory.visitCanonicalShards(consume)
+                val decisionWriter = BoundedDwarfCanonicalShardWriter(SHARD_LIMITS, consume)
+                decisionWriter.write(GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND,
+                    population.decisions.asSequence())
+                decisionWriter.finish()
             }
+            BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(guards.getValue("rich"), scratch, facts, CONTROL_LIMITS, checkpoint)
             checkpoint("before publishing checked GCC driver interfaces")
             guards.forEach { (role, guard) -> guard.verifyUnchanged("after GCC driver interface publication: $role") }
             return artifact
@@ -280,8 +310,8 @@ internal object GccDriverDwarfInterfaceEvidence {
     private fun publication(documents: Map<String, JsonObject>, mapping: JsonObject, projection: DwarfSysvAmd64Projection,
                             globals: JsonObject, globalConfiguration: JsonObject,
                             strippedLayout: FullTreeElfObjectLayoutObservation,
-                            inventory: JsonObject): JsonObject = JsonObject(linkedMapOf(
-        "schemaVersion" to JsonPrimitive(3), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3"),
+                            inventory: JsonObject, automaticLocalPopulation: JsonObject): JsonObject = JsonObject(linkedMapOf(
+        "schemaVersion" to JsonPrimitive(7), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v7"),
         "oracleId" to JsonPrimitive(ORACLE_ID), "sourceRevision" to JsonPrimitive(SOURCE_REVISION),
         "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
         "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
@@ -313,6 +343,7 @@ internal object GccDriverDwarfInterfaceEvidence {
         "ruleProfileSha256" to JsonPrimitive(projection.ruleProfileSha256),
         "coverage" to mapping.getValue("coverage"), "globalCoverage" to globals,
         "prePolicyInventory" to inventory,
+        "automaticLocalPopulation" to automaticLocalPopulation,
         "globalDeclaredTypeCoverage" to JsonObject(mapOf(
             "rawVariableRecords" to JsonPrimitive(projection.globals.size),
             "observableDeclaredTypeAbi" to JsonPrimitive(projection.globals.count { it["observableDeclaredTypeAbi"] == JsonPrimitive(true) }),
@@ -326,6 +357,8 @@ internal object GccDriverDwarfInterfaceEvidence {
             "neutral-typed-ABI-projection-is-not-structural-v1-normalization",
             "storage-binding-does-not-prove-source-variable-identity",
             "pre-policy-observation-inventory-does-not-admit-or-fold-entities",
+            "retained-raw-candidates-are-not-a-reviewed-entity-denominator",
+            "bundle-integrity-alone-does-not-authenticate-a-supplied-raw-stream",
             "required-shared-type-population-and-member-cardinality-remain-unproved",
             "whole-call-register-allocation-and-recovered-candidate-scoring-remain-outstanding",
             "no-production-or-release-qualification",
@@ -334,6 +367,8 @@ internal object GccDriverDwarfInterfaceEvidence {
 
     /** Pure integrity packer. Only capture authenticates checked input controls. */
     internal fun pack(document: JsonObject,
+                      authenticatedScan: BoundedDwarfInterfaceFacts? = null,
+                      automaticLocalPolicy: GccDriverAutomaticLocalPopulationPolicy? = null,
                       emit: ((String, Int, ByteArray, Int) -> Unit) -> Unit): GccDriverDwarfInterfaceArtifact {
         val parts = arrayListOf<Pair<String, ByteArray>>()
         val descriptors = arrayListOf<JsonObject>()
@@ -353,30 +388,40 @@ internal object GccDriverDwarfInterfaceEvidence {
         }
         val manifest = JsonObject(document + mapOf("parts" to JsonArray(descriptors)))
         val encoded = OracleJson.canonicalBytes(manifest, EVIDENCE_JSON_LIMITS)
-        verifyBundle(encoded, parts)
+        verifyBundle(encoded, parts, authenticatedScan, automaticLocalPolicy)
         return GccDriverDwarfInterfaceArtifact(encoded, parts)
     }
 
     /** Validates exact canonical part order/completeness and all hashes; it grants no provenance. */
-    internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>) {
+    internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>,
+                              authenticatedScan: BoundedDwarfInterfaceFacts? = null,
+                              automaticLocalPolicy: GccDriverAutomaticLocalPopulationPolicy? = null) {
         val manifest = OracleJson.parseCanonical(manifestBytes, EVIDENCE_JSON_LIMITS).jsonObject
-        require(manifest["schemaVersion"] == JsonPrimitive(3) &&
-            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3")) { "unsupported GCC interface bundle" }
+        val version = manifest["schemaVersion"]
+        val v6 = version == JsonPrimitive(6) && manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v6")
+        val v7 = version == JsonPrimitive(7) && manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v7")
+        require(v6 || v7) { "unsupported GCC interface bundle" }
+        require(manifest.keys == if (v7) V7_MANIFEST_KEYS else V6_MANIFEST_KEYS) {
+            "GCC interface manifest differs from its closed schema"
+        }
+        val partKinds = if (v7) V7_PART_KINDS else V6_PART_KINDS
         for (flag in listOf("complete", "scored", "productionVerified", "releaseEligible")) {
             require(manifest[flag] == JsonPrimitive(false)) { "interface bundle claims unsupported authority" }
         }
-        val inventoryVerifier = BoundedDwarfObservationInventoryV1.verifier(
-            manifest.getValue("prePolicyInventory").jsonObject,
-        )
+        val inventoryManifest = manifest.getValue("prePolicyInventory").jsonObject
+        val inventoryVerifier = if (authenticatedScan == null) BoundedDwarfObservationInventoryV1.verifier(inventoryManifest)
+            else BoundedDwarfObservationInventoryV1.authenticatedVerifier(inventoryManifest, authenticatedScan)
         inventoryVerifier.acceptStrippedLayout(manifest["strippedObjectLayout"]?.takeUnless { it == JsonNull }?.jsonObject)
         val descriptors = manifest.getValue("parts").jsonArray
         require(descriptors.size == parts.size && parts.size <= SHARD_LIMITS.maximumShards) { "missing or unexpected interface parts" }
+        val rawVariables = arrayListOf<JsonObject>()
+        val populationDecisions = arrayListOf<JsonObject>()
         var totalBytes = 0L; var totalNodes = 0L; var kindIndex = -1; var nextOrdinal = 0
         for ((index, entry) in descriptors.withIndex()) {
             val descriptor = entry.jsonObject
             require(descriptor.keys == setOf("path", "kind", "ordinal", "recordCount", "bytes", "nodes", "sha256")) { "invalid interface part descriptor" }
             val kind = descriptor.text("kind")
-            val selected = PART_KINDS.indexOf(kind)
+            val selected = partKinds.indexOf(kind)
             require(selected >= 0 && (selected == kindIndex || selected == kindIndex + 1)) { "interface part kinds reordered or missing" }
             if (selected != kindIndex) { kindIndex = selected; nextOrdinal = 0 }
             val ordinal = descriptor.getValue("ordinal").jsonPrimitive.content.toInt()
@@ -396,13 +441,42 @@ internal object GccDriverDwarfInterfaceEvidence {
                 kind in BoundedDwarfObservationInventoryV1.RECORD_KINDS) {
                 inventoryVerifier.accept(kind, ordinal, bytes, recordCount)
             }
+            if (kind == "globals") rawVariables += parsed.records
+            if (kind == GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND) populationDecisions += parsed.records
             require(descriptor["nodes"] == JsonPrimitive(parsed.nodeCount)) { "interface shard node accounting differs" }
             totalBytes += bytes.size; totalNodes += parsed.nodeCount
             require(totalBytes <= SHARD_LIMITS.maximumTotalBytes - MAXIMUM_EVIDENCE_BYTES &&
                 totalNodes <= SHARD_LIMITS.maximumTotalNodes - 100_000) { "interface bundle exceeds total bounds" }
         }
-        require(kindIndex == PART_KINDS.lastIndex) { "interface bundle omits record kinds" }
+        require(kindIndex == partKinds.lastIndex) { "interface bundle omits record kinds" }
         inventoryVerifier.finish()
+        if (v7) {
+            val policy = requireNotNull(automaticLocalPolicy) { "v7 interface verification requires the checked automatic-local policy" }
+            val pin = controls.getValue("automaticLocalPopulationPolicy")
+            val inputs = manifest["inputs"] as? JsonObject
+                ?: throw IllegalArgumentException("v7 interface bundle omits checked inputs")
+            val input = inputs["automaticLocalPopulationPolicy"] as? JsonObject
+                ?: throw IllegalArgumentException("v7 interface bundle omits the automatic-local policy input")
+            val populationSummary = manifest["automaticLocalPopulation"] as? JsonObject
+                ?: throw IllegalArgumentException("v7 interface bundle omits the automatic-local application")
+            require(input.keys == setOf("path", "bytes", "sha256") && input.text("path") == pin.path &&
+                input["bytes"] == JsonPrimitive(pin.bytes) && input.text("sha256") == pin.sha256 &&
+                policy.canonicalSha256 == populationSummary.text("canonicalPolicySha256")) {
+                "v7 automatic-local policy input differs from the checked identity"
+            }
+            val rawCommitment = inventoryManifest.getValue("rawCommitments").jsonArray.map { it.jsonObject }
+                .single { it.text("kind") == "globals" }
+            GccDriverAutomaticLocalPopulationPolicyV1.verify(
+                policy, rawVariables.asSequence(), pin.sha256, pin.bytes, inventoryManifest.text("inventorySha256"),
+                rawCommitment, populationDecisions.asSequence(), populationSummary,
+            )
+        } else {
+            val v6Inputs = manifest["inputs"] as? JsonObject
+            require("automaticLocalPopulation" !in manifest &&
+                (v6Inputs == null || "automaticLocalPopulationPolicy" !in v6Inputs)) {
+                "v6 interface bundle contains v7 policy fields"
+            }
+        }
     }
 
     /** Existing reviewed function selections supply root obligations, independently of ABI results. */

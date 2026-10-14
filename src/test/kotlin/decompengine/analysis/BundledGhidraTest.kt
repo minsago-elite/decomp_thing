@@ -23,7 +23,10 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.parallel.ResourceLock
+import org.junit.jupiter.api.parallel.Resources
 
+@ResourceLock(Resources.SYSTEM_PROPERTIES)
 class BundledGhidraTest {
     @Test
     fun `installed native collector source and complete compiled closure match the production reference`() {
@@ -112,6 +115,42 @@ class BundledGhidraTest {
         val bridge = Path.of("/application/bridge.jar")
         for (entries in listOf(emptyList(), listOf(bridge, bridge), listOf(Path.of("/application/part:other.jar")))) {
             assertFailsWith<IllegalArgumentException> { GhidraWorkerCommand.prefix(java, release, entries) }
+        }
+        val prefix = GhidraWorkerCommand.prefix(java, release, listOf(bridge))
+        assertFalse(prefix.any { it.startsWith("-Duser.home=") || it.startsWith("-Djava.io.tmpdir=") || it.startsWith("-Djna.tmpdir=") })
+        assertFalse("-XX:-UsePerfData" in prefix, "contained runtimes own their exact shared-prefix policy")
+    }
+
+    @Test
+    fun `ordinary worker forwards only normalized parent directories without changing its resource policy`() = withFixture { root ->
+        val bundle = fixture(root.resolve("bundle"))
+        val workingDirectory = Path.of("").toAbsolutePath().normalize()
+        val home = root.resolve("parent home = kept").createDirectories()
+        val temporary = root.resolve("parent temp").createDirectories()
+        val nativeTemporary = root.resolve("native temp").createDirectories()
+        withParentDirectoryProperties(mapOf(
+            "user.home" to workingDirectory.relativize(home).toString(),
+            "java.io.tmpdir" to temporary.toString(),
+            "jna.tmpdir" to workingDirectory.relativize(nativeTemporary).toString(),
+            "decompengine.unrelated.parent.property" to "not-forwarded",
+        )) {
+            val command = bundle.probeCommand()
+            assertEquals(listOf(
+                "-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$nativeTemporary",
+            ), command.filter { it.startsWith("-Duser.home=") || it.startsWith("-Djava.io.tmpdir=") || it.startsWith("-Djna.tmpdir=") })
+            assertEquals(1, command.count { it == "-XX:-UsePerfData" })
+            assertTrue("-Xmx2G" in command)
+            assertTrue("-Xshare:off" in command)
+            assertFalse(command.any { it.contains("decompengine.unrelated.parent.property") || it.contains("not-forwarded") })
+            assertEquals("probe", command.last())
+        }
+    }
+
+    @Test
+    fun `ordinary worker does not invent an absent JNA directory`() = withFixture { root ->
+        val bundle = fixture(root.resolve("bundle"))
+        withParentDirectoryProperties(mapOf("jna.tmpdir" to null)) {
+            assertFalse(bundle.probeCommand().any { it.startsWith("-Djna.tmpdir=") })
         }
     }
 
@@ -221,8 +260,10 @@ class BundledGhidraTest {
                 val missingRelease = work.resolve("deliberately-missing-release")
                 assertFalse(Files.exists(missingRelease))
                 val release = if (valid) probe[probe.lastIndex - 1] else missingRelease.toString()
-                val command = listOf(probe.first(), "-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-XX:-UsePerfData") +
-                    probe.drop(1).dropLast(2) + listOf(release, "await-parent-launch", probe.last())
+                val directoryNames = listOf("user.home", "java.io.tmpdir", "jna.tmpdir")
+                val command = listOf(probe.first(), "-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary") +
+                    probe.drop(1).dropLast(2).filterNot { option -> directoryNames.any { option.startsWith("-D$it=") } } +
+                    listOf(release, "await-parent-launch", probe.last())
                 val process = ProcessBuilder(command).directory(work.toFile()).apply {
                     environment().remove("GHIDRA_HOME")
                     environment()["TMPDIR"] = temporary.toString()
@@ -554,11 +595,26 @@ class BundledGhidraTest {
     }
 
     private fun withFixture(block: (Path) -> Unit) {
-        val root = createTempDirectory("bundled-ghidra-test-")
+        val parent = Path.of("build/bundled-ghidra-directory-tests").toAbsolutePath().normalize().createDirectories()
+        val root = createTempDirectory(parent, "bundled-ghidra-test-")
         try {
-            block(root)
+            val home = root.resolve("home").createDirectories()
+            val temporary = root.resolve("tmp").createDirectories()
+            withParentDirectoryProperties(mapOf(
+                "user.home" to home.toString(), "java.io.tmpdir" to temporary.toString(), "jna.tmpdir" to temporary.toString(),
+            )) { block(root) }
         } finally {
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
+    private fun withParentDirectoryProperties(values: Map<String, String?>, block: () -> Unit) {
+        val previous = values.keys.associateWith(System::getProperty)
+        try {
+            values.forEach { (name, value) -> if (value == null) System.clearProperty(name) else System.setProperty(name, value) }
+            block()
+        } finally {
+            previous.forEach { (name, value) -> if (value == null) System.clearProperty(name) else System.setProperty(name, value) }
         }
     }
 }

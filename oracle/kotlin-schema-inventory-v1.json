@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 78,
+  "schemaCount": 80,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -490,6 +490,24 @@
       "formatVersions": [
         1
       ],
+      "name": "gcc/source-build-ownership-action-receipt-v1",
+      "path": "oracle/gcc/source-build-ownership-action-receipt-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c2a4547c7d852e89b84c9aabc9d29b4879330e1638308a7ad2dd796912bf76bf"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-build-ownership-profile-v1",
+      "path": "oracle/gcc/source-build-ownership-profile-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d4fa1183fb3988291aa41fb5353247eefd02edd784ccfdb4b2cf680b0c9e3a02"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
       "name": "gcc/source-lock",
       "path": "oracle/gcc/source-lock.schema.json",
       "registration": "shared-kotlin",
@@ -715,5 +733,5 @@
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 74
+  "sharedCatalogCount": 76
 }
