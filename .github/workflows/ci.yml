@@ -138,7 +138,7 @@ jobs:
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify JVM web contracts and distribution contents
         run: |
-          python3 -B scripts/ci-owned-jdk.py run -- ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -252,7 +252,7 @@ jobs:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
-        run: python3 -B scripts/ci-owned-jdk.py run -- scripts/ci.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/ci.sh
       - name: Retain Kotlin partition reports
         run: |
           mv build/test-results/test build/test-results/full-suite
@@ -352,7 +352,7 @@ jobs:
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
         run: |
           unset GHIDRA_HOME
-          python3 -B scripts/ci-owned-jdk.py run -- bash -euc '
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- bash -euc '
             "$@"
             ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
           ' -- ./gradlew --no-daemon test \
@@ -414,7 +414,7 @@ jobs:
       - name: Run strict Clang and sanitizer compatibility checks
         env:
           DECOMP_TEST_CLANG: /usr/bin/clang-18
-        run: python3 -B scripts/ci-owned-jdk.py run -- scripts/validate-clang.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/validate-clang.sh
       - uses: actions/upload-artifact@v7
         if: always()
         with:

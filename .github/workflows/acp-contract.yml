@@ -48,7 +48,7 @@ jobs:
       - name: Qualify every required ACP, native DNS and shared-agent suite
         env:
           DECOMP_REQUIRE_NATIVE_PROVIDER_DNS: '1'
-        run: python3 -B scripts/ci-owned-jdk.py run -- bash scripts/validate-acp-contract.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- bash scripts/validate-acp-contract.sh
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
