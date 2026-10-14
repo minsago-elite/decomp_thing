@@ -660,7 +660,9 @@ internal class AcpProviderBroker private constructor(
         }
 
         internal fun checkIdle() {
-            if (terminal == null && System.nanoTime() - lastActivityNanos >= policy.bounds.idleTimeout.toNanos()) {
+            // Validated EOF still owns admission until its final queued chunk is delivered.
+            // Only recorded exchanges have frozen success/failure evidence and need no timer.
+            if (!recorded && System.nanoTime() - lastActivityNanos >= policy.bounds.idleTimeout.toNanos()) {
                 finishFailure(AcpProviderTerminalKind.TIMEOUT)
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TIMEOUT)
             }

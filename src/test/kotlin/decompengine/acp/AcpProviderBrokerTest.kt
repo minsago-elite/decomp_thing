@@ -454,6 +454,55 @@ class AcpProviderBrokerTest {
     }
 
     @Test
+    fun `idle monitor expires completed exchanges with all chunks unread`() {
+        assertCompletedQueueIdleExpiry(consumedChunks = 0)
+    }
+
+    @Test
+    fun `idle monitor expires completed exchanges with one final chunk unread`() {
+        assertCompletedQueueIdleExpiry(consumedChunks = 1)
+    }
+
+    @Test
+    fun `idle monitoring cannot rewrite fully delivered completion or revoke its successor`() {
+        val backend = FixtureBackend()
+        val monitor = LifecycleObservation()
+        val bounds = AcpProviderTransportBounds()
+        val broker = open(backend, policy = policy(bounds), cancellation = monitor.cancellation)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val first = broker.beginRequest(1, cap, body())
+            val firstReceiver = backend.receiver!!
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            assertNotNull(first.nextChunk())
+            val completedRecord = broker.snapshot().requests.single()
+            assertEquals(AcpProviderTerminalKind.COMPLETED, completedRecord.terminal)
+            assertTrue(exchangeRecorded(first))
+            val second = broker.beginRequest(2, cap, body())
+            backend.headers(); backend.subscribe()
+
+            val afterMonitor = observeIdleMonitor(broker, first, bounds.idleTimeout, monitor)
+            assertFalse(afterMonitor.revoked)
+            assertEquals(listOf(completedRecord), afterMonitor.requests)
+            assertNull(first.nextChunk())
+            firstReceiver.failed(); firstReceiver.timedOut(); firstReceiver.complete(); first.cancel()
+            assertFalse(broker.snapshot().revoked)
+            assertFalse(backend.cancelled)
+            assertFalse(backend.ownerCancelled)
+            assertFalse(backend.subscriptionCancelled)
+            backend.emit(completed(1)); backend.complete()
+            assertNotNull(second.nextChunk())
+            assertEquals(listOf(AcpProviderTerminalKind.COMPLETED, AcpProviderTerminalKind.COMPLETED), broker.snapshot().requests.map { it.terminal })
+            assertEquals(completedRecord, broker.snapshot().requests.first())
+            assertEquals(2, backend.starts)
+            broker.close()
+            assertNull(first.nextChunk()); assertNull(second.nextChunk())
+            assertEquals(completedRecord, broker.snapshot().requests.first())
+        } finally { broker.close() }
+    }
+
+    @Test
     fun `released completed exchange cannot revoke the next request through stale callbacks`() {
         val backend = FixtureBackend()
         val broker = open(backend, inputTokens = 2)
@@ -868,6 +917,108 @@ class AcpProviderBrokerTest {
         } finally { broker.close() }
     }
 
+    private fun assertCompletedQueueIdleExpiry(consumedChunks: Int) {
+        val backend = FixtureBackend()
+        val monitor = LifecycleObservation()
+        val bounds = AcpProviderTransportBounds(maximumChunkBytes = 256, maximumQueuedChunks = 2)
+        val broker = open(backend, policy = policy(bounds), cancellation = monitor.cancellation)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val exchange = broker.beginRequest(1, cap, body())
+            val receiver = backend.receiver!!
+            backend.headers(); backend.subscribe()
+            // This known synthetic credential prefix stays quarantined until upstream EOF,
+            // producing exactly two queued chunks without depending on the random capability.
+            backend.emit(delta("x".repeat(70) + "s")); backend.emit(completed(3)); backend.complete()
+            assertEquals(2, exchangeQueueSize(exchange))
+            if (consumedChunks == 1) assertEquals(256, exchange.nextChunk()!!.size)
+            assertEquals(2 - consumedChunks, exchangeQueueSize(exchange))
+            assertEquals(AcpProviderTerminalKind.COMPLETED, exchange.terminal)
+            assertFalse(exchangeRecorded(exchange))
+            assertTrue(broker.snapshot().requests.isEmpty())
+
+            val afterMonitor = observeIdleMonitor(broker, exchange, bounds.idleTimeout, monitor)
+            assertTrue(afterMonitor.revoked, "expired completed queue survived the real idle monitor: queued=${exchangeQueueSize(exchange)}, terminal=${exchange.terminal}, recorded=${exchangeRecorded(exchange)}, revoked=${afterMonitor.revoked}")
+            val timeoutRecord = afterMonitor.requests.single()
+            assertEquals(AcpProviderTerminalKind.TIMEOUT, timeoutRecord.terminal)
+            assertEquals(3, timeoutRecord.outputTokens)
+            assertEquals(3, timeoutRecord.admittedOutputTokens)
+            assertEquals(1, timeoutRecord.inputTokens)
+            assertEquals(3L, afterMonitor.outputTokens)
+            assertEquals(0, exchangeQueueSize(exchange))
+            assertTrue(exchangeRecorded(exchange))
+            assertNull(AcpProviderBroker::class.java.getDeclaredField("active").let { it.isAccessible = true; it.get(broker) })
+            assertTrue(backend.ownerCancelled)
+            assertTrue(backend.subscriptionCancelled)
+            assertEquals(AcpProviderBrokerCleanup.NOT_ATTEMPTED, afterMonitor.cleanup)
+            assertEquals(0, backend.closes)
+            assertKind(AcpProviderTerminalKind.TIMEOUT) { exchange.nextChunk() }
+            receiver.complete(); receiver.failed(); receiver.timedOut(); exchange.cancel()
+            assertEquals(listOf(timeoutRecord), broker.snapshot().requests)
+            assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+            assertEquals(1, backend.starts)
+            backend.clean = false
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+            assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+            assertEquals(listOf(timeoutRecord), broker.snapshot().requests)
+            assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+            backend.clean = true
+            broker.close()
+            assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+            assertEquals(listOf(timeoutRecord), broker.snapshot().requests)
+            assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+            assertKind(AcpProviderTerminalKind.TIMEOUT) { exchange.nextChunk() }
+            assertEquals(1, backend.starts)
+        } finally { backend.clean = true; broker.close() }
+    }
+
+    /** Observe the real periodic owner after aging only its existing activity timestamp. */
+    private fun observeIdleMonitor(
+        broker: AcpProviderBroker,
+        exchange: AcpProviderBroker.AcpProviderBrokerExchange,
+        idleTimeout: Duration,
+        monitor: LifecycleObservation,
+    ): AcpProviderBrokerSnapshot {
+        val lock = AcpProviderBroker::class.java.getDeclaredField("lock").let {
+            it.isAccessible = true; it.get(broker) as java.util.concurrent.locks.ReentrantLock
+        }
+        lock.lock()
+        try {
+            exchange.javaClass.getDeclaredField("lastActivityNanos").also { it.isAccessible = true }
+                .setLong(exchange, System.nanoTime() - idleTimeout.toNanos() - 1)
+            monitor.armed.set(true)
+        } finally { lock.unlock() }
+        assertTrue(monitor.observed.await(1, TimeUnit.SECONDS), "real lifecycle monitor did not run")
+        // The callback signals inside checkActive; reacquiring the same owner lock proves the
+        // subsequent checkIdle finished. No consumer operation is allowed to drive expiry.
+        lock.lock()
+        try {
+            monitor.armed.set(false)
+            assertEquals("decomp-acp-provider-lifecycle", monitor.firstThread.get())
+            val started = AcpProviderBroker::class.java.getDeclaredField("startedNanos").let { it.isAccessible = true; it.getLong(broker) }
+            val allowed = AcpProviderBroker::class.java.getDeclaredField("allowedNanos").let { it.isAccessible = true; it.getLong(broker) }
+            assertTrue(System.nanoTime() - started < allowed, "overall deadline must remain live during idle observation")
+            return broker.snapshot()
+        } finally { lock.unlock() }
+    }
+
+    private fun exchangeQueueSize(exchange: AcpProviderBroker.AcpProviderBrokerExchange): Int =
+        exchange.javaClass.getDeclaredField("queue").let { it.isAccessible = true; (it.get(exchange) as Collection<*>).size }
+
+    private fun exchangeRecorded(exchange: AcpProviderBroker.AcpProviderBrokerExchange): Boolean =
+        exchange.javaClass.getDeclaredField("recorded").let { it.isAccessible = true; it.getBoolean(exchange) }
+
+    private class LifecycleObservation {
+        val armed = AtomicBoolean(false)
+        val observed = CountDownLatch(1)
+        val firstThread = java.util.concurrent.atomic.AtomicReference<String>()
+        val cancellation = AgentCancellation {
+            if (armed.get()) { firstThread.compareAndSet(null, Thread.currentThread().name); observed.countDown() }
+            false
+        }
+    }
+
     private fun assertOptionalAccepted(fields: String) {
         val backend = FixtureBackend()
         val broker = open(backend, outputTokens = 32)
@@ -959,12 +1110,14 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         var starts = 0
         var closes = 0
         @Volatile var cancelled = false
+        var ownerCancelled = false
+        var subscriptionCancelled = false
         var receiver: AcpProviderBackendReceiver? = null
         var lastRequest: AcpProviderBackendRequest? = null
         var demand = 0L
         override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
-            starts++; this.receiver = receiver; lastRequest = request; cancelled = false; demand = 0
-            return object : AcpProviderBackendRequestOwner { override fun cancel() { cancelled = true } }
+            starts++; this.receiver = receiver; lastRequest = request; cancelled = false; ownerCancelled = false; subscriptionCancelled = false; demand = 0
+            return object : AcpProviderBackendRequestOwner { override fun cancel() { cancelled = true; ownerCancelled = true } }
         }
         override fun closeWithin(timeout: Duration): Boolean {
             closes++
@@ -974,7 +1127,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         fun headers() = receiver!!.headers(200, mapOf("content-type" to listOf("text/event-stream")))
         fun subscribe() = receiver!!.subscribe(object : Flow.Subscription {
             override fun request(n: Long) { demand += n }
-            override fun cancel() { cancelled = true }
+            override fun cancel() { cancelled = true; subscriptionCancelled = true }
         })
         fun emit(bytes: ByteArray) { check(demand > 0); demand--; receiver!!.bytes(listOf(ByteBuffer.wrap(bytes))) }
         fun complete() = receiver!!.complete()
