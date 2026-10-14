@@ -1,0 +1,200 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "sourceSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "callerSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "family": {
+            "enum": [
+              "acp_mix",
+              "acp_pair_scale",
+              "acp_update",
+              "acp_apply",
+              "acp_fold"
+            ]
+          },
+          "process": {
+            "type": "object",
+            "properties": {
+              "launcherCreated": {
+                "type": "boolean"
+              },
+              "launcherPidIdentityVerified": {
+                "type": "boolean"
+              },
+              "scopeVerified": {
+                "type": "boolean"
+              },
+              "scopeAdmitted": {
+                "type": "boolean"
+              },
+              "captureComplete": {
+                "type": "boolean"
+              },
+              "waitComplete": {
+                "type": "boolean"
+              },
+              "cleanupVerified": {
+                "type": "boolean"
+              },
+              "completed": {
+                "const": true
+              },
+              "termination": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "exit",
+                          "signal"
+                        ]
+                      },
+                      "value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2147483647
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "const": null
+                  }
+                ]
+              },
+              "stdoutHex": {
+                "type": "string",
+                "pattern": "^(?:[0-9a-f]{2})*$",
+                "maxLength": 131072
+              },
+              "stderrHex": {
+                "type": "string",
+                "pattern": "^(?:[0-9a-f]{2})*$",
+                "maxLength": 131072
+              },
+              "timedOut": {
+                "type": "boolean"
+              },
+              "outputExceeded": {
+                "type": "boolean"
+              },
+              "infrastructureFailure": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "launcherCreated",
+              "launcherPidIdentityVerified",
+              "scopeVerified",
+              "scopeAdmitted",
+              "captureComplete",
+              "waitComplete",
+              "cleanupVerified",
+              "completed",
+              "termination",
+              "stdoutHex",
+              "stderrHex",
+              "timedOut",
+              "outputExceeded",
+              "infrastructureFailure"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "completed": {
+                      "const": true
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "launcherCreated": {
+                      "const": true
+                    },
+                    "launcherPidIdentityVerified": {
+                      "const": true
+                    },
+                    "scopeVerified": {
+                      "const": true
+                    },
+                    "scopeAdmitted": {
+                      "const": true
+                    },
+                    "captureComplete": {
+                      "const": true
+                    },
+                    "waitComplete": {
+                      "const": true
+                    },
+                    "cleanupVerified": {
+                      "const": true
+                    },
+                    "termination": {
+                      "type": "object"
+                    },
+                    "timedOut": {
+                      "const": false
+                    },
+                    "outputExceeded": {
+                      "const": false
+                    },
+                    "infrastructureFailure": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "evidenceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "id",
+          "family",
+          "process",
+          "evidenceSha256"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 24,
+      "maxItems": 24
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "sourceSha256",
+    "callerSha256",
+    "observations"
+  ],
+  "additionalProperties": false
+}

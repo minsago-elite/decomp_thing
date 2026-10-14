@@ -1,0 +1,778 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "schema": {
+      "const": "callable-library-candidate-evaluation-v3"
+    },
+    "candidateSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "profileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "phases": {
+      "type": "object",
+      "properties": {
+        "preprocess": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "compile": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "link": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "exports": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "declarations": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "gccAssertions": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "load": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "unverified",
+                "not-attempted"
+              ]
+            },
+            "value": {
+              "const": null
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "behavior": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "preprocess",
+        "compile",
+        "link",
+        "exports",
+        "declarations",
+        "gccAssertions",
+        "load",
+        "behavior"
+      ],
+      "additionalProperties": false
+    },
+    "admitted": {
+      "type": "boolean"
+    },
+    "runtimeRequestCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "launcherCreatedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "scopeVerifiedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "completedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "matchedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "mismatchedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "unknownScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "admissionRefusedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "scenarioCount": {
+      "const": 24
+    },
+    "processBehaviorRate": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "processCoverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "apiEntryCount": {
+      "const": null
+    },
+    "apiCompletionCount": {
+      "const": null
+    },
+    "callbackCount": {
+      "const": null
+    },
+    "apiCoverage": {
+      "const": null
+    },
+    "apiBehaviorRate": {
+      "const": null
+    },
+    "formalStructuralScore": {
+      "const": null
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "family": {
+            "enum": [
+              "acp_mix",
+              "acp_pair_scale",
+              "acp_update",
+              "acp_apply",
+              "acp_fold"
+            ]
+          },
+          "status": {
+            "enum": [
+              "admission-refused",
+              "matched",
+              "mismatched",
+              "unknown"
+            ]
+          },
+          "runtimeRequested": {
+            "type": "boolean"
+          },
+          "process": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "launcherCreated": {
+                    "type": "boolean"
+                  },
+                  "launcherPidIdentityVerified": {
+                    "type": "boolean"
+                  },
+                  "scopeVerified": {
+                    "type": "boolean"
+                  },
+                  "scopeAdmitted": {
+                    "type": "boolean"
+                  },
+                  "captureComplete": {
+                    "type": "boolean"
+                  },
+                  "waitComplete": {
+                    "type": "boolean"
+                  },
+                  "cleanupVerified": {
+                    "type": "boolean"
+                  },
+                  "completed": {
+                    "type": "boolean"
+                  },
+                  "termination": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "exit",
+                              "signal"
+                            ]
+                          },
+                          "value": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2147483647
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "const": null
+                      }
+                    ]
+                  },
+                  "stdoutHex": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{2})*$",
+                        "maxLength": 131072
+                      },
+                      {
+                        "const": null
+                      }
+                    ]
+                  },
+                  "stderrHex": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{2})*$",
+                        "maxLength": 131072
+                      },
+                      {
+                        "const": null
+                      }
+                    ]
+                  },
+                  "timedOut": {
+                    "type": "boolean"
+                  },
+                  "outputExceeded": {
+                    "type": "boolean"
+                  },
+                  "infrastructureFailure": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "launcherCreated",
+                  "launcherPidIdentityVerified",
+                  "scopeVerified",
+                  "scopeAdmitted",
+                  "captureComplete",
+                  "waitComplete",
+                  "cleanupVerified",
+                  "completed",
+                  "termination",
+                  "stdoutHex",
+                  "stderrHex",
+                  "timedOut",
+                  "outputExceeded",
+                  "infrastructureFailure"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "completed": {
+                          "const": true
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "launcherCreated": {
+                          "const": true
+                        },
+                        "launcherPidIdentityVerified": {
+                          "const": true
+                        },
+                        "scopeVerified": {
+                          "const": true
+                        },
+                        "scopeAdmitted": {
+                          "const": true
+                        },
+                        "captureComplete": {
+                          "const": true
+                        },
+                        "waitComplete": {
+                          "const": true
+                        },
+                        "cleanupVerified": {
+                          "const": true
+                        },
+                        "termination": {
+                          "type": "object"
+                        },
+                        "timedOut": {
+                          "const": false
+                        },
+                        "outputExceeded": {
+                          "const": false
+                        },
+                        "infrastructureFailure": {
+                          "const": false
+                        },
+                        "stdoutHex": {
+                          "type": "string"
+                        },
+                        "stderrHex": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "const": null
+              }
+            ]
+          },
+          "evidenceSha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "const": null
+              }
+            ]
+          },
+          "loadObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "apiEntryObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "apiCompletionObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "callbackObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "family",
+          "status",
+          "runtimeRequested",
+          "process",
+          "evidenceSha256",
+          "loadObservation",
+          "apiEntryObservation",
+          "apiCompletionObservation",
+          "callbackObservation"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 24,
+      "maxItems": 24
+    },
+    "evidenceFiles": {
+      "type": "object",
+      "maxProperties": 100,
+      "propertyNames": {
+        "pattern": "^[a-z0-9-]+[.]json$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "abiAccuracy": {
+      "const": "unassessed"
+    },
+    "productionFactoryQualified": {
+      "const": false
+    },
+    "productionProviderQualified": {
+      "const": false
+    },
+    "productionFilesystemQualified": {
+      "const": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "schema",
+    "candidateSha256",
+    "profileSha256",
+    "phases",
+    "admitted",
+    "runtimeRequestCount",
+    "launcherCreatedCount",
+    "scopeVerifiedCount",
+    "completedScenarioProcessCount",
+    "matchedScenarioProcessCount",
+    "mismatchedScenarioProcessCount",
+    "unknownScenarioProcessCount",
+    "admissionRefusedCount",
+    "scenarioCount",
+    "processBehaviorRate",
+    "processCoverage",
+    "apiEntryCount",
+    "apiCompletionCount",
+    "callbackCount",
+    "apiCoverage",
+    "apiBehaviorRate",
+    "formalStructuralScore",
+    "scenarios",
+    "evidenceFiles",
+    "abiAccuracy",
+    "productionFactoryQualified",
+    "productionProviderQualified",
+    "productionFilesystemQualified"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtimeRequestCount": {
+            "const": 0
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "phases": {
+            "properties": {
+              "load": {
+                "const": {
+                  "status": "not-attempted",
+                  "value": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "phases": {
+            "properties": {
+              "load": {
+                "const": {
+                  "status": "unverified",
+                  "value": null
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
