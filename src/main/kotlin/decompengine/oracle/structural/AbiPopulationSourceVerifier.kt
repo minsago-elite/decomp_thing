@@ -33,16 +33,24 @@ internal object AbiPopulationSourceVerifier {
                 require(die.compilationUnitOffset >= previousEnd) { "compilation units overlap" }
                 require(die.depth == 0 && die.tag == 0x11L && die.parentOffset == null)
                 parents.fill(-1)
+                children.fill(false)
                 priorOffset = -1
             } else {
                 require(die.depth in 1..64 && die.depth <= 64)
-                require(parents[die.depth - 1] == die.parentOffset && children[die.depth - 1])
+                val parent = die.parentOffset
+                require(parent != null && parent >= 0) { "physical parent coordinate is missing or negative" }
+                require(parents[die.depth - 1] >= 0 && parents[die.depth - 1] == parent && children[die.depth - 1]) {
+                    "physical parent is absent from the current ancestry"
+                }
             }
             require(die.offset > priorOffset && die.endOffset > die.offset)
             require(die.offset >= die.compilationUnitOffset && die.locator.length <= budget.maximumLocatorCharacters)
             parents[die.depth] = die.offset
             children[die.depth] = die.hasChildren
-            for (depth in die.depth + 1..64) parents[depth] = -1
+            for (depth in die.depth + 1..64) {
+                parents[depth] = -1
+                children[depth] = false
+            }
             require(die.references.size <= budget.maximumReferencesPerRow)
             for (edge in die.references) {
                 require(++work <= budget.maximumRowEdgeVisits)
