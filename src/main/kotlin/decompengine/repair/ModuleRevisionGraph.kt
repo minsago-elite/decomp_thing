@@ -14,6 +14,8 @@ import decompengine.project.ReconstructionProfile
 import decompengine.project.ProjectFileRole
 import decompengine.project.moduleIdForPath
 import decompengine.project.sha256
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
@@ -67,6 +69,24 @@ private val REPAIR_RECEIPT_PATH =
     Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
 internal const val TRACE_REPAIR_ACP_RECEIPT_KIND = "decomp-engine.trace-repair-acp-execution-receipt"
 internal const val TRACE_REPAIR_ACP_TASK_FIELD = "attemptId"
+
+/** Read only after strict receipt verification, from those same detached immutable bytes. */
+internal fun repairAcpReceiptSchemaVersion(bytes: ByteArray): Int {
+    // Match the generic receipt verifier's caps; legacy receipts can exceed default JSON limits.
+    val root = OracleJson.parse(bytes, StrictJsonLimits(
+        maximumInputBytes = MAXIMUM_REPAIR_ACP_RECEIPT_BYTES.toInt(),
+        maximumCanonicalBytes = MAXIMUM_REPAIR_ACP_RECEIPT_BYTES.toInt(),
+        maximumDepth = 64,
+        maximumNodes = 1_000_000,
+        maximumStringBytes = 16 * 1024 * 1024,
+        maximumTotalStringBytes = MAXIMUM_REPAIR_ACP_RECEIPT_BYTES.toInt(),
+    )).jsonObject
+    val version = root["schemaVersion"] as? JsonPrimitive
+    require(version != null && !version.isString && version.intOrNull in 2..3) {
+        "repair ACP receipt schema is unsupported"
+    }
+    return requireNotNull(version.intOrNull)
+}
 
 /**
  * Hard limits for one repair index, context window, patch attempt, and durable revision graph.
@@ -1339,7 +1359,7 @@ enum class RepairPublicationMode { ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 enum class RepairAgentAssessmentStatus { PENDING, ACCEPTED, REJECTED, PROVISIONAL }
 
 /**
- * Content-addressed link from a repair assessment to its immutable schema-v2 ACP invocation.
+ * Content-addressed link from a repair assessment to its immutable ACP invocation.
  * The raw provider evidence remains a separate artifact and is never rewritten as workflow state
  * advances from pending to accepted or rejected.
  */
@@ -1356,7 +1376,12 @@ data class RepairAgentInvocationBinding(
     init {
         require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
         require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
-        require(receiptSchemaVersion == 2) { "repair ACP receipt schema is unsupported" }
+        require(receiptSchemaVersion in 2..3) { "repair ACP receipt schema is unsupported" }
+        if (receiptSchemaVersion == 3) {
+            require(!receiptReleaseComplete && assessmentStatus in setOf(
+                RepairAgentAssessmentStatus.PENDING, RepairAgentAssessmentStatus.REJECTED,
+            )) { "provider schema-v3 ACP evidence may only be retained pending or rejected as nonrelease" }
+        }
         require(requestSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP request digest is invalid" }
         require(resultChangesSha256.matches(REPAIR_BLOB_DIGEST)) {
             "repair ACP result-change digest is invalid"
@@ -1365,7 +1390,7 @@ data class RepairAgentInvocationBinding(
             "repair ACP terminal outcome is invalid"
         }
         if (assessmentStatus == RepairAgentAssessmentStatus.ACCEPTED) {
-            require(receiptReleaseComplete && terminalOutcome == "returned-completed") {
+            require(receiptSchemaVersion == 2 && receiptReleaseComplete && terminalOutcome == "returned-completed") {
                 "only a release-complete returned ACP invocation may be accepted"
             }
         }
@@ -2156,12 +2181,23 @@ internal class ModuleRevisionGraph private constructor(
             TRACE_REPAIR_ACP_TASK_FIELD,
             pending.id,
         )
-        require(verifiedDocument.requestSha256 == document.requestSha256 &&
+        require(repairAcpReceiptSchemaVersion(bytes) == document.schemaVersion &&
+            verifiedDocument.requestSha256 == document.requestSha256 &&
             verifiedDocument.promptSha256 == metadata.prompt &&
             verifiedDocument.resultChangesSha256 == document.resultChangesSha256 &&
             verifiedDocument.terminalOutcome == document.terminalOutcome &&
             verifiedDocument.releaseComplete == document.releaseComplete
         ) { "repair ACP receipt descriptor disagrees with its rendered document" }
+        val binding = RepairAgentInvocationBinding(
+            receiptPath = receiptPath,
+            receiptSha256 = document.sha256,
+            receiptSchemaVersion = document.schemaVersion,
+            requestSha256 = document.requestSha256,
+            resultChangesSha256 = document.resultChangesSha256,
+            terminalOutcome = document.terminalOutcome,
+            receiptReleaseComplete = document.releaseComplete,
+            assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+        )
         try {
             stateStore.writeImmutableRevisionFile(fileName, bytes, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
             val observed = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
@@ -2174,16 +2210,6 @@ internal class ModuleRevisionGraph private constructor(
                 failure,
             )
         }
-        val binding = RepairAgentInvocationBinding(
-            receiptPath = receiptPath,
-            receiptSha256 = document.sha256,
-            receiptSchemaVersion = document.schemaVersion,
-            requestSha256 = document.requestSha256,
-            resultChangesSha256 = document.resultChangesSha256,
-            terminalOutcome = document.terminalOutcome,
-            receiptReleaseComplete = document.releaseComplete,
-            assessmentStatus = RepairAgentAssessmentStatus.PENDING,
-        )
         val boundState = state.copy(
             pending = pending.copy(
                 repairMetadata = metadata.copy(agentInvocation = binding),
@@ -2999,7 +3025,8 @@ internal class ModuleRevisionGraph private constructor(
             "repair ACP assessment status disagrees with graph state: $attemptId"
         }
         if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
-            require(binding.receiptReleaseComplete && binding.terminalOutcome == "returned-completed") {
+            require(binding.receiptSchemaVersion == 2 && binding.receiptReleaseComplete &&
+                binding.terminalOutcome == "returned-completed") {
                 "accepted repair lacks release-complete ACP evidence: $attemptId"
             }
         }
@@ -3014,7 +3041,8 @@ internal class ModuleRevisionGraph private constructor(
                 TRACE_REPAIR_ACP_TASK_FIELD,
                 attemptId,
             )
-            require(verified.requestSha256 == binding.requestSha256 &&
+            require(repairAcpReceiptSchemaVersion(receipt.bytes) == binding.receiptSchemaVersion &&
+                verified.requestSha256 == binding.requestSha256 &&
                 verified.promptSha256 == expectedPromptSha256 &&
                 verified.resultChangesSha256 == binding.resultChangesSha256 &&
                 verified.terminalOutcome == binding.terminalOutcome &&
@@ -3091,7 +3119,7 @@ internal class ModuleRevisionGraph private constructor(
         val binding = RepairAgentInvocationBinding(
             receiptPath = "reports/repair-revisions/$fileName",
             receiptSha256 = receipt.sha256,
-            receiptSchemaVersion = 2,
+            receiptSchemaVersion = repairAcpReceiptSchemaVersion(receipt.bytes),
             requestSha256 = verified.requestSha256,
             resultChangesSha256 = verified.resultChangesSha256,
             terminalOutcome = verified.terminalOutcome,
@@ -3124,7 +3152,8 @@ internal class ModuleRevisionGraph private constructor(
                 requireNotNull(invocation) {
                     "agent-driven repair cannot be accepted without invocation-bound ACP evidence"
                 }
-                require(invocation.receiptReleaseComplete && invocation.terminalOutcome == "returned-completed") {
+                require(invocation.receiptSchemaVersion == 2 && invocation.receiptReleaseComplete &&
+                    invocation.terminalOutcome == "returned-completed") {
                     "agent-driven repair cannot be accepted with incomplete ACP invocation evidence"
                 }
             }
