@@ -281,6 +281,68 @@ def load_worker_monitor_binding() -> dict:
     return binding
 
 
+
+def _recorded_compiler_inputs(recipe, target, deadline=None):
+    """Bind only the existing recorded subset for the exact admitted GCC identity."""
+    profile, _ = load_profile_with_digest()
+    identity = profile['gccIdentity']
+    if target['path'] != identity['realpath']:
+        return None
+    if target['sha256'] != identity['sha256']:
+        raise ValueError('recorded compiler executable identity changed')
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('phase expired before compiler recording validation')
+    source = BASE / 'toolchain-001/pin_environment.py'
+    module = _fixed_source_module(source, '_v3_recorded_compiler_pin')
+    binding = module.load_compiler_binding(profile)
+    required = {'status', 'scope', 'environmentPinSha256', 'closureSha256', 'driverArgv',
+                'workingDirectory', 'environment', 'dependencies', 'closure'}
+    if (type(binding) is not dict or set(binding) != required or
+            binding['status'] != 'static-recording-unqualified' or
+            binding['scope'] != 'recorded-implicit-link-inputs' or
+            binding['environmentPinSha256'] != profile['toolchainEnvironmentPinSha256'] or
+            not binding['dependencies']):
+        raise ValueError('recorded compiler subset binding invalid')
+    # Loader is the strict bounded closure validator; verify the consumer's digest too.
+    closure_hash = hashlib.sha256(json.dumps(binding['closure'], sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    if closure_hash != binding['closureSha256']:
+        raise ValueError('recorded compiler closure digest differs')
+    closure = binding['closure']
+    try:
+        driver = closure['files'][closure['manifest']['tools']['gcc']]
+    except (KeyError, TypeError) as failure:
+        raise ValueError('recorded compiler driver identity missing') from failure
+    if (driver['realpath'] != target['path'] or driver['sha256'] != target['sha256'] or
+            driver['realpath'] != identity['realpath'] or driver['sha256'] != identity['sha256']):
+        raise ValueError('recorded compiler driver disagrees with admitted profile identity')
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('phase expired during compiler recording validation')
+    return {'binding': binding, 'recipe': recipe, 'target': target,
+            'invocationMatched': (recipe['worker'] == binding['driverArgv'] and
+                                  recipe['chdir'] == binding['workingDirectory'] and
+                                  recipe['environment'] == binding['environment'])}
+
+
+def _check_compiler_input_pins(recording, pins):
+    if recording is None:
+        return
+    seen = set()
+    for row in recording['binding']['dependencies']:
+        if (type(row) is not dict or set(row) != {'path', 'sha256'} or row['path'] in seen or
+                row['path'] not in pins or pins[row['path']]['sha256'] != row['sha256']):
+            raise ValueError('recorded compiler input missing or changed in actual launch pins')
+        seen.add(row['path'])
+
+
+def _revalidate_compiler_inputs(launch, deadline=None):
+    recording = launch.get('compilerRecording')
+    if recording is not None:
+        current = _recorded_compiler_inputs(recording['recipe'], recording['target'], deadline)
+        if current != recording:
+            raise ValueError('recorded compiler directory/selection/input binding changed')
+        _check_compiler_input_pins(current, launch['pins'])
+
+
 def _contained_recipe(argv: list[str], cwd: Path) -> dict:
     """Recognize closed existing recipes, with exact-file RO overlays over the sole RW leaf."""
     if not isinstance(argv, list) or not argv or argv[0] != '/usr/bin/bwrap':
@@ -758,7 +820,7 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
     outer = Path('/proc/self/ns/pid').stat()
     common = [Path(__file__), BASE / 'scope_gate.py', BASE / 'build_contract.py',
               BASE / 'contracts/candidate-build-profile.json', Path('/usr/bin/python3'), Path('/usr/bin/systemd-run')]
-    expected = binding = target = None
+    expected = binding = target = compiler_recording = None
     if provisioning:
         command = list(argv)
         common += [Path('/usr/bin/gcc'), BASE / 'worker_exec_monitor.c']
@@ -766,6 +828,9 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
         recipe = _contained_recipe(argv, cwd)
         binding = load_worker_monitor_binding()
         target = _nonprivileged_executable(recipe['target'], deadline)
+        compiler_recording = _recorded_compiler_inputs(recipe, target, deadline)
+        if compiler_recording is not None:
+            common += [Path(row['path']) for row in compiler_recording['binding']['dependencies']]
         reaper = _nonprivileged_executable(Path('/usr/bin/bwrap'), deadline)
         monitor = _nonprivileged_executable(Path(binding['binaryPath']), deadline)
         common += [Path(target['path']), Path(reaper['path']), Path(monitor['path']),
@@ -798,6 +863,7 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
                         '--outer-pidns-device', str(outer.st_dev), '--outer-pidns-inode', str(outer.st_ino), '--', *recipe['worker']]
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
     pins = _pin_files(common, deadline)
+    _check_compiler_input_pins(compiler_recording, pins)
     config = {'schemaVersion': 1, 'directoryDevice': receipt['directoryDevice'],
               'directoryInode': receipt['directoryInode'], 'mode': 'monitor-provisioning' if provisioning else 'worker',
               'argv': command, 'report': None if provisioning else {'device': receipt['device'], 'inode': receipt['inode']},
@@ -823,7 +889,8 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
         'parserSha256':binding['parserSha256'], 'manifestSha256':binding['manifestSha256'],
         'targetSha256':target['sha256'], 'launchPinsSha256':_canonical_pin_digest(pins)}
     return {'argv': launcher, 'unit': unit, 'expected': expected, 'pins': pins,
-            'command': command, 'cache': cache, 'configSha256': config_sha, 'proofBinding':proof_binding}
+            'command': command, 'cache': cache, 'configSha256': config_sha, 'proofBinding':proof_binding,
+            'compilerRecording': compiler_recording}
 
 
 def _read_private_json(path, maximum=4096):
@@ -944,6 +1011,7 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
             raise ValueError('receipt byte bound')
         if _pin_files(launch['pins'], deadline) != launch['pins'] or digest(receipt['directory'] / 'launch.json') != launch['configSha256']:
             raise ValueError('launch source/runtime/input pins changed')
+        _revalidate_compiler_inputs(launch, deadline)
         proof['pinsUnchanged'] = True
         parser = _fixed_source_module(BASE / 'worker_exec_proof.py', '_v3_worker_exec_proof')
         parsed = parser.parse_proof(raw, launch['expected'])

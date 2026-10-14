@@ -148,6 +148,57 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertEqual(self.input,recipe['target'])
         self.assertTrue(any(m['writable'] for m in recipe['mounts']))
 
+    def test_recorded_compiler_subset_identity_invocation_and_post_drift(self):
+        profile=build_contract.load_profile()
+        identity=profile['gccIdentity']
+        target={'path':identity['realpath'],'sha256':identity['sha256']}
+        recipe={'worker':['/usr/bin/gcc','authored-input'], 'chdir':'/work','environment':self.env}
+        closure={'files':{'authored':{'realpath':str(self.input),'sha256':runtime.digest(self.input)}},
+                 'directories':{'/authored':[]},'selections':[{'selected':'authored'}]}
+        closure['manifest']={'tools':{'gcc':'/authored/gcc'}}
+        closure['files']['/authored/gcc']={'realpath':identity['realpath'],'sha256':identity['sha256']}
+        binding={'status':'static-recording-unqualified','scope':'recorded-implicit-link-inputs',
+                 'environmentPinSha256':profile['toolchainEnvironmentPinSha256'],
+                 'closureSha256':hashlib.sha256(json.dumps(closure,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+                 'driverArgv':recipe['worker'],'workingDirectory':'/work','environment':self.env,
+                 'dependencies':[{'path':str(self.input),'sha256':runtime.digest(self.input)}],'closure':closure}
+        loader=Mock();loader.load_compiler_binding.return_value=binding
+        with patch.object(runtime,'_fixed_source_module',return_value=loader):
+            recording=runtime._recorded_compiler_inputs(recipe,target)
+            self.assertTrue(recording['invocationMatched'])
+            # Same profile pin and otherwise valid closure must join the actual driver.
+            import copy
+            for field, value in (('realpath','/authored/other-gcc'),('sha256','0'*64)):
+                wrong=copy.deepcopy(binding)
+                wrong['closure']['files']['/authored/gcc'][field]=value
+                wrong['closureSha256']=hashlib.sha256(json.dumps(wrong['closure'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                loader.load_compiler_binding.return_value=wrong
+                with self.assertRaisesRegex(ValueError,'driver disagrees'):
+                    runtime._recorded_compiler_inputs(recipe,target)
+            loader.load_compiler_binding.return_value=binding
+            for changed in ({**recipe,'worker':recipe['worker']+['-other']},
+                            {**recipe,'chdir':'/other'}, {**recipe,'environment':{**self.env,'HOME':'/tmp'}}):
+                self.assertFalse(runtime._recorded_compiler_inputs(changed,target)['invocationMatched'])
+            with self.assertRaises(ValueError):
+                runtime._recorded_compiler_inputs(recipe,{**target,'sha256':'0'*64})
+            self.assertIsNone(runtime._recorded_compiler_inputs(recipe,{'path':str(self.input),'sha256':runtime.digest(self.input)}))
+            pins=runtime._pin_files([self.input])
+            launch={'compilerRecording':recording,'pins':pins}
+            runtime._revalidate_compiler_inputs(launch)
+            with self.assertRaises(ValueError):runtime._check_compiler_input_pins(recording,{})
+            changed={str(self.input):{**pins[str(self.input)],'sha256':'0'*64}}
+            with self.assertRaises(ValueError):runtime._check_compiler_input_pins(recording,changed)
+            # Fresh loader revalidation covers directories/selections/symlinks, not only file pins.
+            import copy
+            for field in ('directories','selections','files'):
+                drift=copy.deepcopy(binding);drift['closure'][field]={'changed':True}
+                drift['closureSha256']=hashlib.sha256(json.dumps(drift['closure'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                loader.load_compiler_binding.return_value=drift
+                with self.assertRaises(ValueError):runtime._revalidate_compiler_inputs(launch)
+            loader.load_compiler_binding.side_effect=ValueError('bounded resolver refuses input drift')
+            with self.assertRaises(ValueError):runtime._revalidate_compiler_inputs(launch)
+        runtime._revalidate_compiler_inputs({'pins':{}})
+
     def test_actual_prepare_launch_pins_all_explicit_recipe_files_for_consumer(self):
         """Actual producer hashes authored mounted inputs; no SO/source/header pin injection.
 
@@ -198,6 +249,22 @@ class RuntimeWorkerProof(unittest.TestCase):
             launch2=runtime._prepare_launch(command,self.work,bounds,receipt2,False)
             for file in (caller,source,header):
                 self.assertIn(file,received);self.assertEqual(runtime.digest(file),launch2['pins'][str(file)]['sha256'])
+            # Consumer bridge: the actual prepare path must add the recorded subset,
+            # compare its hashes, and leave a generated output out of fixed pins.
+            fixed=base/'recorded-startup';fixed.write_bytes(b'authored startup input')
+            generated=self.work/'generated-output';generated.write_bytes(b'authored mutable output')
+            recording={'binding':{'dependencies':[{'path':str(fixed),'sha256':runtime.digest(fixed)}]},
+                       'invocationMatched':False}
+            with patch.object(runtime,'_recorded_compiler_inputs',return_value=recording):
+                receipt3=runtime._create_worker_receipt();self.addCleanup(os.close,receipt3['fd'])
+                launch3=runtime._prepare_launch(command,self.work,bounds,receipt3,False)
+                self.assertEqual(recording,launch3['compilerRecording'])
+                self.assertIn(str(fixed),launch3['pins'])
+                self.assertNotIn(str(generated),launch3['pins'])
+                recording['binding']['dependencies'][0]['sha256']='0'*64
+                receipt4=runtime._create_worker_receipt();self.addCleanup(os.close,receipt4['fd'])
+                with self.assertRaisesRegex(ValueError,'actual launch pins'):
+                    runtime._prepare_launch(command,self.work,bounds,receipt4,False)
             # Same bytes at a new inode or changed bytes cannot match original admission.
             original=pins[str(library)]
             library.rename(library.with_name('original-libcandidate.so'))
