@@ -2,6 +2,7 @@ package decompengine.acp
 
 import decompengine.builtin.provider.parseProviderObject
 import java.io.IOException
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Collections
 import kotlinx.serialization.json.*
@@ -42,6 +43,11 @@ internal object AcpProviderDnsRuntimeProfiles {
     internal fun requireApproved(profileId: String, manifestSha256: String, resolverPolicySha256: String): Nothing =
         throw AcpProviderDnsRuntimeUnavailableException()
 
+    /** Complete bounded ELF-byte/dependency validation ingress; still grants no runtime authority. */
+    internal fun validateCandidate(bytes: ByteArray, open: (AcpProviderDnsRuntimeEntry) -> InputStream): AcpProviderDnsContentCheckedCandidate =
+        AcpProviderDnsContentCheckedCandidate.validate(bytes, open)
+
+    /** Structural-only candidate. Complete ELF closure consumers must use validateCandidate. */
     internal fun parseCandidate(bytes: ByteArray): AcpProviderDnsRuntimeProfileCandidate {
         require(bytes.size in 1..MAXIMUM_MANIFEST_BYTES)
         val document = parseProviderObject(bytes.decodeToString(throwOnInvalidSequence = true), MAXIMUM_MANIFEST_BYTES)

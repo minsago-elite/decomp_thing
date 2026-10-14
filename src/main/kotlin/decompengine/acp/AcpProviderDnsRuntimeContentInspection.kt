@@ -101,3 +101,25 @@ internal object AcpProviderDnsRuntimeContentInspection {
         return Observation(candidate.manifestSha256, objects)
     }
 }
+
+/** Opaque content-checked candidate, not an approval, authenticated extraction or semantic dlopen proof. */
+internal class AcpProviderDnsContentCheckedCandidate private constructor(
+    private val candidate: AcpProviderDnsRuntimeProfileCandidate,
+    private val observation: AcpProviderDnsRuntimeContentInspection.Observation,
+) {
+    val manifestSha256: String get() = candidate.manifestSha256
+    fun entries(): List<AcpProviderDnsRuntimeEntry> = candidate.entries()
+    fun edges(): List<AcpProviderDnsRuntimeEdge> = candidate.edges()
+    fun objects(): Map<String, AcpProviderDnsElfInspection.Metadata> = observation.objects
+
+    companion object {
+        /** No caller-supplied candidate, metadata subset or self-reported seal is accepted here. */
+        internal fun validate(bytes: ByteArray, open: (AcpProviderDnsRuntimeEntry) -> InputStream): AcpProviderDnsContentCheckedCandidate {
+            require(bytes.size in 1..AcpProviderDnsRuntimeProfiles.MAXIMUM_MANIFEST_BYTES)
+            val parsed = AcpProviderDnsRuntimeProfiles.parseCandidate(bytes.copyOf())
+            val inspected = AcpProviderDnsRuntimeContentInspection.inspect(parsed, open)
+            check(inspected.manifestSha256 == parsed.manifestSha256)
+            return AcpProviderDnsContentCheckedCandidate(parsed, inspected)
+        }
+    }
+}

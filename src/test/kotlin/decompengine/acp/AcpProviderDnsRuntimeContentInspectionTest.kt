@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import kotlinx.serialization.json.*
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
@@ -61,6 +62,68 @@ class AcpProviderDnsRuntimeContentInspectionTest {
     }
     private fun inspect(payloads: Map<String, ByteArray>, candidate: AcpProviderDnsRuntimeProfileCandidate = candidate(payloads)) =
         AcpProviderDnsRuntimeContentInspection.inspect(candidate) { ByteArrayInputStream(payloads.getValue(it.path)) }
+
+    private fun manifestPayloads(): MutableMap<String, ByteArray> = payloads().apply {
+        put("native/libc.so.6", elf("libc.so.6"))
+        listOf("jdk/release", "jdk/conf/net.properties", "jdk/conf/security/java.security", "jdk/legal/java.base/LICENSE")
+            .forEach { put(it, "inert data".toByteArray()) }
+    }
+    private fun manifest(p: Map<String, ByteArray>, omit: Set<String> = emptySet()): ByteArray {
+        val files = p.keys.map { path -> buildJsonObject {
+            put("path", path); put("kind", "file"); put("mode", if (path == "jdk/bin/java" || path == loader) "0755" else "0644")
+            put("owner", "root"); put("size", p.getValue(path).size); put("sha256", dnsSha(p.getValue(path)))
+        } }
+        val directories = p.keys.flatMap { path -> val parts = path.split('/');
+            (1 until parts.size).map { parts.take(it).joinToString("/") } }.distinct().map { path -> buildJsonObject {
+            put("path", path); put("kind", "directory"); put("mode", "0755"); put("owner", "root"); put("size", 0); put("sha256", JsonNull)
+        } }
+        return buildJsonObject {
+            put("schema", "provider-dns-runtime-profile-v1"); put("profileId", AcpProviderDnsRuntimeProfiles.PROFILE_ID)
+            put("architecture", "x86_64"); put("abi", "linux-glibc-x86_64"); put("jdkFeature", 21); put("jdkModule", "java.base")
+            listOf("applicationBuildSha256", "sourceArchiveSha256", "toolchainSha256", "recipeSha256", "workerSha256")
+                .forEach { put(it, "a".repeat(64)) }
+            put("jdkReleaseSha256", dnsSha(p.getValue("jdk/release"))); put("jdkModulesSha256", dnsSha(p.getValue("jdk/lib/modules")))
+            putJsonObject("sourceOwner") { put("policy", "root"); put("uid", 0); put("gid", 0) }
+            putJsonObject("limits") {
+                put("entries", 2048); put("depth", 16); put("bytes", 256L * 1024 * 1024)
+                put("fileBytes", 16L * 1024 * 1024); put("moduleBytes", 192L * 1024 * 1024); put("edges", 256); put("nativeLibraries", 32)
+            }
+            put("entries", JsonArray((directories + files).sortedBy { it.getValue("path").jsonPrimitive.content }))
+            put("elfEdges", JsonArray(candidate(p, omit = omit).edges().map { edge -> buildJsonObject {
+                put("from", edge.from); put("kind", edge.kind); put("name", edge.name); put("target", edge.target)
+            } }))
+            val root = AcpProviderDnsRuntimeProfiles.ROOT
+            put("loaderArgv", JsonArray(listOf("$root/native/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path",
+                "$root/native:$root/jdk/lib:$root/jdk/lib/server", "$root/jdk/bin/java").map(::JsonPrimitive)))
+        }.toString().toByteArray()
+    }
+    @Test fun `composed parsed manifest ingress inspects all payloads and binds supported extra library`() {
+        val p = manifestPayloads(); val bytes = manifest(p); val opened = mutableSetOf<String>()
+        assertFails { AcpProviderDnsRuntimeProfiles.validateCandidate("{}".toByteArray()) {
+            opened += it.path; ByteArrayInputStream(byteArrayOf())
+        } }
+        assertTrue(opened.isEmpty())
+        val checked = AcpProviderDnsRuntimeProfiles.validateCandidate(bytes) { entry ->
+            assertTrue(opened.add(entry.path)); ByteArrayInputStream(p.getValue(entry.path))
+        }
+        assertEquals(p.keys, opened); assertEquals(dnsSha(bytes), checked.manifestSha256)
+        assertEquals(dnsSha(p.getValue("jdk/lib/libextra.so")), checked.objects().getValue("jdk/lib/libextra.so").sha256)
+        assertFailsWith<AcpProviderDnsRuntimeUnavailableException> {
+            AcpProviderDnsRuntimeProfiles.requireApproved(AcpProviderDnsRuntimeProfiles.PROFILE_ID, checked.manifestSha256, "b".repeat(64))
+        }
+    }
+    @Test fun `composed ingress refuses hidden extensionless ELF omitted from declared closure`() {
+        val p = manifestPayloads(); p["jdk/lib/hidden"] = elf("hidden")
+        val bytes = manifest(p, omit = setOf("jdk/lib/hidden"))
+        // Structural admission cannot establish the actual content inventory.
+        assertTrue(AcpProviderDnsRuntimeProfiles.parseCandidate(bytes).entries().any { it.path == "jdk/lib/hidden" })
+        assertFails { AcpProviderDnsRuntimeProfiles.validateCandidate(bytes) { ByteArrayInputStream(p.getValue(it.path)) } }
+        // An opener returning an unlisted replacement cannot substitute its bytes for a committed entry.
+        val clean = manifestPayloads()
+        assertFails { AcpProviderDnsRuntimeProfiles.validateCandidate(manifest(clean)) {
+            ByteArrayInputStream(if (it.path == "jdk/lib/resource.so") p.getValue("jdk/lib/hidden") else clean.getValue(it.path))
+        } }
+    }
 
     @Test fun `candidate limit aliases cannot change later content observations`() {
         val p = payloads(); val original = candidate(p)
