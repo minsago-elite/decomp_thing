@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpProviderDnsRuntimeContextTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-10-14T06:03:14.183Z" hostname="whatsername" time="0.059">
+  <properties/>
+  <testcase name="close racing transfer revokes future admissions()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.017"/>
+  <testcase name="expired trusted helper cleanup retains exact owner until explicit remediation()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.011"/>
+  <testcase name="eight lifetime admissions exhaust the lease even after verified slots()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.003"/>
+  <testcase name="expired shared cleanup checkpoint retains remaining private entries()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.003"/>
+  <testcase name="deadline mismatch revokes and consumes registered context()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.003"/>
+  <testcase name="unregistered context cannot grant launch authority()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.001"/>
+  <testcase name="concurrent replay admits at most one transfer()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.003"/>
+  <testcase name="wrong binding revokes and consumes registered context()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.002"/>
+  <testcase name="revoked context cannot transfer or dispatch()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.003"/>
+  <testcase name="wrong consumer revokes and consumes registered context()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.001"/>
+  <testcase name="valid context transfers only once and clamps dispatch deadline()" classname="decompengine.acp.AcpProviderDnsRuntimeContextTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

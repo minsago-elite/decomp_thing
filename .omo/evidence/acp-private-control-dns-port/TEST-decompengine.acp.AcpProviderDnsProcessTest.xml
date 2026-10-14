@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpProviderDnsProcessTest" tests="18" skipped="0" failures="0" errors="0" timestamp="2026-10-14T06:03:08.319Z" hostname="whatsername" time="5.861">
+  <properties/>
+  <testcase name="late real process publication is killed reaped and permanently quarantined()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.334"/>
+  <testcase name="actual child receives empty environment no arguments and EOF stdin()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.15"/>
+  <testcase name="production jar rejects resolver services and fixture classpath()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.008"/>
+  <testcase name="authenticated artifact mutation is refused before any child()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.006"/>
+  <testcase name="isolated lookup selects one IPv4 address and actually reaps child()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.122"/>
+  <testcase name="invalid and oversized actual child output is refused and reaped()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.543"/>
+  <testcase name="actual stalled resolver deadline kills child without a waiting caller()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="1.513"/>
+  <testcase name="valid address bytes do not bypass required child exit()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.094"/>
+  <testcase name="cancelled lookup cannot be revived by a released address()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.126"/>
+  <testcase name="repeated stalled lookup cleanup leaves no child descriptor or task accumulation()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.234"/>
+  <testcase name="completed lookup cannot be admitted after request deadline()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="1.595"/>
+  <testcase name="signal of actual child never waits for its Java pipe flush monitor()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.435"/>
+  <testcase name="isolated lookup selects one IPv6 address and actually reaps child()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.142"/>
+  <testcase name="cancel before admission starts no child()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.007"/>
+  <testcase name="actual stalled resolver is killed and reaped on cancel()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.12"/>
+  <testcase name="failed lookup returns a fixed failure with no child leak()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.126"/>
+  <testcase name="exact future task is published before execution and remains the completion proof()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.135"/>
+  <testcase name="two real stalled owners exhaust capacity without queued child launches()" classname="decompengine.acp.AcpProviderDnsProcessTest" time="0.155"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
