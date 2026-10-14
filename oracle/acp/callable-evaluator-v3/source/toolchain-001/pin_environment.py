@@ -128,6 +128,28 @@ def load_monitor_binding(profile):
             'environmentPinSha256':digest, 'dependencies':_dependencies(closure, runtime), 'closure':closure}
 
 
+
+def load_compiler_binding(profile):
+    """Expose every existing recorded implicit-link input, never native qualification.
+
+    This view does not represent unrecorded compiler/header/runtime inputs or bind
+    a worker execution. The fixed operational gate rebuilds the whole recording
+    under the existing Resolver budget before any view is returned.
+    """
+    value, digest = _load_operational(profile)
+    closure = value['implicitLinkClosure']; manifest = closure['manifest']
+    if (value['status'] != 'static-recording-unqualified' or
+            closure['status'] != 'static-recording-unqualified' or
+            not closure['files'] or not closure['directories'] or not closure['selections']):
+        raise link_inputs.Refusal('complete static recorded implicit-link closure required')
+    return {'status':'static-recording-unqualified', 'scope':'recorded-implicit-link-inputs',
+            'environmentPinSha256':digest,
+            'closureSha256':link_inputs.sha(link_inputs.canonical(closure)),
+            'driverArgv':manifest['driverArgv'], 'workingDirectory':manifest['workingDirectory'],
+            'environment':manifest['environment'],
+            'dependencies':_dependencies(closure, closure['files']), 'closure':closure}
+
+
 def load_inspection_binding(profile):
     value, digest = _load_operational(profile)
     closure = value['inspectionClosure']; record = closure['record']; files = closure['files']

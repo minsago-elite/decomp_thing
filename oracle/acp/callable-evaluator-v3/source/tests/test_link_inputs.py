@@ -439,6 +439,19 @@ class LinkInputTests(unittest.TestCase):
    validate.assert_called_once();self.assertEqual(validate.call_args.args[1],Path('/'))
   with patch.object(pin,'BASE',base),patch.object(pin,'revalidate_pin',return_value=pin.collect_pin(self.manifest,self.root)):
    with self.assertRaisesRegex(l.Refusal,'fixed public'):pin.load_monitor_binding(profile)
+ def test_compiler_operational_gate_refuses_missing_wrong_hash_unvalidated_and_wrong_source_binding(self):
+  base=self.path('/public');folder=base/'toolchain-001';folder.mkdir();profile={'toolchainEnvironmentPinSha256':'a'*64}
+  with patch.object(pin,'BASE',base),patch.object(pin,'revalidate_pin',side_effect=l.Refusal('authored revalidation refusal')) as validate:
+   with self.assertRaises(l.Refusal):pin.load_compiler_binding(profile)
+   self.assertFalse(validate.called)
+   raw=json.dumps(pin.collect_pin(self.manifest,self.root)).encode();(folder/'environment-pin.json').write_bytes(raw)
+   with self.assertRaisesRegex(l.Refusal,'byte hash'):pin.load_compiler_binding(profile)
+   self.assertFalse(validate.called)
+   profile['toolchainEnvironmentPinSha256']=hashlib.sha256(raw).hexdigest()
+   with self.assertRaisesRegex(l.Refusal,'revalidation'):pin.load_compiler_binding(profile)
+   validate.assert_called_once();self.assertEqual(validate.call_args.args[1],Path('/'))
+  with patch.object(pin,'BASE',base),patch.object(pin,'revalidate_pin',return_value=pin.collect_pin(self.manifest,self.root)):
+   with self.assertRaisesRegex(l.Refusal,'fixed public'):pin.load_compiler_binding(profile)
  def test_binding_views_include_complete_canonical_runtime_and_inspection_inputs(self):
   value=pin.collect_pin(self.manifest,self.root)
   # Pure normalization check only; the separate gate test above proves mandatory revalidation.
@@ -448,6 +461,57 @@ class LinkInputTests(unittest.TestCase):
   self.assertEqual({row['path'] for row in monitor['dependencies']},{'/runtime/ld-runtime.so','/runtime/libfixture.so.1','/runtime/libother.so.1','/etc/ld.so.cache'})
   self.assertEqual({row['path'] for row in inspection['dependencies']},{'/bin/bash','/usr/bin/ldd','/runtime/ld-runtime.so','/runtime/libfixture.so.1','/runtime/libother.so.1','/etc/ld.so.cache'})
   self.assertEqual(inspection['environmentPinSha256'],'b'*64)
+ def test_compiler_binding_preserves_entire_record_without_qualification(self):
+  value=pin.collect_pin(self.manifest,self.root);closure=value['implicitLinkClosure']
+  with patch.object(pin,'_load_operational',return_value=(value,'b'*64)) as gate:
+   binding=pin.load_compiler_binding({'authored':'profile'})
+  gate.assert_called_once_with({'authored':'profile'})
+  self.assertEqual(binding['status'],'static-recording-unqualified')
+  self.assertEqual(binding['scope'],'recorded-implicit-link-inputs')
+  self.assertEqual(binding['environmentPinSha256'],'b'*64)
+  self.assertEqual(binding['closureSha256'],hashlib.sha256(l.canonical(closure)).hexdigest())
+  for key in ('driverArgv','workingDirectory','environment'):self.assertEqual(binding[key],self.manifest[key])
+  self.assertEqual(binding['closure'],closure)
+  self.assertEqual({r['path']:r['sha256'] for r in binding['dependencies']},{r['realpath']:r['sha256'] for r in closure['files'].values()})
+  self.assertTrue(closure['directories']);self.assertTrue(closure['selections'])
+  self.assertTrue(closure['files']['/usr/bin/gcc']['symlinks'])
+  self.assertNotIn('/work/candidate.o',{r['path'] for r in binding['dependencies']})
+ def test_compiler_binding_propagates_actual_recorded_input_drift(self):
+  # Root remapping only: run the real bounded revalidator on inert filesystem fixtures.
+  value=None
+  def operational(profile):return pin.revalidate_pin(value,self.root),'b'*64
+  with patch.object(pin,'_load_operational',side_effect=operational):
+   for name in ('/gcc/lib/crti.o','/gcc/lib/crtn.o','/lib/libc.so.6','/tools/plugin.so','/etc/gcc/specs'):
+    with self.subTest(path=name):
+     path=self.path(name);old=path.read_bytes()
+     value=pin.collect_pin(self.manifest,self.root)
+     self.assertEqual(pin.load_compiler_binding({})['closure'],value['implicitLinkClosure'])
+     path.unlink()
+     with self.assertRaises(l.Refusal):pin.load_compiler_binding({})
+     path.write_bytes(old)
+     value=pin.collect_pin(self.manifest,self.root)
+     self.assertEqual(pin.load_compiler_binding({})['closure'],value['implicitLinkClosure'])
+     path.write_bytes(old+b'changed')
+     with self.assertRaises(l.Refusal):pin.load_compiler_binding({})
+     path.write_bytes(old)
+   value=pin.collect_pin(self.manifest,self.root)
+   self.assertEqual(pin.load_compiler_binding({})['closure'],value['implicitLinkClosure'])
+   self.write('/gcc/lib/libc.so',b'\x7fELF preferred libc')
+   with self.assertRaises(l.Refusal):pin.load_compiler_binding({})
+ def test_compiler_binding_refuses_unrepresented_or_wrong_record(self):
+  value=pin.collect_pin(self.manifest,self.root)
+  for field in ('files','directories','selections'):
+   bad=copy.deepcopy(value);bad['implicitLinkClosure'][field].clear()
+   with patch.object(pin,'_load_operational',return_value=(bad,'b'*64)),self.assertRaises(l.Refusal):pin.load_compiler_binding({})
+  for field in ('status',):
+   bad=copy.deepcopy(value);bad[field]='native-qualified'
+   with patch.object(pin,'_load_operational',return_value=(bad,'b'*64)),self.assertRaises(l.Refusal):pin.load_compiler_binding({})
+  for field in ('driverArgv','environment','workingDirectory'):
+   bad=copy.deepcopy(value)
+   if field=='driverArgv':bad['implicitLinkClosure']['manifest'][field][0]='/different/gcc'
+   elif field=='environment':bad['implicitLinkClosure']['manifest'][field]['LANG']='different'
+   else:bad['implicitLinkClosure']['manifest'][field]='/different'
+   with patch.object(pin,'_load_operational',side_effect=lambda profile: (pin.revalidate_pin(bad,self.root),'b'*64)),self.assertRaises(l.Refusal):pin.load_compiler_binding({})
  def test_new_closed_schema_refuses_each_operational_unknown_missing_and_native_claim(self):
   import fastjsonschema
   validate=fastjsonschema.compile(json.loads((SOURCE/'contracts/toolchain-pin-schema.json').read_bytes()));value=pin.collect_pin(self.manifest,self.root);validate(value)
