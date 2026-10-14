@@ -48,8 +48,62 @@ class BoundedDwarfGlobalSyntheticFactsTest {
             val failure = assertFailsWith<FullTreeControlException> {
                 scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumRetainedFactBytes = tightLimit))
             }
-            assertTrue(failure.message.orEmpty().contains("DWARF interface integral exceeds retained fact bound"),
+            // The first refused charge depends on the whole scan's ordering. The direct scalar
+            // control below independently checks integral evidence accounting at its exact bound.
+            assertTrue(failure.message.orEmpty().contains("exceeds retained fact bound"),
                 failure.message)
+        }
+
+    @Test
+    fun `integral fact charges every absent DAG leaf at the exact budget and refuses atomically below it`() =
+        inInterfaceFixtureDirectory { root ->
+            val shared = (0 until 31).map { index ->
+                val references = if (index < 15) listOf(
+                    reference(0x31, "shared-${index * 2 + 1}"),
+                    reference(0x47, "shared-${index * 2 + 2}"),
+                ) else emptyList()
+                variable("shared-$index", references)
+            }
+            val fixture = typeElf(variable("root", listOf(reference(0x31, "shared-0"))),
+                *shared.toTypedArray())
+            // These are the fixture's sixteen terminal DIE identities, independent of the facts
+            // returned by the reader. No DIE in this graph defines DW_AT_external (0x3f).
+            val expectedEvidence = (15 until 31).map { index ->
+                "${fixture.locator("shared-$index")}:attribute=0x3f:absent"
+            }
+            val expectedDelta = 192L + expectedEvidence.sumOf { locator ->
+                32L + 2L * locator.length.toLong()
+            }
+            val alreadyCharged = 37L
+            withScalarBudgetRepository(root, fixture) { repository, header ->
+                val unit = repository.load(header)
+                repository.withRetainedUnits(unit) {
+                    val source = ResolvedFunctionDie(unit,
+                        unit.index.required(fixture.offsets.getValue("root").toLong(), "scalar DAG root"))
+                    val inheritance = InterfaceInheritance(repository, source, 32)
+                    assertEquals(32, inheritance.sources.size)
+                    assertEquals((listOf("root") + (0 until 31).map { "shared-$it" })
+                        .map(fixture::locator).toSet(), inheritance.sources.map(::dwarfInterfaceLocator).toSet())
+                    assertTrue(inheritance.reasons.isEmpty())
+
+                    val exactBudget = DwarfInterfaceFactBudget(alreadyCharged + expectedDelta, alreadyCharged)
+                    val fact = interfaceIntegralFact(inheritance, 0x3f, exactBudget)
+                    assertEquals(DwarfInterfaceFactState.ABSENT, fact.state)
+                    assertTrue(fact.values.isEmpty())
+                    assertEquals(expectedEvidence, fact.evidence)
+                    assertTrue(fact.reasons.isEmpty())
+                    assertEquals(expectedDelta, exactBudget.chargedBytes - alreadyCharged)
+                    assertEquals(alreadyCharged + expectedDelta, exactBudget.chargedBytes)
+
+                    val shortBudget = DwarfInterfaceFactBudget(alreadyCharged + expectedDelta - 1L, alreadyCharged)
+                    val failure = assertFailsWith<FullTreeControlException> {
+                        interfaceIntegralFact(inheritance, 0x3f, shortBudget)
+                    }
+                    assertEquals("DWARF interface integral exceeds retained fact bound", failure.message)
+                    assertEquals(alreadyCharged, shortBudget.chargedBytes,
+                        "a refused integral fact must not leave a partial evidence charge")
+                }
+            }
         }
 
     @Test
@@ -549,6 +603,25 @@ class BoundedDwarfGlobalSyntheticFactsTest {
         val path = writeElf(root.resolve("global-facts.elf"), fixture.bytes)
         return StableControlFile.open(path, fixture.bytes.size.toLong(), "global DWARF fixture").use { artifact ->
             BoundedDwarfInterfaceFactScanner.scan(artifact, root, limits = limits)
+        }
+    }
+
+    private fun withScalarBudgetRepository(root: Path, fixture: TypeGraphElf,
+        block: (FunctionDwarfUnitRepository, FullTreeDwarfCompilationUnitHeader) -> Unit) {
+        val path = writeElf(root.resolve("scalar-budget-repository.elf"), fixture.bytes)
+        StableControlFile.open(path, fixture.bytes.size.toLong(), "scalar budget repository fixture").use { artifact ->
+            val controls = FullTreeControlLimits()
+            FullTreeDwarfSections.open(artifact, root, controls).use { sections ->
+                val parseBudget = FullTreeDwarfParseBudget(controls.maximumDwarfParseSteps)
+                val iterator = FullTreeDwarfCompilationUnitHeaders(sections.required(".debug_info"),
+                    controls.maximumCompilationUnits.toLong(), parseBudget)
+                val headers = ArrayList<FullTreeDwarfCompilationUnitHeader>()
+                while (iterator.hasNext()) headers += iterator.next()
+                val repository = FunctionDwarfUnitRepository(sections, headers, controls,
+                    FullTreeFunctionObservationProducerLimits(maximumCachedCompilationUnits = 1), parseBudget,
+                    retainAllRecords = true)
+                block(repository, headers.single())
+            }
         }
     }
 

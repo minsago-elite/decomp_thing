@@ -101,6 +101,53 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `archive rejects semantically incomplete retained ACP receipts after every commitment is rebound`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "acp-incomplete-receipt-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val profileRoot = temp.resolve(profile.id)
+                val baseline = createAgentProject(profileRoot.resolve("baseline"), accepted = true, profile = profile)
+                val sourceBytes = baseline.resolve(SOURCE_PATH).readBytes()
+                val buildContractPath = ReconstructionAdapters.resolve(profile).archiveBuild.contractPaths(profile).contractPath
+                val buildContractBytes = baseline.resolve(buildContractPath).readBytes()
+                val baselineArchive = profileRoot.resolve("accepted.zip")
+                ArchivalPackager.create(baseline, baselineArchive, profile = profile)
+                assertTrue(baselineArchive.exists(), profile.id)
+
+                val mutations = listOf(
+                    listOf("refused", "\"stopReason\":\"completed\"", "\"stopReason\":\"refused\"",
+                        "release ACP receipt result is not completed"),
+                    listOf("release-incomplete", "\"releaseComplete\": true", "\"releaseComplete\": false",
+                        "ACP receipt release-complete marker is false"),
+                )
+                for ((name, before, after, expectedMessage) in mutations) {
+                    val project = profileRoot.resolve(name)
+                    copyTree(baseline, project)
+                    rewriteEvidenceAndBindings(project) { it.replaceFirst(before, after) }
+                    assertTrue(sourceBytes.contentEquals(project.resolve(SOURCE_PATH).readBytes()))
+                    assertTrue(buildContractBytes.contentEquals(project.resolve(buildContractPath).readBytes()))
+                    // Confidence and all digest bindings must pass before packaging reaches the
+                    // retained receipt's semantic release checks.
+                    assertTrue(ArchivalProjectAuditor.audit(project, profile).moduleConfidenceEvidenceProblems.isEmpty())
+
+                    val archive = profileRoot.resolve("$name.zip")
+                    val failure = assertFailsWith<IllegalArgumentException>("${profile.id}/$name") {
+                        ArchivalPackager.create(project, archive, profile = profile)
+                    }
+                    assertEquals(expectedMessage, failure.message, "${profile.id}/$name")
+                    assertFalse(archive.exists(), "${profile.id}/$name published an archive")
+                }
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects closed-schema and semantic ACP evidence tampering`() {
         val temp = createTempDirectory("acp-archive-tampering-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)
@@ -620,7 +667,11 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
     }
 
-    private fun createAgentProject(project: Path, accepted: Boolean): Path {
+    private fun createAgentProject(
+        project: Path,
+        accepted: Boolean,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Path {
         val harness = ArchiveEvidenceHarness(accepted)
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
@@ -639,8 +690,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 harness,
                 harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
             ),
+            profile = profile,
         )
-        MakeProjectBuilder.build(project)
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
         return project
     }
 
@@ -652,17 +704,20 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         evidence.writeText(transformed)
         val newEvidenceSha256 = sha256(evidence.readBytes())
 
-        val checkpoint = project.resolve(CHECKPOINT_PATH)
-        val oldCheckpointSha256 = sha256(checkpoint.readBytes())
-        checkpoint.writeText(checkpoint.readText().replace(oldEvidenceSha256, newEvidenceSha256))
-        val newCheckpointSha256 = sha256(checkpoint.readBytes())
-
-        val manifest = project.resolve("source_tree_manifest.json")
-        manifest.writeText(
-            manifest.readText()
-                .replace(oldEvidenceSha256, newEvidenceSha256)
-                .replace(oldCheckpointSha256, newCheckpointSha256),
-        )
+        val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+        require(checkpoint.getValue("executionEvidenceSha256") == JsonPrimitive(oldEvidenceSha256))
+        rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint +
+            ("executionEvidenceSha256" to JsonPrimitive(newEvidenceSha256))))
+        val manifestPath = project.resolve("source_tree_manifest.json")
+        val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+        val files = manifest.getValue("files").jsonArray.map { item ->
+            val file = item.jsonObject
+            if (file.getValue("path").jsonPrimitive.content != EVIDENCE_PATH) file else {
+                require(file.getValue("sha256") == JsonPrimitive(oldEvidenceSha256))
+                JsonObject(file + ("sha256" to JsonPrimitive(newEvidenceSha256)))
+            }
+        }
+        manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString() + "\n")
     }
 
     private fun rewriteCheckpointAndManifest(project: Path, transform: (String) -> String) {

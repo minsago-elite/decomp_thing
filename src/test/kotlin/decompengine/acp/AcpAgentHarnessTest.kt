@@ -466,7 +466,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(75, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -896,14 +896,15 @@ class AcpAgentHarnessTest {
                     "forcedTermination=${diagnostics?.forcedTermination} " +
                     "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
                     "remainingProcesses=${diagnostics?.remainingProcessIds?.size} " +
-                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
+                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded} " +
+                    "cause=${boundedPreparationCauseForTest(receipt.failureCause)}"
             }
 
-            assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
-            assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
-            assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
-            assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
-            assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
+            assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding, outcomes)
+            assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding, outcomes)
+            assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256, outcomes)
+            assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256, outcomes)
+            assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256, outcomes)
             assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence, outcomes))
             assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence, outcomes))
             assertEquals(
@@ -925,6 +926,49 @@ class AcpAgentHarnessTest {
         "phase=$phaseReached cleanup=$cleanupDisposition audits=$completeness " +
             "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
             "sandbox=${sandboxEvidence != null}"
+
+    /** Fixed source labels only: exception messages, file names and process data are never rendered. */
+    private fun boundedPreparationCauseForTest(failure: Throwable?): String {
+        if (failure == null) return "none"
+        val allowedTypes = setOf(
+            "decompengine.agent.AgentExecutionException", "decompengine.acp.AcpCleanupProofFailure",
+            "decompengine.acp.AcpPhaseTimeout", "decompengine.acp.RequestedAcpCancellation",
+            "java.io.IOException", "java.lang.IllegalArgumentException", "java.lang.IllegalStateException",
+            "java.lang.SecurityException", "java.lang.InterruptedException", "java.lang.UnsupportedOperationException",
+            "java.nio.file.AccessDeniedException", "java.nio.file.FileAlreadyExistsException",
+            "java.nio.file.FileSystemException", "java.nio.file.NoSuchFileException",
+            "java.util.concurrent.CancellationException", "java.util.concurrent.ExecutionException",
+            "java.util.concurrent.TimeoutException", "com.sun.jna.LastErrorException",
+        )
+        val allowedClasses = setOf(
+            "AcpAgentHarness", "ProductionAcpSandboxExecution", "LinuxBubblewrapBoundary",
+            "LinuxBubblewrapBoundary\$Companion", "LinuxBubblewrapBoundaryKt",
+            "RuntimePrivateControlScope", "RuntimePrivateControlScope\$Companion",
+            "PinnedControlDirectory", "PinnedControlDirectory\$Companion", "PinnedSandboxControlTemporaryParent",
+            "PinnedSecurityExecutable", "PinnedSecurityExecutable\$Companion",
+            "PinnedSystemdBusEndpoint", "PinnedSystemdBusEndpoint\$Companion",
+            "LinuxFilesystemSyscalls", "LinuxFilesystemSyscallsKt", "LinuxBoundedSessionProcessKt",
+        )
+        val methodName = Regex("[A-Za-z_\$<>][A-Za-z0-9_\$<>-]{0,95}")
+        val seen = ArrayList<Throwable>(6)
+        val rendered = ArrayList<String>(6)
+        var cause: Throwable? = failure
+        while (cause != null && seen.size < 6 && seen.none { it === cause }) {
+            val current = requireNotNull(cause)
+            seen += current
+            val type = current.javaClass.name.takeIf { it in allowedTypes } ?: "other"
+            val frames = current.stackTrace.asSequence().take(64).mapNotNull { frame ->
+                val sourceClass = frame.className.removePrefix("decompengine.acp.")
+                if (!frame.className.startsWith("decompengine.acp.") || sourceClass !in allowedClasses ||
+                    !methodName.matches(frame.methodName) || frame.lineNumber !in 1..20_000
+                ) null else "$sourceClass.${frame.methodName}:${frame.lineNumber}"
+            }.take(3).joinToString(",")
+            rendered += "$type[$frames]"
+            cause = current.cause
+        }
+        if (cause != null) rendered += "truncated"
+        return rendered.joinToString(" -> ").take(2048)
+    }
 
     private fun completedStopReasonForTest(
         label: String,
@@ -1564,13 +1608,21 @@ class AcpAgentHarnessTest {
         )
         val executor = Executors.newSingleThreadExecutor()
         val events = mutableListOf<AgentExecutionEvent>()
+        val readyAcknowledged = CountDownLatch(1)
         try {
             val execution = executor.submit<decompengine.agent.AgentExecutionResult> {
-                harness.execute(request, events::add)
+                harness.execute(request) { event ->
+                    events += event
+                    if (event is AgentMessageEvent && event.textDelta == "cooperative-cancellation-ready") {
+                        readyAcknowledged.countDown()
+                    }
+                }
             }
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
-            while (!ready.exists() && !execution.isDone && System.nanoTime() < deadline) Thread.sleep(10)
+            // Publication precedes callback completion; cancel only after the peer confirms that
+            // the official write response arrived, so cancellation cannot roll readiness back.
+            assertTrue(readyAcknowledged.await(3, TimeUnit.SECONDS), "fixture never acknowledged the ready write")
             assertTrue(ready.exists(), "fixture never reached session/prompt")
+            assertEquals("ready\n", ready.readText())
             cancellation.cancel()
 
             val result = try {
@@ -1904,6 +1956,38 @@ class AcpAgentHarnessTest {
         assertNull(launchEvidence.completeExecutionEvidence)
         assertNull(launchCancelledHarness.latestDiagnostics())
         assertNull(launchCancelledHarness.latestSandboxEvidence())
+
+        for (rootCheckpoint in listOf(true, false)) {
+            val authorityCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
+            val authorityCancellation = AgentCancellation {
+                val frames = Thread.currentThread().stackTrace.filter {
+                    it.className == "decompengine.acp.AcpFilesystemBroker\$Companion"
+                }
+                val atRoot = frames.any { it.methodName.startsWith("openRoot") }
+                val selected = if (rootCheckpoint) atRoot else !atRoot && frames.any { it.methodName.startsWith("open") }
+                if (selected) authorityCancellationObserved.set(true)
+                selected
+            }
+            val authorityHarness = harness("success")
+            val authorityFixture = fixture()
+            val authorityReceipt = authorityHarness.executeReceipt(
+                authorityFixture.request.withCancellation(authorityCancellation),
+            )
+            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(authorityReceipt.outcome).result
+            val authorityEvidence = assertIs<AcpInvocationEvidenceSnapshot>(authorityReceipt.providerEvidence)
+            assertTrue(authorityCancellationObserved.get(), "actual filesystem authority checkpoint was not reached")
+            assertEquals(AgentStopReason.CANCELLED, authorityResult.stopReason)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, authorityEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, authorityEvidence.cleanupDisposition)
+            assertNull(authorityEvidence.negotiatedAgent)
+            assertNull(authorityEvidence.completeExecutionEvidence)
+            assertNull(authorityEvidence.wirePromptSha256)
+            assertNull(authorityResult.session)
+            val authorityDiagnostics = assertNotNull(authorityEvidence.diagnostics)
+            assertTrue(authorityDiagnostics.remainingProcessIds.isEmpty())
+            assertTrue(authorityDiagnostics.sandboxCleanupVerified)
+            assertProcessStopped(authorityDiagnostics.pid)
+        }
 
         val evidenceCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
         val evidenceCancellation = AgentCancellation {

@@ -23,13 +23,16 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
+import decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.Locale
 
 fun main(args: Array<String>) {
@@ -43,6 +46,7 @@ fun main(args: Array<String>) {
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
+        "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -51,6 +55,38 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runLlvmNativeRuntimeMeasurement(args: List<String>) {
+    val listenerContinuity = args.firstOrNull() == "--listener-continuity"
+    val paths = try {
+        val positional = if (listenerContinuity) args.drop(1) else args
+        require(positional.size == 5) { "native runtime measurement requires exactly five paths" }
+        require(positional.all { it.isNotEmpty() && !it.startsWith("-") }) {
+            "native runtime measurement accepts only one optional leading --listener-continuity flag and five paths"
+        }
+        positional.map { Path.of(it) }
+    } catch (failure: IllegalArgumentException) {
+        System.err.println(failure.message)
+        System.err.println("usage: llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] " +
+            "<oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>")
+        kotlin.system.exitProcess(2)
+    }
+    val (canonical, sha256) = if (listenerContinuity) {
+        val candidate = LlvmBehaviorNativeRuntimeMeasurementV2.measureWithListenerContinuity(
+            paths[0], paths[1], paths[2], paths[3],
+        )
+        candidate.canonicalBytes() to candidate.sha256
+    } else {
+        val candidate = LlvmBehaviorNativeRuntimeMeasurementV2.measure(paths[0], paths[1], paths[2], paths[3])
+        candidate.canonicalBytes() to candidate.sha256
+    }
+    Files.newOutputStream(paths[4], StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
+        LinkOption.NOFOLLOW_LINKS).use { output -> output.write(canonical) }
+    println("candidate sha256: $sha256")
+    println("oracleAuthority=false runtimeProfileApproved=false startAuthorized=false containmentProved=false " +
+        "scoringAuthority=false releaseEligible=false")
+    println("Daemon executable approval and HTTP responder identity proof remain unavailable.")
 }
 
 private fun runGccEnginePlan(args: List<String>) {
@@ -558,6 +594,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-full-export <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
@@ -573,6 +610,8 @@ private fun printHelp() {
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
           Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
+          llvm-native-runtime-measurement retains raw read-only evidence with all authority flags false.
+          --listener-continuity records listener credentials; daemon and HTTP responder identities remain unapproved.
           ACP remains read-only and never receives oracle write, validation, scoring, or certification authority.
         """.trimIndent(),
     )
