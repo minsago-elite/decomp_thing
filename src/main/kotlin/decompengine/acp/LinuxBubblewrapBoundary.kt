@@ -946,6 +946,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         }
         launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
         requireBoundaryUnchanged(cancellationCheck)
+        val statistics = RuntimeCopyStatistics()
         var launchMounts = emptyList<PinnedReadOnlyMount>()
         var retainedStagingRoots = emptyList<RetainedHostStagingRoot>()
         var environmentFile: SandboxEnvironmentFile? = null
@@ -961,6 +962,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 configuration.runtimeClosureLimits,
                 forbiddenRuntimeFiles,
                 controlDirectory,
+                statistics = statistics,
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
                 },
@@ -1256,6 +1258,13 @@ internal class LinuxBubblewrapBoundary private constructor(
             commitSandboxAuthorization(authorizationStream)
             return created
         } catch (failure: Throwable) {
+            // This owner has the actual launch-copy observations. Retain a finite
+            // owner label without changing the shared statistics API or primary.
+            try {
+                val diagnostic = IOException("runtime-copy-owner=boundary.launch")
+                statistics.attachFailure(diagnostic)
+                failure.addSuppressed(diagnostic)
+            } catch (_: Throwable) { /* Diagnostic recording cannot replace launch failure. */ }
             launchEvidenceReservation?.let(::releaseSuccessfulLaunchEvidence)
             val cleanupFailures = mutableListOf<Throwable>()
             val created = sandboxed
