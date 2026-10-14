@@ -282,7 +282,7 @@ internal object GccDriverDwarfInterfaceEvidence {
                             globals: JsonObject, globalConfiguration: JsonObject,
                             strippedLayout: FullTreeElfObjectLayoutObservation,
                             inventory: JsonObject): JsonObject = JsonObject(linkedMapOf(
-        "schemaVersion" to JsonPrimitive(4), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v4"),
+        "schemaVersion" to JsonPrimitive(5), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v5"),
         "oracleId" to JsonPrimitive(ORACLE_ID), "sourceRevision" to JsonPrimitive(SOURCE_REVISION),
         "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
         "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
@@ -363,8 +363,8 @@ internal object GccDriverDwarfInterfaceEvidence {
     internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>,
                               authenticatedScan: BoundedDwarfInterfaceFacts? = null) {
         val manifest = OracleJson.parseCanonical(manifestBytes, EVIDENCE_JSON_LIMITS).jsonObject
-        require(manifest["schemaVersion"] == JsonPrimitive(4) &&
-            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v4")) { "unsupported GCC interface bundle" }
+        require(manifest["schemaVersion"] == JsonPrimitive(5) &&
+            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v5")) { "unsupported GCC interface bundle" }
         for (flag in listOf("complete", "scored", "productionVerified", "releaseEligible")) {
             require(manifest[flag] == JsonPrimitive(false)) { "interface bundle claims unsupported authority" }
         }

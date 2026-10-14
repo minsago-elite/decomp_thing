@@ -75,7 +75,7 @@ internal class BoundedDwarfObservationInventory internal constructor(
 }
 
 internal object BoundedDwarfObservationInventoryV1 {
-    const val SCHEMA = "dwarf-pre-policy-inventory-v2"
+    const val SCHEMA = "dwarf-pre-policy-inventory-v3"
     val RECORD_KINDS: List<String> = Collections.unmodifiableList(listOf(
         "inventoryRoots", "inventoryReferences", "inventoryTypeCompleteness", "inventoryFindings", "inventorySelections",
     ))
@@ -302,15 +302,29 @@ internal class InventorySource(
             yield(finding("inventory", "inventory", "required-type-population-unresolved"))
             yield(finding("inventory", "inventory", "member-cardinality-unresolved"))
             if (!facts.physicalCensusPresent) yield(finding("physical-census", "physical-census", "physical-census-absent"))
-            for (die in facts.physicalDies) {
-                budget.work()
-                if (die.category == "unknown") yield(finding("physical-DIE", die.locator, "physical-DIE-tag-unresolved", "0x${die.tag.toString(16)}"))
-                for (reference in die.references) {
+            val physicalRows = facts.physicalDies
+            if (physicalRows is CompactPhysicalDieList) {
+                for ((die, reference) in physicalRows.findingRows { budget.work() }) {
+                    if (reference == null) yield(finding("physical-DIE", die.locator, "physical-DIE-tag-unresolved", "0x${die.tag.toString(16)}"))
+                    else {
+                        if (reference.state != "retained-target") yield(finding("physical-reference", die.locator,
+                            "physical-reference-${reference.state}", reference.attributeOrdinal.toString()))
+                        if ("reference-cycle" in reference.reasons) yield(finding("physical-reference", die.locator,
+                            "physical-reference-cycle", reference.attributeOrdinal.toString()))
+                    }
+                }
+            } else {
+                // Independently constructed fixture facts have no authenticated compact index.
+                for (die in physicalRows) {
                     budget.work()
-                    if (reference.state != "retained-target") yield(finding("physical-reference", die.locator,
-                        "physical-reference-${reference.state}", reference.attributeOrdinal.toString()))
-                    if ("reference-cycle" in reference.reasons) yield(finding("physical-reference", die.locator,
-                        "physical-reference-cycle", reference.attributeOrdinal.toString()))
+                    if (die.category == "unknown") yield(finding("physical-DIE", die.locator, "physical-DIE-tag-unresolved", "0x${die.tag.toString(16)}"))
+                    for (reference in die.references) {
+                        budget.work()
+                        if (reference.state != "retained-target") yield(finding("physical-reference", die.locator,
+                            "physical-reference-${reference.state}", reference.attributeOrdinal.toString()))
+                        if ("reference-cycle" in reference.reasons) yield(finding("physical-reference", die.locator,
+                            "physical-reference-cycle", reference.attributeOrdinal.toString()))
+                    }
                 }
             }
             if (facts.limits.typeGraphScope != BoundedDwarfTypeGraphScope.FULL_REFERENCES) {
@@ -569,9 +583,11 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
     private val expectedNonNulls: Long
     private val units = LinkedHashMap<String, UnitState>()
     private val unitOrder = ArrayList<UnitState>()
-    private val dies = HashSet<String>()
-    // Repeated references to one target need one descriptor; mixed states still fail reconciliation.
-    private val targetStates = HashMap<String, Int>()
+    private val dieMembership: PhysicalOffsetMembership
+    private var observedDieCount = 0
+    private var previousDieOffset = -1L
+    // Numeric offsets are globally unique in .debug_info; every edge state is checked independently.
+    private val targetStates = PhysicalTargetStates(budget.limits.maximumWorkSteps)
     private var previousUnit: UnitState? = null
     private var currentUnit: UnitState? = null
     private var nextUnitOrdinal = 0
@@ -582,7 +598,8 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
 
     init {
         exact(metadata, PHYSICAL_CENSUS_KEYS)
-        require(metadata["schema"] == JsonPrimitive("bounded-physical-die-census-v1") &&
+        require(metadata["schema"] == JsonPrimitive(DwarfPhysicalDieRowEncoding.CENSUS_SCHEMA) &&
+            metadata["recordEncoding"] == JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME) &&
             metadata["scope"] == JsonPrimitive("all-non-null-physical-debug-info-DIEs") &&
             metadata["semanticPopulationComplete"] == JsonPrimitive(false) &&
             metadata["verificationBoundary"] == JsonPrimitive("authenticated-input-scan-replay-required;bundle-hashes-alone-are-not-coverage-proof")) {
@@ -599,6 +616,7 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
         require(expectedNulls <= expectedPhysical && expectedNonNulls <= expectedPhysical &&
             expectedPhysical == expectedNulls + expectedNonNulls) { "physical census counts do not reconcile" }
         if (!present) require(expectedUnits == 0L && expectedPhysical == 0L) { "absent physical census has records" }
+        dieMembership = PhysicalOffsetMembership(expectedNonNulls.toInt(), budget)
     }
 
     fun observe(kind: String, record: JsonObject) {
@@ -610,7 +628,7 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
                 metadataCounts = number(counts, "physicalUnits") to number(counts, "physicalDies")
             }
             "physicalUnits" -> observeUnit(record)
-            "physicalDies" -> observeDie(record)
+            "physicalDies" -> observeDie(DwarfPhysicalDieRowEncoding.decode(record, budget.limits.maximumRecordBytes, { budget.work() }).toJson())
         }
     }
 
@@ -671,7 +689,9 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
         require(locator == dieLocator(unit.compilationUnitOffset, offset) && offset >= unit.firstDieOffset && end > offset && end <= unit.endOffset) {
             "physical DIE identity or range differs from its compilation unit"
         }
-        require(unit.observedDies < unit.nonNullRecordCount && dies.add(locator)) { "physical DIE locator repeats or exceeds unit count" }
+        require(unit.observedDies < unit.nonNullRecordCount && observedDieCount.toLong() < expectedNonNulls &&
+            (observedDieCount == 0 || offset > previousDieOffset)) { "physical DIE locator repeats or exceeds unit count" }
+        dieMembership.add(offset); observedDieCount++; previousDieOffset = offset
         if (unit.observedDies == 0L) {
             require(locator == unit.rootLocator && offset == unit.firstDieOffset && depth == 0 && parent == null) {
                 "physical compilation unit root is missing or inconsistent"
@@ -689,7 +709,7 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
         unit.previousEndOffset = end
         var previousOrdinal = -1L
         for (element in array(record, "references")) {
-            budget.work()
+            // The row decoder charged this reference before allocating its descriptor.
             val reference = obj(element)
             exact(reference, PHYSICAL_REFERENCE_KEYS)
             val ordinal = number(reference, "attributeOrdinal")
@@ -725,7 +745,7 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
                 "retained-target", "missing-target" -> {
                     require(target != null && PHYSICAL_DIE_LOCATOR.matches(target)) { "physical reference target identity is missing or malformed" }
                     if (state == "missing-target") require(reasons.isNotEmpty()) { "missing physical reference target has no reason" }
-                    targetStates[target] = (targetStates[target] ?: 0) or if (state == "retained-target") 1 else 2
+                    targetStates.add(target.substringAfterLast(":die=0x").toLong(16), state == "retained-target")
                 }
                 "unsupported-reference", "out-of-range-reference" -> require(target == null && reasons.isNotEmpty()) {
                     "unresolved physical reference has a target or no reason"
@@ -771,17 +791,68 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
     fun finish() {
         currentUnit?.let(::finishUnit)
         require(units.size.toLong() == expectedUnits && nextUnitOrdinal == units.size &&
-            dies.size.toLong() == expectedNonNulls && summedPhysical == expectedPhysical &&
+            observedDieCount.toLong() == expectedNonNulls && summedPhysical == expectedPhysical &&
             summedNulls == expectedNulls && summedNonNulls == expectedNonNulls) { "physical census counts differ from its records" }
         require(metadataCounts == (expectedUnits to expectedNonNulls)) { "raw metadata physical counts differ from the census" }
-        for ((target, states) in targetStates) {
-            budget.work()
-            require(states == if (target in dies) 1 else 2) { "physical reference state differs from target availability" }
+        targetStates.forEach { target, retained ->
+            require(retained == dieMembership.contains(target)) { "physical reference state differs from target availability" }
         }
     }
 
     private fun requireNullBytes(bytes: Long, count: Long) {
         require(bytes >= count && bytes <= Math.multiplyExact(count, 10L)) { "physical DIE byte gaps differ from null-record counts" }
+    }
+}
+
+/** Primitive bounded membership; each collision probe consumes the existing work budget. */
+private class PhysicalOffsetMembership(count: Int, private val budget: InventoryBudget) {
+    private val entries: LongArray
+    init {
+        var capacity = 1
+        while (capacity < Math.multiplyExact(count, 2)) capacity = Math.multiplyExact(capacity, 2)
+        entries = LongArray(capacity) { -1L }
+    }
+    fun add(offset: Long) {
+        var slot = hash(offset) and (entries.size - 1)
+        // observeDie already charged the first probe for this new physical record.
+        while (entries[slot] != -1L) {
+            require(entries[slot] != offset) { "physical DIE offset repeats" }
+            budget.work(); slot = (slot + 1) and (entries.size - 1)
+        }
+        entries[slot] = offset
+    }
+    fun contains(offset: Long): Boolean {
+        var slot = hash(offset) and (entries.size - 1)
+        while (true) {
+            budget.work()
+            val candidate = entries[slot]
+            if (candidate == offset) return true
+            if (candidate == -1L) return false
+            slot = (slot + 1) and (entries.size - 1)
+        }
+    }
+    private fun hash(offset: Long): Int {
+        var mixed = offset
+        mixed = (mixed xor (mixed ushr 33)) * -49064778989728563L
+        mixed = (mixed xor (mixed ushr 33)) * -4265267296055464877L
+        return (mixed xor (mixed ushr 33)).toInt()
+    }
+}
+
+/** At most one primitive offset and one bit per edge; no boxed/string target maps. */
+private class PhysicalTargetStates(private val maximum: Long) {
+    private val offsets = ArrayList<LongArray>()
+    private val states = ArrayList<ByteArray>()
+    private var count = 0
+    fun add(offset: Long, retained: Boolean) {
+        require(count.toLong() < maximum) { "physical target population exceeds work bounds" }
+        if (count % 1024 == 0) { offsets += LongArray(1024); states += ByteArray(1024) }
+        offsets[count / 1024][count % 1024] = offset
+        states[count / 1024][count % 1024] = if (retained) 1 else 0
+        count++
+    }
+    fun forEach(consumer: (Long, Boolean) -> Unit) {
+        for (index in 0 until count) consumer(offsets[index / 1024][index % 1024], states[index / 1024][index % 1024].toInt() == 1)
     }
 }
 
@@ -918,7 +989,7 @@ private val INVENTORY_SHA = Regex("[0-9a-f]{64}")
 private const val INVENTORY_COMMITMENT_ENCODING = "sha256-domain-kind-record-marker-u64be-length-canonical-json-end-marker-u64be-count-v1"
 private val MANIFEST_KEYS = setOf("schema", "scannerProducer", "rawRecordEncoding", "commitmentEncoding", "typeGraphScope", "inputs",
     "requiredTypePopulationComplete", "physicalCensus", "rawCommitments", "inventoryCommitments", "counts", "inventorySha256")
-private val PHYSICAL_CENSUS_KEYS = setOf("schema", "present", "complete", "scope", "compilationUnitCount", "physicalRecordCount",
+private val PHYSICAL_CENSUS_KEYS = setOf("schema", "recordEncoding", "present", "complete", "scope", "compilationUnitCount", "physicalRecordCount",
     "nullRecordCount", "nonNullRecordCount", "semanticPopulationComplete", "verificationBoundary")
 private val PHYSICAL_UNIT_KEYS = setOf("locator", "compilationUnitOffset", "firstDieOffset", "endOffset", "rootLocator",
     "physicalRecordCount", "nullRecordCount", "nonNullRecordCount")
@@ -926,7 +997,7 @@ private val PHYSICAL_DIE_KEYS = setOf("locator", "compilationUnitLocator", "offs
     "parentLocator", "hasChildren", "references")
 private val PHYSICAL_REFERENCE_KEYS = setOf("attributeOrdinal", "attribute", "declaredForm", "resolvedForm", "indirectDepth",
     "rawOperand", "targetLocator", "state", "reasons")
-private val PHYSICAL_UNSUPPORTED_REFERENCE_FORMS = setOf(FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_REF_SUP4, FULL_TREE_DW_FORM_REF_SUP8)
+private val PHYSICAL_UNSUPPORTED_REFERENCE_FORMS = setOf(FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_REF_SUP4, FULL_TREE_DW_FORM_REF_SUP8, FULL_TREE_DW_FORM_GNU_REF_ALT)
 private val PHYSICAL_REFERENCE_FORMS = setOf(FULL_TREE_DW_FORM_REF_ADDR, FULL_TREE_DW_FORM_REF1, FULL_TREE_DW_FORM_REF2,
     FULL_TREE_DW_FORM_REF4, FULL_TREE_DW_FORM_REF8, FULL_TREE_DW_FORM_REF_UDATA) + PHYSICAL_UNSUPPORTED_REFERENCE_FORMS
 private val PHYSICAL_HEX = Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")

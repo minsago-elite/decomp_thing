@@ -206,30 +206,20 @@ internal class DwarfPhysicalUnitCensus(
     ))
 }
 
-internal class DwarfPhysicalReferenceCensus(
-    val attributeOrdinal: Int,
-    val attribute: Long,
-    val declaredForm: Long,
-    val resolvedForm: Long,
-    val indirectDepth: Int,
-    val rawOperand: ULong,
-    val targetLocator: String?,
-    private val unresolvedState: String? = null,
-) {
-    private var boundState: String? = null
-    private var cyclic = false
-    private var sealed = false
-    val state: String get() = boundState ?: throw IllegalStateException("physical reference has not been reconciled")
-    val reasons: List<String> get() = buildList {
-        if (state != "retained-target") add(state)
-        if (cyclic) add("reference-cycle")
-    }
-    internal fun bindTargets(locators: Set<String>) {
-        check(boundState == null) { "physical reference reconciliation repeats" }
-        boundState = unresolvedState ?: if (targetLocator in locators) "retained-target" else "missing-target"
-    }
-    internal fun markCycle() { check(boundState != null && !sealed); cyclic = true }
-    internal fun seal() { check(boundState != null && !sealed); sealed = true }
+/** Immutable row views. Production rows live in primitive blocks, not per-DIE object graphs. */
+internal interface DwarfPhysicalReferenceCensus {
+    val attributeOrdinal: Int
+    val attribute: Long
+    val declaredForm: Long
+    val resolvedForm: Long
+    val indirectDepth: Int
+    val rawOperand: ULong
+    val targetLocator: String?
+    val state: String
+    val reasons: List<String>
+    fun bindTargets(locators: Set<String>)
+    fun markCycle()
+    fun seal()
     fun toJson(): JsonObject = JsonObject(linkedMapOf(
         "attributeOrdinal" to JsonPrimitive(attributeOrdinal), "attribute" to JsonPrimitive(canonicalHex(attribute)),
         "declaredForm" to JsonPrimitive(canonicalHex(declaredForm)), "resolvedForm" to JsonPrimitive(canonicalHex(resolvedForm)),
@@ -239,21 +229,47 @@ internal class DwarfPhysicalReferenceCensus(
     ))
 }
 
-internal class DwarfPhysicalDieCensus(
-    val compilationUnitOffset: Long,
-    val offset: Long,
-    val endOffset: Long,
-    val tag: Long,
-    val depth: Int,
-    val parentOffset: Long?,
-    val hasChildren: Boolean,
-    references: List<DwarfPhysicalReferenceCensus> = emptyList(),
-) {
-    val locator: String = physicalDieLocator(compilationUnitOffset, offset)
-    val compilationUnitLocator: String = physicalUnitLocator(compilationUnitOffset)
-    val parentLocator: String? = parentOffset?.let { physicalDieLocator(compilationUnitOffset, it) }
-    val category: String = physicalCategory(tag)
-    val references: List<DwarfPhysicalReferenceCensus> = interfaceList(references)
+/** Standalone construction is retained for small fixtures and independently forged replay controls. */
+internal fun DwarfPhysicalReferenceCensus(attributeOrdinal: Int, attribute: Long, declaredForm: Long,
+    resolvedForm: Long, indirectDepth: Int, rawOperand: ULong, targetLocator: String?,
+    unresolvedState: String? = null): DwarfPhysicalReferenceCensus =
+    StandalonePhysicalReference(attributeOrdinal, attribute, declaredForm, resolvedForm, indirectDepth,
+        rawOperand, targetLocator, unresolvedState)
+
+private class StandalonePhysicalReference(
+    override val attributeOrdinal: Int, override val attribute: Long, override val declaredForm: Long,
+    override val resolvedForm: Long, override val indirectDepth: Int, override val rawOperand: ULong,
+    override val targetLocator: String?, private val unresolvedState: String?,
+) : DwarfPhysicalReferenceCensus {
+    private var boundState: String? = null
+    private var cyclic = false
+    private var sealed = false
+    override val state: String get() = boundState ?: throw IllegalStateException("physical reference has not been reconciled")
+    override val reasons: List<String> get() = buildList {
+        if (state != "retained-target") add(state)
+        if (cyclic) add("reference-cycle")
+    }
+    override fun bindTargets(locators: Set<String>) {
+        check(boundState == null) { "physical reference reconciliation repeats" }
+        boundState = unresolvedState ?: if (targetLocator in locators) "retained-target" else "missing-target"
+    }
+    override fun markCycle() { check(boundState != null && !sealed); cyclic = true }
+    override fun seal() { check(boundState != null && !sealed); sealed = true }
+}
+
+internal interface DwarfPhysicalDieCensus {
+    val compilationUnitOffset: Long
+    val offset: Long
+    val endOffset: Long
+    val tag: Long
+    val depth: Int
+    val parentOffset: Long?
+    val hasChildren: Boolean
+    val references: List<DwarfPhysicalReferenceCensus>
+    val locator: String get() = physicalDieLocator(compilationUnitOffset, offset)
+    val compilationUnitLocator: String get() = physicalUnitLocator(compilationUnitOffset)
+    val parentLocator: String? get() = parentOffset?.let { physicalDieLocator(compilationUnitOffset, it) }
+    val category: String get() = physicalCategory(tag)
     fun toJson(): JsonObject = JsonObject(linkedMapOf(
         "locator" to JsonPrimitive(locator), "compilationUnitLocator" to JsonPrimitive(compilationUnitLocator),
         "offset" to JsonPrimitive(canonicalHex(offset)), "endOffset" to JsonPrimitive(canonicalHex(endOffset)),
@@ -263,8 +279,21 @@ internal class DwarfPhysicalDieCensus(
     ))
 }
 
-private fun physicalUnitLocator(offset: Long): String = ".debug_info:cu=${canonicalHex(offset)}"
-private fun physicalDieLocator(unit: Long, offset: Long): String = "${physicalUnitLocator(unit)}:die=${canonicalHex(offset)}"
+internal fun DwarfPhysicalDieCensus(compilationUnitOffset: Long, offset: Long, endOffset: Long, tag: Long,
+    depth: Int, parentOffset: Long?, hasChildren: Boolean,
+    references: List<DwarfPhysicalReferenceCensus> = emptyList()): DwarfPhysicalDieCensus =
+    StandalonePhysicalDie(compilationUnitOffset, offset, endOffset, tag, depth, parentOffset, hasChildren, references)
+
+private class StandalonePhysicalDie(
+    override val compilationUnitOffset: Long, override val offset: Long, override val endOffset: Long,
+    override val tag: Long, override val depth: Int, override val parentOffset: Long?, override val hasChildren: Boolean,
+    references: List<DwarfPhysicalReferenceCensus>,
+) : DwarfPhysicalDieCensus {
+    override val references: List<DwarfPhysicalReferenceCensus> = interfaceList(references)
+}
+
+internal fun physicalUnitLocator(offset: Long): String = ".debug_info:cu=${canonicalHex(offset)}"
+internal fun physicalDieLocator(unit: Long, offset: Long): String = "${physicalUnitLocator(unit)}:die=${canonicalHex(offset)}"
 /** Closed reviewed DWARF tag categories; unknown/vendor tags remain in the complete raw universe. */
 internal fun physicalCategory(tag: Long): String = when (tag) {
     0x11L, 0x3cL, 0x41L -> "unit"
@@ -274,7 +303,7 @@ internal fun physicalCategory(tag: Long): String = when (tag) {
     0x05L, 0x18L -> "parameter"
     0x0dL, 0x1cL, 0x28L -> "type-child"
     0x0bL, 0x39L -> "scope"
-    0x03L, 0x08L, 0x0aL, 0x19L, 0x1aL, 0x1eL, 0x22L, 0x23L, 0x25L, 0x27L,
+    0x03L, 0x08L, 0x0aL, 0x19L, 0x1aL, 0x1bL, 0x1eL, 0x22L, 0x23L, 0x25L, 0x27L,
     0x2aL, 0x2bL, 0x2cL, 0x2fL, 0x30L, 0x31L, 0x32L, 0x33L, 0x34L, 0x36L,
     0x3aL, 0x3dL, 0x3eL, 0x3fL, 0x43L, 0x48L, 0x49L, 0x4aL -> "other-known"
     else -> "unknown"
@@ -304,7 +333,8 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
     val physicalCensusPresent: Boolean = false,
 ) {
     val physicalUnits: List<DwarfPhysicalUnitCensus> = interfaceList(physicalUnits)
-    val physicalDies: List<DwarfPhysicalDieCensus> = interfaceList(physicalDies)
+    val physicalDies: List<DwarfPhysicalDieCensus> =
+        if (physicalDies is CompactPhysicalDieList) physicalDies else interfaceList(physicalDies)
     val executableRanges: List<FullTreeElfExecutableRange> = interfaceList(executableRanges)
     val functions: List<DwarfInterfaceFunctionFacts> = interfaceList(functions)
     val types: Map<String, DwarfInterfaceTypeNode> = Collections.unmodifiableMap(LinkedHashMap(types))
@@ -341,10 +371,11 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         "loadedUnitBytes" to JsonPrimitive(loadedUnitBytes),
         "peakRetainedUnitBytes" to JsonPrimitive(peakRetainedUnitBytes),
         "modeledRetainedFactBytes" to JsonPrimitive(modeledRetainedFactBytes),
-        "retainedFactAccounting" to JsonPrimitive("fixed-record-and-container-allowances-plus-utf16-string-payload;not-rss"),
+        "retainedFactAccounting" to JsonPrimitive("charged-primitive-census-block-capacity-and-traversal-arrays;other-facts-fixed-allowances-plus-utf16;not-rss"),
     ))
     fun physicalCensusJson(): JsonObject = JsonObject(linkedMapOf(
-        "schema" to JsonPrimitive("bounded-physical-die-census-v1"), "present" to JsonPrimitive(physicalCensusPresent),
+        "schema" to JsonPrimitive(DwarfPhysicalDieRowEncoding.CENSUS_SCHEMA), "present" to JsonPrimitive(physicalCensusPresent),
+        "recordEncoding" to JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME),
         "complete" to JsonPrimitive(physicalCensusPresent), "scope" to JsonPrimitive("all-non-null-physical-debug-info-DIEs"),
         "compilationUnitCount" to JsonPrimitive(physicalUnits.size), "physicalRecordCount" to JsonPrimitive(physicalUnits.sumOf { it.physicalRecordCount }),
         "nullRecordCount" to JsonPrimitive(physicalUnits.sumOf { it.nullRecordCount }),
@@ -352,7 +383,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         "semanticPopulationComplete" to JsonPrimitive(false),
         "verificationBoundary" to JsonPrimitive("authenticated-input-scan-replay-required;bundle-hashes-alone-are-not-coverage-proof"),
     ))
-    /** Small-fixture convenience. Production publication uses visitCanonicalShards. */
+    /** Expanded semantic fixture/debug view, not the row-encoded wire. Publication uses visitCanonicalShards. */
     fun toJson(): JsonObject = JsonObject(metadataJson() + linkedMapOf(
         "functions" to JsonArray(functions.map { it.toJson() }),
         "types" to JsonArray(types.values.map { it.toJson() }),
@@ -398,7 +429,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         consumer("globals", globals.asSequence().map { it.toJson() })
         consumer("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
         consumer("physicalUnits", physicalUnits.asSequence().map { it.toJson() })
-        consumer("physicalDies", physicalDies.asSequence().map { it.toJson() })
+        consumer("physicalDies", physicalDies.asSequence().map(DwarfPhysicalDieRowEncoding::encode))
     }
 
     /** Project the header directly: inline child JSON can itself exceed a shard's node bound. */
@@ -438,7 +469,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
 
 /** Program-neutral source interface facts, independent of recovered models and ABI scoring. */
 internal object BoundedDwarfInterfaceFactScanner {
-    const val PRODUCER = "bounded-dwarf-interface-facts-v3"
+    const val PRODUCER = "bounded-dwarf-interface-facts-v4"
 
     /** Replays every physical record from the held authenticated input without retaining a second census. */
     fun verifyPhysicalCensus(
@@ -542,7 +573,7 @@ internal object BoundedDwarfInterfaceFactScanner {
         val functions = ArrayList<DwarfInterfaceFunctionFacts>()
         val globals = ArrayList<DwarfGlobalVariableFacts>()
         val physicalUnits = ArrayList<DwarfPhysicalUnitCensus>()
-        val physicalDies = ArrayList<DwarfPhysicalDieCensus>()
+        val physicalCensus = CompactDwarfPhysicalCensus(budget, limits.maximumScannedDies.toInt(), limits.maximumTypeTraversalSteps)
         var physicalReferences = 0L
         var loadedUnitBytes = 0L
         var peakRetainedUnitBytes = 0L
@@ -588,9 +619,8 @@ internal object BoundedDwarfInterfaceFactScanner {
                         index.nullRecordCount, index.recordsInPhysicalOrder.size.toLong())
                     for (record in index.recordsInPhysicalOrder) {
                         parseBudget.consume("physical DIE census")
-                        // Charge fixed record/list/index allowances before constructing or retaining census facts.
-                        budget.charge(1024L, "physical DIE census")
-                        val references = ArrayList<DwarfPhysicalReferenceCensus>()
+                        physicalCensus.appendDie(header.offset, record.offset, record.endOffset, record.tag,
+                            record.depth, record.parentOffset, record.hasChildren)
                         for ((ordinal, attribute) in record.attributes.withIndex()) {
                             val raw = attribute.value
                             if (raw !is FullTreeDwarfReferenceValue && raw !is FullTreeDwarfUnsupportedReferenceValue) continue
@@ -599,18 +629,14 @@ internal object BoundedDwarfInterfaceFactScanner {
                                 throw FullTreeControlException("physical DIE census exceeds traversal-work bound: references")
                             }
                             physicalReferences++
-                            budget.charge(768L, "physical DIE reference census")
                             val value = raw as FullTreeDwarfUnsignedFormValue
                             val targetOffset = physicalReferenceOffset(raw, header, info.size)
                             val targetHeader = targetOffset?.let { offset -> physicalHeaderContaining(headers, offset, parseBudget) }
-                            val target = targetHeader?.let { physicalDieLocator(it.offset, targetOffset!!) }
-                            references += DwarfPhysicalReferenceCensus(ordinal, attribute.name, attribute.declaredForm,
-                                value.resolvedForm, value.indirectDepth, value.rawValue, target,
+                            physicalCensus.appendReference(ordinal, attribute.name, attribute.declaredForm,
+                                value.resolvedForm, value.indirectDepth, value.rawValue, targetHeader?.offset, targetOffset,
                                 if (raw is FullTreeDwarfUnsupportedReferenceValue) "unsupported-reference"
-                                else if (target == null) "out-of-range-reference" else null)
+                                else if (targetHeader == null) "out-of-range-reference" else null)
                         }
-                        physicalDies += DwarfPhysicalDieCensus(header.offset, record.offset, record.endOffset, record.tag,
-                            record.depth, record.parentOffset, record.hasChildren, references)
                         if (record.tag == GLOBAL_VARIABLE_TAG) {
                             if (globals.size >= limits.maximumGlobals) throw FullTreeControlException("interface scan exceeds global candidate bound")
                             globals += repository.withRetainedUnits(owner) {
@@ -627,7 +653,7 @@ internal object BoundedDwarfInterfaceFactScanner {
                         }
                     }
                 }
-                reconcilePhysicalReferences(physicalDies, budget, limits, parseBudget)
+                physicalCensus.reconcile(limits, parseBudget)
                 types = resolver.nodes()
                 loadedUnitBytes = repository.loadedUnitBytes
                 peakRetainedUnitBytes = repository.peakRetainedUnitBytes
@@ -638,7 +664,7 @@ internal object BoundedDwarfInterfaceFactScanner {
             layout.executableRanges, functions.sortedWith(compareBy<DwarfInterfaceFunctionFacts> { it.absoluteAddress }
                 .thenBy { it.locator }), types, scannedDies, compilationUnits, dwarfPresent, limits, controlLimits,
             globals, objects, layout, loadedUnitBytes, peakRetainedUnitBytes, budget.chargedBytes,
-            physicalUnits, physicalDies, physicalCensusPresent = true).also {
+            physicalUnits, physicalCensus.sealedDies(), physicalCensusPresent = true).also {
             // Enforce per-shard and aggregate bounds without materializing a monolithic document.
             it.visitCanonicalShards { _, _, _, _ -> }
         }
@@ -646,18 +672,18 @@ internal object BoundedDwarfInterfaceFactScanner {
 }
 
 /** A prior source replay matches this ordered universe exactly; binary membership retains no second index. */
-private fun physicalTarget(dies: List<DwarfPhysicalDieCensus>, locator: String?, parseBudget: FullTreeDwarfParseBudget): DwarfPhysicalDieCensus? {
-    if (locator == null) return null
-    val offset = locator.substringAfterLast(":die=0x", "").toLongOrNull(16) ?: return null
+private fun physicalTargetIndex(dies: List<DwarfPhysicalDieCensus>, locator: String?, parseBudget: FullTreeDwarfParseBudget): Int {
+    if (locator == null) return -1
+    val offset = locator.substringAfterLast(":die=0x", "").toLongOrNull(16) ?: return -1
     var low = 0; var high = dies.lastIndex
     while (low <= high) {
         parseBudget.consume("physical replay target lookup")
         val middle = low + (high - low) / 2
         val die = dies[middle]
         when { offset < die.offset -> high = middle - 1; offset > die.offset -> low = middle + 1
-            else -> return die.takeIf { it.locator == locator } }
+            else -> return if (die.locator == locator) middle else -1 }
     }
-    return null
+    return -1
 }
 
 /** Reuses the scanner's charged compact traversal allowance, never retaining another DIE population. */
@@ -666,32 +692,31 @@ private fun verifyPhysicalReferenceClassifications(dies: List<DwarfPhysicalDieCe
     for (die in dies) for (reference in die.references) {
         parseBudget.consume("physical replay reference availability")
         val expected = when {
-            reference.resolvedForm in setOf(FULL_TREE_DW_FORM_REF_SUP4, FULL_TREE_DW_FORM_REF_SUP8, FULL_TREE_DW_FORM_REF_SIG8) -> "unsupported-reference"
+            reference.resolvedForm in setOf(FULL_TREE_DW_FORM_REF_SUP4, FULL_TREE_DW_FORM_REF_SUP8, FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_GNU_REF_ALT) -> "unsupported-reference"
             reference.targetLocator == null -> "out-of-range-reference"
-            physicalTarget(dies, reference.targetLocator, parseBudget) != null -> "retained-target"
+            physicalTargetIndex(dies, reference.targetLocator, parseBudget) >= 0 -> "retained-target"
             else -> "missing-target"
         }
         require(reference.state == expected) { "physical census reference state differs from source replay" }
     }
-    data class Frame(val die: DwarfPhysicalDieCensus, var next: Int = 0)
-    val colors = HashMap<String, Int>()
-    val stack = ArrayDeque<Frame>()
+    require(dies.size.toLong() <= limits.maximumScannedDies) { "physical replay census exceeds DIE bound" }
+    val colors = ByteArray(dies.size)
+    val stackDies = IntArray(dies.size)
+    val stackNext = IntArray(dies.size)
     var steps = 0L
-    for (root in dies) {
-        if (root.locator in colors) continue
-        colors[root.locator] = 1; stack += Frame(root)
-        while (stack.isNotEmpty()) {
+    for (root in dies.indices) {
+        if (colors[root].toInt() != 0) continue
+        var size = 1; stackDies[0] = root; stackNext[0] = 0; colors[root] = 1
+        while (size > 0) {
             parseBudget.consume("physical replay reference cycles")
             if (++steps > limits.maximumTypeTraversalSteps) throw FullTreeControlException("physical replay exceeds traversal-work bound")
-            val frame = stack.last()
-            if (frame.next == frame.die.references.size) {
-                colors[frame.die.locator] = 2; stack.removeLast(); continue
-            }
-            val reference = frame.die.references[frame.next++]
-            val target = if (reference.state == "retained-target") physicalTarget(dies, reference.targetLocator, parseBudget) else null
-            val backEdge = target != null && colors[target.locator] == 1
+            val position = size - 1; val die = dies[stackDies[position]]
+            if (stackNext[position] == die.references.size) { colors[stackDies[position]] = 2; size--; continue }
+            val reference = die.references[stackNext[position]++]
+            val target = if (reference.state == "retained-target") physicalTargetIndex(dies, reference.targetLocator, parseBudget) else -1
+            val backEdge = target >= 0 && colors[target].toInt() == 1
             require(("reference-cycle" in reference.reasons) == backEdge) { "physical census reference cycle differs from source replay" }
-            if (target != null && colors[target.locator] == null) { colors[target.locator] = 1; stack += Frame(target) }
+            if (target >= 0 && colors[target].toInt() == 0) { stackDies[size] = target; stackNext[size] = 0; size++; colors[target] = 1 }
         }
     }
 }
@@ -715,46 +740,6 @@ private fun physicalHeaderContaining(headers: List<FullTreeDwarfCompilationUnitH
         when { offset < header.firstDieOffset -> high = middle - 1; offset >= header.endOffset -> low = middle + 1; else -> return header }
     }
     return null
-}
-
-/** One bounded census index, never a materialized semantic type graph. Back edges stay unresolved. */
-private fun reconcilePhysicalReferences(dies: List<DwarfPhysicalDieCensus>, budget: DwarfInterfaceFactBudget,
-    limits: BoundedDwarfInterfaceFactLimits, parseBudget: FullTreeDwarfParseBudget) {
-    budget.charge(Math.multiplyExact(dies.size.toLong(), 192L), "physical census reconciliation index")
-    val byLocator = HashMap<String, DwarfPhysicalDieCensus>()
-    for (die in dies) {
-        parseBudget.consume("physical census identities")
-        check(byLocator.put(die.locator, die) == null) { "physical DIE census repeats a locator" }
-    }
-    for (die in dies) for (reference in die.references) {
-        parseBudget.consume("physical census target reconciliation")
-        reference.bindTargets(byLocator.keys)
-    }
-    data class Frame(val die: DwarfPhysicalDieCensus, var next: Int = 0)
-    val colors = HashMap<String, Int>()
-    val stack = ArrayDeque<Frame>()
-    var steps = 0L
-    for (root in dies) {
-        if (root.locator in colors) continue
-        colors[root.locator] = 1; stack += Frame(root)
-        while (stack.isNotEmpty()) {
-            parseBudget.consume("physical census reference cycles")
-            if (++steps > limits.maximumTypeTraversalSteps) throw FullTreeControlException("physical census cycle scan exceeds traversal-work bound")
-            val frame = stack.last()
-            if (frame.next == frame.die.references.size) {
-                colors[frame.die.locator] = 2; stack.removeLast(); continue
-            }
-            val reference = frame.die.references[frame.next++]
-            if (reference.state != "retained-target") continue
-            val target = byLocator.getValue(reference.targetLocator!!)
-            when (colors[target.locator]) {
-                1 -> reference.markCycle()
-                2 -> Unit
-                else -> { colors[target.locator] = 1; stack += Frame(target) }
-            }
-        }
-    }
-    for (die in dies) for (reference in die.references) reference.seal()
 }
 
 /** Modeled retained facts, separate from exact encoded shard bytes and the JVM heap limit. */

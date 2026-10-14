@@ -13,6 +13,50 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceFactsTest {
     @Test
+    fun `GNU alternate references remain external and common inclusion is a known physical tag`() =
+        inInterfaceFixtureDirectory { root ->
+            fun fixture(indirectOperand: Long) = typeElf(
+                die("declaration", DW_TAG_SUBPROGRAM, listOf(flag(DW_AT_DECLARATION)), children = listOf(
+                    die("inclusion", 0x1b, listOf(reference(0x1a, "block"))))),
+                die("block", 0x1a),
+                die("vendor", 0x4080, listOf(
+                    TypeGraphAttribute(0x49, FULL_TREE_DW_FORM_GNU_REF_ALT, ByteArray(4), "block"),
+                    raw(0x47, FULL_TREE_DW_FORM_INDIRECT, uleb(FULL_TREE_DW_FORM_GNU_REF_ALT) + fixed(indirectOperand, 4)),
+                    number(0x3f, 1))),
+            )
+            val baseline = fixture(0)
+            val fixture = fixture(baseline.offsets.getValue("block").toLong())
+            val artifact = writeElf(root.resolve("alternate-common.elf"), fixture.bytes)
+            val facts = scanInterfaceFixture(artifact, root)
+            val vendor = facts.physicalDies.single { it.locator == fixture.locator("vendor") }
+            assertEquals("unknown", vendor.category)
+            assertEquals(listOf(FULL_TREE_DW_FORM_GNU_REF_ALT, FULL_TREE_DW_FORM_INDIRECT), vendor.references.map { it.declaredForm })
+            assertEquals(listOf(0, 1), vendor.references.map { it.indirectDepth })
+            for (ref in vendor.references) {
+                assertEquals(FULL_TREE_DW_FORM_GNU_REF_ALT, ref.resolvedForm)
+                assertEquals(fixture.offsets.getValue("block").toULong(), ref.rawOperand)
+                assertEquals(null, ref.targetLocator)
+                assertEquals("unsupported-reference", ref.state)
+                assertEquals(listOf("unsupported-reference"), ref.reasons)
+            }
+            val inclusion = facts.physicalDies.single { it.locator == fixture.locator("inclusion") }
+            assertEquals("other-known", inclusion.category)
+            assertEquals(fixture.locator("declaration"), inclusion.parentLocator)
+            assertEquals(fixture.locator("block"), inclusion.references.single().targetLocator)
+            StableControlFile.open(artifact, Files.size(artifact), "alternate reference replay").use {
+                BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(it, root, facts)
+            }
+            val inventory = BoundedDwarfObservationInventoryV1.collect(facts, emptyList(), null, inputs = listOf(
+                BoundedDwarfObservationInput("rich", facts.inputSha256, facts.inputBytes)))
+            val verifier = BoundedDwarfObservationInventoryV1.authenticatedVerifier(inventory.manifest, facts)
+            verifier.acceptStrippedLayout(null)
+            facts.visitCanonicalShards(verifier::accept)
+            BoundedDwarfCanonicalShardWriter(consumer = verifier::accept).apply { write("strippedObjects", emptySequence()); finish() }
+            inventory.visitCanonicalShards(verifier::accept)
+            verifier.finish()
+        }
+
+    @Test
     fun `source replay target lookups share the aggregate parse work budget`() =
         inInterfaceFixtureDirectory { root ->
             val declarations = (0 until 32).map { index ->
@@ -88,7 +132,7 @@ class BoundedDwarfInterfaceFactsTest {
                 val forgedReference = DwarfPhysicalReferenceCensus(realReference.attributeOrdinal, realReference.attribute,
                     realReference.declaredForm, realReference.resolvedForm, realReference.indirectDepth, realReference.rawOperand,
                     realReference.targetLocator, "missing-target").also { it.bindTargets(census.keys) }
-                val forgedState = facts.physicalDies.map { if (it === realDeclaration)
+                val forgedState = facts.physicalDies.map { if (it.locator == realDeclaration.locator)
                     DwarfPhysicalDieCensus(it.compilationUnitOffset, it.offset, it.endOffset, it.tag, it.depth, it.parentOffset,
                         it.hasChildren, listOf(forgedReference)) else it }
                 assertFailsWith<IllegalArgumentException> {
@@ -97,7 +141,7 @@ class BoundedDwarfInterfaceFactsTest {
                 val forgedCycleReference = DwarfPhysicalReferenceCensus(realReference.attributeOrdinal, realReference.attribute,
                     realReference.declaredForm, realReference.resolvedForm, realReference.indirectDepth, realReference.rawOperand,
                     realReference.targetLocator).also { it.bindTargets(census.keys); it.markCycle() }
-                val forgedCycle = facts.physicalDies.map { if (it === realDeclaration)
+                val forgedCycle = facts.physicalDies.map { if (it.locator == realDeclaration.locator)
                     DwarfPhysicalDieCensus(it.compilationUnitOffset, it.offset, it.endOffset, it.tag, it.depth, it.parentOffset,
                         it.hasChildren, listOf(forgedCycleReference)) else it }
                 assertFailsWith<IllegalArgumentException> {

@@ -24,7 +24,7 @@ class BoundedDwarfCanonicalShardsTest {
             physicalUnits = listOf(unit), physicalDies = dies, physicalCensusPresent = true)
         val parts = collectTypeShards(facts)
         assertEquals(listOf(unit.toJson()), parts.filter { it.first.kind == "physicalUnits" }.flatMap { it.first.records })
-        assertEquals(dies.map { it.toJson() }, parts.filter { it.first.kind == "physicalDies" }.flatMap { it.first.records })
+        assertEquals(dies.map { it.toJson() }, parts.filter { it.first.kind == "physicalDies" }.flatMap { it.first.records }.map { DwarfPhysicalDieRowEncoding.decode(it).toJson() })
         assertTrue(parts.filter { it.first.kind in setOf("functions", "types", "typeChildren") }.all { it.first.records.isEmpty() })
         val encoded = parts.single { it.first.kind == "physicalDies" }.second
         assertFailsWith<IllegalArgumentException> {

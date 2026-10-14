@@ -149,7 +149,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
             GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to changedPart) + parts.drop(1))
         }
         val document = OracleJson.parseCanonical(first.canonicalBytes(), GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject
-        assertEquals(JsonPrimitive(4), document.getValue("schemaVersion"))
+        assertEquals(JsonPrimitive(5), document.getValue("schemaVersion"))
         listOf("complete", "scored", "productionVerified", "releaseEligible").forEach {
             assertEquals(JsonPrimitive(false), document.getValue(it), it)
         }
@@ -195,7 +195,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
         OracleArtifacts.publishAtomically(destination.resolve(GccDriverDwarfInterfaceEvidence.EVIDENCE_NAME), first.canonicalBytes(),
             OracleArtifactLimits(GccDriverDwarfInterfaceEvidence.MAXIMUM_EVIDENCE_BYTES))
         val qualification = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v4"),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v5"),
             "prePolicyInventorySha256" to inventory.getValue("inventorySha256"),
             "evidenceSha256" to JsonPrimitive(first.sha256), "evidenceBytes" to JsonPrimitive(first.canonicalBytes().size),
             "deterministicRepeat" to JsonPrimitive(true), "deterministicBundleParts" to JsonPrimitive(first.partNames.size), "tamperChecks" to JsonArray(tamperResults.map(::JsonPrimitive)),
@@ -226,8 +226,8 @@ class GccDriverDwarfInterfaceEvidenceTest {
             emptyList(), emptyList(), emptyMap(), 0L, 0, true, BoundedDwarfInterfaceFactLimits())
         val inventory = BoundedDwarfObservationInventoryV1.collect(facts, emptyList(), null,
             listOf(BoundedDwarfObservationInput("rich", facts.inputSha256, facts.inputBytes)))
-        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(4),
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v4"),
+        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(5),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v5"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
             "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "prePolicyInventory" to inventory.manifest, "strippedObjectLayout" to JsonNull))
