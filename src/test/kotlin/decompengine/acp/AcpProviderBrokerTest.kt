@@ -20,6 +20,174 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class AcpProviderBrokerTest {
     @Test
+    fun `quoted parallel tool call flag is refused before backend dispatch`() {
+        assertOptionalRefused("\"parallel_tool_calls\":\"false\"")
+    }
+
+    @Test
+    fun `supported optional scalar and text shapes preserve admitted wire values`() {
+        val accepted = listOf(
+            "\"instructions\":\"\"", "\"instructions\":" + requestString("i".repeat(4096), 0),
+            "\"prompt_cache_key\":\"\"", "\"prompt_cache_key\":" + requestString("c".repeat(128), 0),
+            "\"safety_identifier\":\"\"", "\"safety_identifier\":" + requestString("s".repeat(128), 0),
+            "\"parallel_tool_calls\":false", "\"parallel_tool_calls\":true", "\"truncation\":\"disabled\"",
+            "\"include\":[]", "\"include\":[\"reasoning.encrypted_content\"]", "\"metadata\":{}",
+            "\"service_tier\":\"auto\"", "\"text\":{}", "\"text\":{\"verbosity\":\"medium\"}",
+            "\"text\":{\"format\":{\"type\":\"text\"}}", "\"text\":{\"verbosity\":\"medium\",\"format\":{\"type\":\"text\"}}",
+            "\"tools\":[]", "\"tool_choice\":\"auto\"", "\"tool_choice\":\"none\"",
+            "\"metadata\":{" + (0 until 16).joinToString(",") { "\"key$it\":\"value\"" } + "}",
+            "\"metadata\":{" + requestString("k".repeat(64), 0) + ":" + requestString("v".repeat(512), 0) + "}",
+        )
+        accepted.forEach(::assertOptionalAccepted)
+        for (summary in listOf("auto", "concise", "detailed")) {
+            assertOptionalAccepted("\"reasoning\":{\"effort\":\"low\",\"summary\":\"$summary\"}")
+        }
+        assertOptionalAccepted(""""instructions":"fixture instructions","prompt_cache_key":"cache","safety_identifier":"safety","parallel_tool_calls":false,"truncation":"disabled","include":["reasoning.encrypted_content"],"metadata":{"fixture":"safe"},"service_tier":"auto","text":{"verbosity":"medium","format":{"type":"text"}},"tools":[${functionTool()}],"tool_choice":{"type":"function","name":"fixture"}""")
+    }
+
+    @Test
+    fun `optional field type confusion and unsupported modes are refused before dispatch`() {
+        val invalid = mutableListOf<String>()
+        for (field in listOf("instructions", "prompt_cache_key", "safety_identifier", "service_tier", "truncation")) {
+            for (value in listOf("null", "false", "0", "[]", "{}")) invalid += "\"$field\":$value"
+        }
+        for (value in listOf("null", "\"false\"", "0", "[]", "{}")) invalid += "\"parallel_tool_calls\":$value"
+        for (value in listOf("null", "\"reasoning.encrypted_content\"", "{}", "false", "[null]", "[1]", "[{}]", "[\"unknown\"]", "[\"reasoning.encrypted_content\",\"reasoning.encrypted_content\"]")) invalid += "\"include\":$value"
+        for (value in listOf("null", "[]", "\"text\"", "false", "{\"verbosity\":null}", "{\"verbosity\":1}", "{\"verbosity\":\"high\"}", "{\"format\":null}", "{\"format\":\"text\"}", "{\"format\":{\"type\":1}}", "{\"format\":{\"type\":\"json_object\"}}", "{\"format\":{\"type\":\"text\",\"extra\":true}}", "{\"unknown\":false}")) invalid += "\"text\":$value"
+        for (value in listOf("null", "[]", "true", "\"low\"", "{\"effort\":\"low\",\"summary\":null}", "{\"effort\":\"low\",\"summary\":false}", "{\"effort\":\"low\",\"summary\":\"unknown\"}", "{\"effort\":\"low\",\"unknown\":true}")) invalid += "\"reasoning\":$value"
+        invalid += listOf("\"truncation\":\"auto\"", "\"service_tier\":\"priority\"", "\"unknown\":true")
+        invalid.forEach(::assertOptionalRefused)
+    }
+
+    @Test
+    fun `optional string and metadata bounds are enforced before dispatch`() {
+        listOf(
+            "\"instructions\":" + requestString("i".repeat(4097), 0),
+            "\"prompt_cache_key\":" + requestString("c".repeat(129), 0),
+            "\"safety_identifier\":" + requestString("s".repeat(129), 0),
+            "\"metadata\":null", "\"metadata\":[]", "\"metadata\":false", "\"metadata\":\"value\"",
+            "\"metadata\":{\"\":\"value\"}", "\"metadata\":{\"key\":null}", "\"metadata\":{\"key\":false}",
+            "\"metadata\":{\"key\":0}", "\"metadata\":{\"key\":[]}", "\"metadata\":{\"key\":{}}",
+            "\"metadata\":{" + requestString("k".repeat(65), 0) + ":\"value\"}",
+            "\"metadata\":{\"key\":" + requestString("v".repeat(513), 0) + "}",
+            "\"metadata\":{" + (0 until 17).joinToString(",") { "\"key$it\":\"value\"" } + "}",
+        ).forEach(::assertOptionalRefused)
+    }
+
+    @Test
+    fun `closed function tools and choices preserve bounded primitive schemas`() {
+        val property = """{"type":"string","description":"fixture","enum":["one","two"]}"""
+        val properties = """{"text":$property,"number":{"type":"number"},"integer":{"type":"integer"},"flag":{"type":"boolean"}}"""
+        val schema = parameterSchema(properties, "[\"text\",\"number\",\"integer\",\"flag\"]")
+        for (strict in listOf("", ",\"strict\":false", ",\"strict\":true")) {
+            val tool = functionTool(schema = schema, suffix = strict + ",\"description\":" + requestString("d".repeat(1024), 0))
+            for (choice in listOf("\"auto\"", "\"none\"", "\"required\"", "{\"type\":\"function\",\"name\":\"fixture\"}")) {
+                assertOptionalAccepted("\"tools\":[$tool],\"tool_choice\":$choice")
+            }
+        }
+        assertOptionalAccepted("\"tools\":[${functionTool()}]")
+        assertOptionalAccepted("\"tools\":[${functionTool(schema = parameterSchema(properties))}]")
+        assertOptionalAccepted("\"tools\":[" + (0 until 16).joinToString(",") { functionTool(name = "tool_$it") } + "]")
+        assertOptionalAccepted("\"tools\":[${functionTool(name = "n".repeat(64))}]")
+        val boundedProperties = "{" + (0 until 32).joinToString(",") { "\"p$it\":{\"type\":\"boolean\"}" } + "}"
+        assertOptionalAccepted("\"tools\":[${functionTool(schema = parameterSchema(boundedProperties))}]")
+        val enum = (0 until 16).joinToString(",", "[", "]") { requestString("e".repeat(126) + "%02d".format(it), 0) }
+        val boundedProperty = "{" + requestString("p".repeat(64), 0) + ":{\"type\":\"string\",\"description\":" + requestString("d".repeat(1024), 0) + ",\"enum\":$enum}}"
+        assertOptionalAccepted("\"tools\":[${functionTool(schema = parameterSchema(boundedProperty))}]")
+    }
+
+    @Test
+    fun `unsupported function tool and choice shapes are refused before dispatch`() {
+        val invalid = mutableListOf("\"tools\":null", "\"tools\":{}", "\"tools\":false", "\"tools\":\"function\"", "\"tools\":[null]", "\"tools\":[false]", "\"tools\":[[]]", "\"tools\":[{}]", "\"tools\":[{\"type\":\"function\"}]")
+        for (tool in listOf(
+            functionTool().replace("\"function\"", "\"custom\""), functionTool().replace("\"function\"", "null"),
+            functionTool(name = ""), functionTool(name = "invalid name"), functionTool(name = "n".repeat(65)),
+            functionTool().replace("\"fixture\"", "0"), functionTool().replace("\"fixture\"", "null"),
+            functionTool(suffix = ",\"strict\":\"false\""), functionTool(suffix = ",\"strict\":null"),
+            functionTool(suffix = ",\"description\":null"), functionTool(suffix = ",\"description\":[]"),
+            functionTool(suffix = ",\"description\":" + requestString("d".repeat(1025), 0)),
+            functionTool(suffix = ",\"defer_loading\":false"), functionTool(suffix = ",\"unknown\":true"),
+        )) invalid += "\"tools\":[$tool]"
+        for (key in listOf("type", "name", "parameters")) {
+            val tool = kotlinx.serialization.json.JsonObject(Json.parseToJsonElement(functionTool()).jsonObject - key)
+            invalid += "\"tools\":[$tool]"
+        }
+        for (key in listOf("type", "properties", "required", "additionalProperties")) {
+            val schema = kotlinx.serialization.json.JsonObject(Json.parseToJsonElement(parameterSchema()).jsonObject - key)
+            invalid += "\"tools\":[${functionTool(schema = schema.toString())}]"
+        }
+        for (schema in listOf(
+            "null", "[]", "{}", "\"schema\"", parameterSchema().dropLast(1) + ",\"\$ref\":\"fixture\"}",
+            parameterSchema().replace("\"object\"", "[\"object\"]"), parameterSchema().replace("\"object\"", "\"array\""),
+            parameterSchema().replace("false", "true"), parameterSchema().replace("false", "\"false\""),
+            parameterSchema(properties = "[]"), parameterSchema(required = "null"), parameterSchema(required = "{}"),
+            parameterSchema(required = "[null]"), parameterSchema(required = "[\"missing\"]"),
+            parameterSchema("{\"p\":{\"type\":\"string\"}}", "[\"p\",\"p\"]"),
+            parameterSchema("{" + (0 until 33).joinToString(",") { "\"p$it\":{\"type\":\"boolean\"}" } + "}"),
+            parameterSchema("{" + requestString("p".repeat(65), 0) + ":{\"type\":\"string\"}}"),
+            parameterSchema("{\"bad name\":{\"type\":\"string\"}}"),
+        )) invalid += "\"tools\":[${functionTool(schema = schema)}]"
+        for (property in listOf(
+            "null", "[]", "\"string\"", "{}", "{\"type\":null}", "{\"type\":[\"string\"]}",
+            "{\"type\":\"object\"}", "{\"type\":\"array\"}", "{\"type\":\"string\",\"unknown\":false}",
+            "{\"type\":\"string\",\"description\":null}", "{\"type\":\"string\",\"description\":" + requestString("d".repeat(1025), 0) + "}",
+            "{\"type\":\"string\",\"enum\":null}", "{\"type\":\"string\",\"enum\":{}}", "{\"type\":\"string\",\"enum\":[]}",
+            "{\"type\":\"string\",\"enum\":[null]}", "{\"type\":\"string\",\"enum\":[0]}", "{\"type\":\"string\",\"enum\":[\"same\",\"same\"]}",
+            "{\"type\":\"number\",\"enum\":[\"one\"]}", "{\"type\":\"string\",\"enum\":[" + requestString("e".repeat(129), 0) + "]}",
+            "{\"type\":\"string\",\"enum\":[" + (0 until 17).joinToString(",") { "\"e$it\"" } + "]}",
+        )) invalid += "\"tools\":[${functionTool(schema = parameterSchema("{\"p\":$property}"))}]"
+        invalid += "\"tools\":[${functionTool(schema = parameterSchema("{\"p\":{\"type\":\"string\"}}"), suffix = ",\"strict\":true")}]"
+        invalid += "\"tools\":[${functionTool()},${functionTool()}]"
+        invalid += "\"tools\":[" + (0 until 17).joinToString(",") { functionTool(name = "tool_$it") } + "]"
+        for (choice in listOf("null", "false", "0", "[]", "\"unsupported\"", "\"required\"", "{}", "{\"type\":\"function\",\"name\":\"fixture\"}")) invalid += "\"tool_choice\":$choice"
+        for (choice in listOf("{\"type\":\"function\"}", "{\"type\":\"function\",\"name\":null}", "{\"type\":\"function\",\"name\":\"other\"}", "{\"type\":\"custom\",\"name\":\"fixture\"}", "{\"type\":\"function\",\"name\":\"fixture\",\"extra\":true}")) invalid += "\"tools\":[${functionTool()}],\"tool_choice\":$choice"
+        invalid.forEach(::assertOptionalRefused)
+    }
+
+    @Test
+    fun `optional request documents retain strict duplicate depth token and byte admission`() {
+        val base = body().decodeToString().dropLast(1)
+        val malformed = listOf(
+            "$base,\"parallel_tool_calls\":true,\"parallel_tool_calls\":false}",
+            "$base,\"metadata\":" + "[".repeat(65) + "0" + "]".repeat(65) + "}",
+            "$base,\"metadata\":[" + List(100_001) { "0" }.joinToString(",") + "]}",
+            "$base,\"metadata\":{\"number\":" + "1".repeat(129) + "}}",
+        )
+        for (request in malformed) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                assertKind(AcpProviderTerminalKind.MALFORMED_REQUEST) { broker.beginRequest(1, capability(broker), request.toByteArray()) }
+                assertEquals(0, backend.starts)
+                assertNull(backend.lastRequest)
+                assertTrue(broker.snapshot().requests.isEmpty())
+            } finally { broker.close() }
+        }
+        val request = optionalRequest("\"instructions\":\"byte bound fixture\"")
+        val wire = kotlinx.serialization.json.JsonObject(Json.parseToJsonElement(request.decodeToString()).jsonObject +
+            ("max_output_tokens" to kotlinx.serialization.json.JsonPrimitive(32))).toString().toByteArray()
+        for (byteLimit in listOf(wire.size, request.size - 1)) {
+            val backend = FixtureBackend()
+            val broker = open(backend, policy = policy(AcpProviderTransportBounds(maximumRequestBytes = byteLimit)), outputTokens = 32)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                if (byteLimit == wire.size) {
+                    val exchange = broker.beginRequest(1, capability(broker), request)
+                    assertContentEquals(wire, backend.lastRequest!!.body)
+                    backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                    assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+                    assertEquals(1, backend.starts)
+                } else {
+                    assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { broker.beginRequest(1, capability(broker), request) }
+                    assertEquals(0, backend.starts)
+                    assertNull(backend.lastRequest)
+                }
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
     fun `invocation capability in decoded request names and values is refused before dispatch`() {
         for (location in 0..3) for (case in 0..2) for (escapeMode in 0..2) {
             val backend = FixtureBackend()
@@ -699,6 +867,55 @@ class AcpProviderBrokerTest {
             assertNull(exchange.nextChunk())
         } finally { broker.close() }
     }
+
+    private fun assertOptionalAccepted(fields: String) {
+        val backend = FixtureBackend()
+        val broker = open(backend, outputTokens = 32)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val request = optionalRequest(fields)
+            val exchange = broker.beginRequest(1, capability(broker), request)
+            assertEquals(1, backend.starts)
+            val expected = kotlinx.serialization.json.JsonObject(Json.parseToJsonElement(request.decodeToString()).jsonObject +
+                ("max_output_tokens" to kotlinx.serialization.json.JsonPrimitive(32)))
+            assertEquals(expected, Json.parseToJsonElement(backend.lastRequest!!.body.decodeToString()))
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+            assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+            assertEquals(1, backend.starts)
+        } finally { broker.close() }
+    }
+
+    private fun assertOptionalRefused(fields: String) {
+        val backend = FixtureBackend()
+        val broker = open(backend)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val result = runCatching { broker.beginRequest(1, capability(broker), optionalRequest(fields)) }
+            assertEquals(0, backend.starts, "unsupported optional request reached the fixture backend: $fields")
+            val failure = assertIs<AcpProviderBrokerFailure>(result.exceptionOrNull(), fields)
+            assertEquals(AcpProviderTerminalKind.UNSUPPORTED_OPERATION, failure.kind, fields)
+            assertNull(failure.cause)
+            assertEquals("ACP provider broker: UNSUPPORTED_OPERATION", failure.message)
+            assertNull(backend.lastRequest)
+            val evidence = broker.snapshot()
+            assertTrue(evidence.revoked)
+            assertTrue(evidence.requests.isEmpty())
+            assertEquals(AcpProviderTerminalKind.UNSUPPORTED_OPERATION, evidence.admissionDenial!!.terminal)
+            assertEquals(0L, evidence.wireRequestBytes)
+            assertEquals(0L, evidence.outputTokens)
+        } finally { broker.close() }
+    }
+
+    private fun optionalRequest(fields: String): ByteArray = kotlinx.serialization.json.JsonObject(
+        Json.parseToJsonElement(body().decodeToString()).jsonObject + Json.parseToJsonElement("{$fields}").jsonObject,
+    ).toString().toByteArray()
+
+    private fun parameterSchema(properties: String = "{}", required: String = "[]"): String =
+        """{"type":"object","properties":$properties,"required":$required,"additionalProperties":false}"""
+
+    private fun functionTool(name: String = "fixture", schema: String = parameterSchema(), suffix: String = ""): String =
+        """{"type":"function","name":"$name","parameters":$schema$suffix}"""
 
     private fun open(
         backend: FixtureBackend,

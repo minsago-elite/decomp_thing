@@ -380,10 +380,7 @@ internal class AcpProviderBroker private constructor(
             require(reasoning.keys.all { it in setOf("effort", "summary") })
             require(reasoning.getValue("effort").jsonPrimitive.isString && reasoning.getValue("effort").jsonPrimitive.content == policy.reasoning.wireValue)
             reasoning["summary"]?.let { require(it.jsonPrimitive.isString && it.jsonPrimitive.content in setOf("auto", "concise", "detailed")) }
-            objectValue["include"]?.let { require(it.jsonArray.all { item -> item.jsonPrimitive.isString && item.jsonPrimitive.content == "reasoning.encrypted_content" }) }
-            objectValue["tools"]?.let { tools ->
-                require(tools.jsonArray.all { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull == "function" })
-            }
+            validateOptionalRequestFields(objectValue)
             objectValue["max_output_tokens"]?.let { require(!it.jsonPrimitive.isString && it.jsonPrimitive.int in 1..tokenRemaining) }
             objectValue["service_tier"]?.let { require(it.jsonPrimitive.isString && it.jsonPrimitive.content == "auto") }
             objectValue["text"]?.let { text ->
@@ -398,6 +395,79 @@ internal class AcpProviderBroker private constructor(
         val wire = try { boundedProviderJson(policy.bounds.maximumRequestBytes) { it.writeProviderValue(transformed) } }
         catch (_: Exception) { throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) }
         return CheckedProviderRequest(wire, effectiveOutputTokens)
+    }
+
+    /** Deliberately closed adapter subset; these checks do not qualify the private backend. */
+    private fun validateOptionalRequestFields(request: JsonObject) {
+        fun string(value: JsonElement, maximum: Int): String {
+            val primitive = value.jsonPrimitive
+            require(primitive.isString && primitive.content.length <= maximum)
+            return primitive.content
+        }
+        fun boolean(value: JsonElement) { require(!value.jsonPrimitive.isString); value.jsonPrimitive.boolean }
+        request["instructions"]?.let { string(it, 4096) }
+        request["prompt_cache_key"]?.let { string(it, 128) }
+        request["safety_identifier"]?.let { string(it, 128) }
+        request["parallel_tool_calls"]?.let { boolean(it) }
+        request["truncation"]?.let { require(string(it, 8) == "disabled") }
+        request["include"]?.let {
+            require(it.jsonArray.size <= 1)
+            it.jsonArray.forEach { item -> require(string(item, 27) == "reasoning.encrypted_content") }
+        }
+        request["metadata"]?.let {
+            val metadata = it.jsonObject
+            require(metadata.size <= 16)
+            metadata.forEach { (key, value) -> require(key.length in 1..64); string(value, 512) }
+        }
+        val toolNames = mutableSetOf<String>()
+        request["tools"]?.let { value ->
+            val tools = value.jsonArray
+            require(tools.size <= 16)
+            tools.forEach { element ->
+                val tool = element.jsonObject
+                require(tool.keys.all { it in setOf("type", "name", "description", "parameters", "strict") })
+                require(string(tool.getValue("type"), 8) == "function")
+                val name = string(tool.getValue("name"), 64)
+                require(name.matches(Regex("[A-Za-z0-9_-]{1,64}")) && toolNames.add(name))
+                tool["description"]?.let { string(it, 1024) }
+                tool["strict"]?.let { boolean(it) }
+                val schema = tool.getValue("parameters").jsonObject
+                require(schema.keys == setOf("type", "properties", "required", "additionalProperties"))
+                require(string(schema.getValue("type"), 6) == "object")
+                require(!schema.getValue("additionalProperties").jsonPrimitive.isString && !schema.getValue("additionalProperties").jsonPrimitive.boolean)
+                val properties = schema.getValue("properties").jsonObject
+                require(properties.size <= 32)
+                properties.forEach { (propertyName, propertyValue) ->
+                    require(propertyName.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,63}")))
+                    val property = propertyValue.jsonObject
+                    require(property.keys.all { it in setOf("type", "description", "enum") })
+                    val type = string(property.getValue("type"), 7)
+                    require(type in setOf("string", "number", "integer", "boolean"))
+                    property["description"]?.let { string(it, 1024) }
+                    property["enum"]?.let {
+                        val choices = it.jsonArray
+                        require(type == "string" && choices.size in 1..16)
+                        val values = choices.map { choice -> string(choice, 128) }
+                        require(values.distinct().size == values.size)
+                    }
+                }
+                val required = schema.getValue("required").jsonArray.map { string(it, 64) }
+                require(required.size <= 32 && required.distinct().size == required.size && required.all { it in properties })
+                if (tool["strict"]?.jsonPrimitive?.boolean == true) require(required.toSet() == properties.keys)
+            }
+        }
+        request["tool_choice"]?.let { choice ->
+            if (choice is JsonPrimitive) {
+                val mode = string(choice, 8)
+                require(mode in setOf("auto", "none", "required"))
+                if (mode == "required") require(toolNames.isNotEmpty())
+            } else {
+                val function = choice.jsonObject
+                require(function.keys == setOf("type", "name"))
+                require(string(function.getValue("type"), 8) == "function")
+                require(string(function.getValue("name"), 64) in toolNames)
+            }
+        }
     }
 
     private fun rejectCapabilityDisclosure(value: JsonElement, capabilityHex: String) {
