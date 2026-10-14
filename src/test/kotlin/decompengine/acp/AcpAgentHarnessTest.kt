@@ -70,6 +70,23 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
+    fun `invocation evidence retains the exact historical JVM constructor descriptor`() {
+        val descriptors = AcpInvocationEvidenceSnapshot::class.java.declaredConstructors.map { constructor ->
+            constructor.parameterTypes.joinToString(prefix = "(", postfix = ")V", separator = "") { type ->
+                require(!type.isPrimitive && !type.isArray)
+                "L${type.name.replace('.', '/')};"
+            }
+        }.toSet()
+        assertEquals(setOf(
+            "(Ldecompengine/acp/AcpHarnessProvenance;Ldecompengine/acp/AcpExecutionLifecyclePhase;" +
+                "Ldecompengine/acp/AcpExecutionCleanupDisposition;Ldecompengine/acp/AcpNegotiatedAgentEvidence;" +
+                "Ljava/lang/String;Ldecompengine/acp/AcpProcessDiagnostics;Ljava/util/Collection;" +
+                "Ljava/util/Collection;Ljava/util/Collection;Ldecompengine/acp/AcpSandboxEvidence;" +
+                "Ldecompengine/acp/AcpExecutionEvidenceCompleteness;Ldecompengine/acp/AcpExecutionEvidenceSnapshot;)V",
+        ), descriptors)
+    }
+
+    @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
         val input = object : java.io.InputStream() {
