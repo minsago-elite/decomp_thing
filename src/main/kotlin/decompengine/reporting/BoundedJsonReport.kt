@@ -1,5 +1,6 @@
 package decompengine.reporting
 
+import decompengine.analysis.BoundedAnalysisArtifactStagingProcess
 import java.io.BufferedOutputStream
 import java.io.OutputStream
 import java.nio.file.Files
@@ -40,7 +41,8 @@ internal fun openStagedJsonReportOutput(staged: Path): OutputStream = Files.newO
  * Publishes one complete report with an atomic replacement. The existing parent directory is used
  * as supplied; this is not an oracle path-authority boundary. Staged and published files have POSIX
  * owner read/write permissions (0600). Publication does not promise fsync durability or a transaction
- * across reports. Cancellation and elapsed-time limits are cooperative.
+ * across reports. Production native staging is bounded and owned. The final atomic rename is a
+ * separate commit boundary: cancellation cannot revoke a rename already issued to the filesystem.
  */
 internal object JsonReportPublisher {
     fun write(
@@ -55,6 +57,21 @@ internal object JsonReportPublisher {
         val target = path.toAbsolutePath()
         val parent = requireNotNull(target.parent) { "JSON report path must have a parent" }
         requireNotNull(target.fileName) { "JSON report path must name a file" }
+        if (outputStreamFactory == ::openStagedJsonReportOutput) {
+            NATIVE_STAGING.withStagedReport(parent, limits.maximumBytes, budget::checkpoint, { output ->
+                val writer = BoundedJsonReportWriter(BufferedOutputStream(output, 8 * 1024), limits, budget)
+                budget.checkpoint("before rendering JSON report")
+                writer.render()
+                writer.finish()
+            }, { staged ->
+                budget.checkpoint("before publishing JSON report")
+                // COMMIT_STARTED: this operation cannot be revoked at the admitted deadline.
+                // Never infer prior-target preservation from an interrupt or a later timeout.
+                Files.move(staged, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            })
+            return
+        }
+        // Preserve the existing internal injection seam for cooperative output-stream fixtures.
         var temporary: Path? = null
         var primaryFailure: Throwable? = null
         try {
@@ -89,6 +106,8 @@ internal object JsonReportPublisher {
             }
         }
     }
+
+    private val NATIVE_STAGING = BoundedAnalysisArtifactStagingProcess()
 }
 
 /**

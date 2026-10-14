@@ -321,6 +321,27 @@
       "fragment": "gcc/16.2.0",
       "count": 1,
       "reason": "Bundled Ghidra provenance test loads the pinned benchmark compiler-engine profile to authenticate the installed bundled release."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/analysis/AnalysisIoHelperBuildV1.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "internal val ANALYSIS_IO_COMPILER_ARGUMENTS: List<String> = Collections.unmodifiableList(listOf(\"-std=c11\", \"-O2\", \"-static\", \"-no-pie\", \"-Wall\", \"-Wextra\", \"-Werror\", \"-Wformat=2\", \"-Wl,--build-id=none\", \"\\${SOURCE}\", \"-o\", \"\\${OUTPUT}\"))",
+      "count": 1,
+      "reason": "Fixed static analysis I/O endpoint compiler recipe; retained source and compiler guards bind this complete 13-argument command."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/analysis/AnalysisIoHelperBuildV1.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "arguments=-std=c11 -O2 -static -no-pie -Wall -Wextra -Werror -Wformat=2 -Wl,--build-id=none ${'$'}SOURCE -o ${'$'}OUTPUT",
+      "count": 1,
+      "reason": "Canonical build-provenance policy records the fixed static endpoint compiler recipe bound to the installed source and build tuple."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/analysis/AnalysisNativeIoHelper.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "        val prefix = listOf(compilerPath, \"-std=c11\", \"-O2\", \"-static\", \"-no-pie\", \"-Wall\", \"-Wextra\", \"-Werror\",\n            \"-Wformat=2\", \"-Wl,--build-id=none\")",
+      "count": 1,
+      "reason": "Installed endpoint build-record authentication checks this complete compiler prefix against the fixed helper recipe before accepting the defining application resource tuple."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

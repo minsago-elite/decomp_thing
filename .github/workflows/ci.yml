@@ -252,6 +252,9 @@ jobs:
         run: |
           mv build/test-results/test build/test-results/full-suite
           mv build/reports/tests/test build/reports/tests/full-suite
+      - name: Verify installed native analysis I/O
+        if: matrix.shard == 'core'
+        run: ./gradlew --no-daemon verifyAnalysisIoHelperInstalled | tee build/analysis-native-installed-verification.txt
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
         run: bash scripts/test-repair-validation-snapshot.sh
@@ -284,6 +287,9 @@ jobs:
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated
             build/test-results/v3BoundaryPublicationIsolated
+            build/reports/tests/v3BoundaryCensusIsolated
+            build/test-results/v3BoundaryCensusIsolated
+            build/analysis-native-installed-verification.txt
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh

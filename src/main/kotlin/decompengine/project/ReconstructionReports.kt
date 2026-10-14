@@ -10,7 +10,6 @@ import decompengine.reporting.JsonReportLimits
 import decompengine.reporting.JsonReportPublisher
 import decompengine.reporting.publicationLimitFields
 import java.nio.file.Path
-import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 
 internal data class ReconstructionReportLimits(
@@ -50,7 +49,9 @@ internal object ReconstructionReports {
             throw JsonReportLimitException("supplemental report exceeds its generated-file limit")
         }
         budget.checkpoint("before creating supplemental report directory")
-        val reports = projectDir.resolve("reports").createDirectories()
+        // The bounded native stager owns parent creation; preparation must not issue caller-side
+        // filesystem writes before its admission and retained cleanup ownership.
+        val reports = projectDir.resolve("reports")
         JsonReportPublisher.write(reports.resolve("analysis.json"), publication, budget::checkpoint) {
             objectValue {
                 field("sourceAnalysis", analysis.reportPath.pathString)
