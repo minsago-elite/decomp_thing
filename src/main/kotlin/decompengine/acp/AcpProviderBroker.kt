@@ -965,6 +965,11 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
     }
 }
 
+/** Fixed operation labels only; never retain the thrown exception or transport inputs. */
+internal enum class AcpProviderCleanupOperation {
+    CANCEL_RAW_CLOSE, FINAL_RAW_CLOSE, FINAL_CONNECTION_CLOSE, FINAL_TLS_CLOSE, FINAL_RESPONSE_CLOSE,
+}
+
 /** Private owner; none of its socket, resolver, TLS or request inputs is an operator capability. */
 private class ProviderHttpAttempt(
     private val authority: AcpProviderNetworkAuthority,
@@ -977,6 +982,11 @@ private class ProviderHttpAttempt(
     private val receiver = AtomicReference<AcpProviderBackendReceiver?>(receiver)
     private val execution = java.util.concurrent.atomic.AtomicInteger(0) // queued, running, finished
     private val cleanupFailed = AtomicBoolean()
+    private val firstCleanupFailure = AtomicReference<AcpProviderCleanupOperation?>()
+    private fun recordCleanupFailure(operation: AcpProviderCleanupOperation) {
+        firstCleanupFailure.compareAndSet(null, operation)
+        cleanupFailed.set(true)
+    }
     private val cancelled = AtomicBoolean()
     private val connectAdmitted = AtomicBoolean()
     private val raw = AtomicReference<Socket?>()
@@ -1010,7 +1020,7 @@ private class ProviderHttpAttempt(
         cancelled.set(true)
         synchronized(demand) { demand.notifyAll() }
         // Closing the underlying socket aborts connect/handshake/read without HTTP/TLS draining.
-        runCatching { raw.get()?.close() }.onFailure { cleanupFailed.set(true) }
+        runCatching { raw.get()?.close() }.onFailure { recordCleanupFailure(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE) }
         future?.cancel(true)
         finishQueued()
     }
@@ -1091,10 +1101,10 @@ private class ProviderHttpAttempt(
     private fun finishTransport(response: ClassicHttpResponse?, outcome: AcpProviderTerminalKind,
                                 callback: AcpProviderBackendReceiver?) {
             // Close all transport owners before terminal callbacks can release broker admission.
-            runCatching { raw.get()?.close() }.onFailure { cleanupFailed.set(true) }
-            runCatching { connection.get()?.close(CloseMode.IMMEDIATE) }.onFailure { cleanupFailed.set(true) }
-            runCatching { tls.get()?.close() }.onFailure { cleanupFailed.set(true) }
-            runCatching { response?.close() }.onFailure { cleanupFailed.set(true) }
+            runCatching { raw.get()?.close() }.onFailure { recordCleanupFailure(AcpProviderCleanupOperation.FINAL_RAW_CLOSE) }
+            runCatching { connection.get()?.close(CloseMode.IMMEDIATE) }.onFailure { recordCleanupFailure(AcpProviderCleanupOperation.FINAL_CONNECTION_CLOSE) }
+            runCatching { tls.get()?.close() }.onFailure { recordCleanupFailure(AcpProviderCleanupOperation.FINAL_TLS_CLOSE) }
+            runCatching { response?.close() }.onFailure { recordCleanupFailure(AcpProviderCleanupOperation.FINAL_RESPONSE_CLOSE) }
             if (raw.get()?.isClosed == true) raw.set(null)
             if (tls.get()?.isClosed == true) tls.set(null)
             if (connection.get()?.isOpen == false) connection.set(null)

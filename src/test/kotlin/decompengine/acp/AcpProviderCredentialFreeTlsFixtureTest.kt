@@ -783,7 +783,8 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         val future = cleanupField(owner, "future") as java.util.concurrent.Future<*>?
         val execution = (cleanupField(owner, "execution") as AtomicInteger).get()
         val rejected = cleanupField(owner, "rejected") as Boolean
-        return "cleanupFailed=${flag("cleanupFailed")},cancelled=${flag("cancelled")},execution=$execution," +
+        val firstFailure = reference("firstCleanupFailure") as AcpProviderCleanupOperation?
+        return "cleanupFailed=${flag("cleanupFailed")},firstCleanupFailure=${firstFailure?.name ?: "NONE"},cancelled=${flag("cancelled")},execution=$execution," +
             "futurePresent=${future != null},futureDone=${future?.isDone == true},futureCancelled=${future?.isCancelled == true}," +
             "futureTerminal=${rejected || future?.isDone == true},rawPresent=${reference("raw") != null}," +
             "tlsPresent=${reference("tls") != null},connectionPresent=${reference("connection") != null},closedness=UNOBSERVED"
