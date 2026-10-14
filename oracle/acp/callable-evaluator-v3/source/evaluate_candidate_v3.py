@@ -5,6 +5,7 @@ import os
 import stat
 import uuid
 import re
+from contextvars import ContextVar
 from copy import deepcopy
 from pathlib import Path
 from bounded_runtime import (bounded_run, digest, private_directory, public_result, write_json,
@@ -239,6 +240,10 @@ def runtime_command(caller, library, scenario):
 
 
 def run(argv, work, timeout=None, phase='compiler'):
+    return _leaf_call(work, lambda: _run(argv, work, timeout, phase))
+
+
+def _run(argv, work, timeout=None, phase='compiler'):
     p = load_profile()
     try:
         if not argv or argv[0] != '/usr/bin/bwrap':
@@ -252,6 +257,90 @@ def run(argv, work, timeout=None, phase='compiler'):
         return {'status':'unknown','reason':type(e).__name__+':'+str(e)[:300], 'execution':public_result(r) if r else None},r
 
 
+# Invocation-local authority: no pathname discovered from a previous run grants
+# reclamation rights. Held directory descriptors survive pathname replacement.
+_LEAF_SCOPE = ContextVar('candidate_worker_leaves', default=None)
+
+
+def _cleanup_proven(result):
+    return (type(result) is dict and all(result.get(key) is True for key in
+            ('cleanupVerified', 'finalAbsenceVerified', 'rootReaped', 'scopeVerified', 'scopeAdmitted'))
+            and type(result.get('kernelScope')) is dict
+            and result['kernelScope'].get('finalAbsenceVerified') is True)
+
+
+class WorkerLeaves:
+    def __init__(self):
+        self.leaves = {}
+
+    def own(self, path):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.leaves[path] = {'fd': fd, 'identity': os.fstat(fd), 'safe': True}
+
+    def call(self, path, operation):
+        row = self.leaves.get(path)
+        if row is None:
+            return operation()
+        prior = row['safe']; row['safe'] = False
+        try:
+            value = operation()
+        except BaseException as error:
+            row['safe'] = prior and _cleanup_proven(getattr(error, 'bounded_result', None))
+            raise
+        results = ([value[1]] if type(value) is tuple else
+                   [value.get(key) for key in ('execution', 'sectionsExecution') if key in value])
+        row['safe'] = prior and bool(results) and all(_cleanup_proven(r) for r in results)
+        return value
+
+    def close(self):
+        # Outputs have been consumed before this invocation-final cleanup. Only
+        # bounded flat leaves are reclaimed; unexpected trees remain for audit.
+        for path, row in self.leaves.items():
+            fd = row['fd']
+            try:
+                if not row['safe']:
+                    continue
+                held = row['identity']; current = path.lstat()
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    continue
+                # Reopen the held directory itself for a fresh enumeration
+                # (some filesystems snapshot entries when the FD is opened).
+                scan_fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
+                names = []
+                try:
+                    with os.scandir(scan_fd) as scan:
+                        for entry in scan:
+                            names.append(entry.name)
+                            if len(names) > 256: break
+                finally:
+                    os.close(scan_fd)
+                if len(names) > 256:
+                    continue
+                entries = {name: os.stat(name, dir_fd=fd, follow_symlinks=False) for name in names}
+                if any(not (stat.S_ISREG(v.st_mode) or stat.S_ISLNK(v.st_mode)) for v in entries.values()):
+                    continue
+                for name, before in entries.items():
+                    after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if (before.st_dev, before.st_ino, before.st_mode) != (after.st_dev, after.st_ino, after.st_mode):
+                        raise ValueError('worker leaf entry changed during cleanup')
+                    os.unlink(name, dir_fd=fd)
+                # rmdir never follows a replacement symlink; identity is checked
+                # again immediately before removing this exact owned leaf.
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
+                    os.rmdir(path)
+            except (OSError, ValueError):
+                pass  # Reclamation cannot replace the evaluation's primary result.
+            finally:
+                try: os.close(fd)
+                except OSError: pass
+
+
+def _leaf_call(path, operation):
+    scope = _LEAF_SCOPE.get()
+    return scope.call(path, operation) if scope is not None else operation()
+
+
 def new_worker_leaf(label):
     """One controller-owned empty leaf, never an output/control/source parent."""
     if label not in ('preprocess','compile','link','probe','assertions','expected-preprocess','inspection','runtime','caller-build'):
@@ -262,7 +351,10 @@ def new_worker_leaf(label):
     if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=os.getuid()
             or stat.S_IMODE(metadata.st_mode)&0o077 or parent.resolve()!=parent):
         raise ValueError('worker leaf parent must be private, owned and canonical')
-    return private_directory(parent/(label+'-'+uuid.uuid4().hex))
+    leaf = private_directory(parent/(label+'-'+uuid.uuid4().hex))
+    scope = _LEAF_SCOPE.get()
+    if scope is not None: scope.own(leaf)
+    return leaf
 
 
 def copy_input(source, destination, *, executable=False):
@@ -367,6 +459,16 @@ def validated_observations(path, caller, preparation):
 
 
 def evaluate(candidate, output, helper, caller, visible, observations_path):
+    scope = WorkerLeaves()
+    token = _LEAF_SCOPE.set(scope)
+    try:
+        return _evaluate(candidate, output, helper, caller, visible, observations_path)
+    finally:
+        _LEAF_SCOPE.reset(token)
+        scope.close()
+
+
+def _evaluate(candidate, output, helper, caller, visible, observations_path):
     if 'build/acp-decomp-effectiveness/callable-library-v3' not in str(BASE):
         raise ValueError('execution requires trusted v3 source copy')
     for path in (candidate,helper,caller,visible,observations_path):
@@ -391,11 +493,11 @@ def evaluate(candidate, output, helper, caller, visible, observations_path):
         try:
             expected_work=new_worker_leaf('probe')
             for name in ('original.c','original.h'):copy_input(BASE/'private'/name,expected_work/name)
-            expected=probe(expected_work/'original.c',helper,expected_work,dict(p['analysisIsolation']['environment']))
+            expected=_leaf_call(expected_work, lambda: probe(expected_work/'original.c',helper,expected_work,dict(p['analysisIsolation']['environment'])))
             retain('expected-descriptors',expected)
             actual_work=new_worker_leaf('probe')
             actual_source=copy_input(artifacts['preprocess'],actual_work/'candidate.i')
-            actual=probe(actual_source,helper,actual_work,dict(p['analysisIsolation']['environment']))
+            actual=_leaf_call(actual_work, lambda: probe(actual_source,helper,actual_work,dict(p['analysisIsolation']['environment'])))
             retain('candidate-descriptors',actual)
             phases['declarations']=phase_receipt('declarations',compare_descriptors(expected,actual))
         except Exception as error:
@@ -427,7 +529,7 @@ def evaluate(candidate, output, helper, caller, visible, observations_path):
             size=resolve_declaration(expected,expected['interfaces']['acp_state'])['sizeBits']//8 if expected and expected.get('status')=='supported' else -1
             inspection=new_worker_leaf('inspection')
             library=copy_input(artifacts['link'],inspection/'libcandidate.so')
-            phases['exports']=phase_receipt('exports',export_inventory(library,size,inspection,environment(inspection)))
+            phases['exports']=phase_receipt('exports',_leaf_call(inspection, lambda: export_inventory(library,size,inspection,environment(inspection))))
         except Exception as error:
             failure={'status':'unknown','reason':str(error)[:300]}
             if hasattr(error,'bounded_result'):failure['execution']=public_result(error.bounded_result)
@@ -446,5 +548,5 @@ def evaluate(candidate, output, helper, caller, visible, observations_path):
     summary=summarize(scenarios,admitted)
     phases['load']={'status':'unverified' if summary['runtimeRequestCount'] else 'not-attempted','value':None}
     phases['behavior']={'status':summary.pop('behaviorStatus'),'reason':'completed-process-bytes-and-termination','evidenceSha256':None}
-    report={'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':digest(candidate),'profileSha256':digest(BASE/'contracts/candidate-build-profile.json'),'runtimeInputs':runtime_inputs,'phases':phases,'admitted':admitted,**summary,'scenarios':scenarios,'evidenceFiles':evidence,'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
+    report={'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':hashlib.sha256(raw).hexdigest(),'profileSha256':digest(BASE/'contracts/candidate-build-profile.json'),'runtimeInputs':runtime_inputs,'phases':phases,'admitted':admitted,**summary,'scenarios':scenarios,'evidenceFiles':evidence,'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
     validate_exchange('report',report);write_json(output/'receipt.json',report);return report
