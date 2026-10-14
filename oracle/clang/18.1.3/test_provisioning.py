@@ -3068,9 +3068,13 @@ class ProvisioningNegativeTests(unittest.TestCase):
 
             def substitute_after_privileged_publication(command, timeout=None):
                 result = self.simulate_privileged_rootfs_tar_publication(command, timeout)
-                substituted.unlink()
-                substituted.write_bytes(same_size_attacker)
-                substituted.chmod(0o444)
+                before = substituted.stat()
+                replacement = output / "substituted-staged.tar"
+                replacement.write_bytes(same_size_attacker)
+                replacement.chmod(0o444)
+                staged = replacement.stat()
+                self.assertNotEqual((before.st_dev, before.st_ino), (staged.st_dev, staged.st_ino))
+                os.replace(replacement, substituted)
                 return result
 
             with mock.patch.object(
@@ -3085,6 +3089,35 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     provision.publish_rootfs_tar(substituted_source, output, substituted, expected)
             self.assertEqual(substituted.read_bytes(), same_size_attacker)
             self.assertEqual(substituted_source.read_bytes(), original)
+
+            tampered_source = work / "same-inode-source.tar"
+            tampered_source.write_bytes(original)
+            tampered = output / "same-inode.tar"
+
+            def tamper_after_privileged_publication(command, timeout=None):
+                result = self.simulate_privileged_rootfs_tar_publication(command, timeout)
+                before = tampered.stat()
+                tampered.chmod(0o644)
+                with tampered.open("r+b") as stream:
+                    stream.write(same_size_attacker)
+                tampered.chmod(0o444)
+                after = tampered.stat()
+                self.assertEqual((before.st_dev, before.st_ino, before.st_size),
+                                 (after.st_dev, after.st_ino, after.st_size))
+                return result
+
+            with mock.patch.object(
+                    provision, "run_checked", side_effect=tamper_after_privileged_publication), \
+                    mock.patch.object(
+                        provision.os, "stat",
+                        side_effect=self.report_fixture_publications_as_root_owned(original_stat)), \
+                    mock.patch.object(
+                        provision.os, "fstat",
+                        side_effect=self.report_fixture_descriptors_as_root_owned(original_fstat)):
+                with self.assertRaisesRegex(provision.ProvisionError, "verified rootfs tar publication bytes changed"):
+                    provision.publish_rootfs_tar(tampered_source, output, tampered, expected)
+            self.assertEqual(tampered.read_bytes(), same_size_attacker)
+            self.assertEqual(tampered_source.read_bytes(), original)
 
     def test_provisioning_rejects_workdir_equal_or_beneath_rootfs_before_all_mutations(self):
         with self.temporary_directory() as temp:
