@@ -399,30 +399,36 @@ class AcpProviderCredentialFreeTlsFixtureTest {
 
     @Test
     fun `actual refused connection cannot fall back or connect again to a second address`() {
-        val refusedPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
-        val fallback = RawTlsFixture(RawMode.RESET)
-        val owner = Any(); val policy = issueFixture(owner, refusedPort)
-        val broker = open(policy, owner)
-        val capture = CaptureReceiver()
-        try {
-            fallback.start()
-            val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
-            assertTrue(capture.terminal.await(2, TimeUnit.SECONDS))
-            assertFalse(capture.completed)
-            val method = requestOwner.javaClass.getDeclaredMethod("connectOnce", Socket::class.java, InetSocketAddress::class.java).also { it.isAccessible = true }
-            Socket(Proxy.NO_PROXY).use { second ->
-                val failure = assertFailsWith<InvocationTargetException> {
-                    method.invoke(requestOwner, second, InetSocketAddress(InetAddress.getByName("127.0.0.2"), fallback.port))
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { reservation ->
+            val refusedPort = reservation.localPort
+            val fallback = RawTlsFixture(RawMode.RESET)
+            val owner = Any(); val policy = issueFixture(owner, refusedPort)
+            val broker = open(policy, owner)
+            val capture = CaptureReceiver()
+            try {
+                // Keep the refused endpoint owned until the fallback listener has bound.
+                // Otherwise its ephemeral bind may reuse the just-released target port.
+                assertNotEquals(refusedPort, fallback.port, "refused target and fallback listener must be distinct")
+                reservation.close()
+                fallback.start()
+                val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+                assertTrue(capture.terminal.await(2, TimeUnit.SECONDS))
+                assertFalse(capture.completed)
+                val method = requestOwner.javaClass.getDeclaredMethod("connectOnce", Socket::class.java, InetSocketAddress::class.java).also { it.isAccessible = true }
+                Socket(Proxy.NO_PROXY).use { second ->
+                    val failure = assertFailsWith<InvocationTargetException> {
+                        method.invoke(requestOwner, second, InetSocketAddress(InetAddress.getByName("127.0.0.2"), fallback.port))
+                    }
+                    assertTrue(failure.cause is IOException)
+                    assertEquals("provider connection attempt refused", failure.cause!!.message)
+                    assertNull(failure.cause!!.cause)
+                    assertFalse(second.isConnected)
+                    assertEquals(-1, second.localPort, "second connect is refused before socket bind or network IO")
                 }
-                assertTrue(failure.cause is IOException)
-                assertEquals("provider connection attempt refused", failure.cause!!.message)
-                assertNull(failure.cause!!.cause)
-                assertFalse(second.isConnected)
-                assertEquals(-1, second.localPort, "second connect is refused before socket bind or network IO")
-            }
-            assertEquals(0, fallback.connections.get())
-            assertEquals(0, capture.bytes.size())
-        } finally { closeRawVerified(broker, fallback) }
+                assertEquals(0, fallback.connections.get())
+                assertEquals(0, capture.bytes.size())
+            } finally { closeRawVerified(broker, fallback) }
+        }
     }
 
     @Test
