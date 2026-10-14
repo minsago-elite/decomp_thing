@@ -1919,6 +1919,70 @@ private fun hostPhysicalLocation(
         mount.root.resolve(mount.mountPoint.relativize(named)).normalize(), named)
 }
 
+/** Exact-existing-root reauthentication only; generic admission and missing-tail resolution stay strict. */
+private fun manifestRootPhysicalLocation(
+    descriptor: LinuxDescriptor,
+    mounts: List<HostPhysicalMount>,
+    cancellationCheck: () -> Unit,
+): HostPhysicalLocation = descriptor.whileOpen { fd ->
+    cancellationCheck()
+    val identity = LinuxFilesystemSyscalls.identity(fd)
+    val mount = mounts.singleOrNull { it.mountId == identity.mountId }
+        ?: throw IOException("private-control descriptor mount is absent or ambiguous")
+    val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
+    if (!named.isAbsolute || named != named.normalize() || !named.startsWith(mount.mountPoint) ||
+        named.toString().toByteArray(Charsets.UTF_8).size > MAXIMUM_SANDBOX_PATH_BYTES) {
+        throw IOException("private-control descriptor has no authenticated host pathname")
+    }
+    fun requireSame(reopened: LinuxDescriptor) {
+        if (reopened.identity.isSymbolicLink || reopened.identity.key != identity.key ||
+            reopened.identity.mountId != identity.mountId ||
+            reopened.identity.isDirectory != identity.isDirectory ||
+            reopened.identity.isRegularFile != identity.isRegularFile) {
+            throw IOException("private-control descriptor pathname changed during inspection")
+        }
+    }
+    if (named == named.root || (!identity.isDirectory && !identity.isRegularFile)) {
+        // Preserve original root-only and other-kind behavior, including its symlink refusal.
+        withHostPhysicalPath(named, cancellationCheck) { reopened, missing ->
+            if (missing.toString().isNotEmpty()) throw IOException("runtime manifest root disappeared")
+            requireSame(reopened)
+        }
+    } else {
+        var current = LinuxFilesystemSyscalls.openRoot(requireNotNull(named.root))
+        try {
+            val constrained = LinuxFilesystemSyscalls.openConstrainedPathAt(current,
+                named.root.relativize(named).toString())
+            if (constrained != null) {
+                constrained.use { requireSame(it) }
+            } else {
+                // ENOSYS/unsupported ABI: original strict component walk, reusing the owned '/' anchor.
+                val components = named.toList()
+                for ((index, component) in components.withIndex()) {
+                    cancellationCheck()
+                    val next = LinuxFilesystemSyscalls.openPathAtOrNull(current.fd, component.toString())
+                        ?: throw IOException("runtime manifest root disappeared")
+                    if (next.identity.isSymbolicLink || (!next.identity.isDirectory && index != components.lastIndex)) {
+                        next.close()
+                        throw IOException("private-control protection encountered a noncanonical host path")
+                    }
+                    current.close()
+                    current = next
+                }
+                requireSame(current)
+            }
+        } finally {
+            current.close()
+        }
+    }
+    val after = LinuxFilesystemSyscalls.identity(fd)
+    if (identity.key != after.key || identity.mountId != after.mountId || identity.mode != after.mode) {
+        throw IOException("private-control descriptor changed during inspection")
+    }
+    HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
+        mount.root.resolve(mount.mountPoint.relativize(named)).normalize(), named)
+}
+
 private fun requirePrivateControlLocationUnexposed(
     candidate: HostPhysicalLocation,
     recursive: Boolean,
@@ -2051,7 +2115,7 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
-        val current = hostPhysicalLocation(rootDescriptor, mounts, check)
+        val current = manifestRootPhysicalLocation(rootDescriptor, mounts, check)
         if (current.key != root.key || rootDescriptor.identity.mountId !=
             LinuxFilesystemSyscalls.identity(rootDescriptor.fd).mountId ||
             rootDescriptor.identity.mode != LinuxFilesystemSyscalls.identity(rootDescriptor.fd).mode ||
