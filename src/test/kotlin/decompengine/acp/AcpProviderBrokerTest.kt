@@ -1466,7 +1466,7 @@ class AcpProviderBrokerTest {
     else kotlinx.serialization.json.JsonPrimitive(value).toString()
     private fun delta(text: String): ByteArray = ("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":" + kotlinx.serialization.json.JsonPrimitive(text).toString() + "}\n\n").toByteArray()
     private fun completed(tokens: Int): ByteArray = """event: response.completed
-data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":$tokens}}}
+data: {"type":"response.completed","response":{"id":"resp_broker_fixture","status":"completed","usage":{"input_tokens":1,"output_tokens":$tokens,"total_tokens":${1L + tokens.toLong()}}}}
 
 """.toByteArray()
     private fun assertKind(kind: AcpProviderTerminalKind, action: () -> Unit) = assertEquals(kind, assertFailsWith<AcpProviderBrokerFailure>(block = action).kind)

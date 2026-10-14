@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -173,6 +174,7 @@ internal class AcpProviderResponseStream(
         }
         if (type == "error" || type in ERROR_EVENTS) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
         if (type !in SUPPORTED_EVENTS) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        validateWireFields(value)
         val matchers = if (type in DELTA_EVENTS) {
             val direct = matchersForDelta(type, value)
             if (type == "response.output_text.delta") direct + matchersForDelta(RENDERED_MESSAGE_STREAM, value) else direct
@@ -189,10 +191,10 @@ internal class AcpProviderResponseStream(
         if (type == "response.completed") {
             val response = value["response"] as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
             if (stringValue(response["status"]) != "completed") reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
-            val usage = response["usage"] as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            val usage = completedUsage(response)
             outputTokens = boundedTokenCount(usage["output_tokens"])
             if (outputTokens!! > maximumRemainingOutputTokens) reject(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
-            inputTokens = usage["input_tokens"]?.let(::boundedTokenCount)
+            inputTokens = boundedTokenCount(usage["input_tokens"])
             maximumRemainingInputTokens?.let { limit ->
                 val count = inputTokens ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
                 if (count.toLong() > limit) reject(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
@@ -214,6 +216,58 @@ internal class AcpProviderResponseStream(
             while (pending.isNotEmpty()) released.add(pending.removeFirst())
             pendingBytes = 0L
         }
+    }
+
+    /** Exact optional wire types in pinned Codex 0.162.1 ResponsesStreamEvent, not a newer API schema. */
+    private fun validateWireFields(value: JsonObject) {
+        for (field in listOf("item_id", "call_id", "delta", "text")) {
+            optionalValue(value[field])?.let { if (stringValue(it) == null) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE) }
+        }
+        for (field in listOf("summary_index", "content_index")) {
+            optionalValue(value[field])?.let(::wireInteger)
+        }
+    }
+
+    /** Only completed uses fatal typed response decoding in the pinned consumer. */
+    private fun completedUsage(response: JsonObject): JsonObject {
+        if (stringValue(response["id"]) == null) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        optionalValue(response["end_turn"])?.let {
+            val primitive = it as? JsonPrimitive ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            if (primitive.isString || primitive.content !in setOf("true", "false")) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        }
+        optionalValue(response["usage_metadata"])?.let {
+            val metadata = it as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            optionalValue(metadata["amount"])?.let { amount ->
+                if (stringValue(amount) == null) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            }
+        }
+        // Usage is optional upstream, but this adapter's existing token-budget policy requires it.
+        val usage = response["usage"] as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        wireInteger(usage["total_tokens"])
+        optionalValue(usage["input_tokens_details"])?.let {
+            val details = it as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            wireInteger(details["cached_tokens"])
+            details["cache_write_tokens"]?.let(::wireInteger)
+        }
+        optionalValue(usage["output_tokens_details"])?.let {
+            val details = it as? JsonObject ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            wireInteger(details["reasoning_tokens"])
+        }
+        optionalValue(usage["codex_rollout_budget_units"])?.let {
+            val number = it as? JsonPrimitive ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            if (number.isString || number.content.toDoubleOrNull()?.isFinite() != true) {
+                reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            }
+        }
+        return usage
+    }
+
+    private fun optionalValue(value: JsonElement?): JsonElement? = value?.takeUnless { it == JsonNull }
+
+    private fun wireInteger(value: JsonElement?): Long {
+        val primitive = value as? JsonPrimitive ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        if (primitive.isString || !primitive.content.matches(WIRE_INTEGER)) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        return primitive.content.toLongOrNull() ?: reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
     }
 
     private fun matchersForDelta(type: String, value: JsonObject): List<ProviderSemanticMatcher> {
@@ -394,6 +448,7 @@ internal class AcpProviderResponseStream(
         private const val MAXIMUM_IDENTITY_BYTES: Long = 64 * 1024
         private val EVENT_TYPE = Regex("(?:response\\.[a-z][a-z0-9_.]{0,127}|error)")
         private val TOKEN_COUNT = Regex("(?:0|[1-9][0-9]{0,9})")
+        private val WIRE_INTEGER = Regex("(?:0|-?[1-9][0-9]{0,18})")
         private val ERROR_EVENTS = setOf("response.error", "response.failed", "response.incomplete")
         private val STRING_IDENTITY_FIELDS = listOf("item_id", "call_id")
         private val INDEX_IDENTITY_FIELDS = listOf("output_index", "content_index", "summary_index")
