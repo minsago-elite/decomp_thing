@@ -361,7 +361,7 @@ class AgentExecutionEvidenceTest {
                 session = AgentSessionReference("fixture-v1", "provider-data-session"))),
             providerDataFixtureInvocationForTest(request, providerDataProvenance()))
         for (maximum in listOf(64 * 1024 * 1024, 1)) {
-            var denied = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
+            var denied: JsonElement = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
             for ((field, value) in listOf(
                 "requests" to JsonArray(emptyList()), "wireRequestBytes" to JsonPrimitive(0),
                 "responseBytes" to JsonPrimitive(0), "outputTokens" to JsonPrimitive(0), "inputTokens" to JsonNull,
