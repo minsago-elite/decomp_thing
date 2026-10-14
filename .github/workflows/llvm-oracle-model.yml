@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       qualification:
-        description: "Explicit native runtime measurement; never approves a production profile"
+        description: "Explicit observation or qualification; never approves a production profile"
         type: choice
         required: true
         default: native-runtime-measurement
-        options: [native-runtime-measurement, produced-program-observation]
+        options: [native-runtime-measurement, produced-program-observation, runtime-capture-host-preflight]
       listener_continuity:
         description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
         type: boolean
@@ -771,3 +771,48 @@ jobs:
           name: llvm-produced-program-compatibility-observation
           path: build/issue97-live/evidence
           if-no-files-found: warn
+
+  runtime-capture-host-preflight:
+    # Temporary NEW-GENERATION candidate, not a supported baseline; runner expiry2027-04-17.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'runtime-capture-host-preflight'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      HOME: ${{ github.workspace }}/build/issue97-host-inspect/home
+      TMPDIR: ${{ github.workspace }}/build/issue97-host-inspect/tmp
+      RUNNER_TEMP: ${{ github.workspace }}/build/issue97-host-inspect/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-host-inspect/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-host-inspect/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-host-inspect/share
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/build/issue97-host-inspect/run
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Allocate repository-owned observation state
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          umask 077
+          test ! -e "$GITHUB_WORKSPACE/build/issue97-host-inspect"
+          mkdir -p "$GITHUB_WORKSPACE/build/issue97-host-inspect/"{home,tmp,cache,config,share,run,artifacts}
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          clean: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/llvm-oracle-model.yml
+            /oracle/llvm/capture_reference_runtime.py
+      - name: Observe read-only host facts (UNQUALIFIED, never a capture or target run)
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          root="$GITHUB_WORKSPACE/build/issue97-host-inspect"
+          timeout --kill-after=2s 88s python3 -I -B -X "pycache_prefix=$root/cache/python" \
+            oracle/llvm/capture_reference_runtime.py --root "$root" --inspect-host
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-reference-host-UNQUALIFIED-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: build/issue97-host-inspect/artifacts/

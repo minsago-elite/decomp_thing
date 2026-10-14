@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import types
 import unittest
+import time
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -360,6 +361,124 @@ class CaptureRuntimeTest(unittest.TestCase):
              patch.object(capture, "command") as command:
             self.refuse("EXISTING_USER_BUS_REQUIRED", lambda: capture.preflight(self.directory))
         command.assert_not_called()
+
+    def test_inspection_context_does_not_broaden_capture_context(self):
+        env = {key: "authored" for key in capture.PUBLIC_ENV}
+        env.update(GITHUB_REPOSITORY="minsago-elite/decomp_thing", GITHUB_SHA="a" * 40,
+                   GITHUB_WORKFLOW_SHA="b" * 40, GITHUB_RUN_ID="12", GITHUB_RUN_ATTEMPT="1",
+                   GITHUB_EVENT_NAME="workflow_dispatch", RUNNER_OS="Linux", RUNNER_ARCH="X64")
+        with patch.object(capture.os, "environ", env):
+            env["GITHUB_WORKFLOW_REF"] = env["GITHUB_REPOSITORY"] + "/" + capture.INSPECT_WORKFLOW + "@refs/heads/authored"
+            self.assertEqual(env, capture.public_environment(inspect_host=True))
+            self.refuse("WORKFLOW_IDENTITY", capture.public_environment)
+            env["GITHUB_WORKFLOW_REF"] = env["GITHUB_REPOSITORY"] + "/" + capture.WORKFLOW + "@refs/heads/authored"
+            self.assertEqual(env, capture.public_environment())
+            self.refuse("WORKFLOW_IDENTITY", lambda: capture.public_environment(inspect_host=True))
+
+    def test_inspection_file_limits_deadline_fifo_and_aggregate_work_refuse(self):
+        path = self.directory / "metadata"
+        path.write_bytes(b"12345")
+        budget = {"end": time.monotonic() + 30, "bytes": 0}
+        row, raw = capture._inspect_read(path, budget, maximum=4)
+        self.assertEqual("INSPECT_FILE_KIND_OR_LIMIT", row["code"])
+        self.assertEqual(b"", raw)
+        fifo = self.directory / "metadata-fifo"
+        os.mkfifo(fifo)
+        self.assertEqual("INSPECT_FILE_KIND_OR_LIMIT", capture._inspect_read(fifo, budget)[0]["code"])
+        self.assertEqual("INSPECT_DEADLINE", capture._inspect_read(path, {"end": 0, "bytes": 0})[0]["code"])
+        with patch.object(capture, "INSPECT_READ_BUDGET", 4):
+            self.assertEqual("INSPECT_READ_LIMIT", capture._inspect_read(path, budget)[0]["code"])
+            self.assertEqual("INSPECT_READ_LIMIT", capture._inspect_read(path, budget)[0]["code"])
+
+    def test_subordinate_metadata_only_selects_numeric_caller_or_declared_runner(self):
+        result = capture._inspect_allocations(b"runner:100000:65536\n1001:200000:65536\nOTHER_OWNER_CANARY:300000:65536\n", 1001)
+        self.assertEqual(2, len(result["selectedRows"]))
+        self.assertFalse(result["callerNameBindingVerified"])
+        self.assertNotIn("OTHER_OWNER_CANARY", json.dumps(result))
+        for raw, code in ((b"runner:4294967295:2\n", "INSPECT_SUBID_RANGE"),
+                          (b"runner:no:2\n", "INSPECT_SUBID_RECORD"),
+                          (b"\n" * 1025, "INSPECT_SUBID_LIMIT")):
+            self.refuse(code, lambda: capture._inspect_allocations(raw, 1001))
+
+    def test_inspection_query_argv_is_closed_read_only_and_has_no_helper_version_probe(self):
+        budget = {"end": time.monotonic() + 30, "bytes": 0}
+        with patch.object(capture, "command", return_value=(b"authored", b"", 0, None)) as command:
+            for label in ("packages", "user-manager", "user-service"):
+                self.assertEqual("observed", capture._inspect_query(label, 1001, self.directory, budget)["status"])
+            calls = command.call_args_list
+            self.assertEqual(3, len(calls))
+            for call in calls:
+                argv, env = call.args[:2]
+                self.assertIn(argv[0], ("/usr/bin/dpkg-query", "/usr/bin/systemctl"))
+                self.assertNotIn("--version", argv)
+                self.assertNotIn("DOCKER_HOST", env)
+                self.assertLessEqual(call.kwargs["seconds"], 8)
+                self.assertEqual(8192, call.kwargs["limit"])
+            self.refuse("INSPECT_QUERY", lambda: capture._inspect_query("start", 1001, self.directory, budget))
+            self.assertEqual(3, command.call_count)
+
+    @contextmanager
+    def mocked_host_inspection(self, *, missing_bus=False):
+        (self.directory / "artifacts").mkdir()
+        values = {"os-release": b'ID=ubuntu\nVERSION_ID="22.04"\n',
+                  "apparmor_restrict_unprivileged_userns": b"0\n", "unprivileged_userns_clone": b"1\n",
+                  "max_user_namespaces": b"1234\n", "cgroup": b"0::/authored/caller\n",
+                  "subuid": b"runner:100000:65536\n", "subgid": b"runner:100000:65536\n",
+                  "cgroup.controllers": b"cpu memory pids\n", "cgroup.subtree_control": b"cpu memory pids\n",
+                  "cgroup.type": b"domain\n"}
+        def read(path, budget, **kwargs):
+            return {"path": str(path), "status": "observed", "bytes": 1, "sha256": "a" * 64}, values.get(path.name, b"authored")
+        def query(name, uid, root, budget):
+            return {"status": "observed", "stdout": {"packages": "uidmap\tauthored\tamd64\n",
+                "user-manager": "Version=authored\nControlGroup=/authored/manager\n",
+                "user-service": "Delegate=yes\nControlGroup=/authored/manager\nUser=1001\nActiveState=active\n"}[name]}
+        metadata = types.SimpleNamespace(st_uid=1001, st_gid=1001, st_mode=0o140600, st_dev=1, st_ino=2)
+        uname = types.SimpleNamespace(sysname="Linux", release="authored-kernel", version="authored-version", machine="x86_64")
+        with patch.object(capture, "public_environment", return_value={"ImageOS": "authored", "ImageVersion": "authored"}), \
+             patch.object(capture, "_inspect_read", side_effect=read), \
+             patch.object(capture, "_inspect_query", side_effect=query) as queries, \
+             patch.object(capture.Path, "resolve", lambda path, strict=False: path), \
+             patch.object(capture.Path, "lstat", side_effect=FileNotFoundError if missing_bus else lambda path=None: metadata), \
+             patch.object(capture.os, "uname", return_value=uname), \
+             patch.object(capture.os, "getuid", return_value=1001), patch.object(capture.os, "geteuid", return_value=1001), \
+             patch.object(capture.os, "getgid", return_value=1001), patch.object(capture.os, "getegid", return_value=1001), \
+             patch.object(capture.os, "getgroups", return_value=[1001]), patch.object(capture.os, "getpid", return_value=12345), \
+             patch.object(capture, "directory_fd", side_effect=lambda path: os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)), \
+             patch.object(capture, "controller") as controller, patch.object(capture, "worker") as worker, \
+             patch.object(capture, "prepare_inputs") as prepare, patch.object(capture, "preflight") as preflight:
+            yield queries
+        for effectful in (controller, worker, prepare, preflight):
+            effectful.assert_not_called()
+
+    def test_host_inspection_observed_receipt_never_approves_or_enters_capture_route(self):
+        with self.mocked_host_inspection():
+            self.assertTrue(capture.inspect_host(ROOT, self.directory))
+        receipt = json.loads((self.directory / "artifacts/host-inspection.json").read_bytes())
+        self.assertEqual("observed-unqualified", receipt["status"])
+        self.assertEqual("2027-04-17", receipt["facts"]["runnerCandidate"]["expires"])
+        for flag in ("approved", "supportedBaseline", "captureRouteAdmitted", "workerStarted", "targetExecuted", "referenceExecutionQualified"):
+            self.assertIs(False, receipt[flag])
+
+    def test_host_inspection_missing_bus_retains_refusal_without_start_or_query(self):
+        with self.mocked_host_inspection(missing_bus=True) as queries:
+            self.assertFalse(capture.inspect_host(ROOT, self.directory))
+        self.assertEqual(["packages", "user-service"], [call.args[0] for call in queries.call_args_list])
+        receipt = json.loads((self.directory / "artifacts/host-inspection.json").read_bytes())
+        self.assertEqual("refused-unqualified", receipt["status"])
+        self.assertIn("READ_ONLY_QUERY_REFUSED_OR_UNKNOWN", receipt["refusals"])
+
+    def test_inspect_main_routes_only_inspection_and_returns_refusal_code(self):
+        root = self.directory / "build/issue97-host-inspect"
+        root.mkdir(mode=0o700, parents=True)
+        with patch.object(capture.os, "environ", {"GITHUB_WORKSPACE": str(self.directory)}), \
+             patch.object(capture.sys, "argv", ["capture", "--root", str(root), "--inspect-host"]), \
+             patch.object(capture, "inspect_host", return_value=False) as inspect, \
+             patch.object(capture, "controller") as controller, patch.object(capture, "worker") as worker, \
+             patch.object(capture, "preflight") as preflight, patch.object(capture, "prepare_inputs") as prepare:
+            self.assertEqual(78, capture.main())
+        inspect.assert_called_once_with(self.directory, root)
+        for effectful in (controller, worker, preflight, prepare):
+            effectful.assert_not_called()
 
 
 if __name__ == "__main__":

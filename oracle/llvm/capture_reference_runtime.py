@@ -49,6 +49,9 @@ SOURCE_PINS = {
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 WORKFLOW = ".github/workflows/llvm-reference-runtime-capture.yml"
 SCRIPT = "oracle/llvm/capture_reference_runtime.py"
+INSPECT_WORKFLOW = ".github/workflows/llvm-oracle-model.yml"
+INSPECT_SECONDS = 80  # Outer workflow timeout:88s TERM +2s KILL, at most90s.
+INSPECT_READ_BUDGET = 128 * 1024 * 1024
 PUBLIC_ENV = ("GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
               "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_EVENT_NAME",
               "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")
@@ -440,7 +443,7 @@ def directory_fd(path):
             os.close(fd)
 
 
-def public_environment():
+def public_environment(*, inspect_host=False):
     result = {name: text(os.environ.get(name), "MISSING_RUNNER_PROVENANCE", 1024) for name in PUBLIC_ENV}
     require(result["GITHUB_EVENT_NAME"] == "workflow_dispatch" and result["RUNNER_OS"] == "Linux"
             and result["RUNNER_ARCH"] == "X64", "DISPATCH_PLATFORM")
@@ -449,9 +452,234 @@ def public_environment():
         require(re.fullmatch(r"[0-9a-f]{40}", result[name]), "SOURCE_REVISION")
     for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         require(re.fullmatch(r"[1-9][0-9]{0,19}", result[name]), "RUN_ID")
-    require(result["GITHUB_WORKFLOW_REF"].startswith(result["GITHUB_REPOSITORY"] + "/" + WORKFLOW + "@"),
+    workflow = INSPECT_WORKFLOW if inspect_host else WORKFLOW
+    require(result["GITHUB_WORKFLOW_REF"].startswith(result["GITHUB_REPOSITORY"] + "/" + workflow + "@"),
             "WORKFLOW_IDENTITY")
     return result
+
+
+def _inspect_read(path, budget, *, maximum=65536, retain=True):
+    """Read only a fixed public metadata/tool file, under one aggregate budget."""
+    fd = None
+    try:
+        require(time.monotonic() < budget["end"], "INSPECT_DEADLINE")
+        require(budget["bytes"] <= INSPECT_READ_BUDGET, "INSPECT_READ_LIMIT")
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        first = os.fstat(fd)
+        require(stat.S_ISREG(first.st_mode) and first.st_size <= maximum, "INSPECT_FILE_KIND_OR_LIMIT")
+        digest, payload, count = hashlib.sha256(), bytearray(), 0
+        while True:
+            require(time.monotonic() < budget["end"], "INSPECT_DEADLINE")
+            block = os.read(fd, min(65536, maximum - count + 1, INSPECT_READ_BUDGET - budget["bytes"] + 1))
+            if not block:
+                break
+            count += len(block)
+            budget["bytes"] += len(block)
+            require(count <= maximum and budget["bytes"] <= INSPECT_READ_BUDGET, "INSPECT_READ_LIMIT")
+            digest.update(block)
+            if retain:
+                payload.extend(block)
+        current, named = os.fstat(fd), path.lstat()
+        key = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        require(key(first) == key(current) == key(named) and (retain or count == first.st_size), "INSPECT_FILE_CHANGED")
+        require(time.monotonic() < budget["end"], "INSPECT_DEADLINE")
+        return {"path": str(path), "status": "observed", "bytes": count, "sha256": digest.hexdigest(),
+                "device": first.st_dev, "inode": first.st_ino, "uid": first.st_uid, "gid": first.st_gid,
+                "mode": stat.S_IMODE(first.st_mode)}, bytes(payload)
+    except (CaptureFailure, OSError) as failure:
+        return {"path": str(path), "status": "unknown", "code": getattr(failure, "code", "INSPECT_IO"),
+                "errno": getattr(failure, "errno", None)}, b""
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _inspect_query(label, uid, root, budget):
+    # Closed read-only argv: never run a helper --version, service operation or shell.
+    queries = {
+        "packages": ["/usr/bin/dpkg-query", "--show", "--showformat=${Package}\t${Version}\t${Architecture}\n",
+                     "uidmap", "slirp4netns", "rootlesskit", "dbus-user-session", "systemd"],
+        "user-manager": ["/usr/bin/systemctl", "--user", "show", "--property=Version,ControlGroup"],
+        "user-service": ["/usr/bin/systemctl", "show", "user@" + str(uid) + ".service",
+                         "--property=Delegate,ControlGroup,User,ActiveState"],
+    }
+    require(label in queries, "INSPECT_QUERY")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
+           "XDG_RUNTIME_DIR": str(root / "run"), "XDG_CACHE_HOME": str(root / "cache"),
+           "XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "share"),
+           "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/" + str(uid) + "/bus", "LANG": "C", "LC_ALL": "C"}
+    try:
+        remaining = budget["end"] - time.monotonic()
+        require(remaining > 0, "INSPECT_DEADLINE")
+        out, err, code, _ = command(queries[label], env, root, seconds=min(8, remaining), limit=8192, success_codes=(0, 1))
+        require(time.monotonic() < budget["end"], "INSPECT_DEADLINE")
+        return {"status": "observed" if code == 0 else "refused", "argv": queries[label], "exitCode": code,
+                "stdout": out.decode("utf-8", errors="strict"), "stdoutBytes": len(out),
+                "stdoutSha256": hashlib.sha256(out).hexdigest(), "stderrBytes": len(err),
+                "stderrSha256": hashlib.sha256(err).hexdigest()}
+    except (CaptureFailure, OSError, UnicodeError) as failure:
+        out, err = getattr(failure, "stdout", b""), getattr(failure, "stderr", b"")
+        return {"status": "unknown", "argv": queries[label], "code": getattr(failure, "code", "INSPECT_QUERY_IO"),
+                "exitCode": getattr(failure, "exit_code", None), "stdoutBytes": len(out), "stderrBytes": len(err),
+                "stdoutSha256": hashlib.sha256(out).hexdigest(), "stderrSha256": hashlib.sha256(err).hexdigest()}
+
+
+def _inspect_fields(query, allowed):
+    result = {}
+    for line in query.get("stdout", "").splitlines():
+        key, sep, value = line.partition("=")
+        require(sep and key in allowed and key not in result and len(value) <= 4096, "INSPECT_PROPERTY_RECORD")
+        result[key] = value
+    return result
+
+
+def _inspect_allocations(raw, uid):
+    rows = []
+    lines = raw.decode("ascii", errors="strict").splitlines()
+    require(len(lines) <= 1024, "INSPECT_SUBID_LIMIT")
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        require(len(parts) == 3 and re.fullmatch(r"[A-Za-z0-9_.-]{1,256}", parts[0])
+                and all(re.fullmatch(r"[0-9]{1,10}", value) for value in parts[1:]), "INSPECT_SUBID_RECORD")
+        start, count = int(parts[1]), int(parts[2])
+        require(0 < count <= 2**32 and start + count <= 2**32, "INSPECT_SUBID_RANGE")
+        if parts[0] in (str(uid), "runner"):
+            rows.append({"owner": parts[0], "start": start, "count": count,
+                         "numericCallerUidMatch": parts[0] == str(uid)})
+    return {"totalRows": len(lines), "selectedRows": rows,
+            "selection": "numeric caller UID or literal hosted-image runner name; other owners not retained",
+            "callerNameBindingVerified": False}
+
+
+def inspect_host(workspace, root):
+    """Observe an UNQUALIFIED host candidate. Never invoke the capture route."""
+    budget = {"end": time.monotonic() + INSPECT_SECONDS, "bytes": 0}
+    provenance = public_environment(inspect_host=True)
+    uid = os.getuid()
+    uname = os.uname()
+    groups = os.getgroups()
+    require(len(groups) <= 64, "INSPECT_CALLER_GROUP_LIMIT")
+    facts = {"runner": provenance, "runnerCandidate": {"label": "ubuntu-22.04", "expires": "2027-04-17",
+             "supportedBaseline": False}, "kernel": {key: text(getattr(uname, key), "INSPECT_UNAME", 1024)
+             for key in ("sysname", "release", "version", "machine")},
+             "caller": {"uid": uid, "euid": os.geteuid(), "gid": os.getgid(), "egid": os.getegid(),
+                        "groups": groups, "pid": os.getpid()}, "metadata": {}, "tools": [], "queries": {}}
+    refusals = []
+    paths = {"os-release": "/usr/lib/os-release", "apparmor-userns": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+             "unprivileged-userns": "/proc/sys/kernel/unprivileged_userns_clone", "max-userns": "/proc/sys/user/max_user_namespaces",
+             "caller-cgroup": "/proc/self/cgroup", "subuid": "/etc/subuid", "subgid": "/etc/subgid"}
+    metadata = {}
+    for name, path in paths.items():
+        row, raw = _inspect_read(Path(path), budget)
+        if name in ("subuid", "subgid") and row["status"] == "observed":
+            try:
+                row["allocations"] = _inspect_allocations(raw, uid)
+            except (CaptureFailure, UnicodeError) as failure:
+                row.update(status="unknown", code=getattr(failure, "code", "INSPECT_SUBID_ENCODING"))
+        elif row["status"] == "observed":
+            try:
+                row["text"] = raw.decode("utf-8", errors="strict")
+            except UnicodeError:
+                row.update(status="unknown", code="INSPECT_METADATA_ENCODING")
+        facts["metadata"][name], metadata[name] = row, raw
+    for relative in (SCRIPT, INSPECT_WORKFLOW):
+        row, _ = _inspect_read(workspace / relative, budget, maximum=MAX_JSON, retain=False)
+        facts["metadata"][relative] = row
+    for path in ("/usr/bin/python3", "/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/bin/dpkg-query",
+                 "/usr/bin/newuidmap", "/usr/bin/newgidmap", "/usr/bin/slirp4netns", "/usr/bin/rootlesskit"):
+        try:
+            resolved = Path(path).resolve(strict=True)
+            require(str(resolved).startswith(("/usr/", "/bin/", "/sbin/", "/lib/")), "INSPECT_TOOL_PATH")
+            row, _ = _inspect_read(resolved, budget, maximum=32 * 1024 * 1024, retain=False)
+            row["requestedPath"] = path
+        except (OSError, CaptureFailure) as failure:
+            row = {"requestedPath": path, "status": "unknown", "code": getattr(failure, "code", "INSPECT_TOOL_MISSING")}
+        facts["tools"].append(row)
+    bus = Path("/run/user") / str(uid) / "bus"
+    try:
+        observed = bus.lstat()
+        facts["bus"] = {"path": str(bus), "uid": observed.st_uid, "gid": observed.st_gid,
+                        "mode": stat.S_IMODE(observed.st_mode), "device": observed.st_dev, "inode": observed.st_ino,
+                        "socket": stat.S_ISSOCK(observed.st_mode), "callerUidOwner": observed.st_uid == uid}
+    except OSError as failure:
+        facts["bus"] = {"path": str(bus), "status": "unknown", "errno": failure.errno}
+    for name in ("packages", "user-service", "user-manager"):
+        if name == "user-manager" and not (facts["bus"].get("socket") and facts["bus"].get("callerUidOwner")):
+            facts["queries"][name] = {"status": "refused", "code": "EXISTING_OWNED_USER_BUS_UNAVAILABLE"}
+        else:
+            facts["queries"][name] = _inspect_query(name, uid, root, budget)
+    cgroups = []
+    for line in metadata["caller-cgroup"].decode("ascii", errors="replace").splitlines():
+        if line.startswith("0::"):
+            cgroups.append(line[3:])
+    if len(cgroups) != 1:
+        refusals.append("INSPECT_CALLER_CGROUP_RECORD")
+    try:
+        manager = _inspect_fields(facts["queries"]["user-manager"], {"Version", "ControlGroup"})
+        service = _inspect_fields(facts["queries"]["user-service"], {"Delegate", "ControlGroup", "User", "ActiveState"})
+        facts["delegationProperties"] = service
+        if service.get("Delegate") != "yes" or service.get("ActiveState") != "active":
+            refusals.append("EXISTING_USER_DELEGATION_UNAVAILABLE")
+        if manager.get("ControlGroup"):
+            cgroups.append(manager["ControlGroup"])
+        if service.get("ControlGroup"):
+            cgroups.append(service["ControlGroup"])
+    except CaptureFailure as failure:
+        refusals.append(failure.code)
+    facts["cgroups"] = []
+    if len(set(cgroups)) > 3:
+        refusals.append("INSPECT_CGROUP_COUNT")
+    for path in sorted(set(cgroups))[:3]:
+        valid = (path.startswith("/") and path == str(Path(path)) and ".." not in Path(path).parts and len(path) <= 4096)
+        if not valid:
+            refusals.append("INSPECT_CGROUP_PATH")
+            continue
+        base = Path("/sys/fs/cgroup") / path.lstrip("/")
+        row = {"path": path, "files": {}}
+        try:
+            fd = directory_fd(base)
+            try:
+                observed = os.fstat(fd)
+                row["directory"] = {"uid": observed.st_uid, "gid": observed.st_gid, "mode": stat.S_IMODE(observed.st_mode),
+                                    "device": observed.st_dev, "inode": observed.st_ino}
+            finally:
+                os.close(fd)
+        except OSError as failure:
+            row["directory"] = {"status": "unknown", "errno": failure.errno}
+        for filename in ("cgroup.controllers", "cgroup.subtree_control", "cgroup.type"):
+            field, raw = _inspect_read(base / filename, budget, maximum=4096)
+            if field["status"] == "observed":
+                field["text"] = raw.decode("ascii", errors="replace")
+            row["files"][filename] = field
+        facts["cgroups"].append(row)
+    for key in ("os-release", "caller-cgroup", "subuid", "subgid"):
+        if facts["metadata"][key]["status"] != "observed":
+            refusals.append("REQUIRED_METADATA_UNAVAILABLE:" + key)
+    if metadata["apparmor-userns"].strip() not in (b"", b"0"):
+        refusals.append("USERNS_POLICY_RESTRICTED")
+    if metadata["unprivileged-userns"].strip() not in (b"", b"1") or metadata["max-userns"].strip() == b"0":
+        refusals.append("USERNS_POLICY_RESTRICTED")
+    if any(row["status"] != "observed" for row in facts["tools"] if row["requestedPath"] != "/usr/bin/rootlesskit"):
+        refusals.append("REQUIRED_TOOL_UNAVAILABLE")
+    if any(row["status"] != "observed" for row in facts["queries"].values()):
+        refusals.append("READ_ONLY_QUERY_REFUSED_OR_UNKNOWN")
+    if not facts["cgroups"]:
+        refusals.append("CGROUP_V2_OBSERVATIONS_UNAVAILABLE")
+    if any(field["status"] != "observed" for row in facts["cgroups"] for field in row["files"].values()):
+        refusals.append("CGROUP_METADATA_UNAVAILABLE")
+    if time.monotonic() >= budget["end"]:
+        refusals.append("INSPECT_DEADLINE")
+    receipt = {"schemaVersion": 1, "mode": "inspect-host", "status": "refused-unqualified" if refusals else "observed-unqualified",
+               "approved": False, "supportedBaseline": False, "captureRouteAdmitted": False, "workerStarted": False,
+               "targetExecuted": False, "referenceExecutionQualified": False, "facts": facts, "refusals": sorted(set(refusals)),
+               "readBytes": budget["bytes"], "observationBudgetSeconds": INSPECT_SECONDS,
+               "limitations": ["No helper version execution, namespaces, services, OCI, toolchain or target execution.",
+                   "Systemd properties and file metadata do not prove writable delegation or containment.",
+                   "ubuntu-22.04 is a temporary new-generation candidate, not a supported execution profile."]}
+    save(root / "artifacts/host-inspection.json", receipt)
+    return not refusals
 
 
 def environment(root):
@@ -762,19 +990,26 @@ def main():
     parser.add_argument("--internal-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prepare-inputs", action="store_true")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--inspect-host", action="store_true", help="Observe unqualified host facts only; never provision or execute a target")
     args = parser.parse_args()
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ""))
     root = args.root
-    require(workspace.is_absolute() and workspace == workspace.resolve() and root == workspace / "build/r97"
+    expected = "build/issue97-host-inspect" if args.inspect_host else "build/r97"
+    require(workspace.is_absolute() and workspace == workspace.resolve() and root == workspace / expected
             and root == root.resolve() and stat.S_IMODE(root.stat().st_mode) == 0o700, "OWNED_WORKSPACE")
-    require(len(os.fsencode(root / "run/docker.sock")) < 100, "SOCKET_PATH_LIMIT")
-    for name in ("home", "tmp", "cache", "config", "share", "run", "state", "raw", "data", "exec", "artifacts", "buildx"):
+    if not args.inspect_host:
+        require(len(os.fsencode(root / "run/docker.sock")) < 100, "SOCKET_PATH_LIMIT")
+    directories = (("home", "tmp", "cache", "config", "share", "run", "artifacts") if args.inspect_host else
+                   ("home", "tmp", "cache", "config", "share", "run", "state", "raw", "data", "exec", "artifacts", "buildx"))
+    for name in directories:
         (root / name).mkdir(mode=0o700, exist_ok=True)
         require((root / name).resolve() == root / name and stat.S_IMODE((root / name).stat().st_mode) == 0o700,
                 "OWNED_DIRECTORY")
     try:
-        require(sum((args.internal_worker, args.prepare_inputs, args.preflight)) <= 1, "ARGUMENT_MODE")
-        if args.preflight:
+        require(sum((args.internal_worker, args.prepare_inputs, args.preflight, args.inspect_host)) <= 1, "ARGUMENT_MODE")
+        if args.inspect_host:
+            return 0 if inspect_host(workspace, root) else 78
+        elif args.preflight:
             preflight(root)
         elif args.prepare_inputs:
             prepare_inputs(root)
@@ -785,9 +1020,14 @@ def main():
             controller(workspace, root)
         return 0
     except Exception as failure:
-        save(root / ("artifacts/worker-failure.json" if args.internal_worker else "artifacts/capture-failure.json"),
-             {"schema": SCHEMA, "status": "failed", "approved": False,
-              "failureCode": getattr(failure, "code", type(failure).__name__)})
+        failure_path = ("artifacts/host-inspection-failure.json" if args.inspect_host else
+                        "artifacts/worker-failure.json" if args.internal_worker else "artifacts/capture-failure.json")
+        receipt = {"schema": SCHEMA, "status": "failed", "approved": False,
+                   "failureCode": getattr(failure, "code", type(failure).__name__)}
+        if args.inspect_host:
+            receipt.update(mode="inspect-host", status="refused-unqualified", supportedBaseline=False,
+                           captureRouteAdmitted=False, workerStarted=False, targetExecuted=False)
+        save(root / failure_path, receipt)
         return 1
 
 
