@@ -76,7 +76,10 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_existing_probe_and_runtime_mapping_semantics_are_retained(self):
         from interface_gate_v3 import probe_command
         helper=self.directory/'helper';helper.write_bytes(b'ELF placeholder, never executed')
-        recipe=runtime._contained_recipe(probe_command(helper,self.work,['public.c']),self.work)
+        with patch('interface_gate_v3.profile',side_effect=build_contract.load_profile) as declared_profile, \
+                patch.object(build_contract,'digest',side_effect=AssertionError('pure recipe forbids host tool hashing')):
+            recipe=runtime._contained_recipe(probe_command(helper,self.work,['public.c']),self.work)
+        declared_profile.assert_called_once_with()
         self.assertEqual(['/probe','public.c'],recipe['worker'])
         self.assertEqual(helper,recipe['target']);self.assertEqual('/work',recipe['chdir'])
         self.assertFalse(any(m['writable'] for m in recipe['mounts']))
