@@ -32,6 +32,15 @@ gradle.projectsEvaluated {
     project.dependencies.add(sources.implementationConfigurationName, "org.jetbrains.kotlin:kotlin-stdlib:2.4.0")
     project.dependencies.add(sources.implementationConfigurationName, "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.9.0")
     project.dependencies.add(sources.implementationConfigurationName, "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.9.0")
+    // serialization 1.9.0 requests stdlib 2.2.0. Deliberately align the whole
+    // JVM stdlib family to the project's reviewed Kotlin 2.4.0 toolchain.
+    // This overrides those transitive requests, not arbitrary other conflicts.
+    dependencies.resolutionStrategy.force(
+        "org.jetbrains.kotlin:kotlin-stdlib:2.4.0",
+        "org.jetbrains.kotlin:kotlin-stdlib-common:2.4.0",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.4.0",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.4.0"
+    )
     dependencies.resolutionStrategy.failOnVersionConflict()
     def capturedClasspath = project.files(project.provider {
         project.fileTree(new File(snapshot, "classpath")) { include "*.jar" }.files.sort()
