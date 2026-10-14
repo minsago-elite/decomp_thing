@@ -96,6 +96,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
 import kotlinx.coroutines.CancellationException
@@ -698,6 +699,10 @@ class AcpAgentHarness(
         }
         if (cleanupFailure == null) cleanupFailure = processCleanupFailure
         else processCleanupFailure?.let { cleanupFailure.addSuppressed(it) }
+        running.stdoutReaderCleanupFailure()?.let { unfinishedReader ->
+            if (cleanupFailure == null) cleanupFailure = unfinishedReader
+            else requireNotNull(cleanupFailure).addSuppressed(unfinishedReader)
+        }
         evidenceState.finishCleanup(cleanupFailure == null && processCleanupFailure == null)
 
         val fatalCleanup = cleanupFailure
@@ -2093,6 +2098,11 @@ private class RunningAcpProcess(
     private val stdoutOwnership = AtomicReference(StdoutOwnership.UNCLAIMED)
     private val stdoutNaturallyDrained = AtomicBoolean(false)
     private val stdoutDrainFinished = CompletableFuture<Unit>()
+    private val stdoutClosedForUnblocking = AtomicBoolean(false)
+    private val stdoutReadLock = ReentrantLock()
+    // Production never installs an observer. Reflection-only controls may hold this exact
+    // post-read boundary without replacing native reads, bytes, clocks or process authority.
+    private var stdoutEofPublicationObserver: (() -> Unit)? = null
     private val stderrCapture = BoundedStderrCapture(maximumStderrBytes, producedOutput)
     private val stderrNaturallyDrained = AtomicBoolean(false)
     private val stderrDrainFinished = CompletableFuture<Unit>()
@@ -2136,10 +2146,11 @@ private class RunningAcpProcess(
         }
         val frame = ByteArrayOutputStream()
         var observedProtocolFrames = 0
+        var observedEof = false
         try {
             while (true) {
                 val next = try {
-                    stdoutInput.read()
+                    readStdout { stdoutInput.read() }
                 } catch (io: IOException) {
                     if (closing.get()) break
                     val terminal = AcpTransportFailure("failed reading ACP stdout", io)
@@ -2147,6 +2158,7 @@ private class RunningAcpProcess(
                     throw terminal
                 }
                 if (next < 0) {
+                    observedEof = true
                     if (!closing.get()) {
                         val terminal = if (frame.size() == 0) {
                             AcpEofFailure("ACP stdout reached EOF")
@@ -2216,6 +2228,7 @@ private class RunningAcpProcess(
             }
         } finally {
             stdoutOwnership.compareAndSet(StdoutOwnership.FRAME_CONSUMER, StdoutOwnership.UNCLAIMED)
+            if (observedEof && stdoutNaturallyDrained.get()) stdoutDrainFinished.complete(Unit)
             if (closing.get()) startShutdownStdoutDrain()
         }
     }
@@ -2311,9 +2324,9 @@ private class RunningAcpProcess(
             }
         }
         if (!stdoutDrainFinished.isDone) {
-            // A still-blocked frame consumer owns the same raw stream. Closing it releases that
-            // sole owner; its finally block performs the ordered handoff and completes the drain.
-            runCatching { stdoutInput.close() }
+            // Never close or invalidate a read that still owns the stream, including the
+            // interval after read() returned EOF but before that owner publishes its proof.
+            runCatching { tryCloseStdout() }
             startShutdownStdoutDrain()
             val finalStdoutMillis = minOf(sliceMillis, shutdownDeadline.remainingMillis())
             if (finalStdoutMillis > 0) {
@@ -2324,7 +2337,7 @@ private class RunningAcpProcess(
                 }
             }
         }
-        runCatching { stdoutInput.close() }
+        runCatching { tryCloseStdout() }
         if (!stdoutDrainFinished.isDone || !stdoutNaturallyDrained.get()) {
             fail(
                 AcpOutputLimitFailure(
@@ -2385,17 +2398,54 @@ private class RunningAcpProcess(
         limitExceeded = producedOutput.exceeded(),
     )
 
+    fun stdoutReaderCleanupFailure(): AgentExecutionException? = if (stdoutDrainFinished.isDone) null else {
+        AgentExecutionException(
+            AgentFailure(
+                AgentFailureKind.INTERNAL,
+                "ACP stdout reader remained owned after the shutdown deadline",
+                details = mapOf("phase" to "stdout-drain", "reason" to "readerUnfinished"),
+            ),
+        )
+    }
+
+    private inline fun readStdout(read: () -> Int): Int {
+        // Only one reader owns stdout. Closure may race its next read, but neither side waits
+        // for this lock: an unfinished read is retained instead of forced closed at deadline.
+        if (!stdoutReadLock.tryLock()) throw IOException("ACP stdout descriptor closure is active")
+        try {
+            if (stdoutClosedForUnblocking.get()) throw IOException("ACP stdout was closed without EOF proof")
+            val count = read()
+            if (count < 0) {
+                stdoutEofPublicationObserver?.invoke()
+                recordStdoutEof()
+            }
+            return count
+        } finally {
+            stdoutReadLock.unlock()
+        }
+    }
+
+    private fun tryCloseStdout(): Boolean {
+        if (stdoutReadLock.isHeldByCurrentThread || !stdoutReadLock.tryLock()) return false
+        try {
+            if (!stdoutNaturallyDrained.get()) stdoutClosedForUnblocking.set(true)
+            stdoutInput.close()
+            return true
+        } finally {
+            stdoutReadLock.unlock()
+        }
+    }
+
     private fun startShutdownStdoutDrain() {
-        if (!closing.get() ||
+        if (!closing.get() || stdoutNaturallyDrained.get() ||
             !stdoutOwnership.compareAndSet(StdoutOwnership.UNCLAIMED, StdoutOwnership.SHUTDOWN_DRAIN)
         ) return
         Thread.ofVirtual().name("decomp-engine-acp-stdout-drain-${process.pid()}").start {
             val buffer = ByteArray(8192)
             try {
                 while (true) {
-                    val count = stdoutInput.read(buffer)
+                    val count = readStdout { stdoutInput.read(buffer) }
                     if (count < 0) {
-                        stdoutNaturallyDrained.set(true)
                         break
                     }
                     producedOutput.record(count)
@@ -2406,6 +2456,13 @@ private class RunningAcpProcess(
                 stdoutDrainFinished.complete(Unit)
             }
         }
+    }
+
+    private fun recordStdoutEof() {
+        // The owning reader has already accounted for every consumed byte. Retain its EOF
+        // proof instead of requiring another read, which may fail after stream teardown.
+        // A descriptor closed to unblock a reader cannot prove that its unread bytes drained.
+        if (!stdoutClosedForUnblocking.get()) stdoutNaturallyDrained.set(true)
     }
 
     private fun terminateForOutputLimit(maximumBytes: Long) {
@@ -3155,7 +3212,7 @@ private class AcpProcessExitedFailure(val exitCode: Int) : AcpTerminalFailure("A
 internal class AcpProtocolFailure(message: String) : IllegalStateException(message)
 private class AcpPhaseTimeout(phase: String) : RuntimeException("ACP $phase exceeded its configured timeout")
 private class AcpIdleTimeout(timeout: Duration) : RuntimeException("ACP session/prompt was idle for ${timeout.toMillis()} ms")
-private class RequestedAcpCancellation(val phase: String) : RuntimeException("ACP execution cancelled during $phase")
+internal class RequestedAcpCancellation(val phase: String) : RuntimeException("ACP execution cancelled during $phase")
 
 @OptIn(UnstableApi::class)
 private fun AgentCapabilities.supports(capability: AcpRequiredAgentCapability): Boolean = when (capability) {
