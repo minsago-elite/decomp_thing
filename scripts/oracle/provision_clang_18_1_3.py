@@ -252,7 +252,8 @@ def recipe_identity(contract_path: Path = CONTRACT_PATH,
 
 
 def canonical_json(value: object) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                       allow_nan=False) + "\n").encode()
 
 
 def strict_json_loads(payload: str | bytes) -> object:
@@ -265,7 +266,17 @@ def strict_json_loads(payload: str | bytes) -> object:
             result[name] = value
         return result
 
-    return json.loads(payload, object_pairs_hook=unique_object)
+    def nonfinite(_value: str):
+        raise ProvisionError("JSON evidence contains a non-finite number")
+
+    def finite_float(token: str) -> float:
+        value = float(token)
+        if not math.isfinite(value):
+            nonfinite(token)
+        return value
+
+    return json.loads(payload, object_pairs_hook=unique_object,
+                      parse_constant=nonfinite, parse_float=finite_float)
 
 
 def require_reviewed_relevant_files(contract: dict) -> None:
@@ -925,8 +936,10 @@ def _metadata_binary_row(row: dict) -> dict:
 
 def snapshot_metadata_selection(contract: dict, profile: dict, repositories: list[dict], indexes: list[dict],
                                 source_rows: list[dict], binary_rows: list[dict], metadata_bytes: int,
-                                keyring: Path, contract_path: Path = CONTRACT_PATH) -> dict:
+                                keyring: Path, contract_path: Path = CONTRACT_PATH, *,
+                                captured: dict[Path, bytes] | None = None) -> dict:
     """Describe only the pinned source package and five binary roots from signed indexes."""
+    captured = require_contract_snapshot(contract, contract_path, captured)
     source_pin = profile["sourcePackage"]
     roots = profile["binaryRoots"]
     exact_sources = [row for row in source_rows
@@ -988,8 +1001,8 @@ def snapshot_metadata_selection(contract: dict, profile: dict, repositories: lis
         "candidateSnapshot": profile["snapshot"],
         "candidateSnapshotBase": profile["snapshotBase"],
         "configuredSnapshot": contract["profile"]["snapshot"],
-        "contractSha256": sha256_file(contract_path),
-        "recipe": recipe_identity(contract_path),
+        "contractSha256": sha256(captured_evidence(contract_path, captured)),
+        "recipe": recipe_identity(contract_path, captured),
         "trustedUbuntuKeyring": {"bytes": keyring.stat().st_size, "sha256": sha256_file(keyring)},
         "repositories": repositories,
         "indexes": indexes,
@@ -1012,7 +1025,8 @@ def snapshot_metadata_selection(contract: dict, profile: dict, repositories: lis
 
 
 def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring: Path,
-                            contract_path: Path = CONTRACT_PATH) -> dict:
+                            contract_path: Path = CONTRACT_PATH, *,
+                            captured: dict[Path, bytes] | None = None) -> dict:
     """Authenticate one approved Snapshot's signed indexes without fetching package payloads."""
     if snapshot != SNAPSHOT_METADATA_PROBE:
         raise ProvisionError(f"metadata-only probe is pinned to {SNAPSHOT_METADATA_PROBE}")
@@ -1082,7 +1096,8 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
                 })
 
     evidence = snapshot_metadata_selection(contract, profile, repositories, index_records,
-                                           source_rows, binary_rows, downloader.total, keyring, contract_path)
+                                           source_rows, binary_rows, downloader.total, keyring, contract_path,
+                                           captured=captured)
     evidence["evidenceSha256"] = sha256(canonical_json(evidence))
     atomic_write(output / "snapshot-metadata-report.json", canonical_json(evidence))
     return evidence
@@ -2174,8 +2189,10 @@ def command_acquire(args: argparse.Namespace) -> int:
 
 
 def command_probe_snapshot_metadata(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    report = probe_snapshot_metadata(contract, args.snapshot, args.output, args.keyring, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    report = probe_snapshot_metadata(contract, args.snapshot, args.output, args.keyring, args.contract,
+                                     captured=captured)
     print(f"signed Snapshot metadata probe: {report['status']}")
     print(f"evidence sha256:{report['evidenceSha256']}")
     print(f"report: {args.output / 'snapshot-metadata-report.json'}")
@@ -3160,17 +3177,28 @@ def expected_oci_config(profile_id: str, environment: dict[str, str], rootfs_sha
 
 
 def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environment: dict[str, str]) -> dict:
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    output.chmod(0o755, follow_symlinks=False)
+    (output / "blobs").mkdir(mode=0o700)
+    (output / "blobs").chmod(0o755, follow_symlinks=False)
     blobs = output / "blobs/sha256"
-    blobs.mkdir(parents=True)
+    blobs.mkdir(mode=0o700)
+    blobs.chmod(0o755, follow_symlinks=False)
+
+    def write_layout_file(path: Path, payload: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            stream.write(payload)
+
     rootfs_payload = rootfs_tar.read_bytes()
     layer = gzip.compress(rootfs_payload, compresslevel=9, mtime=0)
     layer_digest = sha256(layer)
-    (blobs / layer_digest).write_bytes(layer)
+    write_layout_file(blobs / layer_digest, layer)
     config = expected_oci_config(profile_id, environment, sha256(rootfs_payload))
     config_bytes = canonical_json(config)
     config_digest = sha256(config_bytes)
-    (blobs / config_digest).write_bytes(config_bytes)
+    write_layout_file(blobs / config_digest, config_bytes)
     manifest = {
         "schemaVersion": 2,
         "mediaType": OCI_MANIFEST_MEDIA_TYPE,
@@ -3179,8 +3207,8 @@ def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environme
     }
     manifest_bytes = canonical_json(manifest)
     manifest_digest = sha256(manifest_bytes)
-    (blobs / manifest_digest).write_bytes(manifest_bytes)
-    (output / "oci-layout").write_bytes(canonical_json({"imageLayoutVersion": "1.0.0"}))
+    write_layout_file(blobs / manifest_digest, manifest_bytes)
+    write_layout_file(output / "oci-layout", canonical_json({"imageLayoutVersion": "1.0.0"}))
     index = {
         "schemaVersion": 2, "mediaType": OCI_INDEX_MEDIA_TYPE,
         "manifests": [{
@@ -3189,7 +3217,7 @@ def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environme
             "annotations": {"org.opencontainers.image.ref.name": OCI_REFERENCE_NAME},
         }],
     }
-    (output / "index.json").write_bytes(canonical_json(index))
+    write_layout_file(output / "index.json", canonical_json(index))
     return {"format": "oci-image-layout-v1", "manifestSha256": manifest_digest, "imageDigest": "sha256:" + manifest_digest,
             "layerBytes": len(layer), "layerSha256": layer_digest, "configSha256": config_digest}
 
@@ -3358,7 +3386,9 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                 raise ProvisionError("OCI index manifest digest differs from the build record")
             manifest_name = "blobs/sha256/" + digest.removeprefix("sha256:")
             manifest_bytes = read_small(manifest_name)
-            if sha256(manifest_bytes) != digest.removeprefix("sha256:") or len(manifest_bytes) != manifest_desc.get("size"):
+            if (type(manifest_desc.get("size")) is not int or
+                    sha256(manifest_bytes) != digest.removeprefix("sha256:") or
+                    len(manifest_bytes) != manifest_desc["size"]):
                 raise ProvisionError("OCI manifest content does not match its index digest/size")
             manifest = strict_json_loads(manifest_bytes)
             config_desc = manifest.get("config", {})
@@ -3386,7 +3416,8 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
             layer_digest = layer.get("digest", "")
             layer_name = "blobs/sha256/" + layer_digest.removeprefix("sha256:")
             member = members.get(layer_name)
-            if not layer_digest.startswith("sha256:") or member is None or member.size != layer.get("size"):
+            if (type(layer.get("size")) is not int or not layer_digest.startswith("sha256:") or
+                    member is None or member.size != layer["size"]):
                 raise ProvisionError("OCI rootfs layer descriptor is missing or malformed")
             stream = archive.extractfile(member)
             if stream is None:
@@ -4160,7 +4191,8 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     if (args.rootfs.exists() or args.rootfs.is_symlink() or
             args.output.exists() or args.output.is_symlink()):
         raise ProvisionError("rootfs and evidence output paths must not exist")
-    contract = read_contract(args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
     profile = contract["profile"]
     args.workdir.mkdir(parents=True, exist_ok=True)
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
@@ -4249,7 +4281,7 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     resource_files = resource_manifest(profile_root, resource_dir)
 
     fixture = RECIPE_FILES["fixtureSha256"]
-    expected_probe_source_sha256 = recipe_identity(args.contract)["probeSha256"]
+    expected_probe_source_sha256 = recipe_identity(args.contract, captured)["probeSha256"]
     probe_in_root, fixture_in_root = bound_call(
         stage_probe_inputs, profile_root, held_rootfs_descriptor=True,
     )
@@ -4318,7 +4350,7 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         "resources": resource_files,
         "resourceDirectory": resource_dir,
         "probe": probe_checked,
-        "recipe": recipe_identity(args.contract),
+        "recipe": recipe_identity(args.contract, captured),
         "environment": contract["environment"],
         "commands": canonical_commands(contract, candidate["trustedKeyring"]["sha256"]),
         "rootfs": rootfs_identity,
@@ -4560,9 +4592,19 @@ def reject_build_record_schema_unknown_fields(record: object, *,
     validate_finite_build_record_schema(record, schema)
 
 
+def require_contract_snapshot(contract: dict, contract_path: Path,
+                              captured: dict[Path, bytes] | None) -> dict[Path, bytes]:
+    """Bind low-level callers too; a supplied parsed dict cannot select other raw bytes."""
+    captured = {} if captured is None else captured
+    if canonical_json(read_contract(contract_path, captured=captured)) != canonical_json(contract):
+        raise ProvisionError("selected contract semantics differ from the captured contract snapshot")
+    return captured
+
+
 def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH, *,
                             captured: dict[Path, bytes] | None = None,
                             allow_fragment: bool = False) -> None:
+    captured = require_contract_snapshot(contract, contract_path, captured)
     reject_build_record_schema_unknown_fields(record, captured=captured, allow_fragment=allow_fragment)
     if not isinstance(record, dict):
         raise ProvisionError("build record must be a JSON object")
@@ -4752,7 +4794,9 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
 
 
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
-                       contract_path: Path = CONTRACT_PATH) -> dict:
+                       contract_path: Path = CONTRACT_PATH, *,
+                       captured: dict[Path, bytes] | None = None) -> dict:
+    captured = require_contract_snapshot(contract, contract_path, captured)
     try:
         if first_path.resolve(strict=True) == second_path.resolve(strict=True):
             raise ProvisionError("two clean runs require distinct record paths and files")
@@ -4769,8 +4813,8 @@ def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, c
             second = strict_json_loads(second_file.read().decode("utf-8"))
     except OSError as error:
         raise ProvisionError(f"could not inspect independent build records: {error}") from error
-    validate_build_record(first, contract, contract_path, allow_fragment=True)
-    validate_build_record(second, contract, contract_path, allow_fragment=True)
+    validate_build_record(first, contract, contract_path, captured=captured, allow_fragment=True)
+    validate_build_record(second, contract, contract_path, captured=captured, allow_fragment=True)
     if canonical_json(first) != canonical_json(second):
         raise ProvisionError("two clean rootfs/image/probe runs did not reproduce identical identity")
     record = dict(first)
@@ -4784,16 +4828,19 @@ def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, c
 
 
 def command_compare_runs(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    record = compare_build_runs(args.first, args.second, args.output, contract, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    record = compare_build_runs(args.first, args.second, args.output, contract, args.contract,
+                                captured=captured)
     print(f"two clean runs reproduced rootfs {record['rootfs']['sha256']} and image {record['image']['imageDigest']}")
     return 0
 
 
 def command_verify_record(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    record = read_provenance_report(args.record, "build record", captured=captured)
+    validate_build_record(record, contract, args.contract, captured=captured)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -4808,9 +4855,10 @@ def command_verify_record(args: argparse.Namespace) -> int:
 
 
 def command_write_loader_input(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    record = read_provenance_report(args.record, "build record", captured=captured)
+    validate_build_record(record, contract, args.contract, captured=captured)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -4844,7 +4892,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
     runtime_rows = verified_frontend_runtime_library_digests(rootfs_dir, record)
     values = {
         "rootfs": str(rootfs_dir),
-        "buildRecordSha256": sha256(args.record.read_bytes()),
+        "buildRecordSha256": sha256(captured_evidence(args.record, captured)),
         "containerImageDigest": record["image"]["imageDigest"],
         "configuredDriver": tool["path"],
         "configuredPathSha256": sha256(tool["path"].encode("utf-8")),
@@ -4884,9 +4932,10 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
 
 
 def command_verify_image(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    record = read_provenance_report(args.record, "build record", captured=captured)
+    validate_build_record(record, contract, args.contract, captured=captured)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:

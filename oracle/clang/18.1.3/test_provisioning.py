@@ -3978,6 +3978,119 @@ public:
                         provision.verify_oci_archive(archive_path, record, 1024 * 1024)
 
 
+    def test_json_boundaries_reject_nonfinite_constants_overflow_and_encoding(self):
+        for token in ("NaN", "Infinity", "-Infinity", "1e400", "-1e400"):
+            for payload in (f'{{"downloadedBytes":{token}}}', f'{{"nested":[{token}]}}'):
+                for data in (payload, payload.encode()):
+                    with self.subTest(payload=payload, binary=isinstance(data, bytes)), self.assertRaisesRegex(
+                            provision.ProvisionError, "non-finite"):
+                        provision.strict_json_loads(data)
+                with self.assertRaises(provision.host_worker.WorkerRefusal):
+                    provision.host_worker.parse(payload.encode())
+        for value in (float("nan"), float("inf"), -float("inf")):
+            for encode in (provision.canonical_json, provision.host_worker.canonical):
+                with self.subTest(value=value, encode=encode.__name__), self.assertRaises(ValueError):
+                    encode({"nested": [value]})
+        finite = {"fraction": 1.25, "integer": 7, "nested": [None, True, -0.5]}
+        self.assertEqual(provision.strict_json_loads(provision.canonical_json(finite)), finite)
+        self.assertEqual(provision.host_worker.parse(provision.host_worker.canonical(finite)), finite)
+
+    def test_oci_layout_modes_and_archived_bytes_are_independent_of_umask(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            source = base / "rootfs.tar"
+            source.write_bytes(b"inert fixed rootfs bytes")
+            archives = []
+            for mask in (0o022, 0o077, 0o777):
+                layout = base / f"layout-{mask}"
+                previous = os.umask(mask)
+                try:
+                    provision.create_oci_layout(source, layout, "fixture", self.contract["environment"])
+                finally:
+                    os.umask(previous)
+                entries = [layout, *sorted(layout.rglob("*"))]
+                output = io.BytesIO()
+                with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                    for path in entries:
+                        mode = 0o755 if path.is_dir() else 0o644
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                        info = archive.gettarinfo(str(path), arcname="." if path == layout else path.relative_to(layout).as_posix())
+                        info.uid = info.gid = 0
+                        info.uname = info.gname = ""
+                        info.mtime = 7
+                        if path.is_file():
+                            with path.open("rb") as stream:
+                                archive.addfile(info, stream)
+                        else:
+                            archive.addfile(info)
+                archives.append(output.getvalue())
+            self.assertEqual(archives[0], archives[1])
+            self.assertEqual(archives[0], archives[2])
+
+    def test_oci_manifest_and_layer_sizes_require_exact_integer_values(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            source = base / "rootfs.tar"
+            payload = b"inert descriptor type fixture"
+            source.write_bytes(payload)
+            for role in ("manifest", "layer"):
+                for index, kind in enumerate(("exact", "float", "true", "false", "missing", "null", "string", "negative")):
+                    with self.subTest(role=role, kind=kind):
+                        layout = base / f"{role}-{index}"
+                        image = provision.create_oci_layout(source, layout, "fixture", self.contract["environment"])
+                        manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
+                        manifest = json.loads(manifest_path.read_bytes())
+                        index_path = layout / "index.json"
+                        document = json.loads(index_path.read_bytes())
+                        descriptor = document["manifests"][0] if role == "manifest" else manifest["layers"][0]
+                        size = descriptor["size"]
+                        if kind == "missing":
+                            del descriptor["size"]
+                        else:
+                            descriptor["size"] = {"exact": size, "float": float(size), "true": True,
+                                "false": False, "null": None, "string": str(size), "negative": -size}[kind]
+                        if role == "layer":
+                            raw = provision.canonical_json(manifest)
+                            digest = provision.sha256(raw)
+                            manifest_path.unlink()
+                            (manifest_path.parent / digest).write_bytes(raw)
+                            document["manifests"][0].update(digest="sha256:" + digest, size=len(raw))
+                            image.update(manifestSha256=digest, imageDigest="sha256:" + digest)
+                        index_path.write_bytes(provision.canonical_json(document))
+                        archive_path = base / f"{role}-{index}.tar"
+                        with tarfile.open(archive_path, "w") as archive:
+                            for path in sorted(layout.rglob("*")):
+                                if path.is_file():
+                                    archive.add(path, arcname=path.relative_to(layout).as_posix(), recursive=False)
+                        record = {"profile": {"id": "fixture"}, "environment": self.contract["environment"],
+                                  "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)}, "image": image,
+                                  "imageArtifact": {"bytes": archive_path.stat().st_size,
+                                                    "sha256": provision.sha256_file(archive_path)}}
+                        if kind == "exact":
+                            provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+                        else:
+                            with self.assertRaises(provision.ProvisionError):
+                                provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
+    def test_loader_input_digest_uses_the_same_captured_record_as_validation(self):
+        with self.temporary_directory() as temp:
+            _, rootfs, record_path, output, properties = self.prepare_loader_input_fixture(Path(temp), "captured-record")
+            original = record_path.read_bytes()
+            properties.unlink()  # The fixture's first publication must not be overwritten.
+            validate = provision.validate_build_record
+            def validate_then_replace(*args, **kwargs):
+                validate(*args, **kwargs)
+                replacement = record_path.with_suffix(".replacement")
+                replacement.write_bytes(b'{"replacement":true}\n')
+                replacement.replace(record_path)
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
+                                               rootfs=rootfs, output=output)
+            with mock.patch.object(provision, "validate_build_record", side_effect=validate_then_replace):
+                self.assertEqual(provision.command_write_loader_input(args), 0)
+            self.assertIn(f"buildRecordSha256={provision.sha256(original)}\n".encode(), properties.read_bytes())
+            self.assertNotEqual(provision.sha256_file(record_path), provision.sha256(original))
+
+
 class RecipeAndCandidateBindingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -4964,6 +5077,118 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 self.assertFalse(args.output.exists())
 
 
+    def test_record_commands_hash_the_raw_contract_snapshot_used_for_parsing(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected, record_path = base / "contract.json", base / "record.json"
+            original = json.dumps(self.contract, indent=2).encode() + b"\n \n"
+            read_contract, validate = provision.read_contract, provision.validate_build_record
+            for command in (provision.command_verify_record, provision.command_write_loader_input,
+                            provision.command_verify_image, provision._package_provenance_unqualified):
+                selected.write_bytes(original)
+                record = self.valid_build_record()
+                record["recipe"] = provision.recipe_identity(selected)
+                record_path.write_bytes(provision.canonical_json(record))
+                snapshots = []
+                def read_then_replace(path, **kwargs):
+                    parsed = read_contract(path, **kwargs)
+                    snapshots.append(kwargs.get("captured"))
+                    replacement = selected.with_suffix(".replacement")
+                    replacement.write_bytes(b'{"replacement":true}\n')
+                    replacement.replace(selected)
+                    return parsed
+                def validate_snapshot(value, contract, path, **kwargs):
+                    self.assertIs(kwargs.get("captured"), snapshots[0])
+                    self.assertEqual(kwargs["captured"][selected], original)
+                    validate(value, contract, path, **kwargs)
+                    self.assertEqual(value["recipe"]["contractSha256"], provision.sha256(original))
+                    raise provision.ProvisionError("captured validation complete")
+                args = provision.argparse.Namespace(contract=selected, record=record_path)
+                with self.subTest(command=command.__name__), mock.patch.object(
+                        provision, "read_contract", side_effect=read_then_replace), mock.patch.object(
+                        provision, "validate_build_record", side_effect=validate_snapshot):
+                    with self.assertRaisesRegex(provision.ProvisionError, "captured validation complete"):
+                        command(args)
+
+    def test_compare_and_snapshot_metadata_keep_selected_raw_contract_after_replacement(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected = base / "contract.json"
+            original = json.dumps(self.contract, indent=2).encode() + b" \n"
+            selected.write_bytes(original)
+            record = self.valid_build_record()
+            record["recipe"] = provision.recipe_identity(selected)
+            first, second, output = base / "first.json", base / "second.json", base / "final.json"
+            first.write_bytes(provision.canonical_json(record))
+            second.write_bytes(provision.canonical_json(record))
+            read_contract = provision.read_contract
+            snapshots = []
+            def read_then_replace(path, **kwargs):
+                parsed = read_contract(path, **kwargs)
+                snapshots.append(kwargs["captured"])
+                selected.write_bytes(b'{"replacement":true}\n')
+                return parsed
+            args = provision.argparse.Namespace(contract=selected, first=first, second=second, output=output)
+            with mock.patch.object(provision, "read_contract", side_effect=read_then_replace):
+                self.assertEqual(provision.command_compare_runs(args), 0)
+            self.assertEqual(json.loads(output.read_bytes())["recipe"]["contractSha256"], provision.sha256(original))
+            keyring = base / "keyring"
+            keyring.write_bytes(b"inert keyring fixture")
+            report = provision.snapshot_metadata_selection(self.contract, self.contract["profile"],
+                [], [], [], [], 0, keyring, selected, captured=snapshots[0])
+            self.assertEqual(report["contractSha256"], provision.sha256(original))
+            self.assertEqual(report["recipe"], record["recipe"])
+
+    def test_record_commands_refuse_digest_from_replacement_contract_semantics(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected, record_path = base / "contract.json", base / "record.json"
+            original = json.loads(json.dumps(self.contract))
+            original["environment"]["PATH"] = "/custom/bin"
+            replacement = provision.canonical_json(self.contract)
+            read_contract, validate = provision.read_contract, provision.validate_build_record
+            for command in (provision.command_verify_record, provision.command_write_loader_input,
+                            provision.command_verify_image, provision._package_provenance_unqualified):
+                selected.write_bytes(provision.canonical_json(original))
+                record = self.valid_build_record()
+                record["environment"] = original["environment"]
+                record["commands"] = provision.canonical_commands(original, record["acquisition"]["ubuntuKeyring"]["sha256"])
+                record["recipe"]["contractSha256"] = provision.sha256(replacement)
+                record_path.write_bytes(provision.canonical_json(record))
+                def read_then_replace(path, **kwargs):
+                    parsed = read_contract(path, **kwargs)
+                    selected.write_bytes(replacement)
+                    return parsed
+                def validate_then_stop(*args, **kwargs):
+                    validate(*args, **kwargs)
+                    raise provision.ProvisionError("unsafe replacement digest accepted")
+                args = provision.argparse.Namespace(contract=selected, record=record_path)
+                with self.subTest(command=command.__name__), mock.patch.object(
+                        provision, "read_contract", side_effect=read_then_replace), mock.patch.object(
+                        provision, "validate_build_record", side_effect=validate_then_stop):
+                    with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+                        command(args)
+
+    def test_direct_record_and_metadata_consumers_refuse_unbound_parsed_contract(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected, keyring = base / "contract.json", base / "keyring"
+            changed = json.loads(json.dumps(self.contract))
+            changed["environment"]["PATH"] = "/custom/bin"
+            selected.write_bytes(provision.canonical_json(changed))
+            admitted = provision.read_contract(selected)
+            selected.write_bytes(provision.canonical_json(self.contract))
+            record = self.valid_build_record()
+            record["environment"] = admitted["environment"]
+            record["commands"] = provision.canonical_commands(admitted, record["acquisition"]["ubuntuKeyring"]["sha256"])
+            keyring.write_bytes(b"inert keyring")
+            with self.assertRaisesRegex(provision.ProvisionError, "contract snapshot"):
+                provision.validate_build_record(record, admitted, selected)
+            with self.assertRaisesRegex(provision.ProvisionError, "contract snapshot"):
+                provision.snapshot_metadata_selection(admitted, admitted["profile"], [], [], [], [], 0,
+                                                     keyring, selected)
+
+
 class ConsumerReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -5385,6 +5610,30 @@ class HostWorkerProtocolTests(unittest.TestCase):
         with self.assertRaises(OSError) as caught:
             os.fstat(held_fd)
         self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_held_stage_file_and_directory_modes_ignore_restrictive_umask(self):
+        parent = self.base / "mode-stage-parent"
+        parent.mkdir()
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, descriptor)
+        backend = self.worker.DockerBackend(self.lock, descriptor)
+        with self.worker.sealed_snapshot(self.source.read_bytes()) as source:
+            for mask in (0o022, 0o077, 0o777):
+                previous = os.umask(mask)
+                try:
+                    with backend.stage_inputs({"top.cpp": source, "nested/deep/source.cpp": source,
+                                               "nested/other.cpp": source}) as held:
+                        root = Path(held)
+                        self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o555)
+                        for relative in ("nested", "nested/deep"):
+                            self.assertEqual(stat.S_IMODE((root / relative).stat().st_mode), 0o755)
+                        for relative in ("top.cpp", "nested/deep/source.cpp", "nested/other.cpp"):
+                            path = root / relative
+                            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+                            self.assertEqual(path.read_bytes(), self.source.read_bytes())
+                finally:
+                    os.umask(previous)
+                self.assertEqual(list(parent.iterdir()), [])
 
     def test_concrete_backend_checks_daemon_isolation_and_fixed_arguments(self):
         self.execute()

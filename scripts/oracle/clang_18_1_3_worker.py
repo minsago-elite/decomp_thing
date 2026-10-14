@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -49,6 +50,12 @@ def canonical(value: object) -> bytes:
 
 
 def parse(payload: bytes) -> dict:
+    def finite_float(token):
+        value = float(token)
+        if not math.isfinite(value):
+            raise WorkerRefusal("nonfinite worker metadata")
+        return value
+
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -58,6 +65,7 @@ def parse(payload: bytes) -> dict:
         return result
     try:
         value = json.loads(payload, object_pairs_hook=unique,
+                           parse_float=finite_float,
                            parse_constant=lambda _: (_ for _ in ()).throw(WorkerRefusal("nonfinite worker metadata")))
     except (ValueError, UnicodeError, RecursionError) as error:
         raise WorkerRefusal("invalid bounded worker metadata") from error
@@ -415,9 +423,11 @@ class DockerBackend:
             # even if a caller can rename one of its pathname ancestors.
             root_owned(os.fstat(parent), directory=True)
             os.mkdir(name, 0o700, dir_fd=parent)
+            os.chmod(name, 0o700, dir_fd=parent, follow_symlinks=False)
             root = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
             identity = os.fstat(root)
             root_owned(identity, directory=True)
+            os.fchmod(root, 0o700)
             for logical, source in sorted(inputs.items()):
                 if fcntl.fcntl(source, fcntl.F_GET_SEALS) & SEALS != SEALS:
                     raise WorkerRefusal("runtime staging requires immutable sealed source snapshots")
@@ -432,6 +442,7 @@ class DockerBackend:
                         try:
                             os.mkdir(component, 0o755, dir_fd=directory)
                             created_directories.append(tuple(prefix))
+                            os.chmod(component, 0o755, dir_fd=directory, follow_symlinks=False)
                         except FileExistsError:
                             pass
                         child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -439,10 +450,12 @@ class DockerBackend:
                         os.close(directory)
                         directory = child
                         root_owned(os.fstat(directory), directory=True)
+                        os.fchmod(directory, 0o755)
                     output = os.open(components[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                                      0o444, dir_fd=directory)
                     created_files.append(tuple(components))
                     with os.fdopen(output, "wb") as stream:
+                        os.fchmod(stream.fileno(), 0o444)
                         stream.write(read_descriptor(source, MAX_INPUT))
                 finally:
                     os.close(directory)
