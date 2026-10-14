@@ -21,7 +21,110 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+internal fun assertSourceIdentityTraversalPermutation(
+    baseline: List<Triple<String, Long, Long?>>,
+    permuted: List<Triple<String, Long, Long?>>,
+    order: FullTreeSourceIdentityTraversalOrder,
+    context: String,
+) {
+    val baselineCUs = baseline.filter { it.first == "cu" }.map { it.second }
+    val actualCUs = permuted.filter { it.first == "cu" }.map { it.second }
+    assertTrue(baselineCUs.size > 1, "$context requires more than one CU")
+    assertEquals(baselineCUs.distinct(), baselineCUs, "$context visits each CU once")
+    assertEquals(if (order.reverseCompilationUnits) baselineCUs.asReversed() else baselineCUs, actualCUs, "$context CU visitation")
+    val baselineDies = baseline.filter { it.first == "die" }.groupBy { it.second }
+    val actualDies = permuted.filter { it.first == "die" }.groupBy { it.second }
+    assertTrue(baselineDies.values.any { it.size > 1 }, "$context requires multiple relevant DIEs in a CU")
+    assertEquals(baselineDies.keys, actualDies.keys, "$context identical CU membership")
+    baselineDies.forEach { (cu, dies) ->
+        assertEquals(dies.distinct(), dies, "$context visits each source DIE once")
+        assertEquals(if (order.reverseDies) dies.asReversed() else dies, actualDies.getValue(cu), "$context DIE visitation in $cu")
+    }
+    listOf("header-lookup", "unit-lookup").forEach { phase ->
+        val expected = baseline.filter { it.first == phase }
+        val actual = permuted.filter { it.first == phase }
+        assertTrue(expected.size > 1, "$context requires multiple $phase entries")
+        assertEquals(expected.distinct(), expected, "$context unique $phase keys")
+        assertEquals(if (order.reverseLookupInsertion) expected.asReversed() else expected, actual, "$context actual $phase iteration")
+    }
+    val expectedClaims = baseline.filter { it.first.startsWith("claim:") }
+    val actualClaims = permuted.filter { it.first.startsWith("claim:") }
+    assertTrue(expectedClaims.size > 1, "$context requires multiple real candidate claims")
+    assertEquals(expectedClaims.toSet(), actualClaims.toSet(), "$context identical collision-map population")
+    assertEquals(actualClaims.distinct(), actualClaims, "$context reconciles each candidate once")
+    if (order == FullTreeSourceIdentityTraversalOrder.PERMUTE_MAPS) {
+        assertEquals(expectedClaims.drop(1) + expectedClaims.first(), actualClaims, "$context actual claim HashMap rotation")
+        assertTrue(expectedClaims != actualClaims, "$context claim-map iteration must actually change")
+    }
+}
+
 class FullTreeSourceEntityIdentityProducerTest {
+    @Test
+    fun `default reference walk accepts 32 entries and rejects 33 before publication`() =
+        inControlTemporaryDirectory { root ->
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val expectedFailure = "source-identity origin/specification walk exceeds 32 DIE entries"
+            assertEquals(32, FullTreeFunctionObservationProducerLimits().maximumReferenceChainEntries)
+            for (entries in listOf(32, 33)) {
+                val row = privateDirectory(root.resolve("chain-$entries"))
+                val scratch = privateDirectory(row.resolve("scratch"))
+                val raw = ComposedFunctionObservationElf.build(referenceChainEntries = entries)
+                val artifact = writeElf(row.resolve("chain.elf"), raw.bytes)
+                val artifactHash = OracleArtifacts.sha256(raw.bytes)
+                val scope = scopeForArtifact(controls.authenticatedScope(), artifactHash, raw.bytes.size.toLong())
+                val inventoryPath = row.resolve("inventory.json")
+                val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+                val inventoryBytes = Files.readAllBytes(inventoryPath)
+                val shardId = (inventory.inventory.controlArray("shards").single() as JsonObject).controlString("id")
+                var admittedFacts = 0
+                val outputRoot = row.resolve("observations")
+                if (entries == 32) {
+                    val scan = FullTreeSourceEntityIdentityProducer.scanShard(
+                        artifact, inventoryPath, scope, shardId, scratch,
+                        factAdmission = { _, _ -> admittedFacts++ },
+                    )
+                    assertEquals(32, admittedFacts)
+                    assertEquals(32, scan.facts.size)
+                    val rootFact = scan.facts.single { it.physicalDie.dieOffset == "0x${raw.nonEmittedDieOffset.toString(16)}" }
+                    assertEquals(31, rootFact.edges.size, "the successful walk must reach every distinct target")
+                    assertTrue(rootFact.edges.all { it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION &&
+                        it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null })
+                    assertEquals(31, rootFact.edges.map { it.target }.distinct().size)
+                    assertTrue(rootFact.edges.any { it.target?.dieOffset == "0x${raw.declarationDieOffset.toString(16)}" })
+                    assertEquals(FullTreeSourceEntityKind.DECLARATION_ONLY, rootFact.kind)
+                    assertEquals(FullTreeDenominatorDisposition.NON_SCOREABLE, rootFact.denominatorDisposition)
+                    val published = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                        artifact, inventoryPath, scope, scratch, outputRoot,
+                    )
+                    val validated = FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                        outputRoot, published.binding.indexArtifactSha256, artifact, inventoryPath, scope, scratch,
+                    )
+                    assertEquals(32L, published.sourceEntities)
+                    assertEquals(published.outputs, validated.outputs)
+                } else {
+                    val failure = assertFailsWith<FullTreeControlException> {
+                        FullTreeSourceEntityIdentityProducer.scanShard(
+                            artifact, inventoryPath, scope, shardId, scratch,
+                            factAdmission = { _, _ -> admittedFacts++ },
+                        )
+                    }
+                    assertEquals(expectedFailure, failure.message)
+                    assertEquals(0, admittedFacts, "the root walk fails before any source facts escape admission")
+                    val publicationFailure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                        FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                            artifact, inventoryPath, scope, scratch, outputRoot,
+                        )
+                    }
+                    assertTrue(generateSequence<Throwable>(publicationFailure) { it.cause }.any { it.message == expectedFailure },
+                        "publication must reject the actual reference-walk bound, not a different counter: $publicationFailure")
+                    assertTrue(!Files.exists(outputRoot, LinkOption.NOFOLLOW_LINKS), "no partial observation run may publish")
+                }
+                assertContentEquals(raw.bytes, Files.readAllBytes(artifact))
+                assertContentEquals(inventoryBytes, Files.readAllBytes(inventoryPath))
+                assertTrue(Files.list(scratch).use { it.findAny().isEmpty }, "reference-bound scratch must be cleaned")
+            }
+        }
+
     @Test
     fun `sixteen long typed parameters publish within the identity edge bound and finalize cancellably`() =
         inControlTemporaryDirectory { root ->
@@ -380,6 +483,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         Files.createDirectories(evidence)
         val controls = createFullTreeControlFixture(evidence.resolve("control-fixture"))
         val compilerRows = mutableListOf<String>()
+        val traversalRows = mutableListOf<String>()
         val gcc = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
         val clang = resolveCompilerOrNull(
             listOfNotNull(System.getenv("DECOMP_TEST_CLANG"), System.getenv("CLANGXX")).takeIf { it.isNotEmpty() }
@@ -423,6 +527,7 @@ class FullTreeSourceEntityIdentityProducerTest {
                 val shard = inventory.inventory.controlArray("shards").single() as JsonObject
                 val shardId = shard.controlString("id")
                 val fullRunClaims = mutableListOf<Pair<String, String>>()
+                val baselineVisits = mutableListOf<Triple<String, Long, Long?>>()
                 val first = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
                     inventoryPath,
@@ -430,6 +535,9 @@ class FullTreeSourceEntityIdentityProducerTest {
                     shardId,
                     rowRoot,
                     anchorClaim = { _, candidate, physicalClaim -> fullRunClaims += candidate to physicalClaim },
+                    traversal = FullTreeSourceIdentityTraversal(onVisit = { phase, cu, die ->
+                        baselineVisits += Triple(phase, cu, die)
+                    }),
                 )
                 val second = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
@@ -439,6 +547,32 @@ class FullTreeSourceEntityIdentityProducerTest {
                     rowRoot,
                 )
                 val runDescription = "$compilerIdentity -O$optimization artifact=$artifactSha256"
+                fun retainTraversalEvidence(order: FullTreeSourceIdentityTraversalOrder, visits: List<Triple<String, Long, Long?>>) {
+                    val trace = visits.joinToString("\n") { (phase, cu, die) -> "$phase:$cu:${die ?: "-"}" }
+                    traversalRows += "$runDescription\t${order.name}\t${visits.size}\t" +
+                        "${OracleArtifacts.sha256(trace.toByteArray(StandardCharsets.UTF_8))}\t${first.canonicalSha256}"
+                }
+                retainTraversalEvidence(FullTreeSourceIdentityTraversalOrder.FORWARD, baselineVisits)
+                FullTreeSourceIdentityTraversalOrder.entries.filter { it != FullTreeSourceIdentityTraversalOrder.FORWARD }.forEach { order ->
+                    val visits = mutableListOf<Triple<String, Long, Long?>>()
+                    val permuted = FullTreeSourceEntityIdentityProducer.scanShard(
+                        artifact, inventoryPath, scope, shardId, rowRoot,
+                        traversal = FullTreeSourceIdentityTraversal(order) { phase, cu, die ->
+                            visits += Triple(phase, cu, die)
+                        },
+                    )
+                    assertSourceIdentityTraversalPermutation(baselineVisits, visits, order, runDescription)
+                    assertEquals(first.scannedDies, permuted.scannedDies, "$runDescription $order")
+                    assertEquals(first.canonicalSha256, permuted.canonicalSha256, "$runDescription $order")
+                    assertContentEquals(canonicalSourceEntityFacts(first.facts), canonicalSourceEntityFacts(permuted.facts), "$runDescription $order")
+                    assertEquals(artifactSha256, fixtureSha256(artifact), "traversal must not alter raw artifact bytes")
+                    retainTraversalEvidence(order, visits)
+                }
+                Files.writeString(
+                    evidence.resolve("traversal-matrix.tsv"),
+                    traversalRows.joinToString("\n", postfix = "\n"),
+                    StandardCharsets.UTF_8,
+                )
                 assertEquals(artifactSha256, first.richArtifactSha256, runDescription)
                 assertEquals(first.canonicalSha256, second.canonicalSha256, runDescription)
                 assertEquals(first.facts.size, first.facts.map { it.sourceEntityId }.distinct().size, runDescription)
@@ -1085,7 +1219,8 @@ class FullTreeSourceEntityIdentityProducerTest {
         }
     }
 
-    private fun compileFixture(compiler: Path, fixture: Path, output: Path, optimization: Int): Path {
+    // Shared by the V2 adversarial publication controls: use the same real compiler inputs.
+    internal fun compileFixture(compiler: Path, fixture: Path, output: Path, optimization: Int): Path {
         val objects = listOf("caller_one", "caller_two", "instantiate", "unique_pattern").map { name ->
             val target = output.resolve("$name.o")
             runCommand(
@@ -1117,7 +1252,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         return artifact
     }
 
-    private fun resolveCompiler(environmentName: String, candidates: List<String>): Path =
+    internal fun resolveCompiler(environmentName: String, candidates: List<String>): Path =
         resolveCompilerOrNull(System.getenv(environmentName)?.takeIf(String::isNotBlank)?.let(::listOf) ?: candidates)
             ?: throw AssertionError("required fixture compiler $environmentName is unavailable; tried ${candidates.joinToString()}")
 
@@ -1155,7 +1290,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         Regex("DW_AT_name\\s*:[^\\n]*:\\s*${Regex.escape(namePrefix)}(?:>|[ \\t]|$)")
             .containsMatchIn(dwarfShape)
 
-    private fun scopeForArtifact(
+    internal fun scopeForArtifact(
         original: AuthenticatedFullTreeScope,
         artifactSha256: String,
         artifactBytes: Long,

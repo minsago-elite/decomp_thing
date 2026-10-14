@@ -15,6 +15,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -178,6 +179,159 @@ class StableControlFileTest {
                 assertTrue(failure.message.orEmpty().contains("lease"), failure.message)
             }
             assertContentEquals(original, Files.readAllBytes(input))
+        }
+
+    @Test
+    fun `path identity check accepts unchanged hardlinked input`() = inControlTemporaryDirectory { root ->
+        val original = ByteArray(4096) { index -> index.toByte() }
+        val input = root.resolve("hardlinked-control.bin")
+        val alias = root.resolve("control-alias.bin")
+        writeOwnerFile(input, original)
+        Files.createLink(alias, input)
+        assertEquals(2, (Files.getAttribute(input, "unix:nlink") as Number).toInt())
+
+        StableControlFile.open(input, original.size.toLong(), "hardlinked identity fixture").use { file ->
+            file.requirePathAndIdentity("hardlinked identity fixture")
+            assertContentEquals(original, file.readExactly(0L, original.size, "hardlinked identity fixture"))
+        }
+        assertTrue(Files.isSameFile(input, alias))
+    }
+
+    @Test
+    fun `path identity check rejects parent exchange`() = inControlTemporaryDirectory { root ->
+        val original = ByteArray(4096) { index -> index.toByte() }
+        val replacement = ByteArray(original.size) { index -> (index xor 0x47).toByte() }
+        val selectedParent = Files.createDirectory(root.resolve("selected-parent"))
+        val replacementParent = Files.createDirectory(root.resolve("replacement-parent"))
+        val input = selectedParent.resolve("control.bin")
+        val replacementInput = replacementParent.resolve("control.bin")
+        writeOwnerFile(input, original)
+        writeOwnerFile(replacementInput, replacement)
+
+        StableControlFile.open(input, original.size.toLong(), "path exchange fixture").use { file ->
+            file.requirePathAndIdentity("path exchange fixture before exchange")
+            LinuxFilesystemSyscalls.openRoot(root).use { openedRoot ->
+                openedRoot.whileOpen { rootFd ->
+                    LinuxFilesystemSyscalls.exchange(rootFd, "selected-parent", "replacement-parent")
+                }
+            }
+
+            val failure = assertFailsWith<FullTreeControlException> {
+                file.requirePathAndIdentity("path exchange fixture after exchange")
+            }
+            assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+        }
+        assertContentEquals(replacement, Files.readAllBytes(input))
+        assertContentEquals(original, Files.readAllBytes(replacementInput))
+    }
+
+    @Test
+    fun `path identity check does not invoke stored authentication callbacks`() =
+        inControlTemporaryDirectory { root ->
+            val original = ByteArray(4096) { index -> index.toByte() }
+            val input = root.resolve("callback-control.bin")
+            writeOwnerFile(input, original)
+            val checkpoints = mutableListOf<String>()
+
+            StableControlFile.openWithCheckpoint(
+                input,
+                original.size.toLong(),
+                "callback identity fixture",
+            ) { checkpoints += it }.use { file ->
+                assertTrue(checkpoints.isNotEmpty(), "initial authentication must exercise the stored callback")
+                val initialCheckpoints = checkpoints.toList()
+
+                file.requirePathAndIdentity("callback identity fixture")
+
+                assertEquals(initialCheckpoints, checkpoints)
+                file.verifyUnchanged("callback identity fixture")
+                assertTrue(checkpoints.size > initialCheckpoints.size)
+            }
+        }
+
+    @Test
+    fun `parent rename preserves retained continuity but does not rebind ordinary authentication`() =
+        inControlTemporaryDirectory { root ->
+            val original = ByteArray(4096) { index -> index.toByte() }
+            val selectedParent = Files.createDirectory(root.resolve("selected-parent"))
+            val relocatedParent = root.resolve("relocated-parent")
+            val input = selectedParent.resolve("control.bin")
+            writeOwnerFile(input, original)
+
+            StableControlFile.open(input, original.size.toLong(), "retained rename fixture").use { file ->
+                file.requireRetainedLeaseAndIdentity("retained rename fixture before move")
+                Files.move(selectedParent, relocatedParent)
+
+                file.requireRetainedLeaseAndIdentity("retained rename fixture after move")
+                val verificationFailure = assertFailsWith<FullTreeControlException> {
+                    file.verifyUnchanged("retained rename fixture")
+                }
+                assertTrue(verificationFailure.message.orEmpty().contains("mutated"), verificationFailure.message)
+                val destination = ByteArray(original.size) { 0x5a.toByte() }
+                val expectedDestination = destination.copyOf()
+                val readFailure = assertFailsWith<FullTreeControlException> {
+                    file.readAt(0L, destination, 0, destination.size)
+                }
+                assertTrue(readFailure.message.orEmpty().contains("mutated"), readFailure.message)
+                assertContentEquals(expectedDestination, destination)
+                file.requireRetainedLeaseAndIdentity("retained rename fixture after rejected reads")
+            }
+            assertContentEquals(original, Files.readAllBytes(relocatedParent.resolve("control.bin")))
+        }
+
+    @Test
+    fun `nonblocking writer after parent rename poisons retained continuity`() =
+        inControlTemporaryDirectory { root ->
+            val original = ByteArray(4096) { index -> index.toByte() }
+            val selectedParent = Files.createDirectory(root.resolve("selected-parent"))
+            val relocatedParent = root.resolve("relocated-parent")
+            val input = selectedParent.resolve("control.bin")
+            writeOwnerFile(input, original)
+
+            StableControlFile.open(input, original.size.toLong(), "retained lease fixture").use { file ->
+                Files.move(selectedParent, relocatedParent)
+                file.requireRetainedLeaseAndIdentity("retained lease fixture before writer")
+                val opened = HostileWriterLibC.open(
+                    relocatedParent.resolve("control.bin").toString(),
+                    O_WRONLY or O_NONBLOCK,
+                )
+                val error = if (opened < 0) Native.getLastError() else 0
+                if (opened >= 0) HostileWriterLibC.close(opened)
+                assertEquals(-1, opened)
+                assertEquals(EWOULDBLOCK, error)
+
+                val failure = assertFailsWith<FullTreeControlException> {
+                    file.requireRetainedLeaseAndIdentity("retained lease fixture after writer")
+                }
+                assertTrue(failure.message.orEmpty().contains("lease"), failure.message)
+            }
+            assertContentEquals(original, Files.readAllBytes(relocatedParent.resolve("control.bin")))
+        }
+
+    @Test
+    fun `metadata change after parent rename rejects retained continuity`() =
+        inControlTemporaryDirectory { root ->
+            val original = ByteArray(4096) { index -> index.toByte() }
+            val selectedParent = Files.createDirectory(root.resolve("selected-parent"))
+            val relocatedParent = root.resolve("relocated-parent")
+            val input = selectedParent.resolve("control.bin")
+            writeOwnerFile(input, original)
+            val originalModifiedTime = Files.getLastModifiedTime(input)
+
+            StableControlFile.open(input, original.size.toLong(), "retained metadata fixture").use { file ->
+                Files.move(selectedParent, relocatedParent)
+                file.requireRetainedLeaseAndIdentity("retained metadata fixture before timestamp change")
+                Files.setLastModifiedTime(
+                    relocatedParent.resolve("control.bin"),
+                    FileTime.fromMillis(originalModifiedTime.toMillis() + TimeUnit.SECONDS.toMillis(10L)),
+                )
+
+                val failure = assertFailsWith<FullTreeControlException> {
+                    file.requireRetainedLeaseAndIdentity("retained metadata fixture after timestamp change")
+                }
+                assertTrue(failure.message.orEmpty().contains("timestamps"), failure.message)
+            }
+            assertContentEquals(original, Files.readAllBytes(relocatedParent.resolve("control.bin")))
         }
 
     @Test

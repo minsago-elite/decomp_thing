@@ -34,6 +34,65 @@ import org.junit.jupiter.api.Tag
 @Tag("ci-live")
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     @Test
+    fun `bounded BOOT fixture closure preserves exact worker native and policy resources without test dependencies`() {
+        withDiskScratch { root ->
+            val sources = boundedBootFixtureClassPathSources()
+            val testClasses = Path.of(javaClass.protectionDomain.codeSource.location.toURI()).toAbsolutePath().normalize()
+            val junit = Path.of(org.junit.jupiter.api.Test::class.java.protectionDomain.codeSource.location.toURI())
+                .toAbsolutePath().normalize()
+            assertTrue(testClasses !in sources, "BOOT must not copy the complete test classes")
+            assertTrue(junit !in sources, "BOOT must not copy the JUnit runtime")
+            val entries = boundedBootFixtureClassPath(sources, privateDirectory(root.resolve("runtime")))
+            val total = entries.fold(0L) { sum, entry -> Math.addExact(sum, Files.size(entry.path)) }
+            assertTrue(total in 1..BOOT_FIXTURE_CLASSPATH_MAXIMUM_BYTES)
+            val required = listOf(
+                "decompengine/oracle/fulltree/FullTreeFunctionObservationIsolatedWorker.class",
+                "decompengine/oracle/fulltree/FullTreeFunctionObservationIsolatedSupervisor.class",
+                "kotlin/Unit.class", "com/sun/jna/Native.class", "org/sqlite/JDBC.class",
+                "kotlinx/serialization/json/Json.class", "kotlinx/serialization/KSerializer.class",
+                "com/fasterxml/jackson/core/JsonFactory.class", "oracle-native-libraries-v1.properties",
+            )
+            required.forEach { name ->
+                assertEquals(1, entries.count { entry ->
+                    java.util.jar.JarFile(entry.path.toFile()).use { it.getJarEntry(name) != null }
+                }, "BOOT closure must retain exactly one $name")
+            }
+            entries.forEach { assertEquals(sha256(it.path), it.expectedSha256) }
+            println("bounded BOOT fixture classpath: ${entries.size} entries, $total bytes; maximum $BOOT_FIXTURE_CLASSPATH_MAXIMUM_BYTES bytes")
+        }
+    }
+
+    @Test
+    fun `bounded BOOT fixture census refuses aggregate excess without changing source evidence`() {
+        withDiskScratch { root ->
+            val first = root.resolve("first.jar")
+            val second = root.resolve("second.jar")
+            val bytes = ByteArray(129) { it.toByte() }
+            Files.write(first, bytes)
+            Files.write(second, bytes)
+            assertFailsWith<IllegalArgumentException> {
+                boundedBootFixtureClassPath(listOf(first, second), privateDirectory(root.resolve("runtime")), 257)
+            }
+            assertContentEquals(bytes, Files.readAllBytes(first))
+            assertContentEquals(bytes, Files.readAllBytes(second))
+        }
+    }
+
+    @Test
+    fun `bounded BOOT fixture directory packing refuses actual ZIP output excess and removes partial JAR`() {
+        withDiskScratch { root ->
+            val classes = privateDirectory(root.resolve("classes"))
+            val bytes = ByteArray(32 * 1024).also { java.util.Random(17).nextBytes(it) }
+            val original = classes.resolve("unrelated.bin")
+            Files.write(original, bytes)
+            val runtime = privateDirectory(root.resolve("runtime"))
+            assertFailsWith<IllegalArgumentException> { boundedBootFixtureClassPath(listOf(classes), runtime, 512) }
+            assertTrue(entryNames(runtime).isEmpty(), "refused packing must remove its known partial JAR")
+            assertContentEquals(bytes, Files.readAllBytes(original))
+        }
+    }
+
+    @Test
     fun `prepared fixture cleanup removes bounded nested JVM-like temporary residue`() {
         assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
         inControlTemporaryDirectory { root ->
@@ -924,6 +983,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             val configuration = availableConfiguration(
                 root.resolve("authenticated-runtime"),
                 launchBoundaryRequired = false,
+                boundedBootFixture = true,
             )
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated JVM runtime is unavailable")
@@ -1062,7 +1122,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
             assertTrue(entryNames(mount).isEmpty(), "provisioned ext4 slot is not empty")
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
             }
@@ -1210,7 +1270,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     fun `production BOOT records exact attachment and transfers to UNIT_ATTACHED typestate`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
             }
@@ -1328,7 +1388,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     fun `cold UNIT_ATTACHED recovery re-pins BOOT without mutating the live scope`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated recovery boundary is unavailable")
             }
@@ -1823,7 +1883,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     fun `unit collisions around deterministic absence sweeps stay untouched`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
             }
@@ -1910,7 +1970,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     fun `process start return grants only exact local pidfd cleanup before attachment`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
             }
@@ -2002,7 +2062,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     fun `post-attachment cleanup and final absence faults retain retry authority`() =
         inControlTemporaryDirectory { root ->
             val mount = provisionedOracleExt4Mount()
-            val configuration = availableConfiguration(root.resolve("authenticated-runtime"))
+            val configuration = availableConfiguration(root.resolve("authenticated-runtime"), boundedBootFixture = true)
             if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
                 assertTrue(configuration != null, "required CI authenticated launch boundary is unavailable")
             }
@@ -3373,6 +3433,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     private fun availableConfiguration(
         runtimeParent: Path,
         launchBoundaryRequired: Boolean = true,
+        boundedBootFixture: Boolean = false,
     ): FullTreeFunctionObservationIsolationConfiguration? {
         val uid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
         val java = Path.of(System.getProperty("java.home"), "bin", "java").realExecutableOrNull() ?: return null
@@ -3419,7 +3480,11 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
             busctl = unusedLaunchBoundary.resolve("busctl")
         }
         Files.createDirectories(runtimeParent)
-        val classPath = System.getProperty("java.class.path")
+        // Only the scratch-bounded pre-START controls select the small physical closure. The
+        // full publication fixture still needs the complete existing application/test runtime.
+        val classPath = if (boundedBootFixture) boundedBootFixtureClassPath(
+            boundedBootFixtureClassPathSources(), runtimeParent,
+        ) else System.getProperty("java.class.path")
             .split(File.pathSeparator)
             .filter(String::isNotEmpty)
             .map { Path.of(it).toAbsolutePath().normalize() }
@@ -3467,6 +3532,61 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         )
     }
 
+    private fun boundedBootFixtureClassPathSources(): List<Path> {
+        val sources = listOf(
+            FullTreeFunctionObservationIsolatedWorker::class.java,
+            FullTreeFunctionObservationIsolatedSupervisor::class.java,
+            Unit::class.java,
+            com.sun.jna.Native::class.java,
+            org.sqlite.JDBC::class.java,
+            kotlinx.serialization.json.Json::class.java,
+            kotlinx.serialization.KSerializer::class.java,
+            com.fasterxml.jackson.core.JsonFactory::class.java,
+        ).map { type ->
+            Path.of(checkNotNull(type.protectionDomain.codeSource).location.toURI()).toAbsolutePath().normalize()
+        }.toMutableList()
+        // Gradle separates main classes from their resources. A packaged application already
+        // carries this exact policy in the worker's JAR; a classes-directory launch needs its
+        // main resource container as an independently hashed classpath member too.
+        val policy = checkNotNull(OracleNativeLibraries::class.java.getResource("/oracle-native-libraries-v1.properties"))
+        when (policy.protocol) {
+            "file" -> sources.add(Path.of(policy.toURI()).parent.toAbsolutePath().normalize())
+            "jar" -> {
+                val container = (policy.openConnection() as java.net.JarURLConnection).jarFileURL
+                require(container.protocol == "file") { "BOOT native policy must have a local resource container" }
+                sources.add(Path.of(container.toURI()).toAbsolutePath().normalize())
+            }
+            else -> error("BOOT native policy has an unsupported deployment location")
+        }
+        return sources.distinct()
+    }
+
+    private fun boundedBootFixtureClassPath(
+        sources: List<Path>, runtimeParent: Path,
+        maximumBytes: Long = BOOT_FIXTURE_CLASSPATH_MAXIMUM_BYTES,
+    ): List<FullTreeFunctionObservationClassPathEntry> {
+        require(maximumBytes in 1..BOOT_FIXTURE_CLASSPATH_MAXIMUM_BYTES)
+        require(sources.isNotEmpty() && sources.size <= 9 && sources.distinct().size == sources.size)
+        var total = 0L
+        return sources.mapIndexed { index, source ->
+            val remaining = maximumBytes - total
+            require(remaining > 0) { "BOOT fixture classpath exceeds its bounded scratch allowance" }
+            val packed = Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS)
+            val regular = if (packed) runtimeParent.resolve("boot-classes-$index.jar").also { target ->
+                try { createRuntimeJar(source, target, remaining) }
+                catch (failure: Throwable) {
+                    runCatching { Files.deleteIfExists(target) }.exceptionOrNull()?.let(failure::addSuppressed)
+                    throw failure
+                }
+            } else source
+            require(Files.isRegularFile(regular, LinkOption.NOFOLLOW_LINKS))
+            val bytes = Files.size(regular)
+            require(bytes in 1..remaining) { "BOOT fixture classpath exceeds its bounded scratch allowance" }
+            total = Math.addExact(total, bytes)
+            FullTreeFunctionObservationClassPathEntry(regular, sha256(regular))
+        }
+    }
+
     private fun syntheticConfiguration(
         mounts: List<FullTreeFunctionObservationRuntimeMount>,
         classPath: List<FullTreeFunctionObservationClassPathEntry>,
@@ -3509,8 +3629,20 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         )
     }
 
-    private fun createRuntimeJar(source: Path, target: Path) {
-        JarOutputStream(Files.newOutputStream(target)).use { jar ->
+    private fun createRuntimeJar(source: Path, target: Path, maximumBytes: Long? = null) {
+        val raw = Files.newOutputStream(target)
+        val output = if (maximumBytes == null) raw else object : java.io.FilterOutputStream(raw) {
+            private var count = 0L
+            override fun write(value: Int) {
+                require(count < maximumBytes) { "BOOT fixture packed JAR exceeds its byte allowance" }
+                out.write(value); count++
+            }
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                require(length.toLong() <= maximumBytes - count) { "BOOT fixture packed JAR exceeds its byte allowance" }
+                out.write(bytes, offset, length); count += length
+            }
+        }
+        JarOutputStream(output).use { jar ->
             Files.walk(source).use { paths ->
                 paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
                     .sorted()
@@ -3639,6 +3771,8 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     }
 
     private companion object {
+        // Leave 16 MiB of the unchanged 64 MiB CI slot for ext4 metadata and protocol/temp files.
+        const val BOOT_FIXTURE_CLASSPATH_MAXIMUM_BYTES = 48L * 1024 * 1024
         val PREPARED_TEMPORARY_CLEANUP_LIMITS = AcpRuntimeClosureLimits(
             maximumEntries = 128,
             maximumUserOwnedFileBytes = 64L * 1024 * 1024,

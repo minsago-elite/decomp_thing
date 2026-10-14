@@ -98,6 +98,45 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `native call command is fresh cc1 and cannot select scripts or legacy export mode`() = fixture { root ->
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args, nativeCallObservations = true)
+        assertTrue(options.nativeCallObservations)
+        assertFalse(options.fullRecoveryExport)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")), privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val document = OracleJson.parseCanonical(GccBundledCliInvocation(options, args, identities).canonicalBytes).jsonObject
+        assertEquals("gcc-engine-native-calls", document.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        for (bad in listOf(args + listOf("--resume-after-checkpoint", "512"),
+            args + listOf("--collector", "Other.class"), args + listOf("--script", "Other.java"),
+            listOf("lto1") + args.drop(1), listOf("driver") + args.drop(1))) {
+            assertFails { GccBundledCliOptions.parse(bad, nativeCallObservations = true) }
+        }
+        assertFails { GccBundledCliOptions.parse(args, fullRecoveryExport = true, nativeCallObservations = true) }
+        assertFails { GccBundledCliInvocation(options.copy(nativeCallObservations = false), args, identities).also {
+            GccBundledCliIntentBuilder.build("a".repeat(64), "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                options.binary, options.profile, options.archive, options.output.resolve("inputs"), options.output.resolve("journal"),
+                options.scratch, options.diskPolicy, it, nativeCallObservations = true)
+        } }
+        for (path in children.drop(1)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `native call CLI rejects an untrusted binary before leasing or publishing evidence`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
+        val options = GccBundledCliOptions.parse(args, nativeCallObservations = true)
+        val failure = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(failure.message.orEmpty().contains("binary differs from selected profile engine"), failure.toString())
+        val invocation = OracleJson.parseCanonical(Files.readAllBytes(options.output.resolve("invocation.json"))).jsonObject
+        assertEquals("gcc-engine-native-calls", invocation.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        assertFalse(Files.exists(options.output.resolve("result.json")))
+        for (path in listOf(options.output.resolve("inputs"), options.output.resolve("journal"), options.scratch)) {
+            Files.list(path).use { assertEquals(0L, it.count()) }
+        }
+    }
+
+    @Test
     fun `checkpoint selection must match the exact invocation threshold`() = fixture { root ->
         val args = arguments(root)
         val options = GccBundledCliOptions.parse(args)

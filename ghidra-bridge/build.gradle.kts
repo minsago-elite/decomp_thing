@@ -95,6 +95,7 @@ dependencies { compileOnly(ghidraJars) }
 tasks.jar {
     archiveFileName.set("decomp-ghidra-bridge.jar")
     exclude("RunBundledExports.class")
+    exclude("ExportNativeCallsV1*.class")
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
@@ -105,6 +106,7 @@ val stageBundle = tasks.register<Sync>("stageBundle") {
     from(tasks.jar)
     from(tasks.compileJava.map { it.destinationDirectory }) {
         include("RunBundledExports.class")
+        include("ExportNativeCallsV1*.class")
         into("scripts")
     }
     into(layout.buildDirectory.dir("bundle"))

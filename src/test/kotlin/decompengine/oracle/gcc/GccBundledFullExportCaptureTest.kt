@@ -26,6 +26,20 @@ import kotlinx.serialization.json.long
 
 class GccBundledFullExportCaptureTest {
     @Test
+    fun `native sibling mode preserves model bytes and rejects every other reports member`() = fixture { root, run, reports ->
+        val original = GccBundledFullExportCapture.capture(run, reports, artifacts())
+        Files.createDirectory(root.resolve("reports/native-calls-v1"),
+            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+        val native = GccBundledFullExportCapture.captureWithNativeCallSibling(run, reports, artifacts())
+        assertContentEquals(original.programModel, native.programModel)
+        assertContentEquals(original.sidecarManifest, native.sidecarManifest)
+        assertContentEquals(original.assessmentBytes, native.assessmentBytes)
+        Files.writeString(root.resolve("reports/unexpected"), "x")
+        assertFails { GccBundledFullExportCapture.captureWithNativeCallSibling(run, reports, artifacts()) }
+    }
+
+    @Test
     fun `full export snapshot binds invocation progress model and all descriptor captured sidecars`() = fixture { root, run, reports ->
         val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
         assertEquals(1L, snapshot.functionCount)

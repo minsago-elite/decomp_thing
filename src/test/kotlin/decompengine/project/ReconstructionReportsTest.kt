@@ -9,7 +9,9 @@ import decompengine.binary.UnresolvedSymbol
 import decompengine.jobs.elfFixture
 import decompengine.reporting.JsonReportLimitException
 import decompengine.reporting.JsonReportLimits
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -180,6 +182,85 @@ class ReconstructionReportsTest {
 
         assertTrue(failure.message.orEmpty().contains("elapsed-time"))
         assertFalse(root.resolve("reports").exists())
+    }
+
+    @Test
+    fun `native admission refusal leaves missing supplemental parent ancestry untouched`() = withRoot { root ->
+        val project = root.resolve("missing/project")
+        val cancelled = InterruptedException("refused before native report staging admission")
+        var admissions = 0
+
+        val failure = assertFailsWith<InterruptedException> {
+            ReconstructionReports.write(analysis(root), project, manifest(), profile, checkpoint = { stage ->
+                if (stage == "before admitting native report staging") {
+                    admissions++
+                    assertFalse(root.resolve("missing").exists(), "supplemental preparation must not create parents on the caller")
+                    throw cancelled
+                }
+            })
+        }
+
+        assertSame(cancelled, failure)
+        assertEquals(1, admissions)
+        assertFalse(root.resolve("missing").exists())
+    }
+
+    @Test
+    fun `production native staging creates missing supplemental parents before rendering`() = withRoot { root ->
+        val project = root.resolve("missing/project")
+        val reports = project.resolve("reports")
+        var admissions = 0
+        var creations = 0
+
+        ReconstructionReports.write(analysis(root), project, manifest(), profile, checkpoint = { stage ->
+            when (stage) {
+                "before admitting native report staging" -> {
+                    if (++admissions == 1) assertFalse(root.resolve("missing").exists())
+                }
+                "after native report staging creation" -> {
+                    creations++
+                    assertTrue(Files.isDirectory(reports))
+                    val candidates = reports.listDirectoryEntries(".json-report-stage-*.tmp")
+                    assertEquals(1, candidates.size, "the fixed helper must acknowledge its owned candidate before rendering")
+                    assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(candidates.single()))
+                    if (creations == 1) assertFalse(reports.resolve("analysis.json").exists())
+                }
+            }
+        })
+
+        assertEquals(2, admissions)
+        assertEquals(2, creations)
+        assertEquals(listOf("analysis.json", "unresolved.json"), reports.listDirectoryEntries().map { it.fileName.toString() }.sorted())
+        for (name in listOf("analysis.json", "unresolved.json")) {
+            Json.parseToJsonElement(reports.resolve(name).readText()).jsonObject
+            assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(reports.resolve(name)))
+        }
+    }
+
+    @Test
+    fun `public generator publishes supplemental reports when source layout does not create their parent`() = withRoot { root ->
+        // Keep source generation out of reports so the public route genuinely requires the
+        // default native stager to create this parent, rather than inheriting a source directory.
+        val layout = ProjectLayoutProfile(profile.layout.schemaVersion, profile.layout.declarations.map { declaration ->
+            ProjectFileDeclaration(declaration.id, declaration.pathTemplate.replace("reports/", "evidence/"),
+                declaration.roles, declaration.contentKind)
+        })
+        val selected = ReconstructionProfile(profile.schemaVersion, profile.id, layout, profile.budgets, profile.adapterConfiguration)
+        val project = root.resolve("public/project")
+        assertFalse(project.exists())
+
+        assertEquals(project, RecompilableProjectGenerator.generate(analysis(root), project, selected))
+
+        val reports = project.resolve("reports")
+        assertEquals(listOf("analysis.json", "unresolved.json"), reports.listDirectoryEntries().map { it.fileName.toString() }.sorted())
+        val summary = Json.parseToJsonElement(reports.resolve("analysis.json").readText()).jsonObject
+        val paths = summary.getValue("generatedFiles").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue("evidence/program_model.json" in paths)
+        assertEquals(listOf("reports/analysis.json", "reports/unresolved.json"), paths.filter { it.startsWith("reports/") })
+        val unresolved = Json.parseToJsonElement(reports.resolve("unresolved.json").readText()).jsonObject
+        assertEquals(0L, unresolved.getValue("unresolvedFunctionCount").jsonPrimitive.long)
+        assertEquals(0L, unresolved.getValue("unresolvedObjectCount").jsonPrimitive.long)
+        assertEquals(0L, unresolved.getValue("unresolvedOtherCount").jsonPrimitive.long)
     }
 
     private val profile = GeneratedCMakeReconstructionProfile.descriptor

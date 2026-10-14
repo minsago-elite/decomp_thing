@@ -109,9 +109,13 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         engineId: String,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         budgets: GccCompilerEngineContainmentBudgets,
-        fullRecoveryExport: Boolean,
+        fullRecoveryExport: Boolean = false,
+        nativeCallObservations: Boolean = false,
     ): ByteArray {
         requireCurrent()
+        require(!fullRecoveryExport || !nativeCallObservations) { "distinct export profiles cannot be combined" }
+        require(!nativeCallObservations || engineId == "cc1") { "native call observations require the pinned cc1 profile engine" }
+        if (nativeCallObservations) requireNativeCallProfile()
         val engine = target(engineId)
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "planner profile invocation repeats artifact roles" }
@@ -142,6 +146,20 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         ) { "GCC operation exceeds its retained profile resource ceilings" }
         requireCurrent()
         return encoded.copyOf()
+    }
+
+    /** Fixed production inputs, independently pinned by the existing structural profile reader. */
+    @Synchronized
+    fun requireNativeCallProfile(): GccDriverStructuralInputsV1 {
+        requireCurrent()
+        val pinned = GccDriverStructuralInputsV1.load(suite.profilePath.parent)
+        require(pinned.compilerEngineProfileSha256 == suite.profileSha256 &&
+            suite.target == "x86_64-linux-gnu" &&
+            suite.engine("cc1").strippedArtifact.let { it.sha256 == pinned.strippedBinary.sha256 && it.bytes == pinned.strippedBinary.bytes }) {
+            "native call observations require the independently pinned production cc1 profile"
+        }
+        requireCurrent()
+        return pinned
     }
 
     @Synchronized

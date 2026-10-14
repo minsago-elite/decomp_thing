@@ -40,9 +40,12 @@ internal class GccBundledFullExportSnapshot internal constructor(
     val capturedBytes: Long,
     programModel: ByteArray,
     sidecarManifest: ByteArray,
+    functionEntryOffsets: List<ULong> = emptyList(),
 ) {
     private val model = programModel.copyOf()
     private val sidecars = sidecarManifest.copyOf()
+    private val functionEntries = java.util.List.copyOf(functionEntryOffsets)
+    internal val functionEntryOffsets: List<ULong> get() = functionEntries
     private val assessment = fullAssessmentBytes(
         inputSha256, inputBytes, exporterSha256, exporterBytes, analysisToolSha256, analysisToolBytes,
         language, compilerSpec, stateSha256, progressSha256, programModelSha256,
@@ -148,7 +151,26 @@ internal object GccBundledFullExportCapture {
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false)
+
+    /** Fixed native-operation sibling only; ordinary full exports retain their exact inventory. */
+    internal fun captureWithNativeCallSibling(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+        checkpoint: () -> Unit = {},
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, checkpoint)
+
+    private fun captureExact(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits,
+        nativeCallSibling: Boolean,
+        checkpoint: () -> Unit = {},
     ): GccBundledFullExportSnapshot {
+        checkpoint()
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "GCC full export capture contains duplicate invocation roles" }
         val expectedInput = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256
@@ -163,7 +185,7 @@ internal object GccBundledFullExportCapture {
             }
             val expectedReportNames = setOf(
                 "program_model.json.export", "program_model.json", "program_model.json.progress.json",
-            )
+            ) + if (nativeCallSibling) setOf("native-calls-v1") else emptySet()
             require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
                 expectedReportNames
             ) { "GCC full export reports contain missing, extra or uncommitted entries" }
@@ -189,7 +211,7 @@ internal object GccBundledFullExportCapture {
                                         run, reports, export, planning, functions, globals, types, failures,
                                         expectedReports, expectedInput, expectedExporter, expectedAnalysisTool,
                                         expectedInputBytes, expectedExporterBytes, expectedAnalysisToolBytes,
-                                        topNames, limits,
+                                        topNames, limits, expectedReportNames, checkpoint,
                                     )
                                 }
                             }
@@ -218,8 +240,10 @@ internal object GccBundledFullExportCapture {
         expectedAnalysisToolBytes: Long,
         expectedTop: Set<String>,
         limits: GccResumeByteValidationLimits,
+        expectedReportNames: Set<String>,
+        checkpoint: () -> Unit,
     ): GccBundledFullExportSnapshot {
-        val capture = GccBoundExportFiles(limits.transitionAggregateBytes)
+        val capture = GccBoundExportFiles(limits.transitionAggregateBytes, checkpoint)
         val stateBytes = capture.read(export, "state.json", limits.exporterStateBytes)
         val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool)
         val progressBytes = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
@@ -257,6 +281,7 @@ internal object GccBundledFullExportCapture {
                 "GCC full export sidecar inventory exceeds its manifest bound"
             }
             for ((index, name) in names.withIndex()) {
+                checkpoint()
                 val bytes = capture.read(directory, name, maximum)
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
@@ -308,8 +333,6 @@ internal object GccBundledFullExportCapture {
         requireNamedDirectory(export, "globals", globals, globals.identity, reports.identity)
         requireNamedDirectory(export, "types", types, types.identity, reports.identity)
         requireNamedDirectory(export, "failures", failures, failures.identity, reports.identity)
-        val modelName = "program_model.json"
-        val expectedReportNames = setOf("program_model.json.export", modelName, "$modelName.progress.json")
         require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
             expectedReportNames
         ) {
@@ -356,6 +379,10 @@ internal object GccBundledFullExportCapture {
                 "outputTreeSha256" to JsonPrimitive(treeSha),
                 "tree" to outputTree,
             )), manifestLimits),
+            functionEntryOffsets = functionNames.map { name ->
+                checkpoint()
+                name.removePrefix("fn_").removeSuffix(".json").toULong(16)
+            },
         )
     }
 

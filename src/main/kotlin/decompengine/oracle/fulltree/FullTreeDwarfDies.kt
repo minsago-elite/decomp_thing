@@ -338,6 +338,7 @@ internal object FullTreeDwarfDies {
     private fun inlinePayloadBytes(value: FullTreeDwarfFormValue): Long = when (value) {
         is FullTreeDwarfInlineStringValue -> value.bytes.size.toLong()
         is FullTreeDwarfExpressionValue -> value.size.toLong()
+        is FullTreeDwarfWideUnsignedConstantValue -> MODELED_WIDE_CONSTANT_PAYLOAD_BYTES
         else -> 0L
     }
 
@@ -376,4 +377,6 @@ internal object FullTreeDwarfDies {
     private const val MODELED_ABBREVIATION_ATTRIBUTE_BYTES = 96L
     private const val MODELED_DIE_RECORD_BYTES = 320L
     private const val MODELED_DIE_ATTRIBUTE_BYTES = 96L
+    // Extra BigInteger object and at most four magnitude ints, including headers/alignment.
+    private const val MODELED_WIDE_CONSTANT_PAYLOAD_BYTES = 128L
 }

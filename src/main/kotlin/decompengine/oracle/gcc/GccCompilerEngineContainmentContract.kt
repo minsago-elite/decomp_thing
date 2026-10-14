@@ -220,6 +220,9 @@ internal class GccCompilerEngineContainmentRequest(
         }
         require(this.command.isNotEmpty())
         if (bundledRuntime != null) {
+            require(bundledRuntime.invocationVersion != 8 || engineId == "cc1") {
+                "native call observations require the pinned cc1 engine"
+            }
             require(this.command == bundledRuntime.command(this.artifacts, analysisState, outputLease, runKind)) {
                 "command differs from the exact bundled direct-API worker invocation"
             }
@@ -696,8 +699,16 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     val unitName = "decomp-gcc-${request.engineId}-${requestSha256.take(32)}.scope"
     val unsigned = JsonObject(
         linkedMapOf(
-            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime == null) 1 else 2),
-            "provider" to JsonPrimitive(if (request.bundledRuntime == null) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER),
+            "schemaVersion" to JsonPrimitive(when {
+                request.bundledRuntime?.invocationVersion == 8 -> 5
+                request.bundledRuntime == null -> 1
+                else -> 2
+            }),
+            "provider" to JsonPrimitive(when {
+                request.bundledRuntime?.invocationVersion == 8 -> "gcc-compiler-engine-containment-definition-v5"
+                request.bundledRuntime == null -> DEFINITION_PROVIDER
+                else -> BUNDLED_DEFINITION_PROVIDER
+            }),
             "authority" to JsonPrimitive(ASSESSMENT_AUTHORITY),
             "releaseEligible" to JsonPrimitive(false),
             "startAuthorized" to JsonPrimitive(false),
@@ -732,8 +743,12 @@ private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
     val root = parseCanonicalObject(bytes, "containment definition")
     root.requireKeys(DEFINITION_FIELDS, "containment definition")
     val version = root.intField("schemaVersion", "containment definition")
-    require(version == 1 || version == 2) { "containment definition schema version is unsupported" }
-    root.requireString("provider", if (version == 1) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER, "containment definition")
+    require(version in setOf(1, 2, 5)) { "containment definition schema version is unsupported" }
+    root.requireString("provider", when (version) {
+        1 -> DEFINITION_PROVIDER
+        5 -> "gcc-compiler-engine-containment-definition-v5"
+        else -> BUNDLED_DEFINITION_PROVIDER
+    }, "containment definition")
     root.requireString("authority", ASSESSMENT_AUTHORITY, "containment definition")
     root.requireBoolean("releaseEligible", false, "containment definition")
     root.requireBoolean("startAuthorized", false, "containment definition")
