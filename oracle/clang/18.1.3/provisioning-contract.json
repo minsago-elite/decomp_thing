@@ -29,9 +29,9 @@
       "tag": "llvmorg-18.1.3",
       "archiveUrl": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/llvm-project-18.1.3.src.tar.xz",
       "signatureUrl": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/llvm-project-18.1.3.src.tar.xz.sig",
-      "keyFile": "oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc",
-      "keySha256": "d3e02c6fbcc641935ebd8b5a0d623563f90fef1a51c161917d7d5ed921e36288",
-      "primaryFingerprint": "FFB3368980F3E6BB5737145A316C56D064CACBA5"
+      "keyFile": "oracle/clang/18.1.3/keys/tom-stellard-llvm-release.asc",
+      "keySha256": "29e76f29dc1894b8f7d494ed74b3aef1509bc757888a39b50bf069240979dba9",
+      "primaryFingerprint": "474E22316ABF4785A88C6E8EA2C794A986419D8A"
     },
     "bounds": {
       "timeoutMinutes": 35,

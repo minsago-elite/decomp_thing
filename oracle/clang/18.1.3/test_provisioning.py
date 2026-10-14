@@ -168,6 +168,37 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "libclang-cpp18-dev", "libclang-cpp18",
         })
 
+    def test_contract_pins_the_exact_version_scoped_tom_stellard_release_key(self):
+        upstream = self.contract["profile"]["upstream"]
+        self.assertEqual(upstream["keyFile"], "oracle/clang/18.1.3/keys/tom-stellard-llvm-release.asc")
+        self.assertEqual(upstream["keySha256"], "29e76f29dc1894b8f7d494ed74b3aef1509bc757888a39b50bf069240979dba9")
+        self.assertEqual(upstream["primaryFingerprint"], "474E22316ABF4785A88C6E8EA2C794A986419D8A")
+        key = ROOT / upstream["keyFile"]
+        self.assertEqual(key.stat().st_size, 3935)
+        self.assertEqual(provision.sha256_file(key), upstream["keySha256"])
+
+    def test_detached_signature_rejects_expired_tom_key_before_accepting_validsig(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            data, signature = base / "source", base / "source.sig"
+            data.write_bytes(b"small authenticated tag fixture")
+            signature.write_bytes(b"detached signature fixture")
+            upstream = self.contract["profile"]["upstream"]
+            key = ROOT / upstream["keyFile"]
+            status = (
+                "[GNUPG:] KEYEXPIRED 1746208199\n"
+                "[GNUPG:] EXPKEYSIG A2C794A986419D8A Tom Stellard <tstellar@redhat.com>\n"
+                "[GNUPG:] VALIDSIG 474E22316ABF4785A88C6E8EA2C794A986419D8A "
+                "2024-04-03 1712188131 0 4 0 1 8 00 474E22316ABF4785A88C6E8EA2C794A986419D8A\n"
+            )
+            with mock.patch.object(provision.subprocess, "run", return_value=mock.Mock(
+                    returncode=0, stdout=status, stderr="")) as run:
+                with self.assertRaisesRegex(
+                        provision.ProvisionError,
+                        "upstream signature has a rejected or unknown status: KEYEXPIRED"):
+                    provision.verify_detached_signature(signature, data, key, upstream["primaryFingerprint"])
+            self.assertEqual(run.call_args.args[0][0], "gpgv")
+
     def test_relevant_file_policy_rejects_absolute_substituted_and_dot_paths_before_reads(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
