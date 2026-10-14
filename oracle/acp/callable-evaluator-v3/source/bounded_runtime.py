@@ -12,6 +12,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 
@@ -386,6 +387,7 @@ def _create_worker_receipt() -> dict:
     metadata = root.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.getuid():
         raise ValueError('protected receipt root identity/mode differs')
+    root_identity = (metadata.st_dev, metadata.st_ino)
     directory = private_directory(root / uuid.uuid4().hex)
     directory_metadata = directory.lstat()
     path = directory / 'worker-proof.jsonl'
@@ -396,7 +398,138 @@ def _create_worker_receipt() -> dict:
         raise ValueError('protected receipt initial identity differs')
     return {'path': path, 'directory': directory, 'fd': descriptor, 'device': metadata.st_dev,
             'inode': metadata.st_ino, 'directoryDevice': directory_metadata.st_dev,
-            'directoryInode': directory_metadata.st_ino}
+            'directoryInode': directory_metadata.st_ino, 'rootDevice': root_identity[0],
+            'rootInode': root_identity[1]}
+
+
+def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
+    """Delete only the stopped, consumed, closed attempt's fixed receipt layout.
+
+    Unknown ownership/absence or unconsumed proof retains all diagnostics. No
+    recursive removal, symlink traversal, arbitrary cache tree, or PID authority.
+    All deletions are relative to held, independently revalidated directories.
+    """
+    facts = {'status': 'retained', 'reason': 'absence-proof-or-close-unverified'}
+    if receipt is None or receipt.get('fd') is not None:
+        return facts
+    if (any(result.get(k) is not True for k in ('cleanupVerified', 'rootReaped', 'finalAbsenceVerified')) or
+            not isinstance(result.get('kernelScope'), dict) or
+            result['kernelScope'].get('finalAbsenceVerified') is not True):
+        return facts
+    if provisioning:
+        consumed = (result.get('provisioningOnly') is True and result.get('infrastructureFailure') is False and
+                    all(result.get(k) is True for k in ('launcherCreated', 'launcherPidIdentityVerified',
+                        'scopeVerified', 'scopeAdmitted', 'captureComplete', 'waitComplete')) and
+                    result.get('timedOut') is False and result.get('outputExceeded') is False and
+                    type(result.get('exitCode')) is int and result.get('exitCode') == result.get('launcherExitCode'))
+    else:
+        consumed = worker_execution_complete(result)
+        expected_proof = (result.get('workerProofBindings') or {}).get('expected', {})
+        consumed = (consumed and expected_proof.get('attempt') == receipt['directory'].name and
+                    (expected_proof.get('reportDevice'), expected_proof.get('reportInode')) ==
+                    (receipt['device'], receipt['inode']))
+    if not consumed:
+        facts['reason'] = 'receipt-not-fully-consumed'
+        return facts
+    root_fd = directory_fd = cache_fd = None
+    removed = []
+    try:
+        directory = receipt['directory']; root = BASE / 'exec-proof-receipts'
+        if (directory.parent != root or len(directory.name) != 32 or
+                any(c not in '0123456789abcdef' for c in directory.name)):
+            raise ValueError('receipt path is not an owned attempt')
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        root_fd = os.open(root, flags)
+        directory_fd = os.open(directory.name, flags, dir_fd=root_fd)
+        def identity(metadata):
+            return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+                    metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+        def owned_directory(metadata, expected):
+            if ((metadata.st_dev, metadata.st_ino) != expected or not stat.S_ISDIR(metadata.st_mode) or
+                    stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.getuid()):
+                raise ValueError('receipt directory ownership changed')
+        root_expected = (receipt['rootDevice'], receipt['rootInode'])
+        directory_expected = (receipt['directoryDevice'], receipt['directoryInode'])
+        def directories_unchanged():
+            owned_directory(os.fstat(root_fd), root_expected)
+            owned_directory(root.lstat(), root_expected)
+            owned_directory(os.fstat(directory_fd), directory_expected)
+            owned_directory(os.stat(directory.name, dir_fd=root_fd, follow_symlinks=False), directory_expected)
+        directories_unchanged()
+        expected = {'launch.json', 'gate.json', 'admit', 'python-cache'}
+        if not provisioning:
+            expected.add('worker-proof.jsonl')
+        names = set()
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                if len(names) >= len(expected) or entry.name not in expected:
+                    raise ValueError('unexpected receipt entry; retain attempt')
+                names.add(entry.name)
+        if names != expected:
+            raise ValueError('receipt inventory incomplete; retain attempt')
+        inventory = {}
+        for name in sorted(expected - {'python-cache'}):
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600 or
+                    metadata.st_uid != os.getuid() or metadata.st_nlink != 1):
+                raise ValueError('receipt entry is not a private owned regular file')
+            if name == 'worker-proof.jsonl' and (metadata.st_dev, metadata.st_ino) != (receipt['device'], receipt['inode']):
+                raise ValueError('consumed report file was replaced')
+            inventory[name] = identity(metadata)
+        if not provisioning:
+            # Preserve the already-consumed raw proof on the result. Refuse a
+            # replacement/modification after proof consumption and FD closure.
+            maximum = 1024
+            proof_fd = os.open('worker-proof.jsonl', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                               dir_fd=directory_fd)
+            try:
+                before = os.fstat(proof_fd)
+                if identity(before) != inventory['worker-proof.jsonl'] or before.st_size > maximum:
+                    raise ValueError('consumed report identity/size differs')
+                raw = os.read(proof_fd, maximum + 1)
+                if (raw != result['workerProofRaw'] or len(raw) != before.st_size or
+                        identity(os.fstat(proof_fd)) != identity(before)):
+                    raise ValueError('consumed report bytes changed')
+            finally:
+                os.close(proof_fd)
+        cache_fd = os.open('python-cache', flags, dir_fd=directory_fd)
+        cache_metadata = os.fstat(cache_fd)
+        cache_expected = (receipt['cacheDevice'], receipt['cacheInode'])
+        owned_directory(cache_metadata, cache_expected)
+        # Both controller and gate run with -B. An unexpected cache payload is
+        # evidence to retain, never authority for recursive deletion.
+        with os.scandir(cache_fd) as entries:
+            if next(entries, None) is not None:
+                raise ValueError('receipt Python cache is not empty')
+        for name, expected_identity in inventory.items():
+            directories_unchanged()
+            if identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != expected_identity:
+                raise ValueError('receipt entry changed before deletion')
+            os.unlink(name, dir_fd=directory_fd)
+            removed.append(name)
+        directories_unchanged()
+        owned_directory(os.stat('python-cache', dir_fd=directory_fd, follow_symlinks=False), cache_expected)
+        os.close(cache_fd); cache_fd = None
+        os.rmdir('python-cache', dir_fd=directory_fd)
+        removed.append('python-cache')
+        directories_unchanged()
+        os.close(directory_fd); directory_fd = None
+        owned_directory(os.stat(directory.name, dir_fd=root_fd, follow_symlinks=False), directory_expected)
+        os.rmdir(directory.name, dir_fd=root_fd)
+        facts = {'status': 'removed', 'reason': 'owned-absence-consumption-and-close-verified',
+                 'removedEntries': removed}
+    except Exception as failure:
+        facts = {'status': 'refused', 'reason': 'receipt-directory-reclamation-failed',
+                 'secondaryError': type(failure).__name__ + ':' + str(failure)[:300], 'removedEntries': removed}
+    finally:
+        for descriptor in (cache_fd, directory_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except Exception as failure:
+                    facts = {'status': 'refused', 'reason': 'receipt-reclamation-handle-close-failed',
+                             'secondaryError': type(failure).__name__ + ':' + str(failure)[:300], 'removedEntries': removed}
+    return facts
 
 
 def digest(path: Path) -> str:
@@ -405,13 +538,15 @@ def digest(path: Path) -> str:
 
 
 def private_directory(path: Path) -> Path:
-    assert path.resolve().is_relative_to(BASE), 'directory outside owned benchmark root'
+    if not path.resolve().is_relative_to(BASE):
+        raise ValueError('directory outside owned benchmark root')
     path.mkdir(mode=0o700, parents=True, exist_ok=False)
     return path
 
 
 def write_json(path: Path, value: object) -> None:
-    assert path.resolve().is_relative_to(BASE)
+    if not path.resolve().is_relative_to(BASE):
+        raise ValueError('JSON outside owned benchmark root')
     with path.open('x', encoding='utf-8') as stream:
         json.dump(value, stream, sort_keys=True, indent=2)
         stream.write('\n')
@@ -671,6 +806,8 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
         raise ValueError('fixed launch configuration exceeds gate byte bound')
     write_json(receipt['directory'] / 'launch.json', config)
     cache = private_directory(receipt['directory'] / 'python-cache')
+    cache_metadata = cache.lstat()
+    receipt.update(cacheDevice=cache_metadata.st_dev, cacheInode=cache_metadata.st_ino)
     unit = 'decomp-acp-efficacy-' + receipt['directory'].name + '.scope'
     launcher = ['/usr/bin/systemd-run', '--user', '--scope', '--quiet', '--collect', '--no-ask-password',
                 '--unit=' + unit, '--property=TasksMax=' + str(bounds['cgroup']['tasks']),
@@ -719,13 +856,17 @@ def _admit_scope(receipt, launch, bounds):
     if (set(gate) != {'pid', 'start'} or any(type(gate[k]) is not int or gate[k] <= 0 for k in gate)):
         raise ValueError('scope gate process identity is invalid')
     child = process_identity(gate['pid'])
-    assert child and child['start'] == gate['start'], 'scope gate process identity changed'
+    if not child or child['start'] != gate['start']:
+        raise ValueError('scope gate process identity changed')
     cgroup_record = Path(f"/proc/{gate['pid']}/cgroup").read_text().strip()
-    assert cgroup_record.startswith('0::/') and cgroup_record.count('\n') == 0
+    if not cgroup_record.startswith('0::/') or '\n' in cgroup_record:
+        raise ValueError('scope gate cgroup record is invalid')
     cgroup = Path('/sys/fs/cgroup') / cgroup_record[4:]
-    assert cgroup.resolve().is_relative_to(Path('/sys/fs/cgroup')) and cgroup.name == launch['unit']
+    if not cgroup.resolve().is_relative_to(Path('/sys/fs/cgroup')) or cgroup.name != launch['unit']:
+        raise ValueError('scope gate cgroup path differs')
     values = {name: (cgroup / name).read_text().strip() for name in ('pids.max', 'memory.max', 'memory.swap.max')}
-    assert values == {'pids.max': str(bounds['cgroup']['tasks']), 'memory.max': str(bounds['cgroup']['memoryBytes']), 'memory.swap.max': str(bounds['cgroup']['swapBytes'])}
+    if values != {'pids.max': str(bounds['cgroup']['tasks']), 'memory.max': str(bounds['cgroup']['memoryBytes']), 'memory.swap.max': str(bounds['cgroup']['swapBytes'])}:
+        raise ValueError('scope gate kernel limits differ')
     directory_fd = os.open(cgroup, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     metadata = os.fstat(directory_fd)
     if not stat.S_ISDIR(metadata.st_mode):
@@ -759,7 +900,8 @@ def _admit_scope(receipt, launch, bounds):
             raise ValueError('scope gate membership changed during acquisition')
         descriptor = os.open(receipt['directory'] / 'admit.tmp', os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_WRONLY, 0o600)
         try:
-            assert os.write(descriptor, b'1\n') == 2
+            if os.write(descriptor, b'1\n') != 2:
+                raise ValueError('scope admission write incomplete')
         finally:
             os.close(descriptor)
         os.replace(receipt['directory'] / 'admit.tmp', receipt['directory'] / 'admit')
@@ -929,6 +1071,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning):
         failure.bounded_result = result
         raise
     finally:
+        primary_failure = sys.exception()
         phase_elapsed = time.monotonic() - began
         cleanup_began = time.monotonic()
         cleanup_failure = None
@@ -1034,21 +1177,37 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning):
         if receipt is not None and receipt['fd'] is not None:
             try:
                 os.close(receipt['fd'])
+                receipt['fd'] = None
             except Exception as failure:
                 cleanup_failure = cleanup_failure or failure
                 result.update(cleanupVerified=False, infrastructureFailure=True, infrastructureReason='receipt-close-failed', exitCode=None)
         result['phaseElapsedSeconds'] = round(phase_elapsed + time.monotonic() - proof_began, 6)
         if result['phaseElapsedSeconds'] >= timeout:
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
+        reclamation_failure = None
+        result['_receiptCleanup'] = _reclaim_worker_receipt(receipt, result, provisioning=provisioning)
+        if result['_receiptCleanup']['status'] == 'refused':
+            reclamation_failure = ValueError('owned receipt directory reclamation failed')
+            reclamation_failure.bounded_result = result
+            reclamation_failure.receiptCleanup = result['_receiptCleanup']
+            result.update(infrastructureFailure=True, infrastructureReason='receipt-directory-reclamation-failed')
+            if primary_failure is not None:
+                primary_failure.receiptCleanup = result['_receiptCleanup']
+        result['phaseElapsedSeconds'] = round(phase_elapsed + time.monotonic() - proof_began, 6)
+        if result['phaseElapsedSeconds'] >= timeout:
+            result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         result['elapsedSeconds'] = round(time.monotonic() - began, 6)
         if cleanup_failure is not None:
             cleanup_failure.bounded_result = result
+            cleanup_failure.receiptCleanup = result['_receiptCleanup']
             raise cleanup_failure
+        if reclamation_failure is not None and primary_failure is None:
+            raise reclamation_failure
     return result
 
 
 def public_result(result: dict) -> dict:
-    return {**{k: v for k, v in result.items() if k not in ('stdout', 'stderr', 'workerProofRaw')},
+    return {**{k: v for k, v in result.items() if k not in ('stdout', 'stderr', 'workerProofRaw', '_receiptCleanup')},
             'stdoutHex': result['stdout'].hex(), 'stderrHex': result['stderr'].hex(),
             'workerProofRawHex': result.get('workerProofRaw', b'').hex()}
 

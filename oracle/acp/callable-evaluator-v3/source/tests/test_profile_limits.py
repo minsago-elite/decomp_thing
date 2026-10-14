@@ -18,6 +18,8 @@ sys.path.insert(0, str(SOURCE))
 import build_contract as contract
 import bounded_runtime as runtime
 
+_READ_OWNED_FILE = os.read
+
 TEMP = SOURCE.parents[3] / 'build/acp-decomp-effectiveness/callable-library-v3/static-profile/test-tmp'
 TEMP.mkdir(parents=True, exist_ok=True)
 
@@ -32,7 +34,9 @@ class Stream(io.BytesIO):
 class Process:
     pid = 123
     def __init__(self, code=7):
-        self.stdin = Stream(12); self.stdout = Stream(10); self.stderr = Stream(11)
+        # Synthetic stream labels cannot collide with descriptors opened for
+        # actual repository-owned receipt files during final consumption.
+        self.stdin = Stream(100012); self.stdout = Stream(100010); self.stderr = Stream(100011)
         self.code = code; self.waits = []; self.returncode = None; self.wait_hook = None
     def wait(self, timeout):
         self.waits.append(timeout)
@@ -171,7 +175,7 @@ class ProfileLimits(unittest.TestCase):
         process = Process(wrapper); self.last_process=process; now=[100.0]
         if late_cleanup_wait:
             process.wait_hook=lambda count,timeout: now.__setitem__(0,now[0]+6.0) if count==2 else None
-        blocks = {10:[output,b''],11:[b'err',b'']}
+        blocks = {process.stdout.fileno():[output,b''],process.stderr.fileno():[b'err',b'']}
         popen = stack.enter_context(patch.object(runtime.subprocess,'Popen',return_value=process))
         self.last_popen = popen
         lifetime=work/'authored-launcher-handle';lifetime.write_bytes(b'public mocked lifetime')
@@ -191,14 +195,22 @@ class ProfileLimits(unittest.TestCase):
             stack.enter_context(patch.object(runtime.time,'sleep'))
         stack.enter_context(patch.object(runtime.selectors,'DefaultSelector',return_value=Selector()))
         stack.enter_context(patch.object(runtime.os,'set_blocking'))
-        stack.enter_context(patch.object(runtime.os,'read',side_effect=lambda fd,size:blocks[fd].pop(0) if blocks[fd] else b''))
+        def read(fd,size):
+            if fd in blocks:
+                return blocks[fd].pop(0) if blocks[fd] else b''
+            return _READ_OWNED_FILE(fd,size)
+        stack.enter_context(patch.object(runtime.os,'read',side_effect=read))
         stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock if clock is not None else lambda:now[0]))
         stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
         pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
               '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64}}
         stack.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
         def prepare(argv,cwd,bounds,receipt,provisioning,deadline=None):
+            self.last_receipt=receipt
             runtime.write_json(receipt['directory']/'launch.json', {'mock':True})
+            cache=runtime.private_directory(receipt['directory']/'python-cache')
+            metadata=cache.lstat()
+            receipt.update(cacheDevice=metadata.st_dev,cacheInode=metadata.st_ino)
             expected = {'attempt':receipt['directory'].name,'phase':'runtime','reportDevice':receipt['device'],
                         'reportInode':receipt['inode'],'reaperDevice':3,'reaperInode':4,
                         'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8}
@@ -213,6 +225,9 @@ class ProfileLimits(unittest.TestCase):
         def admit(receipt,launch,bounds):
             if not admission:
                 return None
+            runtime.write_json(receipt['directory']/'gate.json',{'pid':123,'start':9})
+            admission_path=receipt['directory']/'admit'
+            admission_path.write_bytes(b'1\n');admission_path.chmod(0o600)
             if provisioning:
                 self.assertIsNone(receipt['fd']); self.assertFalse(receipt['path'].exists())
                 return {'finalAbsenceVerified':False}
@@ -257,6 +272,33 @@ class ProfileLimits(unittest.TestCase):
         self.assertIsNone(result['workerProof']);self.assertEqual(b'',result['workerProofRaw'])
         self.assertFalse(runtime.worker_execution_complete(result))
         self.assertTrue(result['cleanupVerified']);self.assertTrue(result['scopeAdmitted'])
+
+    def test_mock_complete_receipt_layout_is_actually_consumed_closed_and_reclaimed(self):
+        for provisioning in (False,True):
+            with self.subTest(provisioning=provisioning):
+                result=self.simulate(provisioning=provisioning)
+                self.assertIsNone(self.last_receipt['fd'])
+                self.assertEqual('removed',result['_receiptCleanup']['status'])
+                self.assertFalse(self.last_receipt['directory'].exists())
+                self.assertEqual(not provisioning,runtime.worker_execution_complete(result))
+                self.assertEqual(not provisioning,bool(result['workerProofRaw']))
+                self.assertNotIn('_receiptCleanup',runtime.public_result(result))
+
+    def test_mock_missing_receipt_entry_still_refuses_without_changing_worker_facts(self):
+        reclaim=runtime._reclaim_worker_receipt
+        def missing(receipt,result,**kwargs):
+            (receipt['directory']/'admit').unlink()
+            return reclaim(receipt,result,**kwargs)
+        with patch.object(runtime,'_reclaim_worker_receipt',side_effect=missing):
+            with self.assertRaisesRegex(ValueError,'owned receipt directory reclamation failed') as caught:
+                self.simulate()
+        result=caught.exception.bounded_result
+        self.assertEqual('refused',result['_receiptCleanup']['status'])
+        self.assertEqual([],result['_receiptCleanup']['removedEntries'])
+        self.assertIn('inventory incomplete',result['_receiptCleanup']['secondaryError'])
+        self.assertTrue(self.last_receipt['directory'].is_dir())
+        self.assertTrue(result['cleanupVerified']);self.assertTrue(result['workerTerminationVerified'])
+        self.assertTrue(result['workerProofRaw']);self.assertTrue(result['infrastructureFailure'])
 
     def test_wrapper_status_without_both_proofs_never_becomes_worker_exit(self):
         for wrapper in (0,1,137):

@@ -246,7 +246,9 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertNotIn('provisioning',[arg.arg for arg in public.args.args+public.args.kwonlyargs])
 
     def test_gate_opens_report_only_after_admission_and_explicitly_hands_fd4(self):
-        gate=runtime._fixed_source_module(SOURCE/'scope_gate.py','_pure_scope_gate')
+        gate=types.ModuleType('_pure_optimized_scope_gate')
+        gate.__file__=str(SOURCE/'scope_gate.py')
+        exec(compile((SOURCE/'scope_gate.py').read_bytes(),gate.__file__,'exec',optimize=2),gate.__dict__)
         directory=SOURCE/'exec-proof-receipts'/('a'*32)
         events=[]
         config={'schemaVersion':1,'directoryDevice':10,'directoryInode':11,'mode':'worker',
@@ -271,6 +273,243 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertTrue(flags & os.O_NOFOLLOW);self.assertTrue(flags & os.O_APPEND)
         duplicate.assert_called_once_with(11,4,inheritable=True);inherit.assert_called_once_with(4,True)
         close.assert_called_once_with({4});execute.assert_called_once_with('/usr/bin/bwrap',config['argv'])
+
+    def test_optimized_admission_refuses_each_kernel_identity_limit_and_short_write(self):
+        # Compile the actual function with assertions removed, without starting
+        # another interpreter or reading proc/cgroup data. All effects mocked.
+        tree=ast.parse((SOURCE/'bounded_runtime.py').read_text())
+        function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_admit_scope')
+        namespace=dict(runtime.__dict__)
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'<optimized admission>','exec',optimize=2),namespace)
+        admit=namespace['_admit_scope'];bounds=runtime.execution_bounds(managed_scope=True)
+        wanted={'pids.max':str(bounds['cgroup']['tasks']),'memory.max':str(bounds['cgroup']['memoryBytes']),
+                'memory.swap.max':str(bounds['cgroup']['swapBytes'])}
+        metadata=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_dev=77,st_ino=88)
+        unit='authored.scope';gate={'pid':12,'start':123};child={'pid':12,'start':123}
+        launch={'unit':unit,'pins':{str(Path('/usr/bin/systemd-run')):{'sha256':'0'*64},
+                                  str(runtime.BASE/'scope_gate.py'):{'sha256':'0'*64}}}
+        cases=(None,'start','record','unit','pids.max','memory.max','memory.swap.max','acquired','membership','short-write')
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                values=dict(wanted)
+                if mutation in values:values[mutation]='999'
+                seen=0
+                def text(path,*args,**kwargs):
+                    nonlocal seen
+                    if str(path)=='/proc/12/cgroup':
+                        seen+=1
+                        if mutation=='record':return '1:cpu:/authored.scope'
+                        if mutation=='membership' and seen>1:return '0::/changed.scope'
+                        return '0::/'+('changed.scope' if mutation=='unit' else unit)
+                    return values[path.name]
+                descriptors={'pids.max':91,'memory.max':92,'memory.swap.max':93}
+                def opened(path,*args,**kwargs):return descriptors.get(str(path),90)
+                def read(fd,n):
+                    name=next(k for k,v in descriptors.items() if v==fd)
+                    return ('999' if mutation=='acquired' and name=='memory.max' else values[name]).encode()
+                with patch.dict(namespace,{'_read_private_json':lambda p:dict(gate),
+                                           'process_identity':lambda pid:dict(child,start=999) if mutation=='start' else dict(child)}), \
+                        patch.object(Path,'exists',return_value=True),patch.object(Path,'resolve',lambda p,*a,**k:p), \
+                        patch.object(Path,'read_text',text),patch.object(Path,'stat',return_value=metadata), \
+                        patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'fstat',return_value=metadata), \
+                        patch.object(runtime.os,'read',side_effect=read),patch.object(runtime.os,'close'), \
+                        patch.object(runtime.os,'write',return_value=1 if mutation=='short-write' else 2) as write, \
+                        patch.object(runtime.os,'replace') as publish:
+                    if mutation is None:
+                        self.assertEqual(unit,admit({'directory':self.work},launch,bounds)['unit'])
+                        write.assert_called_once();publish.assert_called_once()
+                    else:
+                        with self.assertRaises(ValueError):admit({'directory':self.work},launch,bounds)
+                        publish.assert_not_called()
+
+    def test_gate_policy_checks_survive_optimized_compilation(self):
+        source=(SOURCE/'scope_gate.py').read_text()
+        self.assertFalse(any(isinstance(n,ast.Assert) for n in ast.walk(ast.parse(source))))
+        # Runtime directory and JSON containment are also unconditional.
+        self.assertFalse(any(isinstance(n,ast.Assert) for n in ast.walk(ast.parse((SOURCE/'bounded_runtime.py').read_text()))))
+        gate=types.ModuleType('_optimized_gate_refusals');gate.__file__=str(SOURCE/'scope_gate.py')
+        exec(compile(source,gate.__file__,'exec',optimize=2),gate.__dict__)
+        with patch.object(gate.sys,'argv',['gate']),patch.object(gate.os,'open') as opened:
+            with self.assertRaises(ValueError):gate.main()
+            opened.assert_not_called()
+        valid=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_uid=os.getuid(),st_nlink=1)
+        bad=types.SimpleNamespace(st_mode=stat.S_IFREG|0o644,st_uid=os.getuid(),st_nlink=1)
+        for metadata,payload in ((bad,b'1\n'),(valid,b'123')):
+            with patch.object(gate.os,'open',return_value=40),patch.object(gate.os,'fstat',return_value=metadata), \
+                    patch.object(gate.os,'read',return_value=payload),patch.object(gate.os,'close'):
+                with self.assertRaises(ValueError):gate._read_at(39,'admit',2)
+        with patch.object(gate.os,'scandir') as scan,patch.object(gate.os,'close') as closed:
+            scan.return_value.__enter__.return_value=iter([types.SimpleNamespace(name='999')])
+            with self.assertRaises(ValueError):gate._close_nonstandard(set())
+            closed.assert_not_called()
+        with patch.object(runtime,'BASE',self.directory):
+            with self.assertRaises(ValueError):runtime.private_directory(self.directory.parent/'outside')
+            with self.assertRaises(ValueError):runtime.write_json(self.directory.parent/'outside.json',{})
+
+    def receipt_fixture(self,*,close=True):
+        # Authored protocol bytes only: actual parser/completion predicate, no
+        # mocked native qualification and no real worker/process launch.
+        from test_identity_graph import completed_result
+        base=Path(self.stack.enter_context(tempfile.TemporaryDirectory(dir=self.directory)))
+        (base/'worker_exec_proof.py').write_bytes((SOURCE/'worker_exec_proof.py').read_bytes())
+        with patch.object(runtime,'BASE',base):
+            receipt=runtime._create_worker_receipt()
+            self.addCleanup(lambda:os.close(receipt['fd']) if receipt['fd'] is not None else None)
+            cache=runtime.private_directory(receipt['directory']/'python-cache');metadata=cache.lstat()
+            receipt.update(cacheDevice=metadata.st_dev,cacheInode=metadata.st_ino)
+            for name in ('launch.json','gate.json','admit'):runtime.write_json(receipt['directory']/name,{})
+            result=completed_result(stdout=b'preserved behavior',stderr=b'preserved diagnostics')
+            expected=result['workerProofBindings']['expected']
+            expected.update(attempt=receipt['directory'].name,reportDevice=receipt['device'],reportInode=receipt['inode'])
+            rows=[json.loads(row) for row in result['workerProofRaw'].splitlines()]
+            for row in rows:row['a']=receipt['directory'].name
+            result['workerProofRaw']=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in rows)
+            result['workerProof']['proofSha256']=hashlib.sha256(result['workerProofRaw']).hexdigest()
+            os.write(receipt['fd'],result['workerProofRaw'])
+            if close:os.close(receipt['fd']);receipt['fd']=None
+            self.assertTrue(runtime.worker_execution_complete(result))
+        return base,receipt,result
+
+    def test_consumed_closed_receipt_is_reclaimed_without_losing_result_bytes(self):
+        import copy
+        base,receipt,result=self.receipt_fixture();before=copy.deepcopy(result)
+        with patch.object(runtime,'BASE',base):facts=runtime._reclaim_worker_receipt(receipt,result)
+        self.assertEqual('removed',facts['status']);self.assertFalse(receipt['directory'].exists())
+        self.assertEqual(before,result);self.assertTrue((base/'exec-proof-receipts').is_dir())
+        self.assertEqual(before['workerProofRaw'],result['workerProofRaw'])
+
+    def test_fixed_provisioning_receipt_needs_complete_controller_without_worker_proof(self):
+        for complete in (True,False):
+            base,receipt,result=self.receipt_fixture();receipt['path'].unlink()
+            result.update(provisioningOnly=True,workerProof=None,workerProofRaw=b'',workerProofBindings=None,
+                          workerExecVerified=False,workerTerminationVerified=False,captureComplete=complete)
+            with patch.object(runtime,'BASE',base):
+                facts=runtime._reclaim_worker_receipt(receipt,result,provisioning=True)
+            self.assertEqual('removed' if complete else 'retained',facts['status'])
+            self.assertEqual(not complete,receipt['directory'].exists())
+            self.assertFalse(result['workerExecVerified']);self.assertEqual(b'',result['workerProofRaw'])
+
+    def test_unknown_absence_unconsumed_proof_or_open_report_retains_receipt(self):
+        for mutation in ('cleanupVerified','rootReaped','finalAbsenceVerified','scope','proof','open'):
+            with self.subTest(mutation=mutation):
+                base,receipt,result=self.receipt_fixture(close=mutation!='open')
+                if mutation in result:result[mutation]=False
+                if mutation=='scope':result['kernelScope']['finalAbsenceVerified']=False
+                if mutation=='proof':result['workerProofRaw']=b'unconsumed'
+                with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=AssertionError('must retain')):
+                    facts=runtime._reclaim_worker_receipt(receipt,result)
+                self.assertEqual('retained',facts['status']);self.assertTrue(receipt['directory'].is_dir())
+
+    def test_receipt_replacements_links_and_unknown_payloads_refuse_before_deletion(self):
+        for mutation in ('directory','symlink','report-symlink','report-change','cache-change','cache-payload','unknown'):
+            with self.subTest(mutation=mutation):
+                base,receipt,result=self.receipt_fixture();directory=receipt['directory']
+                protected=base/'protected';protected.write_bytes(b'never remove this')
+                if mutation in ('directory','symlink'):
+                    original=directory.with_name(directory.name+'-retained');directory.rename(original)
+                    if mutation=='directory':directory.mkdir(mode=0o700)
+                    else:directory.symlink_to(original,target_is_directory=True)
+                elif mutation=='report-symlink':receipt['path'].unlink();receipt['path'].symlink_to(protected)
+                elif mutation=='report-change':receipt['path'].write_bytes(b'changed after consumption')
+                elif mutation=='cache-change':
+                    cache=directory/'python-cache';cache.rename(directory/'previous-cache');cache.mkdir(mode=0o700)
+                elif mutation=='cache-payload':(directory/'python-cache/unknown.pyc').write_bytes(b'retain')
+                else:(directory/'unexpected').write_bytes(b'retain')
+                with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=AssertionError('preflight must refuse')):
+                    facts=runtime._reclaim_worker_receipt(receipt,result)
+                self.assertEqual('refused',facts['status']);self.assertEqual(b'never remove this',protected.read_bytes())
+                self.assertTrue(directory.exists());self.assertTrue(result['workerProofRaw'])
+
+    def test_receipt_deletion_error_preserves_primary_proof_and_directory(self):
+        base,receipt,result=self.receipt_fixture();raw=result['workerProofRaw']
+        with patch.object(runtime,'BASE',base),patch.object(runtime.os,'unlink',side_effect=OSError('authored deletion error')):
+            facts=runtime._reclaim_worker_receipt(receipt,result)
+        self.assertEqual('refused',facts['status']);self.assertIn('OSError',facts['secondaryError'])
+        self.assertTrue(receipt['directory'].exists());self.assertEqual(raw,result['workerProofRaw'])
+
+    def test_runner_consumes_proof_and_closes_report_before_reclaim_with_failure_retention(self):
+        # Actual runner/final-proof/reclaim functions, authored bytes and mocked
+        # process/kernel interfaces. Never asks the OS to create a child or scope.
+        for mutation in (None,'absence','report-close','delete','capture','prelaunch'):
+            with self.subTest(mutation=mutation):
+                base,receipt,authored=self.receipt_fixture(close=False)
+                report_fd=receipt['fd'];events=[];real_close=os.close;real_read=os.read
+                real_reclaim=runtime._reclaim_worker_receipt
+                class Pipe:
+                    def __init__(self,fd):self.fd=fd
+                    def fileno(self):return self.fd
+                    def write(self,value):pass
+                    def close(self):pass
+                process=types.SimpleNamespace(pid=123,stdin=Pipe(900),stdout=Pipe(901),stderr=Pipe(902),
+                                              wait=Mock(return_value=0),returncode=0)
+                class Selector:
+                    def __init__(self):self.entries={}
+                    def register(self,stream,event,label):self.entries[stream.fd]=types.SimpleNamespace(fileobj=stream,data=label)
+                    def unregister(self,stream):self.entries.pop(stream.fd)
+                    def get_map(self):return self.entries
+                    def select(self,timeout):
+                        if mutation=='capture':raise ValueError('original capture refusal')
+                        return [(entry,1) for entry in list(self.entries.values())]
+                    def close(self):pass
+                pins=authored['launchInputPins']
+                launch={'argv':['authored never executed'],'unit':'authored.scope',
+                        'expected':authored['workerProofBindings']['expected'],'pins':pins,
+                        'proofBinding':authored['workerProofBindings'],
+                        'configSha256':runtime.digest(receipt['directory']/'launch.json')}
+                def closed(fd):
+                    events.append(('close',fd))
+                    if fd==report_fd and mutation=='report-close':raise OSError('authored report close refusal')
+                    if fd not in (111,112):real_close(fd)
+                def reclaim(*args,**kwargs):
+                    self.assertIsNone(receipt['fd'])
+                    self.assertIn(('close',report_fd),events)
+                    self.assertTrue(args[1]['workerProofRaw'] or mutation=='prelaunch')
+                    events.append(('reclaim',None))
+                    if mutation=='delete':
+                        return {'status':'refused','reason':'authored deletion failure','secondaryError':'OSError:authored'}
+                    return real_reclaim(*args,**kwargs)
+                def prepare(*args,**kwargs):
+                    if mutation=='prelaunch':raise ValueError('original prelaunch refusal')
+                    return launch
+                scope={'_directoryFd':112,'unit':'authored.scope'}
+                with ExitStack() as effects:
+                    for effect in (
+                        patch.object(runtime,'BASE',base),patch.object(runtime,'_work_directory',return_value=self.work),
+                        patch.object(runtime,'_worker_environment'),patch.object(runtime,'_create_worker_receipt',return_value=receipt),
+                        patch.object(runtime,'_prepare_launch',side_effect=prepare),patch.object(runtime.subprocess,'Popen',return_value=process),
+                        patch.object(runtime.os,'pidfd_open',return_value=111),patch.object(runtime,'process_identity',return_value={'start':1}),
+                        patch.object(runtime.selectors,'DefaultSelector',side_effect=Selector),patch.object(runtime.os,'set_blocking'),
+                        patch.object(runtime,'_admit_scope',return_value=scope),patch.object(runtime,'_kill_owned_scope'),
+                        patch.object(runtime,'_kill_launcher'),patch.object(runtime,'scope_processes',return_value=[]),
+                        patch.object(runtime,'owned_processes',side_effect=ValueError('authored absence refusal') if mutation=='absence' else lambda *a:[]),
+                        patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime.os,'close',side_effect=closed),
+                        patch.object(runtime.os,'read',side_effect=lambda fd,n:b'' if fd in (901,902) else real_read(fd,n)),
+                        patch.object(runtime,'_reclaim_worker_receipt',side_effect=reclaim if mutation not in ('report-close','absence','prelaunch') else real_reclaim)
+                    ):effects.enter_context(effect)
+                    try:
+                        result=runtime._run_scoped(['authored'],self.work,self.env,b'',
+                            runtime.execution_bounds(managed_scope=True,phase='runtime'),provisioning=False)
+                    except (ValueError,OSError) as error:
+                        result=error.bounded_result
+                        if mutation in ('capture','prelaunch'):
+                            self.assertIn('original '+mutation,str(error))
+                        elif mutation=='delete':
+                            self.assertEqual('owned receipt directory reclamation failed',str(error))
+                        elif mutation not in ('absence','report-close'):raise
+                if mutation is None:
+                    self.assertEqual('removed',result['_receiptCleanup']['status'])
+                    self.assertFalse(receipt['directory'].exists());self.assertTrue(runtime.worker_execution_complete(result))
+                else:
+                    self.assertTrue(receipt['directory'].exists());self.assertNotEqual('removed',result['_receiptCleanup']['status'])
+                if mutation not in ('prelaunch','absence'):
+                    self.assertEqual(authored['workerProofRaw'],result['workerProofRaw'])
+                elif mutation=='absence':
+                    self.assertEqual(b'',result['workerProofRaw'])
+                    self.assertEqual(authored['workerProofRaw'],receipt['path'].read_bytes())
+                if mutation=='delete':
+                    self.assertTrue(result['cleanupVerified']);self.assertTrue(result['workerTerminationVerified'])
+                    self.assertTrue(result['infrastructureFailure']);self.assertIn('secondaryError',result['_receiptCleanup'])
+                self.assertNotIn('_receiptCleanup',runtime.public_result(result))
 
 
 if __name__=='__main__':unittest.main()
