@@ -1,6 +1,6 @@
 # Resumable Ghidra program-model export
 
-Current exports use model schema 3 and exporter 12. See [referenced data byte evidence](referenced-data-byte-evidence.md) for the closed byte-window contract, bounds, historical compatibility and versioned active GCC profiles.
+Current exports use model schema 4 and exporter 13. See [referenced data byte evidence](referenced-data-byte-evidence.md) for the closed byte-window contract, bounds, historical compatibility and versioned active GCC profiles.
 
 Whole-program export is staged through durable records under
 `analysis/reports/program_model.json.export/`. Full recovery forces each accepted function to disk atomically only
@@ -70,7 +70,7 @@ full decompiled C bodies; those bodies belong to the later reconstruction phase:
 
 ```bash
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
-  --profile oracle/gcc/16.2.0/compiler-engines-exporter12.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter13.json \
   --ghidra-archive /path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
   --output /path/to/cc1-plan
 ```

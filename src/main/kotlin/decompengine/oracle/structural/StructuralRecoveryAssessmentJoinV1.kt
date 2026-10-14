@@ -168,7 +168,8 @@ internal object StructuralRecoveryAssessmentJoinV1 {
         }
 
         val model = snapshot.model
-        require(model.schemaVersion in 2..3) { "structural finding joins require schema-2 or schema-3 extracted models" }
+        // Historical schemas remain fixture-readable; this does not admit them as active production inputs.
+        require(model.schemaVersion in 2..4) { "structural finding joins require schema-2 through schema-4 extracted models" }
         val modelEntities = modelEntities(model)
         val scoreEntities = scoreReport.getValue("entities").jsonArray
             .map { it.jsonObject }
