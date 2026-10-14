@@ -899,11 +899,11 @@ class AcpAgentHarnessTest {
                     "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
             }
 
-            assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
-            assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
-            assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
-            assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
-            assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
+            assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding, outcomes)
+            assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding, outcomes)
+            assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256, outcomes)
+            assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256, outcomes)
+            assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256, outcomes)
             assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence, outcomes))
             assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence, outcomes))
             assertEquals(
