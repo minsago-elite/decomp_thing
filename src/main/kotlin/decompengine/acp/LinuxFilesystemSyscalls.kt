@@ -18,6 +18,128 @@ import java.nio.file.attribute.BasicFileAttributes
 /** Invocation-owned observations only; never used for admission or deadlines. */
 internal class RuntimeCopyStatistics {
     enum class Operation { CHECK, READ, WRITE, FSYNC }
+    /** Inclusive phase observations and retained leaf counters; never admission facts. */
+    class Prefix private constructor(private val budget: (Long) -> LongArray) {
+        enum class Phase { ENTRY, PREPARE, VALIDATE, VALIDATION_PINNING, VALIDATION_RECHECK,
+            VALIDATION_DELETE, LAUNCH, LAUNCH_PINNING, LAUNCH_CLEANUP, BOUNDARY_CLOSE }
+        enum class Owner { PREPARE, VALIDATE, LAUNCH }
+        enum class Failure { TIMEOUT, CANCELLED, ERROR, OTHER }
+        private val ownerThread = Thread.currentThread()
+        private val entered = LongArray(Phase.entries.size) { -1 }
+        private val exited = LongArray(Phase.entries.size) { -1 }
+        private val remainingAtEntry = LongArray(Phase.entries.size) { -1 }
+        private val remainingAtExit = LongArray(Phase.entries.size) { -1 }
+        private val states = IntArray(Phase.entries.size) // 0 unseen, 1 active, 2 returned, 3 threw
+        private val owners = arrayOfNulls<RuntimeCopyStatistics>(Owner.entries.size)
+        private var firstFailure = -1
+        private var failureObserved = false
+        private var firstFailureKind = -1
+        private var failureElapsed = -1L
+        private var failureRemaining = -1L
+        private var lastEntered = -1
+        private var lastReturned = -1
+        private val stack = IntArray(32)
+        private var depth = 0
+        @Volatile private var supported = true
+        private var emitted = false
+
+        private inline fun observe(action: () -> Unit) {
+            try {
+                if (Thread.currentThread() !== ownerThread) { supported = false; return }
+                action()
+            } catch (_: Throwable) { supported = false }
+        }
+        fun start(phase: Phase) = observe {
+            val i = phase.ordinal
+            if (states[i] != 0) { supported = false; return@observe }
+            if (depth == stack.size) { supported = false; return@observe }
+            stack[depth++] = i
+            states[i] = 1
+            lastEntered = i
+            val sample = budget(System.nanoTime())
+            entered[i] = sample[0]; remainingAtEntry[i] = sample[1]
+        }
+        fun finish(phase: Phase, returned: Boolean) = observe {
+            val i = phase.ordinal
+            if (states[i] != 1 || depth == 0 || stack[depth - 1] != i) { supported = false; return@observe }
+            depth--
+            val sample = budget(System.nanoTime())
+            exited[i] = sample[0]; remainingAtExit[i] = sample[1]
+            states[i] = if (returned) 2 else 3
+            if (returned) lastReturned = i
+            if (sample[0] < entered[i]) supported = false
+        }
+        fun failure(phase: Phase?, kind: Failure = Failure.OTHER) = observe {
+            if (!failureObserved) {
+                failureObserved = true
+                firstFailure = phase?.ordinal ?: -1
+                firstFailureKind = kind.ordinal
+                val sample = budget(System.nanoTime())
+                failureElapsed = sample[0]; failureRemaining = sample[1]
+            }
+        }
+        fun failureCurrent(kind: Failure = Failure.OTHER) = observe {
+            failure(Phase.entries.getOrNull(if (depth > 0) stack[depth - 1] else -1), kind)
+        }
+        fun statistics(owner: Owner): RuntimeCopyStatistics? = try {
+            RuntimeCopyStatistics().also { retain(owner, it) }
+        } catch (_: Throwable) { supported = false; null }
+        fun retain(owner: Owner, statistics: RuntimeCopyStatistics) = observe {
+            if (owners[owner.ordinal] != null) supported = false
+            else owners[owner.ordinal] = statistics
+        }
+        fun <T> measure(phase: Phase, action: () -> T): T {
+            start(phase)
+            var returned = false
+            try {
+                val result = action()
+                returned = true
+                return result
+            } catch (failure: Throwable) {
+                this.failure(phase, if (failure is Error) Failure.ERROR else Failure.OTHER)
+                throw failure
+            } finally { finish(phase, returned) }
+        }
+        fun attachFailure(primary: Throwable) = observe {
+            if (emitted) return@observe
+            emitted = true
+            val phases = Phase.entries.joinToString(";") { phase ->
+                val i = phase.ordinal
+                // Exceptional inclusive spans are unknown, never invented normal timings.
+                val duration = if (states[i] == 2 && entered[i] >= 0 && exited[i] >= entered[i])
+                    (exited[i] - entered[i]).toString() else "unknown"
+                "${phase.name}:${states[i]},entryNs=${entered[i]},exitNs=${exited[i]}," +
+                    "remainingEntryNs=${remainingAtEntry[i]},remainingExitNs=${remainingAtExit[i]},inclusiveNs=$duration"
+            }
+            val leaves = Owner.entries.joinToString(";") { owner ->
+                val statistics = owners[owner.ordinal]
+                if (statistics == null) "${owner.name}:unobserved"
+                else "${owner.name}:COPY[${statistics.copy.summary()}],HASH[${statistics.hash.summary()}]"
+            }
+            val first = Phase.entries.getOrNull(firstFailure)?.name ?: "unobserved"
+            primary.addSuppressed(IOException("acp-prelaunch-prefix-observation-v1;supported=$supported;" +
+                "firstObservedFailure=$first,kind=${Failure.entries.getOrNull(firstFailureKind)?.name ?: "unobserved"}," +
+                "failureElapsedNs=$failureElapsed,failureRemainingNs=$failureRemaining;" +
+                "lastEntered=${Phase.entries.getOrNull(lastEntered)?.name ?: "unobserved"};" +
+                "lastReturned=${Phase.entries.getOrNull(lastReturned)?.name ?: "unobserved"};" +
+                "states=0-unseen/1-active/2-returned/3-threw;inclusive-overlap-do-not-sum;" +
+                "cleanup-return-is-not-cleanup-proof;other-counters=unsupported;" +
+                "coverage=phase-and-existing-loop-only;unobserved-work=not-attributed;" +
+                "first-failure-time=observation-not-throw-instant;phases[$phases];leaves[$leaves]"))
+        }
+        companion object {
+            fun attach(observation: Prefix?, primary: Throwable) {
+                try {
+                    if (observation == null || Thread.currentThread() !== observation.ownerThread) primary.addSuppressed(IOException(
+                        "acp-prelaunch-prefix-observation-v1;supported=false;record=unavailable;observational-only"))
+                    else observation.attachFailure(primary)
+                } catch (_: Throwable) { /* Never replace a real failure with diagnostics. */ }
+            }
+            fun create(budget: (Long) -> LongArray): Prefix? = try {
+                Prefix(budget).also { it.start(Phase.ENTRY); it.finish(Phase.ENTRY, true) }
+            } catch (_: Throwable) { null }
+        }
+    }
     inner class Bucket {
         private val calls = LongArray(Operation.entries.size)
         private val nanos = LongArray(Operation.entries.size)

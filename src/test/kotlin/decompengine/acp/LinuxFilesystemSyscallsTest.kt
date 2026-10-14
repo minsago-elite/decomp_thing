@@ -16,6 +16,76 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
+        var clock = 0L
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {
+            val elapsed = clock++
+            longArrayOf(elapsed, 100L - elapsed)
+        })
+        val prepare = RuntimeCopyStatistics()
+        prefix.retain(RuntimeCopyStatistics.Prefix.Owner.PREPARE, prepare)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+            prepare.copy.started(); prepare.copy.read(13); prepare.copy.written(13); prepare.copy.completed()
+        }
+        val validation = requireNotNull(prefix.statistics(RuntimeCopyStatistics.Prefix.Owner.VALIDATE))
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.VALIDATE) {
+            validation.hash.started(); validation.hash.read(7); validation.hash.completed()
+        }
+        val primary = IllegalStateException("authored action failure")
+        val caught = assertFailsWith<IllegalStateException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) {
+                prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING) {
+                    prefix.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+                    throw primary
+                }
+            }
+        }
+        assertTrue(caught === primary)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { Unit }
+        prefix.attachFailure(primary)
+        prefix.attachFailure(primary)
+        val summary = primary.suppressed.single().message.orEmpty()
+        assertTrue(summary.contains("firstObservedFailure=LAUNCH_PINNING,kind=TIMEOUT"), summary)
+        assertTrue(summary.contains("failureElapsedNs=8,failureRemainingNs=92"), summary)
+        assertTrue(summary.contains("PREPARE:COPY[observed=true,supported=true,files=1/1,readBytes=13"), summary)
+        assertTrue(summary.contains("VALIDATE:COPY[observed=false"), summary)
+        assertTrue(summary.contains("HASH[observed=true,supported=true,files=1/1,readBytes=7"), summary)
+        assertTrue(summary.contains("LAUNCH:3") && summary.contains("inclusiveNs=unknown"), summary)
+        assertTrue(summary.contains("BOUNDARY_CLOSE:2"), summary)
+        assertTrue(summary.contains("inclusive-overlap-do-not-sum"), summary)
+    }
+
+    @Test
+    fun `unavailable diagnostic clock cannot change action result or primary failure`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { error("unavailable observation clock") })
+        var actions = 0
+        assertEquals(37, prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++; 37 })
+        assertEquals(1, actions)
+        val primary = IOException("authored primary")
+        assertTrue(assertFailsWith<IOException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { throw primary }
+        } === primary)
+        prefix.attachFailure(primary)
+        assertTrue(primary.suppressed.single().message.orEmpty().contains("supported=false"))
+        assertEquals("authored primary", primary.message)
+    }
+
+    @Test
+    fun `repeated phase observations remain bounded and never skip the action`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        var actions = 0
+        repeat(1000) { prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++ } }
+        assertEquals(1000, actions)
+        val primary = IOException("bounded diagnostic")
+        prefix.attachFailure(primary)
+        val summary = primary.suppressed.single().message.orEmpty()
+        assertTrue(RuntimeCopyStatistics.Prefix.Phase.entries.size <= 32)
+        assertTrue(summary.length <= 16 * 1024)
+        assertTrue(summary.contains("supported=false"))
+        assertFalse(summary.contains("bounded diagnostic"))
+    }
+
+    @Test
     fun `filesystem capacity is read through the pinned directory descriptor`() {
         withLinuxDirectory("linux-syscall-capacity-") { path, directory ->
             val capacity = LinuxFilesystemSyscalls.filesystemCapacity(directory)
