@@ -466,7 +466,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(81, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -854,7 +854,7 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `overlapping receipts retain their own request prompt and provider evidence`() {
-        // This case checks receipt isolation while both callbacks overlap, not timeout policy.
+        // Require both live invocations to remain inside their event callbacks until the test releases them.
         val firstFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
@@ -866,15 +866,22 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000),
         )
         val callbacksEntered = CountDownLatch(2)
+        val releaseCallbacks = CountDownLatch(1)
+        val activeCallbacks = AtomicInteger()
         val executor = Executors.newFixedThreadPool(2)
 
         fun submit(request: AgentExecutionRequest) = executor.submit<AgentExecutionReceipt> {
             val firstCallback = AtomicBoolean(true)
             harness.executeReceipt(request) {
                 if (firstCallback.compareAndSet(true, false)) {
+                    activeCallbacks.incrementAndGet()
                     callbacksEntered.countDown()
-                    check(callbacksEntered.await(20, TimeUnit.SECONDS)) {
-                        "overlapping ACP invocation did not reach its event callback"
+                    try {
+                        check(releaseCallbacks.await(20, TimeUnit.SECONDS)) {
+                            "overlapping ACP invocation callback was not released"
+                        }
+                    } finally {
+                        activeCallbacks.decrementAndGet()
                     }
                 }
             }
@@ -883,6 +890,10 @@ class AcpAgentHarnessTest {
         try {
             val firstFuture = submit(firstRequest)
             val secondFuture = submit(secondRequest)
+            val bothCallbacksEntered = callbacksEntered.await(20, TimeUnit.SECONDS)
+            val heldCallbackCount = activeCallbacks.get()
+            val bothInvocationsHeld = !firstFuture.isDone && !secondFuture.isDone
+            releaseCallbacks.countDown()
             val first = firstFuture.get(75, TimeUnit.SECONDS)
             val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
@@ -896,9 +907,13 @@ class AcpAgentHarnessTest {
                     "forcedTermination=${diagnostics?.forcedTermination} " +
                     "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
                     "remainingProcesses=${diagnostics?.remainingProcessIds?.size} " +
-                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
+                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded} " +
+                    "cause=${boundedPreparationCauseForTest(receipt.failureCause)}"
             }
 
+            assertTrue(bothCallbacksEntered, "both contained invocations must reach callbacks; $outcomes")
+            assertEquals(2, heldCallbackCount, "both callbacks must remain held simultaneously; $outcomes")
+            assertTrue(bothInvocationsHeld, "neither invocation may finish before callback release; $outcomes")
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding, outcomes)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding, outcomes)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256, outcomes)
@@ -916,7 +931,18 @@ class AcpAgentHarnessTest {
             )
             assertEquals("new source\n", firstFixture.source.readText())
             assertEquals("new source\n", secondFixture.source.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, firstFixture.forbiddenCanary.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, secondFixture.forbiddenCanary.readText())
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, firstEvidence.cleanupDisposition, outcomes)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, secondEvidence.cleanupDisposition, outcomes)
+            listOf("first" to firstEvidence, "second" to secondEvidence).forEach { (label, evidence) ->
+                val diagnostics = assertNotNull(evidence.diagnostics, "$label: $outcomes")
+                assertTrue(diagnostics.remainingProcessIds.isEmpty(), "$label: $outcomes")
+                assertTrue(diagnostics.sandboxCleanupVerified, "$label: $outcomes")
+                assertProcessStopped(diagnostics.pid)
+            }
         } finally {
+            releaseCallbacks.countDown()
             executor.shutdownNow()
         }
     }
@@ -925,6 +951,49 @@ class AcpAgentHarnessTest {
         "phase=$phaseReached cleanup=$cleanupDisposition audits=$completeness " +
             "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
             "sandbox=${sandboxEvidence != null}"
+
+    /** Fixed source labels only: exception messages, file names and process data are never rendered. */
+    private fun boundedPreparationCauseForTest(failure: Throwable?): String {
+        if (failure == null) return "none"
+        val allowedTypes = setOf(
+            "decompengine.agent.AgentExecutionException", "decompengine.acp.AcpCleanupProofFailure",
+            "decompengine.acp.AcpPhaseTimeout", "decompengine.acp.RequestedAcpCancellation",
+            "java.io.IOException", "java.lang.IllegalArgumentException", "java.lang.IllegalStateException",
+            "java.lang.SecurityException", "java.lang.InterruptedException", "java.lang.UnsupportedOperationException",
+            "java.nio.file.AccessDeniedException", "java.nio.file.FileAlreadyExistsException",
+            "java.nio.file.FileSystemException", "java.nio.file.NoSuchFileException",
+            "java.util.concurrent.CancellationException", "java.util.concurrent.ExecutionException",
+            "java.util.concurrent.TimeoutException", "com.sun.jna.LastErrorException",
+        )
+        val allowedClasses = setOf(
+            "AcpAgentHarness", "ProductionAcpSandboxExecution", "LinuxBubblewrapBoundary",
+            "LinuxBubblewrapBoundary\$Companion", "LinuxBubblewrapBoundaryKt",
+            "RuntimePrivateControlScope", "RuntimePrivateControlScope\$Companion",
+            "PinnedControlDirectory", "PinnedControlDirectory\$Companion", "PinnedSandboxControlTemporaryParent",
+            "PinnedSecurityExecutable", "PinnedSecurityExecutable\$Companion",
+            "PinnedSystemdBusEndpoint", "PinnedSystemdBusEndpoint\$Companion",
+            "LinuxFilesystemSyscalls", "LinuxFilesystemSyscallsKt", "LinuxBoundedSessionProcessKt",
+        )
+        val methodName = Regex("[A-Za-z_\$<>][A-Za-z0-9_\$<>-]{0,95}")
+        val seen = ArrayList<Throwable>(6)
+        val rendered = ArrayList<String>(6)
+        var cause: Throwable? = failure
+        while (cause != null && seen.size < 6 && seen.none { it === cause }) {
+            val current = requireNotNull(cause)
+            seen += current
+            val type = current.javaClass.name.takeIf { it in allowedTypes } ?: "other"
+            val frames = current.stackTrace.asSequence().take(64).mapNotNull { frame ->
+                val sourceClass = frame.className.removePrefix("decompengine.acp.")
+                if (!frame.className.startsWith("decompengine.acp.") || sourceClass !in allowedClasses ||
+                    !methodName.matches(frame.methodName) || frame.lineNumber !in 1..20_000
+                ) null else "$sourceClass.${frame.methodName}:${frame.lineNumber}"
+            }.take(3).joinToString(",")
+            rendered += "$type[$frames]"
+            cause = current.cause
+        }
+        if (cause != null) rendered += "truncated"
+        return rendered.joinToString(" -> ").take(2048)
+    }
 
     private fun completedStopReasonForTest(
         label: String,
@@ -2611,6 +2680,46 @@ class AcpAgentHarnessTest {
         return failure
     }
 
+    /** Existing receipt metadata only: no process queries, exception text, stderr or request content. */
+    private fun cleanupFailureDiagnostic(
+        invocation: AcpInvocationEvidenceSnapshot,
+        failure: AgentExecutionException,
+    ): String {
+        val diagnostics = invocation.diagnostics
+        val output = invocation.sandboxEvidence?.outerProcessOutput
+        val allowedCauseTypes = setOf(
+            "decompengine.agent.AgentExecutionException", "decompengine.acp.AcpCleanupProofFailure",
+            "decompengine.acp.AcpOutputLimitFailure", "decompengine.acp.AcpPhaseTimeout",
+            "decompengine.acp.AcpEofFailure", "decompengine.acp.AcpProcessExitedFailure",
+            "java.io.IOException", "java.lang.IllegalStateException", "java.lang.InterruptedException",
+            "java.util.concurrent.TimeoutException", "java.util.concurrent.ExecutionException",
+        )
+        val seen = ArrayList<Throwable>(6)
+        val causeTypes = ArrayList<String>(6)
+        var cause: Throwable? = failure
+        while (cause != null && seen.size < 6 && seen.none { it === cause }) {
+            val current = requireNotNull(cause)
+            seen += current
+            causeTypes += current.javaClass.name.takeIf { it in allowedCauseTypes } ?: "other"
+            cause = current.cause
+        }
+        return ("cleanupDiagnostic phase=${invocation.phaseReached} cleanup=${invocation.cleanupDisposition} " +
+            "failureKind=${failure.failure.kind} failedOutcome=${failure.receipt?.outcome is AgentExecutionOutcome.Failed} " +
+            "audits=${invocation.completeness} negotiated=${invocation.negotiatedAgent != null} " +
+            "wirePromptPresent=${invocation.wirePromptSha256 != null} sandbox=${invocation.sandboxEvidence != null} " +
+            "completeEvidence=${invocation.completeExecutionEvidence != null} diagnostics=${diagnostics != null} " +
+            "exitCode=${diagnostics?.exitCode} forcedTermination=${diagnostics?.forcedTermination} " +
+            "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
+            "remainingPidCount=${diagnostics?.remainingProcessIds?.size} " +
+            "remainingPidsFirst8=${diagnostics?.remainingProcessIds?.take(8)} " +
+            "sandboxCleanupVerified=${diagnostics?.sandboxCleanupVerified} " +
+            "producedBytes=${diagnostics?.producedOutputBytes} producedLimit=${diagnostics?.producedOutputLimitBytes} " +
+            "outputLimitExceeded=${diagnostics?.outputLimitExceeded} stderrTruncated=${diagnostics?.stderrTruncated} " +
+            "outerObserved=${output?.observedBytes} outerLimit=${output?.maximumBytes} outerExceeded=${output?.limitExceeded} " +
+            "stdoutEof=unknown stderrEof=unknown shutdownBudget=unknown " +
+            "causeClasses=$causeTypes causeTailUnknown=${cause != null} suppressedCauses=unknown").take(4096)
+    }
+
     private fun assertCleanTermination(
         harness: AcpAgentHarness,
         context: String = "execution",
@@ -2622,7 +2731,14 @@ class AcpAgentHarnessTest {
         val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
         if (failure != null) {
             assertNotNull(invocation, "$context invocation evidence")
-            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, context)
+            val cleanupContext = if (invocation.cleanupDisposition != AcpExecutionCleanupDisposition.VERIFIED) {
+                try {
+                    "$context " + cleanupFailureDiagnostic(invocation, failure)
+                } catch (_: Throwable) {
+                    "diagnostic-unavailable"
+                }
+            } else context
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, cleanupContext)
             assertNull(invocation.completeExecutionEvidence, "$context failed outcome archive evidence")
         }
         val diagnostics = assertNotNull(invocation?.diagnostics ?: harness.latestDiagnostics(), context)

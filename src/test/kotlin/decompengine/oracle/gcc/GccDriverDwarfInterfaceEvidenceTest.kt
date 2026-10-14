@@ -154,6 +154,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
         }
         val document = OracleJson.parseCanonical(first.canonicalBytes(), GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject
         exerciseRehashedDecisionTamper(document, parts, policy)
+        val rehashedDecisionTamperResult = "rehashed-decision-membership-change-rejected"
         assertEquals(JsonPrimitive(7), document.getValue("schemaVersion"))
         assertEquals(JsonPrimitive("gcc-driver-dwarf-interface-evidence-v7"), document.getValue("provider"))
         listOf("complete", "scored", "productionVerified", "releaseEligible").forEach {
@@ -213,7 +214,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
             record.getValue("candidateDieLocators").jsonArray.forEach { assertTrue(it.jsonPrimitive.content in candidateIds) }
         }
         val tamperResults = exerciseCheckedInputTampering(root, destination, document) +
-            listOf("missing-shard-rejected", "altered-shard-rejected", "reordered-shards-rejected")
+            listOf(rehashedDecisionTamperResult, "missing-shard-rejected", "altered-shard-rejected", "reordered-shards-rejected")
         first.visitParts { relative, bytes ->
             val path = destination.resolve(relative)
             Files.createDirectories(path.parent, PRIVATE_DIRECTORY)
@@ -480,8 +481,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
             assertTrue(replacedControl.message.orEmpty().startsWith("before GCC driver interface scan: automaticLocalPopulationPolicy "),
                 "wrong rejection: ${replacedControl.message}")
             return listOf("same-size-rich-byte-tamper-rejected", "same-size-policy-byte-tamper-rejected",
-                "same-content-policy-path-replacement-rejected", "rehashed-policy-substitution-rejected",
-                "rehashed-decision-membership-change-rejected")
+                "same-content-policy-path-replacement-rejected")
         } finally { deleteTree(fixture) }
     }
 
