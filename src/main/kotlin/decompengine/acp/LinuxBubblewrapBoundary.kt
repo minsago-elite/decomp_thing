@@ -3934,7 +3934,7 @@ private class PrivateCleanupBudget(
     }
 }
 
-private class SystemdScopeController(
+internal class SystemdScopeController(
     private val supervisor: PinnedSecurityExecutable,
     private val inspector: PinnedSecurityExecutable,
     private val bus: PinnedSystemdBusEndpoint,
@@ -4481,6 +4481,30 @@ internal class VerifiedSystemdScope(
         } else false
         throw IOException("sandbox scope cleanup was not proven (populated=$populated)")
     }
+
+    /** Test fixture already holds its exact leaf's kill capability. This observer
+     * never signals/stops a unit discovered by a later name query. Removal of
+     * the acquired cgroup leaf implies zero membership, not child reaping. */
+    internal fun requireFixtureRemoved(deadline: Long) {
+        val checkpoint = sandboxCleanupCheckpoint(deadline)
+        while (System.nanoTime() < deadline) {
+            checkpoint()
+            val properties = systemctlShow(inspector, bus, unitName, checkpoint, deadline)
+            val absent = !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)
+            checkpoint()
+            if (properties["LoadState"] == "not-found" && absent) {
+                finalMembershipZero.set(true)
+                cgroupRemoved.set(true)
+                scopeRemoved.set(true)
+                cgroupDescriptor.close()
+                checkpoint()
+                return
+            }
+            Thread.sleep(minOf(SCOPE_POLL_MILLIS,
+                TimeUnit.NANOSECONDS.toMillis((deadline - System.nanoTime()).coerceAtLeast(0L))))
+        }
+        throw IOException("fixture's acquired scope/cgroup removal was not proven")
+    }
 }
 
 internal data class AcpSetupWaiter(
@@ -4706,7 +4730,7 @@ private fun killPinnedBubblewrapProcesses(cgroupPath: Path, bubblewrap: PinnedSe
     throw IOException("pinned bubblewrap processes survived ordered pre-release cleanup")
 }
 
-private fun requireExactRlimits(
+internal fun requireExactRlimits(
     pid: Long,
     limits: AcpSandboxResourceLimits,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
@@ -6662,7 +6686,7 @@ private fun pathsOverlap(first: Path, second: Path): Boolean =
 private fun currentUid(): Int =
     (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
 
-private fun nprocBackstop(
+internal fun nprocBackstop(
     sandboxMaximum: Int,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ): Int {
