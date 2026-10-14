@@ -171,7 +171,7 @@ class AcpProviderBrokerReviewRegressionTest {
     }
 
     @Test fun `first cleanup operation survives later failures and successful retry`() {
-        val receiver = Receiver()
+        val receiver = Receiver(expectFailure = true)
         val type = Class.forName("decompengine.acp.ProviderHttpAttempt")
         val body = "synthetic body".toByteArray()
         val owner = type.declaredConstructors.single().also { it.isAccessible = true }.newInstance(
@@ -184,9 +184,11 @@ class AcpProviderBrokerReviewRegressionTest {
         assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
         val finish = type.declaredMethods.single { it.name == "finishTransport" }.also { it.isAccessible = true }
         finish.invoke(owner, null, AcpProviderTerminalKind.COMPLETED, receiver)
+        assertEquals(1, receiver.failed)
         assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
         raw.set(null)
         finish.invoke(owner, null, AcpProviderTerminalKind.COMPLETED, receiver)
+        assertEquals(2, receiver.failed)
         assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
         assertTrue((field(owner, "cleanupFailed") as AtomicBoolean).get())
         assertFalse(type.getDeclaredMethod("resourcesClosed").also { it.isAccessible = true }.invoke(owner) as Boolean)
@@ -290,13 +292,17 @@ class AcpProviderBrokerReviewRegressionTest {
         }
         override fun closeWithin(timeout: Duration) = true
     }
-    private class Receiver : AcpProviderBackendReceiver {
+    private class Receiver(private val expectFailure: Boolean = false) : AcpProviderBackendReceiver {
         @Volatile var completed = 0
+        @Volatile var failed = 0
         override fun headers(status: Int, headers: Map<String, List<String>>) = Unit
         override fun subscribe(subscription: Flow.Subscription) = Unit
         override fun bytes(buffers: List<ByteBuffer>) = Unit
         override fun complete() { completed++ }
-        override fun failed() { error("unexpected inert transport failure") }
+        override fun failed() {
+            check(expectFailure) { "unexpected inert transport failure" }
+            failed++
+        }
         override fun timedOut() { error("unexpected inert timeout") }
     }
 }
