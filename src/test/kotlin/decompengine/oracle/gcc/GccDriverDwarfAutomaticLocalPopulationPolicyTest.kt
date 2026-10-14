@@ -210,12 +210,40 @@ class GccDriverDwarfAutomaticLocalPopulationPolicyTest {
     @Test
     fun `policy and decision limits refuse atomically`() {
         val record = variable("0x1")
-        apply(listOf(record), GccDriverAutomaticLocalPopulationLimits(maximumRecords = 1, maximumWorkSteps = 2))
         assertPolicyFailure("record bound") {
             apply(listOf(record, variable("0x2")), GccDriverAutomaticLocalPopulationLimits(maximumRecords = 1))
         }
-        assertPolicyFailure("work bound") {
-            apply(listOf(record), GccDriverAutomaticLocalPopulationLimits(maximumWorkSteps = 1))
+
+        val locationValue = record.getValue("location").jsonObject.getValue("values").jsonArray.single()
+        val repeatedEvidence = JsonArray(List(96) { JsonPrimitive("evidence:$it") })
+        val repeatedReasons = JsonArray(List(96) { JsonPrimitive("reason:$it") })
+        val heavyLocation = JsonObject(record.getValue("location").jsonObject + mapOf(
+            "state" to JsonPrimitive("ambiguous"),
+            "values" to JsonArray(List(96) { locationValue }),
+            "evidence" to repeatedEvidence,
+            "reasons" to repeatedReasons,
+        ))
+        val heavyScopes = JsonArray(List(96) { index -> JsonObject(linkedMapOf(
+            "locator" to JsonPrimitive(".debug_info:cu=0x0:die=0x${(index + 0x100).toString(16)}"),
+            "tag" to JsonPrimitive("0xb"),
+            "name" to fact("ambiguous", listOf("scope-$index", "scope-alt-$index"),
+                List(8) { "scope-evidence:$index:$it" }, List(8) { "scope-reason:$index:$it" }),
+            "ownerLocator" to record.getValue("locator"),
+        )) })
+        val heavyRecord = JsonObject(record + mapOf(
+            "declaration" to fact("ambiguous", listOf("0", "18446744073709551616"),
+                List(96) { "declaration-evidence:$it" }, List(96) { "declaration-reason:$it" }),
+            "location" to heavyLocation,
+            "scopes" to heavyScopes,
+            "origins" to JsonArray(List(96) { JsonPrimitive("origin:$it") }),
+            "reasons" to repeatedReasons,
+        ))
+        val baselineWork = jsonNodes(OracleJson.canonicalBytes(record)).toLong()
+        val exactHeavyWork = jsonNodes(OracleJson.canonicalBytes(heavyRecord)).toLong()
+        assertTrue(exactHeavyWork > baselineWork * 10, "adversarial arrays must dominate record-level work")
+        apply(listOf(heavyRecord), GccDriverAutomaticLocalPopulationLimits(maximumWorkSteps = exactHeavyWork))
+        assertPolicyFailure("node-heavy work bound one-over") {
+            apply(listOf(heavyRecord), GccDriverAutomaticLocalPopulationLimits(maximumWorkSteps = exactHeavyWork - 1))
         }
 
         val decision = apply(listOf(record)).decisions.single()

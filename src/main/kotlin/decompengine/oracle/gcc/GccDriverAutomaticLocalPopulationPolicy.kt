@@ -171,7 +171,9 @@ internal object GccDriverAutomaticLocalPopulationPolicyV1 {
         var work = 0L
         for (record in rawVariables) {
             if (decisions.size >= limits.maximumRecords) policyFail("raw variable record count exceeds bounds")
-            work = chargeWork(work, 1, limits)
+            val admission = admitRawRecord(record, sourceNodes, work, limits)
+            val recordNodes = admission.nodes
+            work = admission.work
             validateRawVariable(record)
             val locator = text(record, "locator")
             if (!LOCATOR.matches(locator)) policyFail("source locator is not canonical")
@@ -179,13 +181,10 @@ internal object GccDriverAutomaticLocalPopulationPolicyV1 {
             val source = OracleJson.canonicalBytes(record, limits.recordJsonLimits())
             if (sourceBytes > limits.maximumCanonicalBytes - source.size) policyFail("raw canonical bytes exceed bounds")
             sourceBytes += source.size
-            val recordNodes = countCanonicalNodes(source, limits)
-            if (sourceNodes > limits.maximumCanonicalNodes - recordNodes) policyFail("raw canonical nodes exceed bounds")
             sourceNodes += recordNodes
             rawCommitter.add(source)
             val decision = deriveDecision(record, OracleArtifacts.sha256(source))
             val encodedDecision = OracleJson.canonicalBytes(decision, limits.recordJsonLimits())
-            work = chargeWork(work, 1, limits)
             sourceCommitter.add(encodedDecision)
             counts.observe(decision)
             decisions += decision
@@ -534,21 +533,34 @@ private fun orderedDistinct(values: List<String>): List<String> {
 }
 private fun defensiveObject(value: JsonObject): JsonObject =
     OracleJson.parseCanonical(OracleJson.canonicalBytes(value, APPLICATION_JSON_LIMITS), APPLICATION_JSON_LIMITS) as JsonObject
-private fun countCanonicalNodes(bytes: ByteArray, limits: GccDriverAutomaticLocalPopulationLimits): Long {
-    val root = OracleJson.parseCanonical(bytes, limits.recordJsonLimits())
+private data class RawRecordAdmission(val nodes: Long, val work: Long)
+
+/** One work step per canonical raw node bounds every later variable-length pass over the admitted record. */
+private fun admitRawRecord(
+    root: JsonObject,
+    priorNodes: Long,
+    priorWork: Long,
+    limits: GccDriverAutomaticLocalPopulationLimits,
+): RawRecordAdmission {
     val pending = ArrayDeque<JsonElement>()
-    pending.addLast(root)
     var nodes = 0L
-    while (pending.isNotEmpty()) {
+    var work = priorWork
+    fun admit(value: JsonElement) {
+        if (nodes >= limits.maximumRecordNodes) policyFail("raw record nodes exceed bounds")
+        if (priorNodes > limits.maximumCanonicalNodes - nodes - 1) policyFail("raw canonical nodes exceed bounds")
+        work = chargeWork(work, 1, limits)
         nodes++
-        if (nodes > limits.maximumRecordNodes) policyFail("raw record nodes exceed bounds")
+        pending.addLast(value)
+    }
+    admit(root)
+    while (pending.isNotEmpty()) {
         when (val value = pending.removeLast()) {
-            is JsonObject -> value.values.forEach(pending::addLast)
-            is JsonArray -> value.forEach(pending::addLast)
+            is JsonObject -> value.values.forEach(::admit)
+            is JsonArray -> value.forEach(::admit)
             else -> Unit
         }
     }
-    return nodes
+    return RawRecordAdmission(nodes, work)
 }
 private fun chargeWork(current: Long, added: Long, limits: GccDriverAutomaticLocalPopulationLimits): Long {
     if (current > limits.maximumWorkSteps - added) policyFail("application work exceeds bounds")
