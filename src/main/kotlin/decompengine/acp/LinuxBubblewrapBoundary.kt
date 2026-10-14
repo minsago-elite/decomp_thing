@@ -5033,6 +5033,17 @@ private fun probeResourceLimiter(
     REQUIRED_PRLIMIT_OPTIONS.forEach { if (it !in help) throw IOException("resource limiter lacks $it") }
 }
 
+/** Shared static-executable verifier; guardian authentication grants no launch authority. */
+internal fun verifyStaticAcpProviderGuardian(bytes: ByteArray, expectedSha256: String, mode: Int) {
+    try {
+        verifyStaticSandboxGateHelper(bytes, expectedSha256, mode)
+    } catch (_: IOException) {
+        throw IOException("ACP provider guardian artifact integrity check failed")
+    } catch (_: RuntimeException) {
+        throw IOException("ACP provider guardian artifact integrity check failed")
+    }
+}
+
 private fun verifyStaticSandboxGateHelper(
     bytes: ByteArray,
     expectedSha256: String,

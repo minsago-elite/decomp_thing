@@ -319,6 +319,10 @@ val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_ga
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")
 val acpGateHelperCompiler = providers.gradleProperty("acpGateHelperCompiler").orElse("/usr/bin/cc")
+val acpProviderGuardianSource = layout.projectDirectory.file("src/main/c/decomp_acp_provider_guardian.c")
+val acpProviderGuardianBinary = layout.buildDirectory.file("native/acp/decomp-acp-provider-guardian")
+val acpProviderGuardianChecksum = layout.buildDirectory.file("native/acp/decomp-acp-provider-guardian.sha256")
+val acpProviderGuardianCompiler = providers.gradleProperty("acpProviderGuardianCompiler").orElse("/usr/bin/cc")
 val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_llvm_behavior_helper.c")
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
@@ -1046,6 +1050,140 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     }
 }
 
+val buildAcpProviderGuardian = tasks.register<Exec>("buildAcpProviderGuardian") {
+    group = "build"
+    description = "Builds the static ACP provider guardian prerequisite; factory qualification is separate"
+    inputs.file(acpProviderGuardianSource)
+    inputs.property("compiler", acpProviderGuardianCompiler)
+    inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
+    outputs.file(acpProviderGuardianBinary)
+    // A compiler upgrade is not visible to Gradle's path-based inputs.
+    outputs.upToDateWhen { false }
+
+    doFirst {
+        require(System.getProperty("os.name") == "Linux" &&
+            System.getProperty("os.arch") in setOf("amd64", "x86_64", "aarch64")) {
+            "the ACP provider guardian supports only Linux x86-64 or aarch64"
+        }
+        val compiler = file(acpProviderGuardianCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
+        require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
+            "ACP provider-guardian compiler is not an executable regular file"
+        }
+        val output = acpProviderGuardianBinary.get().asFile.toPath()
+        val scratch = layout.buildDirectory.dir("native/acp/provider-guardian-compiler").get().asFile.toPath()
+        listOf(output.parent, scratch.resolve("tmp"), scratch.resolve("home")).forEach { Files.createDirectories(it) }
+        // Compiler subprocesses also stay within the checkout and inherit no caller injection options.
+        environment.clear()
+        environment("PATH", "/usr/bin:/bin")
+        environment("HOME", scratch.resolve("home").toString())
+        listOf("TMPDIR", "TMP", "TEMP").forEach { environment(it, scratch.resolve("tmp").toString()) }
+        commandLine(compiler.toString(), "-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror",
+            "-Wl,--build-id=none", acpProviderGuardianSource.asFile.absolutePath, "-o", output.toString())
+    }
+    doLast {
+        Files.setPosixFilePermissions(acpProviderGuardianBinary.get().asFile.toPath(),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+    }
+}
+
+// Both the producer output and installed output pass the same bounded static-ELF checks.
+fun verifyAcpProviderGuardianArtifact(guardian: Path) {
+    require(Files.isRegularFile(guardian, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(guardian) &&
+        (Files.getAttribute(guardian, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1ed) {
+        "ACP provider guardian must be an executable regular file with mode 0755"
+    }
+    require(Files.size(guardian) in 64L..(4L * 1024 * 1024)) {
+        "ACP provider guardian must be a bounded ELF64 executable"
+    }
+    val bytes = Files.readAllBytes(guardian)
+    require(bytes.size in 64..(4 * 1024 * 1024) && bytes[0] == 0x7f.toByte() &&
+        bytes[1] == 'E'.code.toByte() && bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+        bytes[4] == 2.toByte() && bytes[5] == 1.toByte() && bytes[6] == 1.toByte()) {
+        "ACP provider guardian must be a little-endian ELF64 executable"
+    }
+    val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val expectedMachine = when (System.getProperty("os.arch")) {
+        "amd64", "x86_64" -> 62
+        "aarch64" -> 183
+        else -> error("unsupported ACP provider-guardian architecture")
+    }
+    require(elf.getShort(16).toInt() and 0xffff == 2 && elf.getInt(20) == 1 &&
+        elf.getShort(18).toInt() and 0xffff == expectedMachine && elf.getShort(52).toInt() and 0xffff == 64) {
+        "ACP provider guardian ELF architecture or executable header does not match the build host"
+    }
+    val programOffset = elf.getLong(32)
+    val programEntrySize = elf.getShort(54).toInt() and 0xffff
+    val programCount = elf.getShort(56).toInt() and 0xffff
+    require(programOffset >= 64 && programEntrySize == 56 && programCount in 1..128 &&
+        programOffset <= bytes.size.toLong() - programEntrySize.toLong() * programCount) {
+        "ACP provider guardian has an invalid ELF program-header table"
+    }
+    repeat(programCount) { index ->
+        val offset = (programOffset + index.toLong() * programEntrySize).toInt()
+        val segmentOffset = elf.getLong(offset + 8)
+        val segmentSize = elf.getLong(offset + 32)
+        require(segmentOffset >= 0 && segmentSize >= 0 && segmentOffset <= bytes.size.toLong() - segmentSize) {
+            "ACP provider-guardian segment exceeds the artifact"
+        }
+        when (elf.getInt(offset)) {
+            3 -> error("ACP provider guardian must not contain PT_INTERP")
+            2 -> {
+                require(segmentSize % 16L == 0L) { "ACP provider-guardian dynamic table is malformed" }
+                var cursor = segmentOffset
+                var terminated = false
+                while (cursor < segmentOffset + segmentSize) {
+                    when (elf.getLong(cursor.toInt())) {
+                        0L -> { terminated = true; break }
+                        1L -> error("ACP provider guardian must not contain DT_NEEDED")
+                    }
+                    cursor += 16L
+                }
+                require(terminated) { "ACP provider-guardian dynamic table is unterminated" }
+            }
+            4 -> {
+                var cursor = segmentOffset
+                val end = segmentOffset + segmentSize
+                while (cursor < end) {
+                    require(cursor <= end - 12L) { "ACP provider-guardian note table is malformed" }
+                    val nameSize = elf.getInt(cursor.toInt()).toLong() and 0xffffffffL
+                    val descriptionSize = elf.getInt(cursor.toInt() + 4).toLong() and 0xffffffffL
+                    val noteType = elf.getInt(cursor.toInt() + 8)
+                    val alignedName = (nameSize + 3L) and -4L
+                    val alignedDescription = (descriptionSize + 3L) and -4L
+                    require(alignedName <= end - cursor - 12L &&
+                        alignedDescription <= end - cursor - 12L - alignedName) {
+                        "ACP provider-guardian note exceeds the artifact"
+                    }
+                    if (noteType == 3 && nameSize == 4L && bytes.copyOfRange(cursor.toInt() + 12, cursor.toInt() + 16)
+                            .contentEquals(byteArrayOf('G'.code.toByte(), 'N'.code.toByte(), 'U'.code.toByte(), 0))) {
+                        error("ACP provider guardian must not contain a GNU build ID")
+                    }
+                    cursor += 12L + alignedName + alignedDescription
+                }
+            }
+        }
+    }
+}
+
+val verifyAcpProviderGuardian = tasks.register("verifyAcpProviderGuardian") {
+    group = "verification"
+    description = "Verifies the packaged provider guardian's static ELF and fail-closed contract"
+    dependsOn(buildAcpProviderGuardian)
+    inputs.file(acpProviderGuardianBinary)
+    doLast {
+        val guardian = acpProviderGuardianBinary.get().asFile.toPath()
+        verifyAcpProviderGuardianArtifact(guardian)
+        val probe = ProcessBuilder(guardian.toString()).also { it.environment().clear() }.start()
+        probe.outputStream.close()
+        val exited = probe.waitFor(5, TimeUnit.SECONDS)
+        if (!exited) { probe.destroyForcibly(); probe.waitFor(2, TimeUnit.SECONDS) }
+        require(exited && probe.exitValue() == 120 && probe.inputStream.readBytes().isEmpty() &&
+            probe.errorStream.readBytes().isEmpty()) {
+            "ACP provider guardian did not fail closed on a missing protocol invocation"
+        }
+    }
+}
+
 val buildLlvmBehaviorHelper = tasks.register<JavaExec>("buildLlvmBehaviorHelper") {
     group = "build"
     description = "Runs the bounded Kotlin helper compiler owner and records actual deployment provenance"
@@ -1331,6 +1469,21 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
     }
 }
 
+val generateAcpProviderGuardianChecksum = tasks.register("generateAcpProviderGuardianChecksum") {
+    group = "distribution"
+    description = "Writes the content digest shipped with the verified ACP provider guardian"
+    dependsOn(verifyAcpProviderGuardian)
+    inputs.file(acpProviderGuardianBinary)
+    outputs.file(acpProviderGuardianChecksum)
+    doLast {
+        val digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(acpProviderGuardianBinary.get().asFile.toPath()))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val checksum = acpProviderGuardianChecksum.get().asFile.toPath()
+        Files.writeString(checksum, "$digest  decomp-acp-provider-guardian\n")
+        Files.setPosixFilePermissions(checksum, PosixFilePermissions.fromString("rw-r--r--"))
+    }
+}
+
 val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHelperChecksum") {
     group = "distribution"
     description = "Writes the digest shipped with the static LLVM behavior helper prerequisite"
@@ -1360,6 +1513,14 @@ distributions {
                 filePermissions { unix("rwxr-xr-x") }
             }
             from(acpGateHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(acpProviderGuardianBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
+            from(acpProviderGuardianChecksum) {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
@@ -1448,6 +1609,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
+    testTask.dependsOn(generateAcpProviderGuardianChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
     testTask.dependsOn(buildAnalysisIoHelper)
     testTask.inputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
@@ -1457,6 +1619,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.dependsOn(generateLlvmHostedWorkerClasspathReference)
     testTask.inputs.file(acpGateHelperBinary)
     testTask.inputs.file(acpGateHelperChecksum)
+    testTask.inputs.files(acpProviderGuardianBinary, acpProviderGuardianChecksum)
     testTask.inputs.file(llvmBehaviorHelperBinary)
     testTask.inputs.file(llvmBehaviorHelperChecksum)
     testTask.inputs.files(llvmBehaviorHelperSourceCopy, llvmBehaviorHelperBuildRecord, llvmBehaviorHelperReference)
@@ -1487,6 +1650,12 @@ private fun configureOracleTestRuntime(testTask: Test) {
             "decompengine.acp.gateHelperChecksum",
             acpGateHelperChecksum.get().asFile.absolutePath,
         )
+        testTask.systemProperty("decompengine.acp.providerGuardianExecutable", acpProviderGuardianBinary.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.acp.providerGuardianChecksum", acpProviderGuardianChecksum.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.acp.providerGuardianExpectedSha256",
+            Files.readString(acpProviderGuardianChecksum.get().asFile.toPath()).also {
+                require(it.matches(Regex("[0-9a-f]{64}  decomp-acp-provider-guardian\n")))
+            }.substring(0, 64))
         testTask.systemProperty(
             "decompengine.oracle.behavior.nativeHelperExecutable",
             llvmBehaviorHelperBinary.get().asFile.absolutePath,
@@ -1620,6 +1789,7 @@ listOf("installDist", "distZip", "distTar").forEach { taskName ->
         dependsOn(stageOracleNativeLibraries)
         inputs.property("ghidraBundlePermissionsVersion", 2)
         dependsOn(generateAcpGateHelperChecksum)
+        dependsOn(generateAcpProviderGuardianChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
         dependsOn(generateKotlinBootClasspathReference)
         dependsOn(generateGccBundledGhidraReference)
@@ -1763,6 +1933,32 @@ val verifyAcpGateHelperDistribution = tasks.register("verifyAcpGateHelperDistrib
     }
 }
 
+val verifyAcpProviderGuardianDistribution = tasks.register("verifyAcpProviderGuardianDistribution") {
+    group = "verification"
+    description = "Verifies that installDist preserves the authenticated static ACP provider guardian"
+    dependsOn(tasks.named("installDist"))
+    doLast {
+        val root = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val guardian = root.resolve("decomp-acp-provider-guardian")
+        val checksum = root.resolve("decomp-acp-provider-guardian.sha256")
+        verifyAcpProviderGuardianArtifact(guardian)
+        require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS) && Files.size(checksum) == 95L &&
+            (Files.getAttribute(checksum, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1a4) {
+            "installed ACP provider-guardian checksum is missing or has invalid size or mode"
+        }
+        val installedBytes = Files.readAllBytes(guardian)
+        require(installedBytes.contentEquals(Files.readAllBytes(acpProviderGuardianBinary.get().asFile.toPath()))) {
+            "installDist changed the verified ACP provider guardian"
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(installedBytes)
+            .joinToString("") { byte -> "%02x".format(byte) }
+        require(Files.readString(checksum) == "$digest  decomp-acp-provider-guardian\n" &&
+            Files.readString(checksum) == Files.readString(acpProviderGuardianChecksum.get().asFile.toPath())) {
+            "installed ACP provider-guardian digest does not authenticate the installed bytes"
+        }
+    }
+}
+
 val verifyLlvmBehaviorHelperDistribution = tasks.register("verifyLlvmBehaviorHelperDistribution") {
     group = "verification"
     description = "Verifies that installDist preserves the static LLVM behavior helper and digest"
@@ -1842,6 +2038,7 @@ tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
+    dependsOn(verifyAcpProviderGuardianDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
 }
