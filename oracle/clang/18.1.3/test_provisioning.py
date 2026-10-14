@@ -484,7 +484,7 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
         for name in ("acquisition-candidate.json","patch-audit.json"):(acquisition/name).write_bytes(b"{}")
         image=self.base/"image.tar";image.write_bytes(b"inert image placeholder")
         record={"reproducibility":{"cleanBuilds":2,"matchingRootfsSha256":True,"matchingImageDigest":True},"packages":[row],"downloadedPackages":[]}
-        args=provision.argparse.Namespace(contract=provision.CONTRACT_PATH,record=self.base/"record.json",acquisition=acquisition,rootfs=self.root,oci_archive=image,probe_report=self.base/"probe.json",loader_report=self.base/"loader.json",negative_report=self.base/"negative.json",negative_compiler=self.base/"negative",keyring=self.base/"keyring",output=self.base/"must-not-exist.tar")
+        args=provision.argparse.Namespace(contract=provision.CONTRACT_PATH,record=self.base/"record.json",package_payloads=self.base/"package-payloads",acquisition=acquisition,rootfs=self.root,oci_archive=image,probe_report=self.base/"probe.json",loader_report=self.base/"loader.json",negative_report=self.base/"negative.json",negative_compiler=self.base/"negative",keyring=self.base/"keyring",output=self.base/"must-not-exist.tar")
         key=(row["name"],row["version"],row["architecture"])
         # Authored upstream signed metadata/image gates only; actual new payload gate is not mocked out.
         with mock.patch.object(provision,"pin_retained_rootfs_directory",side_effect=authored_retained_root_binding),mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_installed_package_payloads",wraps=provision.verify_installed_package_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
@@ -492,6 +492,101 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
                 provision._package_provenance_unqualified(args)
             gate.assert_called_once();native.assert_not_called()
         self.assertFalse(args.output.exists())
+
+
+    def test_selected_run_payload_root_with_parent_combined_record_and_authentication_negatives(self):
+        row, payload = self.fixture()
+        acquisition = self.base / "acquisition"
+        acquisition.mkdir()
+        (acquisition / "downloads").mkdir()
+        for name in ("acquisition-candidate.json", "patch-audit.json"):
+            (acquisition / name).write_bytes(b"{}")
+        record = {"reproducibility": {"cleanBuilds": 2, "matchingRootfsSha256": True,
+                  "matchingImageDigest": True}, "packages": [row], "downloadedPackages": []}
+        record_path = self.base / "build-record.json"
+        record_path.write_bytes(provision.canonical_json(record))
+        paths = {}
+        for name in ("image", "probe", "loader", "negative", "compiler", "keyring", "manifest"):
+            paths[name] = self.base / name
+            paths[name].write_bytes(b"authored inert boundary input")
+        run2 = self.base / "run2" / "package-payloads"
+        run2.mkdir(parents=True)
+        filename = row["sha256"] + ".deb"
+        (run2 / filename).write_bytes(payload)
+        # An invalid parent sibling must never override the explicitly selected run.
+        inferred_decoy = self.base / "package-payloads"
+        inferred_decoy.mkdir()
+        (inferred_decoy / filename).write_bytes(b"untrusted parent-directory decoy")
+        empty = self.base / "empty-payloads"
+        empty.mkdir()
+        tampered = self.base / "tampered-payloads"
+        tampered.mkdir()
+        (tampered / filename).write_bytes(payload + b"tampered")
+        wrong = self.base / "other-run-wrong-payloads"
+        wrong.mkdir()
+        (wrong / filename).write_bytes(authored_deb_payload(
+            {**self.package, "name": "other-authored-package"}, []))
+        identical = self.base / "other-run-identical-payloads"
+        identical.mkdir()
+        (identical / filename).write_bytes(payload)
+        args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
+            acquisition=acquisition, rootfs=self.root, package_payloads=run2,
+            oci_archive=paths["image"], probe_report=paths["probe"], loader_report=paths["loader"],
+            negative_report=paths["negative"], negative_compiler=paths["compiler"],
+            keyring=paths["keyring"], output=self.base / "not-published.tar")
+        key = (row["name"], row["version"], row["architecture"])
+        cases = (("selected run2", run2, True),
+                 ("missing root", self.base / "missing-payload-root", False),
+                 ("missing signed file", empty, False), ("tampered file", tampered, False),
+                 ("wrong payload", wrong, False), ("identical other-run bytes", identical, True))
+        for label, selected, accepted in cases:
+            with self.subTest(label=label), contextlib.ExitStack() as stack:
+                args.package_payloads = selected
+                # Signature/image/native boundaries are inert; actual path preflights,
+                # signed tuple comparison and .deb/installed-tree authentication run.
+                stack.enter_context(mock.patch.object(provision, "pin_retained_rootfs_directory",
+                                                       side_effect=authored_retained_root_binding))
+                stack.enter_context(mock.patch.object(provision, "read_provenance_report", return_value=record))
+                stack.enter_context(mock.patch.object(provision, "validate_build_record"))
+                preflight = stack.enter_context(mock.patch.object(provision, "preflight_provenance_output",
+                                                                  wraps=provision.preflight_provenance_output))
+                stack.enter_context(mock.patch.object(provision, "validate_locked_comparator_manifest",
+                                                       return_value=(None, paths["manifest"], None, None)))
+                stack.enter_context(mock.patch.object(provision, "load_candidate", return_value=({}, [])))
+                stack.enter_context(mock.patch.object(provision, "verify_retained_rootfs_and_image"))
+                stack.enter_context(mock.patch.object(provision, "package_metadata_map", return_value={key: row}))
+                stack.enter_context(mock.patch.object(provision, "installed_package_keys", return_value={key}))
+                gate = stack.enter_context(mock.patch.object(provision, "verify_installed_package_payloads",
+                                                             wraps=provision.verify_installed_package_payloads))
+                native = stack.enter_context(mock.patch.object(provision, "verify_recorded_driver_identities",
+                    side_effect=provision.ProvisionError("authored stop before native replay")))
+                with self.assertRaises(provision.ProvisionError) as raised:
+                    provision._package_provenance_unqualified(args)
+                if accepted:
+                    self.assertEqual(str(raised.exception), "authored stop before native replay")
+                    native.assert_called_once()
+                    gate.assert_called_once()
+                else:
+                    self.assertNotEqual(str(raised.exception), "authored stop before native replay")
+                    native.assert_not_called()
+                for call in preflight.call_args_list:
+                    self.assertIn(selected, call.args[1])
+                if gate.called:
+                    self.assertEqual(gate.call_args.args[1], selected)
+                self.assertFalse(args.output.exists())
+        # Identical authenticated bytes have no independently distinguishable run
+        # origin. Directory names do not grant or remove signed payload authority.
+        self.assertEqual((identical / filename).read_bytes(), (run2 / filename).read_bytes())
+
+    def test_package_provenance_parser_requires_explicit_payload_root(self):
+        command = ["package-provenance", "--acquisition", "acquisition", "--record", "combined.json",
+                   "--rootfs", "rootfs", "--oci-archive", "image.tar", "--probe-report", "probe.json",
+                   "--loader-report", "loader.json", "--negative-report", "negative.json",
+                   "--negative-compiler", "compiler", "--output", "provenance.tar"]
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            provision.build_parser().parse_args(command)
+        args = provision.build_parser().parse_args(command + ["--package-payloads", "run2/package-payloads"])
+        self.assertEqual(args.package_payloads, Path("run2/package-payloads"))
 
 
 class ProvisioningNegativeTests(unittest.TestCase):
@@ -5114,6 +5209,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
+                                               package_payloads=base / "package-payloads",
                                                acquisition=root, rootfs=rootfs, keyring=keyring,
                                                oci_archive=base / "run2.oci.tar",
                                                probe_report=base / "probe.json", loader_report=base / "loader.json",
@@ -5193,7 +5289,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 report_paths[name] = base / f"{name}.json"
                 report_paths[name].write_bytes(provision.canonical_json(report))
             args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
-                                               rootfs=rootfs, oci_archive=oci_archive, keyring=keyring,
+                                               package_payloads=base / "package-payloads", rootfs=rootfs, oci_archive=oci_archive, keyring=keyring,
                                                negative_compiler=base / "retained-comparator",
                                                output=base / "provenance.tar", **report_paths)
 
@@ -5285,6 +5381,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             paths[name] = base / (name + ".json")
             paths[name].write_bytes(provision.canonical_json(report))
         args = provision.argparse.Namespace(contract=selected, record=record_path,
+            package_payloads=base / "package-payloads",
             acquisition=root, rootfs=rootfs, oci_archive=image, keyring=keyring,
             negative_compiler=base / "retained-comparator",
             output=base / "provenance.tar", **paths)

@@ -5965,7 +5965,7 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
         args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report, args.negative_compiler,
         args.contract, args.keyring, *RECIPE_FILES.values(),
     ]
-    preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.record.parent / "package-payloads"], initial_files)
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.package_payloads], initial_files)
     candidate = args.acquisition / "acquisition-candidate.json"
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
@@ -5996,7 +5996,7 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
         comparator_lock, comparator_manifest,
         args.keyring, ROOT / contract["profile"]["upstream"]["keyFile"],
     ]
-    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.package_payloads], expected_artifacts)
     captured_evidence(candidate, captured)
     captured_evidence(patch_audit, captured)
     validated_candidate, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring,
@@ -6028,7 +6028,7 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
     validate_record_package_metadata(
         record, signed_package_metadata, bound(installed_package_keys, rootfs, contract),
     )
-    payload_directory = args.record.parent / "package-payloads"
+    payload_directory = args.package_payloads
     package_manifest = bound(verify_installed_package_payloads,
         rootfs, payload_directory, record["packages"], contract,
     )
@@ -6057,9 +6057,9 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
     for source in expected_artifacts:
         if source != args.acquisition / "downloads":
             captured_evidence(source, captured)
-    output_path = preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    output_path = preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.package_payloads], expected_artifacts)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts) != output_path:
+    if preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.package_payloads], expected_artifacts) != output_path:
         raise ProvisionError("provenance output path changed after its preflight")
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     try:
@@ -6303,6 +6303,8 @@ def build_parser() -> argparse.ArgumentParser:
     provenance.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     provenance.add_argument("--acquisition", type=Path, required=True)
     provenance.add_argument("--record", type=Path, required=True)
+    provenance.add_argument("--package-payloads", type=Path, required=True,
+                            help="selected run output package-payloads directory; every .deb is reauthenticated")
     provenance.add_argument("--rootfs", type=Path, required=True,
                              help="retained final rootfs used to recheck package and runtime closure")
     provenance.add_argument("--oci-archive", type=Path, required=True,

@@ -298,6 +298,7 @@ jobs:
           python3 scripts/oracle/provision_clang_18_1_3.py package-provenance \
             --acquisition "$CLANG_WORK/acquisition" \
             --record "$CLANG_WORK/build-record.json" \
+            --package-payloads "$CLANG_WORK/run2/package-payloads" \
             --rootfs "$CLANG_WORK/rootfs-run2" \
             --oci-archive "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar" \
             --probe-report "$CLANG_WORK/run2/probe-report.json" \
