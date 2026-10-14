@@ -731,6 +731,47 @@ class LinuxBubblewrapBoundaryTest {
         }
     }
 
+    /** Diagnostic only: never changes descriptor-count equality or admission/cleanup decisions. */
+    private fun privateControlDescriptorSnapshot(): Map<Int, String> = try {
+        val directory = Path.of("/proc/self/fd")
+        // Close the inventory stream before resolving identities, excluding its transient descriptors.
+        val names = Files.list(directory).use { entries -> entries.limit(257).map { it.fileName.toString() }.toList() }
+        check(names.size <= 256) { "descriptor diagnostic capacity" }
+        names.mapNotNull { name ->
+            val fd = name.toIntOrNull() ?: return@mapNotNull null
+            val path = directory.resolve(name)
+            try {
+                val target = Files.readSymbolicLink(path).toString().take(256)
+                    .replace(Regex("[^A-Za-z0-9 /._:()=,-]"), "?")
+                val identity = Files.readAttributes(path, "unix:dev,ino,mode")
+                fd to "dev=${identity["dev"]},ino=${identity["ino"]},mode=${identity["mode"]},target=$target"
+            } catch (_: java.nio.file.NoSuchFileException) { null }
+            catch (_: IOException) { fd to "IDENTITY_UNAVAILABLE" }
+        }.toMap()
+    } catch (_: Exception) { mapOf(-1 to "SNAPSHOT_UNAVAILABLE") }
+
+    private fun privateControlDescriptorDiff(before: Map<Int, String>, after: Map<Int, String>): String {
+        val changed = (before.keys + after.keys).sorted().filter { before[it] != after[it] }
+        fun bounded(value: String?) = value.orEmpty().take(320).replace(Regex("[^A-Za-z0-9 /._:()=,?-]"), "?")
+        return "changed=${changed.size} shown=${minOf(changed.size, 8)} " + changed.take(8).joinToString(";") {
+            "fd=$it before=(${bounded(before[it])}) after=(${bounded(after[it])})"
+        }
+    }
+
+    @Test
+    fun `private control descriptor diagnostics are bounded and preserve changed identities`() {
+        val before = mapOf(5 to "dev=1,ino=2,target=control", 6 to "stable")
+        val after = mapOf(5 to "dev=1,ino=3,target=control", 6 to "stable", 7 to "socket")
+        val diff = privateControlDescriptorDiff(before, after)
+        assertTrue(diff.contains("changed=2 shown=2"))
+        assertTrue(diff.contains("ino=2") && diff.contains("ino=3") && diff.contains("fd=7"))
+        assertFalse(diff.contains("fd=6"))
+        val oversized = (0..255).associateWith { "x".repeat(1000) + "\n" }
+        val bounded = privateControlDescriptorDiff(emptyMap(), oversized)
+        assertTrue(bounded.startsWith("changed=256 shown=8")); assertTrue(bounded.length < 6000)
+        assertFalse(bounded.contains('\n'))
+    }
+
     private fun runPrivateControlBindProbe(base: Path) {
         fun command(vararg argv: String) {
             val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
@@ -915,6 +956,7 @@ class LinuxBubblewrapBoundaryTest {
             val ancestorAlias = alias(parent, "alias-ancestor")
             val childAlias = alias(privateChild, "alias-child")
             val fileAlias = alias(canary, "alias-file")
+            val beforeNestedIdentities = privateControlDescriptorSnapshot()
             val beforeNestedAdmission = openDescriptorCount()
             for (temporaryParent in listOf(firstPath, privateChild, rootAlias, childAlias)) {
                 val beforeEntries = Files.list(firstPath).use { it.map { entry -> entry.fileName.toString() }.toList().toSet() }
@@ -947,7 +989,11 @@ class LinuxBubblewrapBoundaryTest {
                 command("umount", mountedPrivateParent.toString())
                 Files.delete(mountedPrivateParent)
             }
-            assertEquals(beforeNestedAdmission, openDescriptorCount(), "rejected nested controls must release parent descriptors")
+            val afterNestedAdmission = openDescriptorCount()
+            val nestedDescriptorDiff = privateControlDescriptorDiff(beforeNestedIdentities, privateControlDescriptorSnapshot())
+            println("private-control-bind-probe: nestedDescriptorDiff $nestedDescriptorDiff")
+            assertEquals(beforeNestedAdmission, afterNestedAdmission,
+                "rejected nested controls must release parent descriptors; $nestedDescriptorDiff")
             val cleanupOuter = newControl()
             val cleanupInner = newControl()
             val cleanupOuterPath = controlPath(cleanupOuter)
