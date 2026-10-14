@@ -20,6 +20,31 @@ PROFILE = REPOSITORY_ROOT / "oracle/gcc/16.2.0/compiler-engines.json"
 
 
 class GccCompilerEngineProfileTest(unittest.TestCase):
+    def test_active_twelve_and_historical_eleven_use_distinct_closed_schemas(self) -> None:
+        for version, path in ((11, PROFILE), (12, PROFILE.with_name("compiler-engines-exporter12.json"))):
+            profile, records = load_compiler_engine_profile(path)
+            self.assertEqual(version, profile["analysis"]["exporter"]["version"])
+            self.assertEqual(["cc1", "lto1"], list(records))
+            unknown = copy.deepcopy(profile)
+            unknown["analysis"]["exporter"]["unchecked"] = True
+            parent = REPOSITORY_ROOT / "build/python-test-tmp"
+            parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=parent) as directory:
+                modified = Path(directory) / "profile.json"
+                modified.write_bytes(canonical_json_bytes(unknown))
+                with self.assertRaisesRegex(VerificationError, "fails JSON Schema"):
+                    load_compiler_engine_profile(modified)
+        for version in (True, 13, "12", None):
+            value = json.loads(PROFILE.read_text())
+            value["analysis"]["exporter"]["version"] = version
+            parent = REPOSITORY_ROOT / "build/python-test-tmp"
+            parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=parent) as directory:
+                path = Path(directory) / "profile.json"
+                path.write_bytes(canonical_json_bytes(value))
+                with self.assertRaisesRegex(VerificationError, "unsupported exporter version"):
+                    load_compiler_engine_profile(path)
+
     def test_checked_profile_binds_budgets_provenance_and_derived_records(self) -> None:
         profile, records = load_compiler_engine_profile(PROFILE)
         self.assertEqual(1800, profile["budgets"]["exportWallClockSeconds"])

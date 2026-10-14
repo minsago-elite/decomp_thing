@@ -25,6 +25,8 @@ import stat
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
+from oracle.referenced_data_bytes import admit_program_model_bytes, validate_evidence
+
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ADDRESS = re.compile(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})")
@@ -806,14 +808,20 @@ def load_program_model(
         or model_image_base > _MAX_ADDRESS
     ):
         raise ScoringError(f"{twin} model image base must be an unsigned 64-bit integer")
+    payload = _read_regular_snapshot(path, f"{twin} program model", MAX_JSON_INPUT_BYTES)
+    try:
+        admit_program_model_bytes(payload)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ScoringError(str(error)) from error
     root = _object(
-        _load_json(path, f"{twin} program model"),
+        _decode_json(payload, f"{twin} program model"),
         f"{twin} program model",
         {"schemaVersion", "inputSha256", "functions", "globals", "types"},
     )
+    del payload
     model_version = root["schemaVersion"]
-    if type(model_version) is not int or model_version not in (1, 2):
-        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1 or 2")
+    if type(model_version) is not int or model_version not in (1, 2, 3):
+        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1, 2 or 3")
     status_field = "status" if model_version == 1 else "extractionStatus"
     input_sha256 = _sha256(
         root["inputSha256"],
@@ -838,6 +846,36 @@ def load_program_model(
         f"{twin} program model.functions",
         maximum=MAX_FUNCTION_RECORDS,
     )
+    byte_budget = [0, 0]
+    for index, raw in enumerate(globals_records):
+        item_path = f"{twin} program model.globals[{index}]"
+        if model_version != 3:
+            if isinstance(raw, dict) and "byteEvidence" in raw:
+                raise ScoringError("historical models cannot contain byteEvidence")
+            continue
+        item = _object(raw, item_path, {"id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment"})
+        _string(item["id"], item_path + ".id", maximum=MAX_IDENTIFIER_CHARACTERS)
+        _string(item["name"], item_path + ".name", maximum=4096)
+        _address(item["address"], item_path + ".address")
+        _string(item["type"], item_path + ".type", allow_empty=True, maximum=MAX_TEXT_CHARACTERS)
+        if item["initializer"] is not None:
+            _string(item["initializer"], item_path + ".initializer", allow_empty=True, maximum=MAX_TEXT_CHARACTERS)
+        if _string(item["extractionStatus"], item_path + ".extractionStatus", maximum=32) not in _RECOVERY_STATUSES or item["recoveryAssessment"] != "unassessed":
+            raise ScoringError(item_path + " has invalid extraction status or scored recovery assessment")
+        try:
+            validate_evidence(item["byteEvidence"], byte_budget)
+        except ValueError as error:
+            raise ScoringError(str(error)) from error
+    if model_version == 3:
+        for index, raw in enumerate(type_records):
+            item_path = f"{twin} program model.types[{index}]"
+            item = _object(raw, item_path, {"id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"})
+            _string(item["id"], item_path + ".id", maximum=MAX_IDENTIFIER_CHARACTERS)
+            _string(item["declaration"], item_path + ".declaration", allow_empty=True, maximum=MAX_TEXT_CHARACTERS)
+            if item["sourceAddress"] is not None:
+                _address(item["sourceAddress"], item_path + ".sourceAddress")
+            if _string(item["extractionStatus"], item_path + ".extractionStatus", maximum=32) not in _RECOVERY_STATUSES or item["recoveryAssessment"] != "unassessed":
+                raise ScoringError(item_path + " has invalid extraction status or scored recovery assessment")
     # Globals and types do not participate in this metric.  Release their
     # potentially large decoded trees before processing function records.
     del globals_records, type_records, root
@@ -860,9 +898,9 @@ def load_program_model(
                 "referencedGlobals",
                 "strings",
                 "decompiledC",
-            } | ({"recoveryAssessment"} if model_version == 2 else set()),
+            } | ({"recoveryAssessment"} if model_version >= 2 else set()),
         )
-        if model_version == 2 and item["recoveryAssessment"] != "unassessed":
+        if model_version >= 2 and item["recoveryAssessment"] != "unassessed":
             raise ScoringError(f"{item_path} cannot supply a scored recovery assessment")
         identifier = _string(
             item["id"],

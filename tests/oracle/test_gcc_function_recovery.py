@@ -221,6 +221,35 @@ class GccFunctionRecoveryTest(unittest.TestCase):
         self.assertFalse(report["oracle"]["verification"]["productionVerified"])
         self.assertEqual(score_fixture(), report)
 
+    def test_schema_three_validates_bytes_without_changing_function_projection(self) -> None:
+        from tests.oracle.test_referenced_data_bytes import evidence
+        oracle = load_function_oracle(ORACLE)
+        def migrate(model: dict[str, Any]) -> None:
+            model["schemaVersion"] = 3
+            for kind in ("functions", "globals", "types"):
+                for entity in model[kind]:
+                    entity["extractionStatus"] = entity.pop("status")
+                    entity["recoveryAssessment"] = "unassessed"
+            model["globals"] = [{"id": "global_authored", "name": "authored", "address": "0x2000", "type": "undefined1",
+                "initializer": "00h", "extractionStatus": "recovered", "recoveryAssessment": "unassessed", "byteEvidence": evidence()}]
+        for twin, path, base in (("rich", RICH_MODEL, RICH_MODEL_IMAGE_BASE), ("stripped", STRIPPED_MODEL, STRIPPED_MODEL_IMAGE_BASE)):
+            previous = load_program_model(path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+            with self.staged_json(path, migrate) as current_path:
+                current = load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+                self.assertEqual(previous.functions, current.functions)
+                original = json.loads(current_path.read_text())
+                for field, value in (("byteEvidence", None), ("unchecked", True), ("recoveryAssessment", "abi-equivalent")):
+                    altered = copy.deepcopy(original)
+                    altered["globals"][0][field] = value
+                    current_path.write_text(json.dumps(altered))
+                    with self.assertRaises(ScoringError):
+                        load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+                altered = copy.deepcopy(original)
+                altered["inputSha256"] = "0" * 64
+                current_path.write_text(json.dumps(altered))
+                with self.assertRaisesRegex(ScoringError, "does not match"):
+                    load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+
     @contextmanager
     def staged_text(self, name: str, payload: str) -> Iterator[Path]:
         with tempfile.TemporaryDirectory(prefix="function-score-raw-") as temporary:

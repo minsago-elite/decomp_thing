@@ -720,7 +720,7 @@
       "name": "unassessed-recovery-population",
       "path": "oracle/unassessed-recovery-population.schema.json",
       "registration": "retained-outside-shared-catalog",
-      "schemaSha256": "f41bfd2f5ef84d6172d74e2dcfb80371379d542c34e85b151dd3b7a9dcce692a",
+      "schemaSha256": "48f6d9772150f949b316e4243b3b28bf57da03bec6947ed6268aa0425c954644",
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],

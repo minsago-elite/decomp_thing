@@ -109,6 +109,8 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
                 }
                 require(!evidence() || role != "other") { "unexpected byte evidence container" }
                 if (role == "evidence") evidenceDepth++
+                // Match the canonical parser's depth before an entire hostile chunk/file is scanned.
+                require(stack.size < 32) { "program model nesting bound exceeded" }
                 stack += Frame(role, c == '{')
             }
             '"' -> {

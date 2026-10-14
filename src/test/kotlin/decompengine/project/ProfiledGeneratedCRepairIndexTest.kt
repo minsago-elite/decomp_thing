@@ -8,6 +8,7 @@ import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairResourceBudget
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.readText
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -38,6 +39,48 @@ class ProfiledGeneratedCRepairIndexTest {
                 if (it.id in setOf("shared-interface", "module-interface")) it.roles - ProjectFileRole.EDITABLE else it.roles, it.contentKind)
         }), base.budgets, base.adapterConfiguration,
     )
+
+    @Test
+    fun `repair index admits schema three bytes and historical schemas without weakening closed fields`() {
+        val window = ReferencedDataByteWindow(0x2000UL, 8,
+            ReferencedDataByteOrigin(0x1000UL, 0x2000UL, 0, "pcode_direct_read"), "available",
+            listOf(ReferencedDataByteSegment(0, 8, "available", "000000000000e03f", null)))
+        for (version in 1..3) {
+            val project = createTempDirectory("repair-model-migration-")
+            val byteEvidence = if (version == 3) ReferencedDataByteEvidence(windows = listOf(window)) else null
+            val model = RecoveredProgramModel(schemaVersion = version, inputSha256 = "a".repeat(64),
+                functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                    referencedGlobals = setOf("global_authored"))),
+                globals = listOf(RecoveredGlobal("global_authored", "authored", 0x2000UL, "undefined1", "00h", byteEvidence = byteEvidence)))
+            SourceTreeGenerator.generate(model, project)
+            ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+            if (version == 3) {
+                val path = project.resolve("reports/program_model.json")
+                val original = path.readText()
+                for (changed in listOf(
+                    original.replace("\"requestedLength\":8", "\"requestedLength\":257"),
+                    original.replace("\"widthBasis\":\"pcode_direct_read\"", "\"widthBasis\":\"guessed\""),
+                    original.replace("\"widthBasis\":\"pcode_direct_read\"", "\"widthBasis\":\"guessed\",\"widthBasis\":\"pcode_direct_read\""),
+                    original.replace("\"byteEvidence\":", "\"unchecked\":null,\"byteEvidence\":"),
+                    original.replace("\"recoveryAssessment\": \"unassessed\"", "\"recoveryAssessment\": \"abi-equivalent\""),
+                )) {
+                    assertTrue(changed != original)
+                    path.writeText(changed)
+                    assertFailsWith<IllegalArgumentException> { ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile) }
+                }
+                val windowWire = ReferencedDataByteEvidenceJson.render(requireNotNull(byteEvidence))
+                    .substringAfter("\"windows\":[").substringBefore("],\"omissionReason\"")
+                path.writeText(original.substringBefore("\"windows\":[") + "\"windows\":[" +
+                    List(32) { windowWire }.joinToString(",") + ",{\"oversized\":\"" + "x".repeat(1_000_000))
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+                }
+                assertTrue(failure.message.orEmpty().contains("window bound"))
+                path.writeText(original)
+                ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+            }
+        }
+    }
 
     @Test
     fun `relocated declared roots retain dependency context and recover under the same descriptor`() {

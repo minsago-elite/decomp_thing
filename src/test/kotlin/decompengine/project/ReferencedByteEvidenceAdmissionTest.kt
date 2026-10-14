@@ -16,6 +16,12 @@ class ReferencedByteEvidenceAdmissionTest {
             assertContains(failure.message.orEmpty(), reason)
         }
     }
+    @Test fun `lexical nesting is bounded before a malformed huge suffix`() {
+        val accepted = "{\"unused\":" + "[".repeat(31) + "0" + "]".repeat(31) + "}"
+        val admission = ReferencedByteEvidenceAdmission(byteInput = false)
+        accepted.forEach { admission.accept(it.code) }
+        rejectsBeforePayload("{\"unused\":" + "[".repeat(32) + "\"" + "x".repeat(1_000_000), "nesting bound")
+    }
     @Test fun `window thirty three is refused before malformed huge payload`() {
         rejectsBeforePayload(root(evidence(List(32) { "{}" }.joinToString(",") + "," + forbiddenPayload)), "global window bound")
     }

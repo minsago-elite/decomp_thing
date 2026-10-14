@@ -22,7 +22,7 @@ class GccBundledCliIntentBuilderTest {
         val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
         val binary = Files.writeString(root.resolve("binary"), "fixture")
         val archive = Files.writeString(root.resolve("archive"), "fixture")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         val arguments = listOf("cc1", binary.toString(), "--profile", profile.toString(),
             "--ghidra-archive", archive.toString(), "--output", output.toString(), "--scratch", scratch.toString())
         for (invocationFullMode in listOf(false, true)) {
@@ -66,7 +66,7 @@ class GccBundledCliIntentBuilderTest {
         val scratch = privateDirectory(root.resolve("scratch"))
         val binary = Files.writeString(root.resolve("wrong-engine"), "not the selected profile binary")
         val archive = Files.writeString(root.resolve("archive"), "not the archive")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         assertFails {
             GccBundledCliIntentBuilder.build(SHA, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 binary, profile, archive, controls, journal, scratch, POLICY)
@@ -84,7 +84,7 @@ class GccBundledCliIntentBuilderTest {
         val scratch = privateDirectory(root.resolve("scratch"))
         val binary = Files.writeString(root.resolve("binary"), "binary")
         val archive = Files.writeString(root.resolve("archive"), "archive")
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         fun build(selectedBinary: Path = binary, selectedJournal: Path = journal,
             operation: String = SHA, engine: String = "cc1", kind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL) =
             GccBundledCliIntentBuilder.build(operation, engine, kind, selectedBinary, profile, archive, controls, selectedJournal, scratch, POLICY)

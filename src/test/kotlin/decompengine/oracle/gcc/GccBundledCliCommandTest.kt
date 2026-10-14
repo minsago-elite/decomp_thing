@@ -106,7 +106,7 @@ class GccBundledCliCommandTest {
 
     @Test
     fun `native call CLI rejects an untrusted binary before leasing or publishing evidence`() = fixture { root ->
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
         val options = GccBundledCliOptions.parse(args, nativeCallObservations = true)
         val failure = assertFails { GccBundledCliCommand.run(options, args) }
@@ -139,7 +139,7 @@ class GccBundledCliCommandTest {
 
     @Test
     fun `command records selection but refuses a mismatched binary before staging or leasing`() = fixture { root ->
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
         val options = GccBundledCliOptions.parse(args)
         val failure = assertFails { GccBundledCliCommand.run(options, args) }
@@ -154,7 +154,7 @@ class GccBundledCliCommandTest {
 
     @Test
     fun `command rejects an unreachable profile checkpoint before staging or leasing`() = fixture { root ->
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it } +
             listOf("--resume-after-checkpoint", "16777216")
         val options = GccBundledCliOptions.parse(args)
@@ -168,7 +168,7 @@ class GccBundledCliCommandTest {
 
     @Test
     fun `full export CLI records its mode before rejecting an untrusted binary`() = fixture { root ->
-        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines-exporter12.json").toRealPath()
         val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
         val options = GccBundledCliOptions.parse(args, fullRecoveryExport = true)
         val failure = assertFails { GccBundledCliCommand.run(options, args) }
