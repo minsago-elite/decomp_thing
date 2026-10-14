@@ -375,7 +375,7 @@ internal class AcpProviderBroker private constructor(
         try {
             require(!objectValue.getValue("store").jsonPrimitive.isString && objectValue.getValue("store").jsonPrimitive.boolean == false)
             require(!objectValue.getValue("stream").jsonPrimitive.isString && objectValue.getValue("stream").jsonPrimitive.boolean)
-            require(objectValue.getValue("input").jsonArray.isNotEmpty())
+            validateInput(objectValue.getValue("input"))
             val reasoning = objectValue.getValue("reasoning").jsonObject
             require(reasoning.keys.all { it in setOf("effort", "summary") })
             require(reasoning.getValue("effort").jsonPrimitive.isString && reasoning.getValue("effort").jsonPrimitive.content == policy.reasoning.wireValue)
@@ -395,6 +395,44 @@ internal class AcpProviderBroker private constructor(
         val wire = try { boundedProviderJson(policy.bounds.maximumRequestBytes) { it.writeProviderValue(transformed) } }
         catch (_: Exception) { throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) }
         return CheckedProviderRequest(wire, effectiveOutputTokens)
+    }
+
+    /** Two text-only component variants; native traffic and private acceptance remain unqualified. */
+    private fun validateInput(value: JsonElement) {
+        fun requireText(value: JsonElement) {
+            val text = value.jsonPrimitive
+            require(text.isString && text.content.length in 1..policy.bounds.maximumRequestBytes)
+            // JSON escapes must not introduce an unpaired surrogate which changes on UTF-8 output.
+            var index = 0
+            while (index < text.content.length) {
+                val character = text.content[index++]
+                if (Character.isHighSurrogate(character)) {
+                    require(index < text.content.length && Character.isLowSurrogate(text.content[index]))
+                    index++
+                } else require(!Character.isLowSurrogate(character))
+            }
+        }
+        val messages = value.jsonArray
+        require(messages.size in 1..MAXIMUM_INPUT_MESSAGES)
+        messages.forEach { element ->
+            val message = element.jsonObject
+            require(message.getValue("role").jsonPrimitive.isString && message.getValue("role").jsonPrimitive.content == "user")
+            if ("type" !in message) {
+                require(message.keys == setOf("role", "content"))
+                requireText(message.getValue("content"))
+            } else {
+                require(message.keys == setOf("type", "role", "content"))
+                require(message.getValue("type").jsonPrimitive.isString && message.getValue("type").jsonPrimitive.content == "message")
+                val parts = message.getValue("content").jsonArray
+                require(parts.size in 1..MAXIMUM_INPUT_PARTS)
+                parts.forEach { element ->
+                    val part = element.jsonObject
+                    require(part.keys == setOf("type", "text"))
+                    require(part.getValue("type").jsonPrimitive.isString && part.getValue("type").jsonPrimitive.content == "input_text")
+                    requireText(part.getValue("text"))
+                }
+            }
+        }
     }
 
     /** Deliberately closed adapter subset; these checks do not qualify the private backend. */
@@ -731,6 +769,9 @@ internal class AcpProviderBroker private constructor(
     }
 
     companion object {
+        private const val MAXIMUM_INPUT_MESSAGES = 16
+        private const val MAXIMUM_INPUT_PARTS = 16
+
         /** Still-unqualified adapter: only future explicit protected qualification may call this. */
         fun openForProtectedQualification(
             policy: AcpProviderTransportPolicy,

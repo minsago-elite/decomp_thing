@@ -20,6 +20,146 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class AcpProviderBrokerTest {
     @Test
+    fun `boolean input item is refused before backend dispatch`() {
+        assertInputRefused("[false]")
+    }
+
+    @Test
+    fun `empty object input item is refused before backend dispatch`() {
+        assertInputRefused("[{}]")
+    }
+
+    @Test
+    fun `approved user text input variants preserve values and bounded collections`() {
+        val simple = inputMessage("\"fixture\"")
+        val native = inputMessage("\"fixture\"", native = true)
+        val accepted = listOf(
+            "[$simple]", "[$native]", "[$simple,$native]",
+            List(16) { simple }.joinToString(",", "[", "]"),
+            "[{\"type\":\"message\",\"role\":\"user\",\"content\":" + List(16) { "{\"type\":\"input_text\",\"text\":\"fixture\"}" }.joinToString(",", "[", "]") + "}]",
+        )
+        accepted.forEach { assertOptionalAccepted("\"input\":$it") }
+        for (nativeShape in listOf(false, true)) for (text in listOf(" ", "\n\t\"\\\u0000", "g".repeat(8192), "\uD83D\uDE00".repeat(4096))) {
+            assertOptionalAccepted("\"input\":[${inputMessage(requestString(text, 0), nativeShape)}]")
+        }
+        for (nativeShape in listOf(false, true)) {
+            assertOptionalAccepted("\"input\":[${inputMessage("\"\\uD83D\\uDE00\"", nativeShape)}]")
+        }
+    }
+
+    @Test
+    fun `unsupported input items roles keys and content shapes are refused before dispatch`() {
+        val invalid = mutableListOf("null", "false", "0", "\"fixture\"", "{}", "[]", "[null]", "[0]", "[\"fixture\"]", "[[]]")
+        for (message in listOf(
+            "{\"role\":\"user\"}", "{\"content\":\"fixture\"}", "{\"role\":\"user\",\"content\":\"fixture\",\"extra\":true}",
+            "{\"role\":\"user\",\"content\":[]}", "{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture\"}",
+            "{\"type\":\"message\",\"role\":\"user\"}", "{\"type\":\"message\",\"content\":[]}",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[],\"status\":\"completed\"}",
+            "{\"type\":\"function_call\",\"call_id\":\"fixture\",\"name\":\"fixture\",\"arguments\":\"{}\"}",
+            "{\"type\":\"function_call_output\",\"call_id\":\"fixture\",\"output\":\"fixture\"}",
+        )) invalid += "[$message]"
+        for (nativeShape in listOf(false, true)) {
+            for (role in listOf("null", "false", "0", "[]", "{}", "\"assistant\"", "\"system\"", "\"developer\"", "\"tool\"", "\" user\"")) {
+                invalid += "[" + inputMessage("\"fixture\"", nativeShape).replace("\"role\":\"user\"", "\"role\":$role") + "]"
+            }
+            for (content in listOf("null", "false", "0", "{}", "[]")) {
+                invalid += if (nativeShape) "[{\"type\":\"message\",\"role\":\"user\",\"content\":$content}]"
+                    else "[{\"role\":\"user\",\"content\":$content}]"
+            }
+        }
+        for (type in listOf("null", "false", "0", "[]", "{}", "\"function_call\"", "\"message \"")) {
+            invalid += "[" + inputMessage("\"fixture\"", true).replace("\"type\":\"message\"", "\"type\":$type") + "]"
+        }
+        for (part in listOf("null", "false", "0", "\"fixture\"", "[]", "{}", "{\"type\":\"input_text\"}", "{\"text\":\"fixture\"}", "{\"type\":\"input_text\",\"text\":\"fixture\",\"extra\":true}")) {
+            invalid += "[{\"type\":\"message\",\"role\":\"user\",\"content\":[$part]}]"
+        }
+        for (type in listOf("null", "false", "0", "[]", "{}", "\"output_text\"", "\"input_image\"", "\"input_audio\"")) {
+            invalid += "[" + inputMessage("\"fixture\"", true).replace("\"type\":\"input_text\"", "\"type\":$type") + "]"
+        }
+        for (text in listOf("null", "false", "0", "[]", "{}")) invalid += "[${inputMessage(text, true)}]"
+        invalid.forEach { assertInputRefused(it) }
+        assertInputRefused("[${inputMessage("\"fixture\"")},false]")
+    }
+
+    @Test
+    fun `input counts empty text and malformed Unicode refuse before dispatch`() {
+        assertInputRefused(List(17) { inputMessage("\"fixture\"") }.joinToString(",", "[", "]"))
+        assertInputRefused("[{\"type\":\"message\",\"role\":\"user\",\"content\":" + List(17) { "{\"type\":\"input_text\",\"text\":\"fixture\"}" }.joinToString(",", "[", "]") + "}]")
+        for (nativeShape in listOf(false, true)) {
+            assertInputRefused("[${inputMessage("\"\"", nativeShape)}]")
+            for (escaped in listOf("\\uD800", "\\uDC00", "\\uD800A", "A\\uDC00", "\\uDC00\\uD800", "\\uD800\\uD800", "\\uD83D\\uDE00\\uD800")) {
+                val input = "[${inputMessage("\"$escaped\"", nativeShape)}]"
+                assertTrue(rawInputRequest(input).decodeToString().contains(escaped), "ASCII JSON escapes must reach the broker unchanged")
+                assertInputRefused(input)
+            }
+            assertInputRefused("[${inputMessage(requestString("g".repeat(8192), 0), nativeShape)}]", AcpProviderTerminalKind.RESOURCE_EXHAUSTED,
+                policy(AcpProviderTransportBounds(maximumRequestBytes = 8192)))
+        }
+    }
+
+    @Test
+    fun `input admission retains global parser and exact transformed byte limits`() {
+        assertInputRefused("[{\"role\":\"user\",\"content\":\"fixture\",\"content\":\"duplicate\"}]", AcpProviderTerminalKind.MALFORMED_REQUEST)
+        assertInputRefused("[{\"role\":\"user\",\"\\u0072ole\":\"user\",\"content\":\"fixture\"}]", AcpProviderTerminalKind.MALFORMED_REQUEST)
+        assertInputRefused("[".repeat(65) + "false" + "]".repeat(65), AcpProviderTerminalKind.MALFORMED_REQUEST)
+        assertInputRefused(List(100_001) { "false" }.joinToString(",", "[", "]"), AcpProviderTerminalKind.MALFORMED_REQUEST)
+        val utf8Fixture = rawInputRequest("[${inputMessage("\"marker\"")}]")
+        val marker = utf8Fixture.decodeToString().indexOf("marker")
+        assertInputRequestRefused(utf8Fixture.copyOfRange(0, marker) + byteArrayOf(0xc3.toByte()) + utf8Fixture.copyOfRange(marker + 6, utf8Fixture.size), AcpProviderTerminalKind.MALFORMED_REQUEST, policy())
+        for (nativeShape in listOf(false, true)) {
+            val request = rawInputRequest("[${inputMessage("\"byte fixture\"", nativeShape)}]")
+            val wire = kotlinx.serialization.json.JsonObject(Json.parseToJsonElement(request.decodeToString()).jsonObject +
+                ("max_output_tokens" to kotlinx.serialization.json.JsonPrimitive(32))).toString().toByteArray()
+            for (limit in listOf(wire.size, wire.size - 1, request.size - 1)) {
+                val backend = FixtureBackend()
+                val broker = open(backend, policy = policy(AcpProviderTransportBounds(maximumRequestBytes = limit)), outputTokens = 32)
+                try {
+                    broker.bindSession("actual-session", "turn-1")
+                    if (limit == wire.size) {
+                        val exchange = broker.beginRequest(1, capability(broker), request)
+                        assertContentEquals(wire, backend.lastRequest!!.body)
+                        backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                        assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+                        assertEquals(1, backend.starts)
+                    } else {
+                        assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { broker.beginRequest(1, capability(broker), request) }
+                        assertEquals(0, backend.starts)
+                        assertNull(backend.lastRequest)
+                    }
+                } finally { broker.close() }
+            }
+        }
+    }
+
+    @Test
+    fun `decoded capability in native text input refuses before dispatch`() {
+        for (case in 0..2) for (escape in 0..2) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val secret = cap.joinToString("") { "%02x".format(it) }
+                val spelling = when (case) {
+                    1 -> secret.uppercase()
+                    2 -> secret.mapIndexed { index, character -> if (index % 2 == 0) character.uppercaseChar() else character }.joinToString("")
+                    else -> secret
+                }
+                val request = rawInputRequest("[${inputMessage(requestString(spelling, escape), true)}]")
+                val failure = assertFailsWith<AcpProviderBrokerFailure> { broker.beginRequest(1, cap, request) }
+                assertEquals(AcpProviderTerminalKind.SECRET_EXPOSURE, failure.kind)
+                assertNull(failure.cause)
+                assertFalse(failure.toString().contains(secret, ignoreCase = true))
+                assertEquals(0, backend.starts)
+                assertNull(backend.lastRequest)
+                assertTrue(broker.snapshot().requests.isEmpty())
+                assertEquals(0L, broker.snapshot().wireRequestBytes)
+                assertEquals(0L, broker.snapshot().outputTokens)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
     fun `quoted parallel tool call flag is refused before backend dispatch`() {
         assertOptionalRefused("\"parallel_tool_calls\":\"false\"")
     }
@@ -914,6 +1054,41 @@ class AcpProviderBrokerTest {
             val combined = exchange.nextChunk()!!.decodeToString()
             assertTrue(combined.contains("one") && combined.contains("two") && combined.contains("three") && combined.contains("response.completed"))
             assertNull(exchange.nextChunk())
+        } finally { broker.close() }
+    }
+
+    private fun inputMessage(text: String, native: Boolean = false): String = if (native)
+        """{"type":"message","role":"user","content":[{"type":"input_text","text":$text}]}"""
+    else """{"role":"user","content":$text}"""
+
+    private fun rawInputRequest(input: String): ByteArray {
+        val fixture = "\"input\":[{\"role\":\"user\",\"content\":\"synthetic fixture\"}]"
+        val original = body().decodeToString()
+        check(original.contains(fixture)) { "input fixture is unavailable" }
+        return original.replace(fixture, "\"input\":$input").toByteArray()
+    }
+
+    private fun assertInputRefused(input: String, kind: AcpProviderTerminalKind = AcpProviderTerminalKind.UNSUPPORTED_OPERATION,
+        selectedPolicy: AcpProviderTransportPolicy = policy()) = assertInputRequestRefused(rawInputRequest(input), kind, selectedPolicy)
+
+    private fun assertInputRequestRefused(request: ByteArray, kind: AcpProviderTerminalKind, selectedPolicy: AcpProviderTransportPolicy) {
+        val backend = FixtureBackend()
+        val broker = open(backend, policy = selectedPolicy)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val result = runCatching { broker.beginRequest(1, capability(broker), request) }
+            assertEquals(0, backend.starts, "unsupported mandatory input reached the fixture backend")
+            val failure = assertIs<AcpProviderBrokerFailure>(result.exceptionOrNull())
+            assertEquals(kind, failure.kind)
+            assertNull(failure.cause)
+            assertEquals("ACP provider broker: ${kind.name}", failure.message)
+            assertNull(backend.lastRequest)
+            val evidence = broker.snapshot()
+            assertTrue(evidence.revoked)
+            assertEquals(kind, evidence.admissionDenial!!.terminal)
+            assertTrue(evidence.requests.isEmpty())
+            assertEquals(0L, evidence.wireRequestBytes)
+            assertEquals(0L, evidence.outputTokens)
         } finally { broker.close() }
     }
 
