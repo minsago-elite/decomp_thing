@@ -2337,7 +2337,7 @@ private fun providerTransportJson(value: AcpProviderArchivedInvocationEvidence):
     ) },
     "wireRequestBytes" to value.wireRequestBytes, "responseBytes" to value.responseBytes,
     "outputTokens" to value.outputTokens, "inputTokens" to value.inputTokens, "revoked" to value.revoked,
-    "admissionDenial" to value.admissionDenial?.let { providerObject("sequence" to it.sequence, "terminal" to it.terminal) },
+    "admissionDenial" to value.admissionDenial?.let { providerObject("terminal" to it.terminal) },
     "requests" to JsonArray(value.requests.map { r -> providerObject(
         "sequence" to r.sequence, "sessionSha256" to r.sessionSha256,
         "wireRequestBytes" to r.wireRequestBytes, "responseBytes" to r.responseBytes,
@@ -2410,7 +2410,7 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderArchivedInvoca
             row.transportInt("admittedOutputTokens"), row.transportEnum("terminal"))
     }
     val denial = value.transportNullableObject("admissionDenial")?.let {
-        AcpProviderExecutionDenialEvidence(it.transportLong("sequence"), it.transportEnum("terminal"))
+        AcpProviderArchivedDenialEvidence(it.transportEnum("terminal"))
     }
     val evidence = AcpProviderArchivedInvocationEvidence(value.transportEnum("authority"), value.transportString("qualificationProfileSha256"),
         value.transportString("modelSha256"), value.transportEnum("runtimeAdapter"), value.transportEnum("reasoning"),
