@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import contextmanager
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -220,6 +221,18 @@ class ProducedProgramObservationTest(unittest.TestCase):
     """Synthetic wire/ELF metadata only: no compiler, OCI, or ELF execution."""
 
     @staticmethod
+    @contextmanager
+    def repository_temporary_directory():
+        from unittest.mock import patch
+        parent = REPOSITORY_ROOT / "build/issue97-produced-program-test-temp-001/tmp"
+        parent.mkdir(parents=True, exist_ok=True)
+        # Explicit dir does not consult the ambient tempfile cache. The scoped
+        # override also contains generic recorder internals and is always restored.
+        with tempfile.TemporaryDirectory(prefix="profile-control-", dir=parent) as directory:
+            with patch.object(tempfile, "tempdir", directory):
+                yield directory
+
+    @staticmethod
     def inert_elf_metadata() -> bytes:
         import struct
         payload = bytearray(128)
@@ -257,6 +270,20 @@ class ProducedProgramObservationTest(unittest.TestCase):
                 "compileCorpus": draft, "compileReport": self.synthetic_report(draft),
                 "executionCorpus": runtime, "executionReport": self.synthetic_report(runtime),
                 "producedArtifact": copy.deepcopy(artifact)}
+
+    def test_repository_temp_scope_overrides_ambient_cache_and_restores_after_failure(self):
+        from unittest.mock import patch
+        original = tempfile.tempdir
+        with patch.object(tempfile, "tempdir", "/tmp"):
+            with self.assertRaisesRegex(RuntimeError, "authored context failure"):
+                with self.repository_temporary_directory() as directory:
+                    self.assertTrue(Path(directory).resolve().is_relative_to(REPOSITORY_ROOT))
+                    self.assertEqual(directory, tempfile.gettempdir())
+                    with tempfile.TemporaryDirectory() as generic_directory:
+                        self.assertTrue(Path(generic_directory).is_relative_to(Path(directory)))
+                    raise RuntimeError("authored context failure")
+            self.assertEqual("/tmp", tempfile.tempdir)
+        self.assertEqual(original, tempfile.tempdir)
 
     def test_closed_pair_preserves_historical_profile_and_finite_bounds(self):
         from oracle.llvm import produced_program as pair
@@ -337,7 +364,7 @@ class ProducedProgramObservationTest(unittest.TestCase):
         import os
         from oracle.behavior_corpus import BehaviorCorpusError
         from oracle.llvm import produced_program as pair
-        with tempfile.TemporaryDirectory() as directory:
+        with self.repository_temporary_directory() as directory:
             root = Path(directory)
             program = root / "program"
             program.write_bytes(b"inert metadata")
@@ -373,7 +400,7 @@ class ProducedProgramObservationTest(unittest.TestCase):
         draft["executable"].pop("base64")
         observation = {"id": draft["cases"][0]["id"], "status": "passed", **pair._expected(0)}
         observation["artifacts"] = [{"path": "program", "present": True, "mode": "0o755", **pair._blob(self.inert_elf_metadata())}]
-        with tempfile.TemporaryDirectory() as directory:
+        with self.repository_temporary_directory() as directory:
             target = Path(directory) / "inert"
             target.write_bytes(payload)
             with patch.object(generic, "_snapshot_control_client", return_value=b"inert client"), \
@@ -395,7 +422,7 @@ class ProducedProgramObservationTest(unittest.TestCase):
         def inert_runtime(corpus, path, **kwargs):
             captured.append((path.read_bytes(), path.stat().st_mode & 0o777, corpus))
             return document["executionReport"]
-        with tempfile.TemporaryDirectory() as directory:
+        with self.repository_temporary_directory() as directory:
             with patch.object(pair, "record_corpus_observations", return_value=(document["compileCorpus"], document["compileReport"])) as compiler, \
                  patch.object(pair, "run_corpus", side_effect=inert_runtime) as runtime:
                 actual = pair.observe_produced_program(pair.PROFILE / "oracle-manifest.json", Path("/never-opened-artifact-root"), Path(directory), container_runtime=Path("/never-launched"))
@@ -414,7 +441,7 @@ class ProducedProgramObservationTest(unittest.TestCase):
         from oracle.llvm import produced_program as pair
         document = self.synthetic_pair()
         document["compileReport"]["cases"][0]["exitCode"] = 1
-        with tempfile.TemporaryDirectory() as directory:
+        with self.repository_temporary_directory() as directory:
             with patch.object(pair, "record_corpus_observations", return_value=(document["compileCorpus"], document["compileReport"])), \
                  patch.object(pair, "run_corpus") as runtime:
                 with self.assertRaises(BehaviorCorpusError):
@@ -425,7 +452,7 @@ class ProducedProgramObservationTest(unittest.TestCase):
         from oracle.behavior_corpus import BehaviorCorpusError
         from oracle.llvm import produced_program as pair
         document = self.synthetic_pair()
-        with tempfile.TemporaryDirectory() as directory:
+        with self.repository_temporary_directory() as directory:
             path = Path(directory) / "observation.json"
             path.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n")
             self.assertEqual(document, pair.load_observation(path))
