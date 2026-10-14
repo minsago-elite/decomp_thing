@@ -91,7 +91,7 @@ class GccCompilerEngineProfileTest {
         assertEquals("12.1.3", suite.analysis.ghidraVersion)
         assertEquals(569_445_154L, suite.analysis.ghidraArchive.bytes)
         assertEquals("93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54", suite.analysis.ghidraArchive.sha256)
-        assertEquals("9e1957818c12e5a86e96cb278243cd76970e886565c328aac79e4d986bcf394a", suite.analysis.exporterSha256)
+        assertEquals("854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29", suite.analysis.exporterSha256)
         assertEquals(16, suite.analysis.exporterVersion)
         assertEquals("planning", suite.analysis.exporterMode)
         val diagnostics = checkNotNull(suite.cc1RuntimeDiagnostics)

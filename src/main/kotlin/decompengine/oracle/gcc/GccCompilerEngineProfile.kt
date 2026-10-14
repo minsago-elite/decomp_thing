@@ -717,7 +717,7 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
-        private const val DRIVER_COMPILER_PROFILE_SHA256 = "dc0ce5fe570e6cedaeb661ae120c04652ca023860598374f4f4bbc5f8aa21c68"
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "0b4b02f0aa85b8ad8ae4a044389d543d1ece4b034051ce1d6f7a8021912b2cae"
         private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"

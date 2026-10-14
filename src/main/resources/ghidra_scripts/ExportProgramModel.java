@@ -58,6 +58,67 @@ import ghidra.util.task.TaskMonitorAdapter;
 
 // PARALLEL_EXPORT_TEST_BEGIN
 /** Only this coordinator prepares metadata and publishes evidence; workers return immutable results. */
+/** Bounded diagnostic observations only: elapsed timers are NOT CPU or qualification facts. */
+final class ExporterPhaseObservationV1 {
+    enum Phase {
+        METADATA_INITIAL, METADATA_RETRY,
+        NATIVE_0_INITIAL, NATIVE_0_RETRY, NATIVE_1_INITIAL, NATIVE_1_RETRY,
+        NATIVE_2_INITIAL, NATIVE_2_RETRY, NATIVE_3_INITIAL, NATIVE_3_RETRY,
+        RENDER, FUNCTION_PUBLICATION, PROGRESS_PUBLICATION,
+        GLOBAL_EXISTING, GLOBAL_FIRST_ATTEMPT, TYPE_EXISTING, TYPE_FIRST_ATTEMPT,
+        IDLE_POLL_WAIT, BARRIER_POLL_WAIT
+    }
+    private final long[] starts = new long[Phase.values().length];
+    private final long[] ends = new long[Phase.values().length];
+    private final long[] elapsed = new long[Phase.values().length];
+    private final long[] published = new long[2];
+    private final long[] raced = new long[2];
+    private int snapshots;
+    private int cadence = 1;
+    private boolean terminal;
+
+    synchronized long begin(Phase phase) { starts[phase.ordinal()]++; return System.nanoTime(); }
+    synchronized void end(Phase phase, long since) {
+        ends[phase.ordinal()]++;
+        elapsed[phase.ordinal()] += Math.max(0L, System.nanoTime() - since);
+    }
+    synchronized void waitElapsed(boolean barrier, long nanos) {
+        int index = (barrier ? Phase.BARRIER_POLL_WAIT : Phase.IDLE_POLL_WAIT).ordinal();
+        starts[index]++; ends[index]++; elapsed[index] += Math.max(0L, nanos);
+    }
+    synchronized void publication(boolean type, boolean race) {
+        (race ? raced : published)[type ? 1 : 0]++;
+    }
+    synchronized void configure(int functions) { cadence = Math.max(1, (int) (((long) functions + 13L) / 14L)); }
+
+    // At most16 snapshots *4 lines =64 fixed lines, each <=1024 characters/UTF-8 bytes.
+    // Ends include exceptional returns; starts-ends is in-flight, not a success count.
+    synchronized void emit(java.util.function.Consumer<String> sink, int completed, boolean terminalState,
+                           boolean runReturned) {
+        if (terminal || (!terminalState && (snapshots >= 15 || completed % cadence != 0))) return;
+        snapshots++;
+        if (terminalState) terminal = true;
+        try {
+            Phase[] phases = Phase.values();
+            for (int group = 0; group < 4; group++) {
+                StringBuilder line = new StringBuilder("program-model phase-observation-v1");
+                line.append(" snapshot=").append(snapshots).append(" group=").append(group)
+                    .append(" state=").append(terminalState ? (runReturned ? "RETURNED" : "FAILED_OR_INTERRUPTED") : "PARTIAL")
+                    .append(" completed=").append(completed)
+                    .append(" clocks=elapsed_not_cpu overlap=inclusive inflight=starts_minus_ends analyzer_cpu=UNMEASURED worker_cpu=UNMEASURED");
+                for (int index = group * 5; index < Math.min(group * 5 + 5, phases.length); index++) {
+                    line.append(' ').append(phases[index].name()).append('=')
+                        .append(starts[index]).append('/').append(ends[index]).append('/').append(elapsed[index]);
+                }
+                if (group == 3) line.append(" global_published=").append(published[0])
+                    .append(" type_published=").append(published[1]).append(" global_raced=").append(raced[0])
+                    .append(" type_raced=").append(raced[1]);
+                if (line.length() <= 1024) sink.accept(line.toString());
+            }
+        } catch (Throwable diagnosticFailure) { /* Diagnostics never replace the primary outcome. */ }
+    }
+}
+
 final class ExporterParallelCoordinatorV1<M, R> implements AutoCloseable {
     static final int MAXIMUM_WORKERS = 4;
     static final long CLEANUP_MILLIS = 2_000;
@@ -77,6 +138,7 @@ final class ExporterParallelCoordinatorV1<M, R> implements AutoCloseable {
         boolean retryRequired(R result);
         boolean retrySucceeded(R result);
         void commit(int index, R result) throws Exception;
+        default void observePollWait(boolean barrier, long nanos) {}
     }
 
     private static final class Attempt<M, R> {
@@ -141,7 +203,10 @@ final class ExporterParallelCoordinatorV1<M, R> implements AutoCloseable {
                 submit(new Attempt<>(index, metadata, null));
             }
             if (outstanding == 0) continue;
-            Future<Completed<M, R>> ready = completions.poll(50, TimeUnit.MILLISECONDS);
+            long pollStarted = System.nanoTime();
+            Future<Completed<M, R>> ready;
+            try { ready = completions.poll(50, TimeUnit.MILLISECONDS); }
+            finally { source.observePollWait(!metadataBarriers.isEmpty(), System.nanoTime() - pollStarted); }
             if (ready == null) continue;
             Completed<M, R> completed;
             try {
@@ -626,6 +691,19 @@ final class ExporterPureRenderingV1 {
 // PURE_RENDERING_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
+    private ExporterPhaseObservationV1 phaseObservation;
+    private int observedCompleted;
+    private long phaseBegin(ExporterPhaseObservationV1.Phase phase) {
+        return phaseObservation == null ? 0L : phaseObservation.begin(phase);
+    }
+    private void phaseEnd(ExporterPhaseObservationV1.Phase phase, long started) {
+        if (phaseObservation != null) phaseObservation.end(phase, started);
+    }
+    private void emitPhases(boolean terminal, boolean returned) {
+        try { if (phaseObservation != null) phaseObservation.emit(this::println, observedCompleted, terminal, returned); }
+        catch (Throwable diagnosticFailure) { /* Never replace the primary outcome. */ }
+    }
+
     private static final int EXPORTER_VERSION = 16;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
@@ -1081,7 +1159,7 @@ public class ExportProgramModel extends GhidraScript {
         TypeEvidence evidence = new TypeEvidence(id, declaration, sourceAddress);
         String record = renderType(evidence);
         if (planningEvidence == null) {
-            writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record);
+            writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record, phaseObservation, true);
         } else {
             planningEvidence.retainType(id, record);
         }
@@ -1161,7 +1239,7 @@ public class ExportProgramModel extends GhidraScript {
                         GlobalEvidence global = globalAt(target);
                         String globalRecord = renderGlobal(global);
                         if (planningEvidence == null) {
-                            writeIfAbsentAtomic(globalsDirectory.resolve(global.id + ".json"), globalRecord);
+                            writeIfAbsentAtomic(globalsDirectory.resolve(global.id + ".json"), globalRecord, phaseObservation, false);
                         } else {
                             planningEvidence.retainGlobal(global.id, globalRecord);
                         }
@@ -1278,7 +1356,11 @@ public class ExportProgramModel extends GhidraScript {
         private final DecompInterface decompiler = new DecompInterface();
         private final TaskMonitorAdapter taskMonitor = new TaskMonitorAdapter(true);
 
-        NativeWorker() {
+        private final int workerIndex;
+        private final ExporterPhaseObservationV1 observation;
+        NativeWorker(int workerIndex) {
+            this.workerIndex = workerIndex;
+            this.observation = phaseObservation;
             try {
                 DecompileOptions decompileOptions = new DecompileOptions();
                 decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
@@ -1296,9 +1378,16 @@ public class ExportProgramModel extends GhidraScript {
 
         @Override
         public FunctionExport execute(FunctionMetadata metadata, boolean retry) throws Exception {
-            NativeOutcome outcome = decompileFunction(metadata.function, decompiler,
-                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor);
-            return renderFunction(metadata, outcome, true);
+            ExporterPhaseObservationV1.Phase nativePhase = ExporterPhaseObservationV1.Phase.values()[
+                ExporterPhaseObservationV1.Phase.NATIVE_0_INITIAL.ordinal() + workerIndex * 2 + (retry ? 1 : 0)];
+            long started = observation.begin(nativePhase);
+            NativeOutcome outcome;
+            try { outcome = decompileFunction(metadata.function, decompiler,
+                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor); }
+            finally { observation.end(nativePhase, started); }
+            long rendering = observation.begin(ExporterPhaseObservationV1.Phase.RENDER);
+            try { return renderFunction(metadata, outcome, true); }
+            finally { observation.end(ExporterPhaseObservationV1.Phase.RENDER, rendering); }
         }
 
         @Override
@@ -1314,7 +1403,7 @@ public class ExportProgramModel extends GhidraScript {
     private ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport> createFullRecoveryCoordinator(int count) {
         List<ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport>> workers = new ArrayList<>();
         try {
-            for (int index = 0; index < count; index++) workers.add(new NativeWorker());
+            for (int index = 0; index < count; index++) workers.add(new NativeWorker(index));
             return new ExporterParallelCoordinatorV1<>(workers);
         } catch (RuntimeException | Error failure) {
             for (ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport> worker : workers) {
@@ -1452,22 +1541,38 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private static void writeIfAbsentAtomic(Path target, String content) throws IOException {
-        if (Files.isRegularFile(target)) return;
-        Files.createDirectories(target.getParent());
-        Path temporary = target.resolveSibling("." + target.getFileName() + "." + UUID.randomUUID() + ".tmp");
+        writeIfAbsentAtomic(target, content, null, false);
+    }
+
+    private static void writeIfAbsentAtomic(Path target, String content, ExporterPhaseObservationV1 observation,
+                                           boolean type) throws IOException {
+        long since = System.nanoTime();
+        boolean existing = Files.isRegularFile(target);
+        ExporterPhaseObservationV1.Phase phase = type
+            ? (existing ? ExporterPhaseObservationV1.Phase.TYPE_EXISTING : ExporterPhaseObservationV1.Phase.TYPE_FIRST_ATTEMPT)
+            : (existing ? ExporterPhaseObservationV1.Phase.GLOBAL_EXISTING : ExporterPhaseObservationV1.Phase.GLOBAL_FIRST_ATTEMPT);
+        // The initial existence check is included in elapsed; failed/raced first attempts are not publications.
+        if (observation != null) observation.begin(phase);
         try {
-            writeAndForce(temporary, content);
+            if (existing) return;
+            Files.createDirectories(target.getParent());
+            Path temporary = target.resolveSibling("." + target.getFileName() + "." + UUID.randomUUID() + ".tmp");
             try {
-                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary, target);
+                writeAndForce(temporary, content);
+                try {
+                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException unsupported) {
+                    Files.move(temporary, target);
+                }
+                forceDirectory(target.getParent());
+                if (observation != null) observation.publication(type, false);
+            } catch (FileAlreadyExistsException raced) {
+                if (observation != null) observation.publication(type, true);
+                Files.deleteIfExists(temporary);
+            } finally {
+                Files.deleteIfExists(temporary);
             }
-            forceDirectory(target.getParent());
-        } catch (FileAlreadyExistsException raced) {
-            Files.deleteIfExists(temporary);
-        } finally {
-            Files.deleteIfExists(temporary);
-        }
+        } finally { if (observation != null) observation.end(phase, since); }
     }
 
     private static void writeAtomic(Path target, String content) throws IOException {
@@ -2105,6 +2210,13 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
+    private void observedProgress(Path path, String phase, int completed, int total, int recovered,
+                                  int partial, int failed, int reused, String currentFunction) throws IOException {
+        long started = phaseBegin(ExporterPhaseObservationV1.Phase.PROGRESS_PUBLICATION);
+        try { writeProgress(path, phase, completed, total, recovered, partial, failed, reused, currentFunction); }
+        finally { phaseEnd(ExporterPhaseObservationV1.Phase.PROGRESS_PUBLICATION, started); }
+    }
+
     private static void writeProgress(
         Path progressPath,
         String phase,
@@ -2151,6 +2263,14 @@ public class ExportProgramModel extends GhidraScript {
 
     @Override
     protected void run() throws Exception {
+        phaseObservation = null;
+        observedCompleted = 0;
+        boolean returned = false;
+        try { runObserved(); returned = true; }
+        finally { emitPhases(true, returned); }
+    }
+
+    private void runObserved() throws Exception {
         String[] arguments = getScriptArgs();
         if (arguments.length != 4 && arguments.length != 5) {
             throw new IllegalArgumentException(
@@ -2166,6 +2286,7 @@ public class ExportProgramModel extends GhidraScript {
             throw new IllegalArgumentException("unsupported recovery mode");
         }
         boolean includeDecompiledC = recoveryMode.equals("full");
+        if (includeDecompiledC) phaseObservation = new ExporterPhaseObservationV1();
         boolean holdFirstPlanningCheckpoint = false;
         int decompilationWorkers = 1;
         if (arguments.length == 5) {
@@ -2298,8 +2419,11 @@ public class ExportProgramModel extends GhidraScript {
                 else failed++;
             }
             reused = completed;
-            writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
+            observedProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
 
+            phaseObservation.configure(total);
+            observedCompleted = completed;
+            emitPhases(false, false);
             final int[] counts = { completed, recovered, partial, failed };
             final int reusedRecords = reused;
             final Map<Integer, Long> startedFunctions = new TreeMap<>();
@@ -2312,6 +2436,9 @@ public class ExportProgramModel extends GhidraScript {
                             throw new InterruptedException("program-model export was cancelled");
                         }
                     }
+
+                    @Override
+                    public void observePollWait(boolean barrier, long nanos) { phaseObservation.waitElapsed(barrier, nanos); }
 
                     @Override
                     public boolean accepted(int index) throws Exception {
@@ -2327,8 +2454,12 @@ public class ExportProgramModel extends GhidraScript {
                         } else {
                             startedFunctions.put(index, System.nanoTime());
                         }
-                        writeProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, id);
-                        return collectFunctionMetadata(functions.get(index), globalsDirectory, typesDirectory, null);
+                        observedProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, id);
+                        ExporterPhaseObservationV1.Phase metadataPhase = retry
+                            ? ExporterPhaseObservationV1.Phase.METADATA_RETRY : ExporterPhaseObservationV1.Phase.METADATA_INITIAL;
+                        long metadata = phaseBegin(metadataPhase);
+                        try { return collectFunctionMetadata(functions.get(index), globalsDirectory, typesDirectory, null); }
+                        finally { phaseEnd(metadataPhase, metadata); }
                     }
 
                     @Override
@@ -2343,13 +2474,18 @@ public class ExportProgramModel extends GhidraScript {
                     @Override
                     public void commit(int index, FunctionExport exported) throws Exception {
                         String id = functionIds.get(index);
-                        writeFunctionFailure(failuresDirectory, id, exported);
-                        writeAtomic(functionsDirectory.resolve(id + ".json"), exported.record);
+                        long publication = phaseBegin(ExporterPhaseObservationV1.Phase.FUNCTION_PUBLICATION);
+                        try {
+                            writeFunctionFailure(failuresDirectory, id, exported);
+                            writeAtomic(functionsDirectory.resolve(id + ".json"), exported.record);
+                        } finally { phaseEnd(ExporterPhaseObservationV1.Phase.FUNCTION_PUBLICATION, publication); }
                         counts[0]++;
                         if (exported.status.equals("recovered")) counts[1]++;
                         else if (exported.status.equals("partial")) counts[2]++;
                         else counts[3]++;
-                        writeProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, null);
+                        observedProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, null);
+                        observedCompleted = counts[0];
+                        emitPhases(false, false);
                         println("program-model export " + counts[0] + "/" + total + " " + id +
                             " status=" + exported.status + " elapsedNanos=" + (System.nanoTime() - startedFunctions.remove(index)));
                     }
@@ -2475,7 +2611,7 @@ public class ExportProgramModel extends GhidraScript {
                 }
             }
             reused = completed;
-            writeProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
+            observedProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
 
             for (int start = completed; start < total; start += PLANNING_BATCH_FUNCTIONS) {
                 int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, total);
@@ -2620,7 +2756,7 @@ public class ExportProgramModel extends GhidraScript {
                 recovered += validation.functions.recovered;
                 partial += validation.functions.partial;
                 failed += validation.functions.failed;
-                writeProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
+                observedProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
                 println("program-model planning export " + completed + "/" + total + " batch=" + baseName);
                 // The contained owner must durably authorize and deliver the requested stop
                 // while this child is still live. Only an explicitly bound interrupted run
@@ -2632,7 +2768,7 @@ public class ExportProgramModel extends GhidraScript {
         }
 
         assembleModel(outputPath, inputSha256, functionRecords, globalRecords, typeRecords, auxiliaryEvidence);
-        writeProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
+        observedProgress(progressPath, "complete", completed, total, recovered, partial, failed, reused, null);
         println(
             "program-model export complete functions=" + completed + " partial=" + partial +
                 " failed=" + failed + " reused=" + reused

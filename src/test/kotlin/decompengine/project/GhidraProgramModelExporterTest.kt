@@ -26,6 +26,54 @@ import kotlin.test.assertTrue
 
 class GhidraProgramModelExporterTest {
     @Test
+    fun `phase diagnostics are bounded instance local partial and primary failure neutral`() {
+        val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readBytes().toString(Charsets.UTF_8) }
+        val helper = exporter.substringAfter("final class ExporterPhaseObservationV1")
+            .substringBefore("final class ExporterParallelCoordinatorV1")
+        val root = Path.of("").toAbsolutePath().normalize().resolve("build/exporter-phase-diagnostic-tests").createDirectories()
+        val directory = Files.createTempDirectory(root, "inert-")
+        val source = directory.resolve("PhaseProbe.java")
+        source.writeText("final class ExporterPhaseObservationV1" + helper)
+        val compiler = checkNotNull(javax.tools.ToolProvider.getSystemJavaCompiler())
+        assertEquals(0, compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-d",
+            directory.toString(), source.toString()))
+        java.net.URLClassLoader(arrayOf(directory.toUri().toURL()), null).use { loader ->
+            val type = loader.loadClass("ExporterPhaseObservationV1")
+            val constructor = type.getDeclaredConstructor().also { it.isAccessible = true }
+            val observer = constructor.newInstance()
+            val phaseType = loader.loadClass("ExporterPhaseObservationV1" + '$' + "Phase")
+            val phase = phaseType.enumConstants.first()
+            fun method(name: String, vararg args: Class<*>) = type.getDeclaredMethod(name, *args).also { it.isAccessible = true }
+            val begin = method("begin", phaseType)
+            val end = method("end", phaseType, java.lang.Long.TYPE)
+            val configure = method("configure", Integer.TYPE)
+            val emit = method("emit", java.util.function.Consumer::class.java, Integer.TYPE,
+                java.lang.Boolean.TYPE, java.lang.Boolean.TYPE)
+            val lines = mutableListOf<String>()
+            val sink = java.util.function.Consumer<String> { lines.add(it) }
+            configure.invoke(observer, 14)
+            val started = begin.invoke(observer, phase) as Long
+            emit.invoke(observer, sink, 0, false, false)
+            assertTrue(lines.first().contains("METADATA_INITIAL=1/0/0"), "active interval must remain in flight")
+            end.invoke(observer, phase, started)
+            for (completed in 1..100) emit.invoke(observer, sink, completed, false, false)
+            emit.invoke(observer, sink, 100, true, false)
+            emit.invoke(observer, sink, 100, true, true)
+            assertEquals(64, lines.size)
+            assertTrue(lines.all { it.toByteArray(Charsets.UTF_8).size <= 1024 })
+            assertTrue(lines.takeLast(4).all { "state=FAILED_OR_INTERRUPTED" in it })
+            assertTrue(lines.all { "clocks=elapsed_not_cpu" in it && "analyzer_cpu=UNMEASURED" in it })
+            val fresh = constructor.newInstance()
+            val freshLines = mutableListOf<String>()
+            emit.invoke(fresh, java.util.function.Consumer<String> { freshLines.add(it) }, 0, true, true)
+            assertTrue(freshLines.first().contains("METADATA_INITIAL=0/0/0"))
+            // A diagnostic sink failure never escapes to replace a primary failure.
+            emit.invoke(constructor.newInstance(), java.util.function.Consumer<String> { error("inert sink failure") }, 0, true, false)
+        }
+    }
+
+    @Test
     fun `headless adapter installs the staged exporter and reads its final model`() {
         val temp = createTempDirectory("program-model-adapter-")
         val home = fakeGhidraHome(temp, complete = true)
