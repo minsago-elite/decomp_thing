@@ -107,7 +107,14 @@ class LlvmToolchainBuildScriptTest {
         val measurement = workflowJob(model, "native-runtime-measurement")
         assertEquals("    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'",
             measurement.lineSequence().first(String::isNotBlank))
-        assertTrue(model.substringBefore("\njobs:\n").contains("never approves a production profile"))
+        val dispatch = model.substringBefore("\njobs:\n")
+        assertTrue(dispatch.contains("never approves a production profile"))
+        assertTrue(dispatch.contains("        default: native-runtime-measurement"))
+        val listenerInput = dispatch.substringAfter("      listener_continuity:\n", missingDelimiterValue = "")
+            .substringBefore("\n\n")
+        assertTrue(listenerInput.contains("        type: boolean"))
+        assertTrue(listenerInput.contains("        required: false"))
+        assertTrue(listenerInput.contains("        default: false"))
         assertTrue(measurement.contains("docker buildx build"))
         assertTrue(measurement.contains("--file \"${'$'}root/context/native-runtime-measurement-v2.Dockerfile\""))
         assertTrue(measurement.contains("--output \"type=oci,dest=${'$'}root/raw-oci,tar=false,rewrite-timestamp=true\""))
@@ -115,7 +122,15 @@ class LlvmToolchainBuildScriptTest {
         assertTrue(measurement.contains("decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2LiveMain"))
         assertTrue(measurement.contains("Measure the actual installed raw OCI and fixed Docker export without START"))
         assertTrue(measurement.contains("\"${'$'}root/evidence/native-runtime-measurement-candidate-v2.json\""))
-        assertTrue(measurement.contains("name: native-runtime-measurement-candidate-v2"))
+        assertTrue(measurement.contains("LISTENER_CONTINUITY: ${'$'}{{ inputs.listener_continuity && 'true' || 'false' }}"))
+        assertTrue(measurement.contains("listener_args=()"))
+        assertTrue(measurement.contains("if [[ \"${'$'}LISTENER_CONTINUITY\" == true ]]; then\n" +
+            "            listener_args=(--listener-continuity)\n" +
+            "            candidate=\"${'$'}root/evidence/native-runtime-measurement-candidate-v3.json\"\n" +
+            "          fi"))
+        assertTrue(measurement.contains("\"${'$'}{listener_args[@]}\" \"${'$'}root/raw-oci\""))
+        assertTrue(measurement.contains("\"${'$'}candidate\" \\\n"))
+        assertTrue(measurement.contains("name: native-runtime-measurement-candidate-${'$'}{{ inputs.listener_continuity && 'v3' || 'v2' }}"))
         assertTrue(measurement.contains("build/nrm-live/evidence"))
         assertTrue(measurement.contains("build/nrm-live/raw-oci"))
         for (frozenQualification in listOf("bash scripts/ci-build-llvm-toolchain.sh", "build-toolchain.Dockerfile",

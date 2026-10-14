@@ -17,6 +17,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 internal class LlvmBehaviorNativeRuntimeMeasurementV2Exception(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
@@ -47,6 +48,52 @@ internal class LlvmBehaviorNativeRuntimeMeasurementV2Candidate private construct
     }
 }
 
+/** Listener continuity is an observed socket credential snapshot, never daemon or responder approval. */
+internal class LlvmBehaviorNativeRuntimeMeasurementV3Candidate private constructor(
+    private val canonical: ByteArray,
+) {
+    val sha256: String = OracleArtifacts.sha256(canonical)
+    fun canonicalBytes(): ByteArray = canonical.copyOf()
+
+    companion object {
+        internal fun measured(value: JsonObject, checkpoint: (String) -> Unit):
+            LlvmBehaviorNativeRuntimeMeasurementV3Candidate {
+            if (value["schemaVersion"] != JsonPrimitive(3) ||
+                value["artifactKind"] != JsonPrimitive("native-runtime-measurement-candidate") ||
+                value["authority"] != JsonPrimitive("unapproved-raw-measurement-only") ||
+                listOf("oracleAuthority", "runtimeProfileApproved", "startAuthorized", "containmentProved",
+                    "scoringAuthority", "releaseEligible").any { value[it] != JsonPrimitive(false) }
+            ) measurementFail("listener measurement candidate cannot claim production or execution authority")
+            val observed = (value["readOnlyRuntime"] as? JsonObject)?.get("observedListenerContinuity") as? JsonObject
+                ?: measurementFail("listener measurement candidate lacks its observed listener continuity")
+            val fixed = linkedMapOf(
+                "schemaVersion" to JsonPrimitive(1),
+                "identityKind" to JsonPrimitive("linux-af-unix-listener-credential-snapshot"),
+                "identifierNamespace" to JsonPrimitive("observer"),
+                "peerHandleMechanism" to JsonPrimitive("SO_PEERPIDFD"),
+                "fixedExchangeCount" to JsonPrimitive(5),
+                "sameListenerSnapshot" to JsonPrimitive(true),
+                "retentionBoundary" to JsonPrimitive("final-factory-guard"),
+                "daemonExecutableApproved" to JsonPrimitive(false),
+                "httpResponderIdentityProved" to JsonPrimitive(false),
+            )
+            if (observed.keys != fixed.keys + setOf("pid", "uid", "gid") ||
+                fixed.any { (key, expected) -> observed[key] != expected }
+            ) measurementFail("listener measurement candidate has unsupported continuity facts")
+            for ((key, range) in listOf("pid" to 1L..Int.MAX_VALUE.toLong(),
+                "uid" to 0L..0xffff_ffffL, "gid" to 0L..0xffff_ffffL)) {
+                val number = (observed[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
+                if (number == null || number !in range) {
+                    measurementFail("listener measurement candidate $key is outside its observer namespace bound")
+                }
+            }
+            return LlvmBehaviorNativeRuntimeMeasurementV3Candidate(
+                OracleJson.canonicalBytes(value, NATIVE_MEASUREMENT_JSON_LIMITS, checkpoint),
+            )
+        }
+    }
+}
+
 /** Fixed Docker 29.7.2 measurement factory. No caller supplied runtime JSON or tool pin is accepted. */
 internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
     fun measure(
@@ -54,9 +101,32 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
         controlClient: Path,
         emptyPrivateDockerConfig: Path,
         privateRuntimeSocket: Path,
-    ): LlvmBehaviorNativeRuntimeMeasurementV2Candidate {
+    ): LlvmBehaviorNativeRuntimeMeasurementV2Candidate = produceCandidate(
+        ociLayout, controlClient, emptyPrivateDockerConfig, privateRuntimeSocket, false,
+        LlvmBehaviorNativeRuntimeMeasurementV2Candidate::measured,
+    )
+
+    fun measureWithListenerContinuity(
+        ociLayout: Path,
+        controlClient: Path,
+        emptyPrivateDockerConfig: Path,
+        privateRuntimeSocket: Path,
+    ): LlvmBehaviorNativeRuntimeMeasurementV3Candidate = produceCandidate(
+        ociLayout, controlClient, emptyPrivateDockerConfig, privateRuntimeSocket, true,
+        LlvmBehaviorNativeRuntimeMeasurementV3Candidate::measured,
+    )
+
+    private fun <Candidate> produceCandidate(
+        ociLayout: Path,
+        controlClient: Path,
+        emptyPrivateDockerConfig: Path,
+        privateRuntimeSocket: Path,
+        withListenerContinuity: Boolean,
+        candidateBuilder: (JsonObject, (String) -> Unit) -> Candidate,
+    ): Candidate {
+        val schemaVersion = if (withListenerContinuity) 3 else 2
         val deadline = AnalysisDeadline.start(
-            TimeUnit.MINUTES.toNanos(10), "native runtime V2 raw measurement",
+            TimeUnit.MINUTES.toNanos(10), "native runtime V$schemaVersion raw measurement",
         )
         val checkpoint: (String) -> Unit = deadline::checkpoint
         val deploymentPath = try {
@@ -77,7 +147,7 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
             PinnedMeasurementCodecs.open(deploymentPath.parent, checkpoint).use { codecs ->
             LlvmBehaviorNativeOciImageV2.openLayout(ociLayout, checkpoint).use { image ->
                 val recipe = ownRecipeBinding(deploymentPath, image, checkpoint)
-                val bindings = captureFixed(controlClient, emptyPrivateDockerConfig, privateRuntimeSocket, deadline)
+                val bindings = captureFixed(controlClient, emptyPrivateDockerConfig, privateRuntimeSocket, deadline, withListenerContinuity)
                 bindings.use {
                     val measured = consumeFixed(bindings, image, deadline)
                     val subject = image.resolve("/subject/executable")
@@ -93,9 +163,9 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
                         deployment.authenticatedSha256
                     ) measurementFail("measurement deployment bytes changed")
                     checkpoint("before native measurement candidate rendering")
-                    val candidate = LlvmBehaviorNativeRuntimeMeasurementV2Candidate.measured(
+                    val candidate = candidateBuilder(
                         JsonObject(linkedMapOf(
-                            "schemaVersion" to JsonPrimitive(2),
+                            "schemaVersion" to JsonPrimitive(schemaVersion),
                             "artifactKind" to JsonPrimitive("native-runtime-measurement-candidate"),
                             "authority" to JsonPrimitive("unapproved-raw-measurement-only"),
                             "oracleAuthority" to JsonPrimitive(false),
@@ -159,9 +229,16 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
         }
     }
 
-    private fun captureFixed(client: Path, config: Path, socket: Path, deadline: AnalysisDeadline): PinnedDockerRuntimeBindings {
+    private fun captureFixed(
+        client: Path,
+        config: Path,
+        socket: Path,
+        deadline: AnalysisDeadline,
+        withListenerContinuity: Boolean,
+    ): PinnedDockerRuntimeBindings {
+        val bridgeName = if (withListenerContinuity) "captureForNativeRuntimeV3" else "captureForNativeRuntimeV2"
         val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single {
-            it.name == "captureForNativeRuntimeV2"
+            it.name == bridgeName
         }
         check(bridge.trySetAccessible())
         return try {
