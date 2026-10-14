@@ -20,6 +20,128 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class AcpProviderBrokerTest {
     @Test
+    fun `invocation capability in decoded request names and values is refused before dispatch`() {
+        for (location in 0..3) for (case in 0..2) for (escapeMode in 0..2) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val secret = cap.joinToString("") { "%02x".format(it) }
+                val value = when (case) {
+                    1 -> secret.uppercase()
+                    2 -> secret.mapIndexed { index, character -> if (index % 2 == 0) character.uppercaseChar() else character }.joinToString("")
+                    else -> secret
+                }
+                val encoded = requestString(value, escapeMode)
+                val base = body().decodeToString()
+                val request = when (location) {
+                    0 -> base.replace("\"synthetic fixture\"", encoded)
+                    1 -> base.dropLast(1) + ",\"instructions\":$encoded}"
+                    2 -> base.dropLast(1) + ",\"metadata\":{\"safe\":[{\"nested\":$encoded}]}}"
+                    else -> base.dropLast(1) + ",\"metadata\":{$encoded:\"safe\"}}"
+                }
+                val failure = assertFailsWith<AcpProviderBrokerFailure> { broker.beginRequest(1, cap, request.toByteArray()) }
+                assertEquals(AcpProviderTerminalKind.SECRET_EXPOSURE, failure.kind)
+                assertNull(failure.cause)
+                assertFalse(failure.toString().contains(secret, ignoreCase = true))
+                assertFalse(failure.toString().contains(encoded))
+                assertEquals(0, backend.starts)
+                assertNull(backend.lastRequest)
+                val evidence = broker.snapshot()
+                assertTrue(evidence.revoked)
+                assertEquals(AcpProviderTerminalKind.SECRET_EXPOSURE, evidence.admissionDenial!!.terminal)
+                assertTrue(evidence.requests.isEmpty())
+                assertEquals(0L, evidence.wireRequestBytes)
+                assertEquals(0L, evidence.outputTokens)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `safe capability prefixes and near matches remain admissible without disclosure`() {
+        for (nearMatch in listOf(false, true)) for (escaped in listOf(false, true)) {
+            val backend = FixtureBackend()
+            val broker = open(backend)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val secret = cap.joinToString("") { "%02x".format(it) }
+                val safe = if (nearMatch) secret.dropLast(1) + if (secret.last() == '0') '1' else '0'
+                    else secret.take(63) + "!"
+                val request = body().decodeToString().dropLast(1) + ",\"instructions\":" + requestString(safe, if (escaped) 1 else 0) + "}"
+                val exchange = broker.beginRequest(1, cap, request.toByteArray())
+                assertEquals(1, backend.starts)
+                backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+                assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `reported output exceeding a smaller declared request bound is refused before completion`() {
+        val backend = FixtureBackend()
+        val broker = open(backend, outputTokens = 8)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val request = body().decodeToString().dropLast(1) + ",\"max_output_tokens\":2}"
+            val exchange = broker.beginRequest(1, capability(broker), request.toByteArray())
+            assertEquals(2, Json.parseToJsonElement(backend.lastRequest!!.body.decodeToString()).jsonObject.getValue("max_output_tokens").jsonPrimitive.int)
+            backend.headers(); backend.subscribe(); backend.emit(completed(3)); backend.complete()
+            assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { exchange.nextChunk() }
+            assertTrue(backend.cancelled)
+            assertEquals(1, backend.starts)
+            val evidence = broker.snapshot()
+            assertTrue(evidence.revoked)
+            assertEquals(0L, evidence.outputTokens)
+            assertEquals(0, evidence.requests.single().admittedOutputTokens)
+            assertEquals(AcpProviderTerminalKind.RESOURCE_EXHAUSTED, evidence.requests.single().terminal)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `exact declared output bound and default cumulative remainder retain their limits`() {
+        for (firstUsage in 0..2) {
+        val backend = FixtureBackend()
+        val broker = open(backend, outputTokens = 6)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val request = body().decodeToString().dropLast(1) + ",\"max_output_tokens\":2}"
+            val first = broker.beginRequest(1, cap, request.toByteArray())
+            backend.headers(); backend.subscribe(); backend.emit(completed(firstUsage)); backend.complete()
+            assertNotNull(first.nextChunk()); assertNull(first.nextChunk())
+            val second = broker.beginRequest(2, cap, body())
+            val remaining = 6 - firstUsage
+            assertEquals(remaining, Json.parseToJsonElement(backend.lastRequest!!.body.decodeToString()).jsonObject.getValue("max_output_tokens").jsonPrimitive.int)
+            backend.headers(); backend.subscribe(); backend.emit(completed(remaining)); backend.complete()
+            assertNotNull(second.nextChunk()); assertNull(second.nextChunk())
+            assertEquals(6L, broker.snapshot().outputTokens)
+            assertEquals(listOf(firstUsage, remaining), broker.snapshot().requests.map { it.admittedOutputTokens })
+            assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { broker.beginRequest(3, cap, body()) }
+            assertEquals(2, backend.starts)
+        } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `invalid declared request output limits are refused before backend dispatch`() {
+        for (limit in listOf("0", "-1", "9", "\"2\"", "2.5", "true", "null", "[]")) {
+            val backend = FixtureBackend()
+            val broker = open(backend, outputTokens = 8)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val request = body().decodeToString().dropLast(1) + ",\"max_output_tokens\":$limit}"
+                assertKind(AcpProviderTerminalKind.UNSUPPORTED_OPERATION) { broker.beginRequest(1, capability(broker), request.toByteArray()) }
+                assertEquals(0, backend.starts)
+                assertNull(backend.lastRequest)
+                assertTrue(broker.snapshot().requests.isEmpty())
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
     fun `throwing cancellation callback revokes a stalled exchange without consumer progress`() {
         val failCallback = AtomicBoolean(false)
         val backend = FixtureBackend()
@@ -599,6 +721,11 @@ class AcpProviderBrokerTest {
     private fun capability(broker: AcpProviderBroker): ByteArray = AcpProviderBrokerProtocol.decodeChannelSetupPayload(broker.channelSetupPayload()).capability
     private fun body(model: String = "gpt-6.1-sol", effort: String = "low"): ByteArray =
         """{"model":"$model","input":[{"role":"user","content":"synthetic fixture"}],"reasoning":{"effort":"$effort"},"store":false,"stream":true}""".toByteArray()
+    private fun requestString(value: String, escapeMode: Int): String = if (escapeMode != 0)
+        "\"" + value.mapIndexed { index, character ->
+            if (escapeMode == 1 || index % 2 == 0) "\\u%04x".format(character.code) else character.toString()
+        }.joinToString("") + "\""
+    else kotlinx.serialization.json.JsonPrimitive(value).toString()
     private fun delta(text: String): ByteArray = ("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":" + kotlinx.serialization.json.JsonPrimitive(text).toString() + "}\n\n").toByteArray()
     private fun completed(tokens: Int): ByteArray = """event: response.completed
 data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":$tokens}}}

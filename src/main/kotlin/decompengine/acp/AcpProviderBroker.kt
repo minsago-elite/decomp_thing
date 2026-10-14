@@ -259,12 +259,13 @@ internal class AcpProviderBroker private constructor(
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
             }
             val admittedBody = body.copyOf()
-            val wire = checkedRequestBody(admittedBody, tokenRemaining)
+            val checked = checkedRequestBody(admittedBody, tokenRemaining)
+            val wire = checked.wire
             if (wire.size.toLong() > policy.bounds.maximumRequestBytes - admittedWireBytes) {
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
             }
             checkActive()
-            val exchange = AcpProviderBrokerExchange(sequence, session, turn, brokerDigest(admittedBody), wire, tokenRemaining)
+            val exchange = AcpProviderBrokerExchange(sequence, session, turn, brokerDigest(admittedBody), wire, checked.maximumOutputTokens)
             admittedWireBytes += wire.size
             active = exchange
             nextSequence++
@@ -352,7 +353,9 @@ internal class AcpProviderBroker private constructor(
     private fun remainingMillis(): Long = remainingMillisOrZero().takeIf { it > 0 }
         ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TIMEOUT)
 
-    private fun checkedRequestBody(body: ByteArray, tokenRemaining: Int): ByteArray {
+    private class CheckedProviderRequest(val wire: ByteArray, val maximumOutputTokens: Int)
+
+    private fun checkedRequestBody(body: ByteArray, tokenRemaining: Int): CheckedProviderRequest {
         if (body.isEmpty() || body.size > policy.bounds.maximumRequestBytes) {
             throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
         }
@@ -361,6 +364,9 @@ internal class AcpProviderBroker private constructor(
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(body)).toString()
             parseProviderObject(text, policy.bounds.maximumRequestBytes)
         } catch (_: Exception) { throw AcpProviderBrokerFailure(AcpProviderTerminalKind.MALFORMED_REQUEST) }
+        // The existing strict parser bounds document bytes, tokens and depth before this walk.
+        // Inspect decoded names and scalar content so JSON escapes cannot hide the channel bearer.
+        rejectCapabilityDisclosure(objectValue, capability.joinToString("") { "%02x".format(it) })
         if (objectValue.keys.any { it !in REQUEST_KEYS }) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION)
         val selectedModel = objectValue["model"] as? JsonPrimitive
         if (selectedModel?.contentOrNull != policy.model || selectedModel.isString != true) {
@@ -387,11 +393,27 @@ internal class AcpProviderBroker private constructor(
             }
         } catch (_: Exception) { throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION) }
         // Explicit adapter transform. Acceptance by the ChatGPT backend remains unqualified.
-        val transformed = JsonObject(objectValue + ("max_output_tokens" to JsonPrimitive(
-            objectValue["max_output_tokens"]?.jsonPrimitive?.int ?: tokenRemaining,
-        )))
-        return try { boundedProviderJson(policy.bounds.maximumRequestBytes) { it.writeProviderValue(transformed) } }
+        val effectiveOutputTokens = objectValue["max_output_tokens"]?.jsonPrimitive?.int ?: tokenRemaining
+        val transformed = JsonObject(objectValue + ("max_output_tokens" to JsonPrimitive(effectiveOutputTokens)))
+        val wire = try { boundedProviderJson(policy.bounds.maximumRequestBytes) { it.writeProviderValue(transformed) } }
         catch (_: Exception) { throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) }
+        return CheckedProviderRequest(wire, effectiveOutputTokens)
+    }
+
+    private fun rejectCapabilityDisclosure(value: JsonElement, capabilityHex: String) {
+        fun rejectIfPresent(text: String) {
+            if (text.contains(capabilityHex, ignoreCase = true)) {
+                throw AcpProviderBrokerFailure(AcpProviderTerminalKind.SECRET_EXPOSURE)
+            }
+        }
+        when (value) {
+            is JsonObject -> value.forEach { (name, child) ->
+                rejectIfPresent(name)
+                rejectCapabilityDisclosure(child, capabilityHex)
+            }
+            is JsonArray -> value.forEach { rejectCapabilityDisclosure(it, capabilityHex) }
+            is JsonPrimitive -> rejectIfPresent(value.content)
+        }
     }
 
     internal inner class AcpProviderBrokerExchange internal constructor(
@@ -400,7 +422,7 @@ internal class AcpProviderBroker private constructor(
         private val turn: String,
         private val admittedDigest: String,
         private val wire: ByteArray,
-        tokenRemaining: Int,
+        maximumRequestOutputTokens: Int,
     ) : AcpProviderBackendReceiver {
         internal var owner: AcpProviderBackendRequestOwner? = null
         internal var terminal: AcpProviderTerminalKind? = null
@@ -417,7 +439,7 @@ internal class AcpProviderBroker private constructor(
         private val parser = AcpProviderResponseStream(
             policy.bounds,
             listOf(credentials.accessToken.toByteArray(), credentials.accountId.toByteArray(), capability.joinToString("") { "%02x".format(it) }.toByteArray()),
-            tokenRemaining,
+            maximumRequestOutputTokens,
             maximumInvocationInputTokens?.let { it - observedInputTokens },
         )
 
