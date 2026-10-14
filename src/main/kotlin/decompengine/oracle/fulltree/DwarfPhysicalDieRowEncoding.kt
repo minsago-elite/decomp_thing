@@ -8,32 +8,39 @@ internal object DwarfPhysicalDieRowEncoding {
     const val NAME = "physical-die-numeric-row-v1"
     const val CENSUS_SCHEMA = "bounded-physical-die-census-v2"
     private const val MAXIMUM_REFERENCES_PER_DIE = 65_536
-    fun encode(die: DwarfPhysicalDieCensus): JsonObject {
-        val row = buildString {
-            fun hex(value: Long) { append(value.toString(16)) }
-            hex(die.compilationUnitOffset); append(','); hex(die.offset); append(','); hex(die.endOffset)
-            append(','); hex(die.tag); append(','); append(die.depth); append(',')
-            die.parentOffset?.let(::hex) ?: append('-'); append(','); append(if (die.hasChildren) '1' else '0')
-            append('|')
-            for ((index, ref) in die.references.withIndex()) {
-                if (index > 0) append(';')
-                append(ref.attributeOrdinal); append(','); hex(ref.attribute); append(','); hex(ref.declaredForm)
-                append(','); hex(ref.resolvedForm); append(','); append(ref.indirectDepth); append(','); append(ref.rawOperand.toString(16))
-                append(',')
-                val target = ref.targetLocator
-                if (target == null) append("-,-") else {
-                    val marker = target.indexOf(":die=0x")
-                    require(target.startsWith(".debug_info:cu=0x") && marker > 0) { "malformed physical target locator" }
-                    append(target.substring(17, marker)); append(','); append(target.substring(marker + 7))
-                }
-                append(','); append(when (ref.state) {
-                    "retained-target" -> 'r'; "unsupported-reference" -> 'u'; "out-of-range-reference" -> 'o'; "missing-target" -> 'm'
-                    else -> error("unsupported physical reference state")
-                })
-                append(','); append(if ("reference-cycle" in ref.reasons) '1' else '0')
-            }
+    private val TARGET_PATTERN = Regex("\\.debug_info:cu=0x(0|[1-9a-f][0-9a-f]{0,15}):die=0x(0|[1-9a-f][0-9a-f]{0,15})")
+    fun encode(die: DwarfPhysicalDieCensus, maximumRowCharacters: Int = 8 * 1024 * 1024): JsonObject =
+        JsonObject(mapOf("row" to JsonPrimitive(encodeRow(die, maximumRowCharacters))))
+    fun encodeRow(die: DwarfPhysicalDieCensus, maximumRowCharacters: Int = 8 * 1024 * 1024): String {
+        require(maximumRowCharacters > 0 && die.compilationUnitOffset >= 0 && die.offset >= 0 && die.endOffset >= 0 && die.tag >= 0 && die.depth >= 0)
+        val row = StringBuilder()
+        fun append(fragment: String) {
+            if (fragment.length > maximumRowCharacters - row.length) throw FullTreeControlException("physical row exceeds its byte bound")
+            row.append(fragment)
         }
-        return JsonObject(mapOf("row" to JsonPrimitive(row)))
+        fun hex(value: Long): String { require(value >= 0); return value.toString(16) }
+        append(listOf(hex(die.compilationUnitOffset), hex(die.offset), hex(die.endOffset), hex(die.tag),
+            die.depth.toString(), die.parentOffset?.let(::hex) ?: "-", if (die.hasChildren) "1" else "0").joinToString(",") + "|")
+        for ((index, ref) in die.references.withIndex()) {
+            require(index < MAXIMUM_REFERENCES_PER_DIE && ref.attributeOrdinal >= 0 && ref.indirectDepth >= 0)
+            val target = ref.targetLocator
+            val targetColumns = if (target == null) "-,-" else {
+                require(target.length <= 56 && target.startsWith(".debug_info:cu=0x")) { "malformed physical target locator" }
+                val match = TARGET_PATTERN.matchEntire(target)
+                require(match != null && match.groupValues[1].toLongOrNull(16) != null && match.groupValues[2].toLongOrNull(16) != null) {
+                    "malformed physical target locator"
+                }
+                match.groupValues[1] + "," + match.groupValues[2]
+            }
+            val state = when (ref.state) {
+                "retained-target" -> "r"; "unsupported-reference" -> "u"; "out-of-range-reference" -> "o"; "missing-target" -> "m"
+                else -> error("unsupported physical reference state")
+            }
+            append((if (index == 0) "" else ";") + listOf(ref.attributeOrdinal.toString(), hex(ref.attribute),
+                hex(ref.declaredForm), hex(ref.resolvedForm), ref.indirectDepth.toString(), ref.rawOperand.toString(16),
+                targetColumns, state, if ("reference-cycle" in ref.reasons) "1" else "0").joinToString(","))
+        }
+        return row.toString()
     }
     fun decode(record: JsonObject, maximumRowCharacters: Int = 8 * 1024 * 1024,
                referenceWork: () -> Unit = {}): DwarfPhysicalDieCensus {

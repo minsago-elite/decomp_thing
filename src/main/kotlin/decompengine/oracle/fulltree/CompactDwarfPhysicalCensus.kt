@@ -254,6 +254,7 @@ internal class CompactDwarfPhysicalCensus(
 /** Trusted, immutable, non-materializing census list. No collection-copy facade is needed. */
 internal class CompactPhysicalDieList(private val census: CompactDwarfPhysicalCensus) : java.util.AbstractList<DwarfPhysicalDieCensus>() {
     override val size: Int get() = census.dieCount
+    internal val referenceCount: Int get() = census.referenceCount
     override fun get(index: Int): DwarfPhysicalDieCensus = census.die(index)
     internal fun findingRows(work: () -> Unit) = census.findingRows(work)
 }

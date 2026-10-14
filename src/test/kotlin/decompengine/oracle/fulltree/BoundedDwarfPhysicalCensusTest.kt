@@ -4,10 +4,14 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
 
-class CompactDwarfPhysicalCensusTest {
+class BoundedDwarfPhysicalCensusTest {
     @Test
     fun `block boundaries preserve every numeric column ordered references and sealed views`() {
         val budget = DwarfInterfaceFactBudget(1024 * 1024)
@@ -63,6 +67,81 @@ class CompactDwarfPhysicalCensusTest {
         assertEquals(expected, actual)
         assertEquals(9, actual.size)
         assertTrue(probes < 100, "ordinary rows were unnecessarily visited: $probes")
+    }
+
+    @Test
+    fun `physical tables preserve every row across block and compilation unit boundaries`() {
+        val dies = (0 until 130).map { DwarfPhysicalDieCensus(0, it.toLong() + 11, it.toLong() + 12, 0x24, 0, null, false) } +
+            (0 until 3).map { DwarfPhysicalDieCensus(1000, it.toLong() + 1011, it.toLong() + 1012, 0x24, 0, null, false) }
+        val tables = DwarfPhysicalDieTableEncoding.records(dies).toList()
+        assertEquals(listOf(128, 2, 3), tables.map(DwarfPhysicalDieTableEncoding::logicalRowCount))
+        assertEquals(listOf(0, 128, 130), tables.map(DwarfPhysicalDieTableEncoding::firstOrdinal))
+        var first = 0
+        val decoded = tables.flatMap { table -> DwarfPhysicalDieTableEncoding.decode(table, first).toList().also { first += it.size } }
+        assertEquals(dies.map { it.toJson() }, decoded.map { it.toJson() })
+    }
+
+    @Test
+    fun `table byte splitting reserves real singleton shard envelope headroom`() {
+        fun row(index: Int): DwarfPhysicalDieCensus {
+            val refs = (0 until 50).map { ordinal -> DwarfPhysicalReferenceCensus(ordinal, 0x49, 0x1f20, 0x1f20, 0,
+                ULong.MAX_VALUE, null, "unsupported-reference").also { it.bindTargets(emptySet()); it.seal() } }
+            return DwarfPhysicalDieCensus(0, index.toLong() + 11, index.toLong() + 12, 0x4080, 0, null, false, refs)
+        }
+        val dies = listOf(row(0), row(1))
+        val bareCombined = DwarfPhysicalDieTableEncoding.records(dies).single()
+        val cap = OracleJson.canonicalBytes(bareCombined).size
+        val split = DwarfPhysicalDieTableEncoding.records(dies, maximumRecordBytes = cap).toList()
+        assertEquals(listOf(1, 1), split.map(DwarfPhysicalDieTableEncoding::logicalRowCount))
+        val decoded = ArrayList<DwarfPhysicalDieCensus>()
+        val limits = BoundedDwarfShardLimits(maximumShardBytes = cap)
+        val writer = BoundedDwarfCanonicalShardWriter(limits) { kind, ordinal, bytes, count ->
+            assertTrue(bytes.size <= cap)
+            val shard = parseCanonicalDwarfShard(bytes, limits, kind, ordinal, count)
+            shard.records.forEach { decoded += DwarfPhysicalDieTableEncoding.decode(it).toList() }
+        }
+        writer.write("physicalDies", split.asSequence()); writer.finish()
+        assertEquals(dies.map { it.toJson() }, decoded.map { it.toJson() })
+        assertFailsWith<FullTreeControlException> { DwarfPhysicalDieTableEncoding.records(dies, maximumRecordBytes = 100).toList() }
+        assertEquals(2, DwarfPhysicalDieTableEncoding.records(dies, maximumRecordNodes = 13).count())
+        assertFailsWith<FullTreeControlException> { DwarfPhysicalDieTableEncoding.records(dies, maximumRecordNodes = 12).toList() }
+    }
+
+    @Test
+    fun `table decoder rejects gaps duplicates reordering wrong CU counts types overflow and extra fields`() {
+        val base = DwarfPhysicalDieTableEncoding.records(listOf(DwarfPhysicalDieCensus(0, 11, 12, 0x11, 0, null, false))).single()
+        val changes = listOf("firstDieOrdinal" to JsonPrimitive(-1), "firstDieOrdinal" to JsonPrimitive(Long.MAX_VALUE),
+            "firstDieOrdinal" to JsonPrimitive(5_000_000), "firstDieOrdinal" to JsonPrimitive(0.0),
+            "firstDieOrdinal" to Json.parseToJsonElement("-0"),
+            "rowCount" to JsonPrimitive(0), "rowCount" to JsonPrimitive(2), "rowCount" to JsonPrimitive("1"),
+            "compilationUnitOffset" to JsonPrimitive("0x00"), "compilationUnitOffset" to JsonPrimitive("0x8000000000000000"),
+            "compilationUnitOffset" to JsonPrimitive("0x1"), "rows" to JsonPrimitive(0),
+            "rows" to JsonArray(listOf(JsonPrimitive(0))), "rows" to JsonArray(List(129) { (base["rows"] as JsonArray).single() }),
+            "encoding" to JsonPrimitive("other"), "extra" to JsonPrimitive(0))
+        for ((key, value) in changes) assertFailsWith<IllegalArgumentException>(key) {
+            DwarfPhysicalDieTableEncoding.decode(JsonObject(base + (key to value))).toList()
+        }
+        assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieTableEncoding.decode(base, expectedFirstOrdinal = 1).toList() }
+        assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieTableEncoding.decode(JsonObject(base - "rowCount")).toList() }
+        assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieTableEncoding.decode(base, maximumRecordBytes = 8 * 1024 * 1024 + 1).toList() }
+        assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieTableEncoding.decode(base, maximumRecordNodes = 100_001).toList() }
+        val clipped = JsonObject(base + mapOf("firstDieOrdinal" to JsonPrimitive(4_999_999), "rowCount" to JsonPrimitive(2),
+            "rows" to JsonArray(List(2) { (base["rows"] as JsonArray).single() })))
+        assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieTableEncoding.decode(clipped).toList() }
+    }
+
+    @Test
+    fun `table traversal charges each decoded row and reference and refuses malformed standalone targets`() {
+        val ref = DwarfPhysicalReferenceCensus(0, 0x49, 0x1f20, 0x1f20, 0, 1UL, null, "unsupported-reference").also { it.bindTargets(emptySet()); it.seal() }
+        val dies = (0 until 2).map { DwarfPhysicalDieCensus(0, it.toLong() + 11, it.toLong() + 12, 0x11, 0, null, false, listOf(ref)) }
+        val table = DwarfPhysicalDieTableEncoding.records(dies).single()
+        var rows = 0; var refs = 0
+        assertEquals(2, DwarfPhysicalDieTableEncoding.decode(table, rowWork = { rows++ }, referenceWork = { refs++ }).count())
+        assertEquals(2, rows); assertEquals(2, refs)
+        for (target in listOf(".debug_info:cu=0x0:die=0xb\\", ".debug_info:cu=0x0:die=0x00", ".debug_info:cu=0x8000000000000000:die=0xb")) {
+            val bad = DwarfPhysicalReferenceCensus(0, 0x49, 0x13, 0x13, 0, 11UL, target).also { it.bindTargets(setOf(target)); it.seal() }
+            assertFailsWith<IllegalArgumentException> { DwarfPhysicalDieRowEncoding.encode(DwarfPhysicalDieCensus(0, 11, 12, 0x11, 0, null, false, listOf(bad))) }
+        }
     }
 
     @Test

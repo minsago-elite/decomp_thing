@@ -75,7 +75,7 @@ internal class BoundedDwarfObservationInventory internal constructor(
 }
 
 internal object BoundedDwarfObservationInventoryV1 {
-    const val SCHEMA = "dwarf-pre-policy-inventory-v3"
+    const val SCHEMA = "dwarf-pre-policy-inventory-v4"
     val RECORD_KINDS: List<String> = Collections.unmodifiableList(listOf(
         "inventoryRoots", "inventoryReferences", "inventoryTypeCompleteness", "inventoryFindings", "inventorySelections",
     ))
@@ -120,7 +120,7 @@ internal object BoundedDwarfObservationInventoryV1 {
             "typeGraphScope" to JsonPrimitive(facts.limits.typeGraphScope.wireName),
             "inputs" to JsonArray(inputs.sortedBy { it.role }.map { it.toJson() }),
             "requiredTypePopulationComplete" to JsonPrimitive(false),
-            "physicalCensus" to physicalCensus,
+            "physicalCensus" to physicalCensus, "physicalCensusWireSummary" to physical.wireSummary(),
             "rawCommitments" to JsonArray(raw), "inventoryCommitments" to JsonArray(inventory), "counts" to counts.toJson(),
         ))
         val manifest = JsonObject(unsigned + ("inventorySha256" to JsonPrimitive(inventorySha(OracleJson.canonicalBytes(unsigned, INVENTORY_MANIFEST_LIMITS)))))
@@ -157,6 +157,7 @@ internal object BoundedDwarfObservationInventoryV1 {
         require(rich["sha256"] == JsonPrimitive(trustedFacts.inputSha256) && rich["bytes"] == JsonPrimitive(trustedFacts.inputBytes)) {
             "inventory input differs from authenticated scan"
         }
+        require(bound["physicalCensusWireSummary"] == physical.wireSummary()) { "inventory physical wire counts differ from authenticated scan" }
         require(bound["physicalCensus"] == metadata) { "inventory physical census differs from authenticated scan" }
         val expected = readCommitments(bound, "rawCommitments", RAW_RECORD_KINDS + "strippedMetadata")
         require(commitments.all { (kind, commitment) -> expected[kind] == commitment }) {
@@ -216,6 +217,11 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
         val inventory = readCommitments(boundManifest, "inventoryCommitments", BoundedDwarfObservationInventoryV1.RECORD_KINDS)
         expected = raw + inventory
         physical = PhysicalCensusVerifier(obj(boundManifest.getValue("physicalCensus")), budget)
+        val wire = obj(boundManifest.getValue("physicalCensusWireSummary"))
+        exact(wire, setOf("tableRecords", "decodedDies", "decodedReferences"))
+        require(number(wire, "tableRecords") <= limits.maximumRecords &&
+            number(wire, "decodedDies") <= DwarfPhysicalDieTableEncoding.MAXIMUM_DECODED_DIES &&
+            number(wire, "decodedReferences") <= limits.maximumWorkSteps) { "inventory physical wire summary exceeds bounds" }
         exact(obj(boundManifest.getValue("counts")), InventoryCounts.KEYS)
         obj(boundManifest.getValue("counts")).keys.forEach { number(obj(boundManifest.getValue("counts")), it) }
     }
@@ -248,7 +254,7 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
                 val rich = array(boundManifest, "inputs").map(::obj).single { text(it, "role") == "rich" }
                 require(normalized["inputSha256"] == rich["sha256"] && normalized["inputBytes"] == rich["bytes"])
             }
-            val encoded = budget.encode(normalized)
+            val encoded = budget.encode(normalized, if (kind == "physicalDies") DwarfPhysicalDieTableEncoding.logicalRowCount(normalized) else 1)
             // Charge canonical records before retaining compact structural descriptors.
             physical.observe(kind, normalized)
             committer.add(encoded)
@@ -271,6 +277,10 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
         for ((kind, value) in expected) require(commitments.getValue(kind).finish() == value) { "inventory $kind commitment differs from its records" }
         require(counts.toJson() == boundManifest["counts"]) { "inventory counts differ from the records" }
         physical.finish()
+        require(boundManifest["physicalCensusWireSummary"] == physical.wireSummary()) { "inventory physical wire counts differ from decoded records" }
+        require((physical.wireSummary().getValue("tableRecords")) == expected.getValue("physicalDies")["recordCount"]) {
+            "inventory table record count differs from its raw commitment"
+        }
         finished = true
     }
 
@@ -521,8 +531,9 @@ internal class InventoryBudget(val limits: BoundedDwarfObservationInventoryLimit
         if (count > limits.maximumWorkSteps - steps) inventoryFail("traversal work exceeds bounds")
         steps += count
     }
-    fun encode(record: JsonObject): ByteArray {
-        work()
+    fun encode(record: JsonObject, itemWork: Int = 1): ByteArray {
+        require(itemWork > 0)
+        work(itemWork.toLong())
         if (records >= limits.maximumRecords) inventoryFail("record count exceeds bounds")
         val encoded = OracleJson.canonicalBytes(record, limits.jsonLimits())
         var recordNodes = 0
@@ -557,7 +568,7 @@ private class InventoryCommitter(private val kind: String) {
 private fun commitRecords(kind: String, records: Sequence<JsonObject>, budget: InventoryBudget,
                           observe: (JsonObject) -> Unit = {}): JsonObject =
     InventoryCommitter(kind).also { commitment -> records.forEach {
-        val encoded = budget.encode(it)
+        val encoded = budget.encode(it, if (kind == "physicalDies") DwarfPhysicalDieTableEncoding.logicalRowCount(it) else 1)
         observe(it)
         commitment.add(encoded)
     } }.finish()
@@ -581,6 +592,9 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
     private val expectedPhysical: Long
     private val expectedNulls: Long
     private val expectedNonNulls: Long
+    private val expectedReferences: Long
+    private var observedReferences = 0L
+    private var tableRecords = 0L
     private val units = LinkedHashMap<String, UnitState>()
     private val unitOrder = ArrayList<UnitState>()
     private val dieMembership: PhysicalOffsetMembership
@@ -598,8 +612,12 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
 
     init {
         exact(metadata, PHYSICAL_CENSUS_KEYS)
-        require(metadata["schema"] == JsonPrimitive(DwarfPhysicalDieRowEncoding.CENSUS_SCHEMA) &&
-            metadata["recordEncoding"] == JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME) &&
+        require(metadata["schema"] == JsonPrimitive(DwarfPhysicalDieTableEncoding.CENSUS_SCHEMA) &&
+            metadata["recordEncoding"] == JsonPrimitive(DwarfPhysicalDieTableEncoding.NAME) &&
+            metadata["rowEncoding"] == JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME) &&
+            metadata["maximumRowsPerWireRecord"] == JsonPrimitive(DwarfPhysicalDieTableEncoding.MAXIMUM_ROWS) &&
+            metadata["wireRecordUnit"] == JsonPrimitive("bounded-contiguous-CU-table") &&
+            metadata["decodedRecordUnit"] == JsonPrimitive("non-null-physical-DIE") &&
             metadata["scope"] == JsonPrimitive("all-non-null-physical-debug-info-DIEs") &&
             metadata["semanticPopulationComplete"] == JsonPrimitive(false) &&
             metadata["verificationBoundary"] == JsonPrimitive("authenticated-input-scan-replay-required;bundle-hashes-alone-are-not-coverage-proof")) {
@@ -611,11 +629,12 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
         expectedPhysical = number(metadata, "physicalRecordCount")
         expectedNulls = number(metadata, "nullRecordCount")
         expectedNonNulls = number(metadata, "nonNullRecordCount")
-        require(expectedUnits <= budget.limits.maximumRecords && expectedNonNulls <= budget.limits.maximumRecords &&
+        expectedReferences = number(metadata, "referenceCount")
+        require(expectedUnits <= budget.limits.maximumRecords && expectedNonNulls <= DwarfPhysicalDieTableEncoding.MAXIMUM_DECODED_DIES && expectedReferences <= budget.limits.maximumWorkSteps &&
             expectedPhysical <= budget.limits.maximumWorkSteps) { "physical census population exceeds bounds" }
         require(expectedNulls <= expectedPhysical && expectedNonNulls <= expectedPhysical &&
             expectedPhysical == expectedNulls + expectedNonNulls) { "physical census counts do not reconcile" }
-        if (!present) require(expectedUnits == 0L && expectedPhysical == 0L) { "absent physical census has records" }
+        if (!present) require(expectedUnits == 0L && expectedPhysical == 0L && expectedReferences == 0L) { "absent physical census has records" }
         dieMembership = PhysicalOffsetMembership(expectedNonNulls.toInt(), budget)
     }
 
@@ -628,7 +647,15 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
                 metadataCounts = number(counts, "physicalUnits") to number(counts, "physicalDies")
             }
             "physicalUnits" -> observeUnit(record)
-            "physicalDies" -> observeDie(DwarfPhysicalDieRowEncoding.decode(record, budget.limits.maximumRecordBytes, { budget.work() }).toJson())
+            "physicalDies" -> {
+                val count = DwarfPhysicalDieTableEncoding.logicalRowCount(record)
+                require(count.toLong() <= expectedNonNulls - observedDieCount && tableRecords < budget.limits.maximumRecords) { "physical table adds rows or records beyond bounds" }
+                val rows = DwarfPhysicalDieTableEncoding.decode(record, observedDieCount, budget.limits.maximumRecordBytes,
+                    budget.limits.maximumRecordNodes, budget.limits.shardLimits.maximumShardBytes,
+                    budget.limits.shardLimits.maximumShardNodes, referenceWork = { budget.work() })
+                for (die in rows) observeDie(die.toJson())
+                tableRecords++
+            }
         }
     }
 
@@ -710,6 +737,8 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
         var previousOrdinal = -1L
         for (element in array(record, "references")) {
             // The row decoder charged this reference before allocating its descriptor.
+            require(observedReferences < expectedReferences) { "physical reference count exceeds the census" }
+            observedReferences++
             val reference = obj(element)
             exact(reference, PHYSICAL_REFERENCE_KEYS)
             val ordinal = number(reference, "attributeOrdinal")
@@ -791,13 +820,16 @@ private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: I
     fun finish() {
         currentUnit?.let(::finishUnit)
         require(units.size.toLong() == expectedUnits && nextUnitOrdinal == units.size &&
-            observedDieCount.toLong() == expectedNonNulls && summedPhysical == expectedPhysical &&
+            observedDieCount.toLong() == expectedNonNulls && observedReferences == expectedReferences && summedPhysical == expectedPhysical &&
             summedNulls == expectedNulls && summedNonNulls == expectedNonNulls) { "physical census counts differ from its records" }
         require(metadataCounts == (expectedUnits to expectedNonNulls)) { "raw metadata physical counts differ from the census" }
         targetStates.forEach { target, retained ->
             require(retained == dieMembership.contains(target)) { "physical reference state differs from target availability" }
         }
     }
+
+    fun wireSummary(): JsonObject = JsonObject(mapOf("tableRecords" to JsonPrimitive(tableRecords),
+        "decodedDies" to JsonPrimitive(observedDieCount), "decodedReferences" to JsonPrimitive(observedReferences)))
 
     private fun requireNullBytes(bytes: Long, count: Long) {
         require(bytes >= count && bytes <= Math.multiplyExact(count, 10L)) { "physical DIE byte gaps differ from null-record counts" }
@@ -988,8 +1020,8 @@ private val ROOT_KINDS = setOf("function-return", "function-parameter", "selecte
 private val INVENTORY_SHA = Regex("[0-9a-f]{64}")
 private const val INVENTORY_COMMITMENT_ENCODING = "sha256-domain-kind-record-marker-u64be-length-canonical-json-end-marker-u64be-count-v1"
 private val MANIFEST_KEYS = setOf("schema", "scannerProducer", "rawRecordEncoding", "commitmentEncoding", "typeGraphScope", "inputs",
-    "requiredTypePopulationComplete", "physicalCensus", "rawCommitments", "inventoryCommitments", "counts", "inventorySha256")
-private val PHYSICAL_CENSUS_KEYS = setOf("schema", "recordEncoding", "present", "complete", "scope", "compilationUnitCount", "physicalRecordCount",
+    "requiredTypePopulationComplete", "physicalCensus", "physicalCensusWireSummary", "rawCommitments", "inventoryCommitments", "counts", "inventorySha256")
+private val PHYSICAL_CENSUS_KEYS = setOf("schema", "recordEncoding", "rowEncoding", "maximumRowsPerWireRecord", "wireRecordUnit", "decodedRecordUnit", "referenceCount", "present", "complete", "scope", "compilationUnitCount", "physicalRecordCount",
     "nullRecordCount", "nonNullRecordCount", "semanticPopulationComplete", "verificationBoundary")
 private val PHYSICAL_UNIT_KEYS = setOf("locator", "compilationUnitOffset", "firstDieOffset", "endOffset", "rootLocator",
     "physicalRecordCount", "nullRecordCount", "nonNullRecordCount")

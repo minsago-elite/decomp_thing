@@ -224,7 +224,7 @@ class BoundedDwarfObservationInventoryTest {
         assertTrue(schemaFailure.message.orEmpty().contains("closed schema"))
         val verifier = BoundedDwarfObservationInventoryV1.verifier(inventory.manifest)
         verifier.acceptStrippedLayout(null)
-        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.wireRecordCount) }
         verifier.finish()
         assertFailsWith<IllegalArgumentException> { verifier.finish() }
     }
@@ -311,12 +311,47 @@ class BoundedDwarfObservationInventoryTest {
     }
 
     @Test
+    fun `physical table bare record bounds are separate from shard envelope bounds`() {
+        val references = (0 until 100).map { ordinal ->
+            DwarfPhysicalReferenceCensus(ordinal, 0x49, FULL_TREE_DW_FORM_GNU_REF_ALT,
+                FULL_TREE_DW_FORM_GNU_REF_ALT, 0, ULong.MAX_VALUE, null, "unsupported-reference")
+                .also { it.bindTargets(emptySet()); it.seal() }
+        }
+        val dies = (0 until 128).map { index -> DwarfPhysicalDieCensus(0, index.toLong() + 11,
+            index.toLong() + 12, if (index == 0) 0x11 else 0x24, if (index == 0) 0 else 1,
+            if (index == 0) null else 11, index == 0, if (index == 0) references else emptyList()) }
+        val input = facts(physicalCensusPresent = true, physicalUnits = listOf(
+            DwarfPhysicalUnitCensus(0, 11, 140, ".debug_info:cu=0x0:die=0xb", 129, 1, 128)), physicalDies = dies)
+        val inventory = collect(input); val raw = stream(input, inventory)
+        val table = DwarfPhysicalDieTableEncoding.records(dies).single()
+        val bytes = OracleJson.canonicalBytes(table).size
+        fun nodes(value: JsonElement): Int = 1 + when (value) {
+            is JsonObject -> value.values.sumOf(::nodes)
+            is JsonArray -> value.sumOf(::nodes)
+            else -> 0
+        }
+        val nodeCount = nodes(table)
+        val chargedRecords = raw.flatMap { shard -> wireRecordsForTest(shard.kind, shard.records).map {
+            if (shard.kind == "metadata") semanticMetadata(it) else it
+        } } + JsonObject(mapOf("objectLayout" to JsonNull))
+        assertEquals(bytes, chargedRecords.maxOf { OracleJson.canonicalBytes(it).size })
+        assertEquals(nodeCount, chargedRecords.maxOf(::nodes))
+        val exact = BoundedDwarfObservationInventoryLimits(maximumRecordBytes = bytes, maximumRecordNodes = nodeCount)
+        assertEquals(inventory.manifest, collect(input, limits = exact).manifest)
+        verify(inventory.manifest, raw, limits = exact)
+        for (limits in listOf(exact.copy(maximumRecordBytes = bytes - 1), exact.copy(maximumRecordNodes = nodeCount - 1))) {
+            assertFailsWith<IllegalArgumentException> { collect(input, limits = limits) }
+            assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, raw, limits = limits) }
+        }
+    }
+
+    @Test
     fun `physical census retains unknown DIEs and references without changing semantic projections`() {
         val projected = facts(functions = listOf(function("f", known("t", "return"))), types = listOf(type("t")))
         val input = physicalFacts(functions = projected.functions, types = projected.types.values.toList())
         val inventory = collect(input)
         val census = inventory.manifest.getValue("physicalCensus") as JsonObject
-        assertEquals("dwarf-pre-policy-inventory-v3", string(inventory.manifest, "schema"))
+        assertEquals("dwarf-pre-policy-inventory-v4", string(inventory.manifest, "schema"))
         assertTrue(boolean(census, "present"))
         assertTrue(boolean(census, "complete"))
         assertEquals("1", string(census, "compilationUnitCount"))
@@ -345,7 +380,7 @@ class BoundedDwarfObservationInventoryTest {
         verify(inventory.manifest, raw)
         val authenticated = BoundedDwarfObservationInventoryV1.authenticatedVerifier(inventory.manifest, input)
         authenticated.acceptStrippedLayout(null)
-        raw.forEach { authenticated.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        raw.forEach { authenticated.accept(it.kind, it.ordinal, it.bytes, it.wireRecordCount) }
         authenticated.finish()
     }
 
@@ -413,7 +448,8 @@ class BoundedDwarfObservationInventoryTest {
         val originalMetadata = changed.single { it.kind == "metadata" }.records.single()
         val recordCounts = originalMetadata.getValue("recordCounts") as JsonObject
         val census = inventory.manifest.getValue("physicalCensus") as JsonObject
-        val changedCensus = JsonObject(census + mapOf("physicalRecordCount" to JsonPrimitive(3), "nonNullRecordCount" to JsonPrimitive(2)))
+        val changedCensus = JsonObject(census + mapOf("physicalRecordCount" to JsonPrimitive(3), "nonNullRecordCount" to JsonPrimitive(2),
+            "referenceCount" to JsonPrimitive(changedDies.sumOf { array(it, "references").size })))
         val changedMetadata = JsonObject(originalMetadata + mapOf("recordCounts" to JsonObject(recordCounts +
             ("physicalDies" to JsonPrimitive(2))), "physicalCensus" to changedCensus))
         changed = replaceGroup(replaceGroup(replaceGroup(changed, "physicalDies", changedDies),
@@ -421,7 +457,9 @@ class BoundedDwarfObservationInventoryTest {
         var changedManifest = replaceCommitment(inventory.manifest, "rawCommitments", "physicalDies", changedDies)
         changedManifest = replaceCommitment(changedManifest, "rawCommitments", "physicalUnits", changedUnits)
         changedManifest = replaceCommitment(changedManifest, "rawCommitments", "metadata", listOf(semanticMetadata(changedMetadata)))
-        changedManifest = rehash(JsonObject(changedManifest + ("physicalCensus" to changedCensus)))
+        changedManifest = rehash(JsonObject(changedManifest + mapOf("physicalCensus" to changedCensus,
+            "physicalCensusWireSummary" to JsonObject(mapOf("tableRecords" to JsonPrimitive(1), "decodedDies" to JsonPrimitive(2),
+                "decodedReferences" to JsonPrimitive(changedDies.sumOf { array(it, "references").size }))))))
         // Integrity verification cannot authenticate what these reinterpreted bytes originally contained.
         verify(changedManifest, changed)
         assertFailsWith<IllegalArgumentException> {
@@ -463,6 +501,38 @@ class BoundedDwarfObservationInventoryTest {
         val tooLittleWork = BoundedDwarfObservationInventoryLimits(maximumWorkSteps = 3)
         assertFailsWith<IllegalArgumentException> { collect(physical, limits = tooLittleWork) }
         assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, stream(physical, inventory), limits = tooLittleWork) }
+    }
+
+    @Test
+    fun `actual shared object budget counts one table while all decoded DIEs stay independently bounded`() {
+        val root = ".debug_info:cu=0x0:die=0xb"
+        val dies = listOf(DwarfPhysicalDieCensus(0, 11, 12, 0x11, 0, null, true)) + (0 until 31).map {
+            DwarfPhysicalDieCensus(0, it.toLong() + 12, it.toLong() + 13, 0x24, 1, 11, false)
+        }
+        val input = facts(physicalCensusPresent = true, physicalUnits = listOf(DwarfPhysicalUnitCensus(0, 11, 44, root, 33, 1, 32)), physicalDies = dies)
+        val inventory = collect(input)
+        val objects = (array(inventory.manifest, "rawCommitments") + array(inventory.manifest, "inventoryCommitments"))
+            .sumOf { string(it as JsonObject, "recordCount").toLong() }
+        assertEquals(6L, objects) // Metadata, unit, table, stripped metadata, two required findings.
+        val exact = BoundedDwarfObservationInventoryLimits(maximumRecords = objects)
+        assertEquals(inventory.manifest, collect(input, limits = exact).manifest)
+        verify(inventory.manifest, stream(input, inventory), limits = exact)
+        val wire = inventory.manifest.getValue("physicalCensusWireSummary") as JsonObject
+        assertEquals("1", string(wire, "tableRecords")); assertEquals("32", string(wire, "decodedDies")); assertEquals("0", string(wire, "decodedReferences"))
+        assertFailsWith<FullTreeControlException> { collect(input, limits = exact.copy(maximumRecords = objects - 1)) }
+    }
+
+    @Test
+    fun `rehashed wire table DIE and reference summary count forgeries fail plain verification`() {
+        val input = physicalFacts(); val inventory = collect(input); val raw = stream(input, inventory)
+        val summary = inventory.manifest.getValue("physicalCensusWireSummary") as JsonObject
+        for (key in summary.keys) {
+            val changed = JsonObject(summary + (key to JsonPrimitive(string(summary, key).toLong() + 1)))
+            val manifest = rehash(JsonObject(inventory.manifest + ("physicalCensusWireSummary" to changed)))
+            assertFailsWith<IllegalArgumentException>(key) { verify(manifest, raw) }
+        }
+        val extra = rehash(JsonObject(inventory.manifest + ("physicalCensusWireSummary" to JsonObject(summary + ("extra" to JsonPrimitive(1))))))
+        assertFailsWith<IllegalArgumentException> { verify(extra, raw) }
     }
 
     @Test
@@ -520,14 +590,14 @@ class BoundedDwarfObservationInventoryTest {
         val inventory = collect(input)
         val raw = stream(input, inventory)
         verify(inventory.manifest, raw)
-        val exactBytes = raw.sumOf { shard -> shard.records.sumOf { record ->
-            OracleJson.canonicalBytes(if (shard.kind == "metadata") semanticMetadata(record) else wireForTest(shard.kind, record)).size.toLong()
+        val exactBytes = raw.sumOf { shard -> wireRecordsForTest(shard.kind, shard.records).sumOf { record ->
+            OracleJson.canonicalBytes(if (shard.kind == "metadata") semanticMetadata(record) else record).size.toLong()
         } } + OracleJson.canonicalBytes(JsonObject(mapOf("objectLayout" to JsonNull))).size
         val limits = BoundedDwarfObservationInventoryLimits(maximumCanonicalBytes = exactBytes)
         assertEquals(inventory.manifest, collect(input, limits = limits).manifest)
         val verifier = BoundedDwarfObservationInventoryV1.authenticatedVerifier(inventory.manifest, input, limits)
         verifier.acceptStrippedLayout(null)
-        raw.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        raw.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.wireRecordCount) }
         verifier.finish()
         val census = inventory.manifest.getValue("physicalCensus") as JsonObject
         val hostileCount = rehash(JsonObject(inventory.manifest + ("physicalCensus" to JsonObject(census + mapOf(
@@ -535,13 +605,13 @@ class BoundedDwarfObservationInventoryTest {
         assertFailsWith<IllegalArgumentException> { BoundedDwarfObservationInventoryV1.verifier(hostileCount) }
     }
 
-    private data class Shard(val kind: String, val ordinal: Int, val bytes: ByteArray, val records: List<JsonObject>)
+    private data class Shard(val kind: String, val ordinal: Int, val bytes: ByteArray, val records: List<JsonObject>, val wireRecordCount: Int = records.size)
 
     private fun stream(input: BoundedDwarfInterfaceFacts, inventory: BoundedDwarfObservationInventory,
                        objects: List<FullTreeElfObjectSymbol> = emptyList()): List<Shard> = buildList {
         val retain: (String, Int, ByteArray, Int) -> Unit = { kind, ordinal, bytes, count ->
             add(Shard(kind, ordinal, bytes, parseCanonicalDwarfShard(bytes, expectedKind = kind,
-                expectedOrdinal = ordinal, expectedRecordCount = count).records.map { expandedForTest(kind, it) }))
+                expectedOrdinal = ordinal, expectedRecordCount = count).records.flatMap { expandedForTest(kind, it) }, count))
         }
         input.visitCanonicalShards(retain)
         BoundedDwarfCanonicalShardWriter(consumer = retain).apply {
@@ -550,8 +620,12 @@ class BoundedDwarfObservationInventoryTest {
         inventory.visitCanonicalShards(retain)
     }
 
-    private fun expandedForTest(kind: String, record: JsonObject): JsonObject =
-        if (kind == "physicalDies" && record.keys == setOf("row")) DwarfPhysicalDieRowEncoding.decode(record).toJson() else record
+    private fun expandedForTest(kind: String, record: JsonObject): List<JsonObject> =
+        if (kind == "physicalDies") {
+            // Keep malformed table fields in tamper controls; the verifier rejects the wire.
+            val clean = JsonObject(record.filterKeys { it in setOf("encoding", "compilationUnitOffset", "firstDieOrdinal", "rowCount", "rows") })
+            DwarfPhysicalDieTableEncoding.decode(clean).map { it.toJson() }.toList()
+        } else listOf(record)
 
     /** Tamper controls mutate full semantics, then independently rebuild the versioned wire row. */
     private fun wireForTest(kind: String, record: JsonObject): JsonObject {
@@ -577,12 +651,31 @@ class BoundedDwarfObservationInventoryTest {
         return if (record["category"] != JsonPrimitive(die.category)) JsonObject(encoded + ("unexpectedCategory" to record.getValue("category"))) else encoded
     }
 
+    private fun wireRecordsForTest(kind: String, records: List<JsonObject>): List<JsonObject> {
+        if (kind != "physicalDies") return records
+        val result = ArrayList<JsonObject>()
+        var first = 0
+        while (first < records.size) {
+            val unit = string(records[first], "compilationUnitLocator").substringAfter("cu=0x")
+            var end = first + 1
+            while (end < records.size && end - first < DwarfPhysicalDieTableEncoding.MAXIMUM_ROWS &&
+                string(records[end], "compilationUnitLocator").substringAfter("cu=0x") == unit) end++
+            val wireRows = records.subList(first, end).map { wireForTest(kind, it) }
+            val fields = linkedMapOf<String, JsonElement>("encoding" to JsonPrimitive(DwarfPhysicalDieTableEncoding.NAME),
+                "compilationUnitOffset" to JsonPrimitive("0x$unit"), "firstDieOrdinal" to JsonPrimitive(first),
+                "rowCount" to JsonPrimitive(end - first), "rows" to JsonArray(wireRows.map { it.getValue("row") }))
+            if (wireRows.any { "unexpectedCategory" in it }) fields["unexpectedCategory"] = JsonPrimitive(true)
+            result += JsonObject(fields); first = end
+        }
+        return result
+    }
+
     private fun replaceGroup(stream: List<Shard>, kind: String, records: List<JsonObject>): List<Shard> {
         val replacements = mutableListOf<Shard>()
         BoundedDwarfCanonicalShardWriter { observedKind, ordinal, bytes, count ->
             replacements += Shard(observedKind, ordinal, bytes, parseCanonicalDwarfShard(bytes,
-                expectedKind = kind, expectedOrdinal = ordinal, expectedRecordCount = count).records.map { expandedForTest(kind, it) })
-        }.apply { write(kind, records.asSequence().map { wireForTest(kind, it) }); finish() }
+                expectedKind = kind, expectedOrdinal = ordinal, expectedRecordCount = count).records.flatMap { expandedForTest(kind, it) }, count)
+        }.apply { write(kind, wireRecordsForTest(kind, records).asSequence()); finish() }
         val index = stream.indexOfFirst { it.kind == kind }
         return stream.take(index) + replacements + stream.drop(index).filter { it.kind != kind }
     }
@@ -591,7 +684,7 @@ class BoundedDwarfObservationInventoryTest {
                        limits: BoundedDwarfObservationInventoryLimits = BoundedDwarfObservationInventoryLimits()) {
         val verifier = BoundedDwarfObservationInventoryV1.verifier(manifest, limits)
         verifier.acceptStrippedLayout(layout)
-        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.wireRecordCount) }
         verifier.finish()
     }
 
@@ -652,18 +745,19 @@ class BoundedDwarfObservationInventoryTest {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update("bounded-dwarf-observation-records-v1\n$kind\n".toByteArray(Charsets.UTF_8))
         var totalBytes = 0L
-        records.forEach {
-            val bytes = OracleJson.canonicalBytes(wireForTest(kind, it))
+        val wireRecords = wireRecordsForTest(kind, records)
+        wireRecords.forEach {
+            val bytes = OracleJson.canonicalBytes(it)
             digest.update(1.toByte())
             digest.update(ByteBuffer.allocate(8).putLong(bytes.size.toLong()).array())
             digest.update(bytes)
             totalBytes += bytes.size
         }
         digest.update(0.toByte())
-        digest.update(ByteBuffer.allocate(8).putLong(records.size.toLong()).array())
+        digest.update(ByteBuffer.allocate(8).putLong(wireRecords.size.toLong()).array())
         val hash = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
         return JsonObject(mapOf("kind" to JsonPrimitive(kind), "sha256" to JsonPrimitive(hash),
-            "recordCount" to JsonPrimitive(records.size), "canonicalBytes" to JsonPrimitive(totalBytes)))
+            "recordCount" to JsonPrimitive(wireRecords.size), "canonicalBytes" to JsonPrimitive(totalBytes)))
     }
 
     private fun facts(

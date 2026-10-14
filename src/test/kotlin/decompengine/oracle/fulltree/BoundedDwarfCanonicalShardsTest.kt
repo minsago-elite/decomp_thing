@@ -24,14 +24,14 @@ class BoundedDwarfCanonicalShardsTest {
             physicalUnits = listOf(unit), physicalDies = dies, physicalCensusPresent = true)
         val parts = collectTypeShards(facts)
         assertEquals(listOf(unit.toJson()), parts.filter { it.first.kind == "physicalUnits" }.flatMap { it.first.records })
-        assertEquals(dies.map { it.toJson() }, parts.filter { it.first.kind == "physicalDies" }.flatMap { it.first.records }.map { DwarfPhysicalDieRowEncoding.decode(it).toJson() })
+        assertEquals(dies.map { it.toJson() }, parts.filter { it.first.kind == "physicalDies" }.flatMap { it.first.records }.flatMap { DwarfPhysicalDieTableEncoding.decode(it).map { it.toJson() }.toList() })
         assertTrue(parts.filter { it.first.kind in setOf("functions", "types", "typeChildren") }.all { it.first.records.isEmpty() })
         val encoded = parts.single { it.first.kind == "physicalDies" }.second
         assertFailsWith<IllegalArgumentException> {
             parseCanonicalDwarfShard(encoded, expectedKind = "types", expectedOrdinal = 0, expectedRecordCount = 2)
         }
         assertFailsWith<IllegalArgumentException> {
-            parseCanonicalDwarfShard(encoded, expectedKind = "physicalDies", expectedOrdinal = 0, expectedRecordCount = 1)
+            parseCanonicalDwarfShard(encoded, expectedKind = "physicalDies", expectedOrdinal = 0, expectedRecordCount = 2)
         }
         assertFailsWith<IllegalArgumentException> {
             parseCanonicalDwarfShard(encoded, BoundedDwarfShardLimits(maximumShardBytes = encoded.size - 1))

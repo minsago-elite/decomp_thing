@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceFactsTest {
     @Test
-    fun `GNU alternate references remain external and common inclusion is a known physical tag`() =
+    fun `GNU alternate references remain external and common inclusion is a known physical tag`(): Unit =
         inInterfaceFixtureDirectory { root ->
             fun fixture(indirectOperand: Long) = typeElf(
                 die("declaration", DW_TAG_SUBPROGRAM, listOf(flag(DW_AT_DECLARATION)), children = listOf(
@@ -57,7 +57,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `source replay target lookups share the aggregate parse work budget`() =
+    fun `source replay target lookups share the aggregate parse work budget`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val declarations = (0 until 32).map { index ->
                 die("node$index", 0x16, listOf(reference(0x49, if (index == 31) "int" else "node${index + 1}")))
@@ -77,17 +77,18 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `physical census retains declarations unreachable types locals vendor tags and raw unresolved edges`() =
+    fun `physical census retains declarations unreachable types locals vendor tags and raw unresolved edges`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(
-                emitted("entry", "reachable"),
+                emitted("entry", "reachable").copy(children = listOf(
+                    die("scope", 0x0b, children = listOf(die("local", 0x34, listOf(text(DW_AT_NAME, "local"),
+                        reference(0x49, "unreachable-b"), raw(0x02, FULL_TREE_DW_FORM_EXPRLOC,
+                            uleb(1) + byteArrayOf(0x50)))))))),
                 die("declaration", DW_TAG_SUBPROGRAM, listOf(flag(DW_AT_DECLARATION), reference(0x49, "unreachable-a"))),
                 integerType("reachable"),
                 die("unreachable-a", 0x13, listOf(text(DW_AT_NAME, "Same"), reference(0x49, "unreachable-b")),
                     children = listOf(die("member", 0x0d, listOf(reference(0x49, "unreachable-a"))))),
                 die("unreachable-b", 0x13, listOf(text(DW_AT_NAME, "Same"), reference(0x49, "unreachable-a"))),
-                die("scope", 0x0b, children = listOf(die("local", 0x34, listOf(text(DW_AT_NAME, "local"),
-                    reference(0x49, "unreachable-b"))))),
                 die("vendor", 0x4080, listOf(reference(0x49, "reachable", addend = 1),
                     raw(0x31, FULL_TREE_DW_FORM_REF_SIG8, ByteArray(8)),
                     raw(0x47, FULL_TREE_DW_FORM_REF4, ByteArray(4) { 0x7f }))),
@@ -97,6 +98,11 @@ class BoundedDwarfInterfaceFactsTest {
             assertTrue(facts.physicalCensusPresent)
             assertEquals(setOf(fixture.locator("entry")), facts.functions.map { it.locator }.toSet())
             assertEquals(setOf(fixture.locator("reachable")), facts.types.keys)
+            val local = facts.globals.single { it.locator == fixture.locator("local") }
+            assertEquals(DwarfInterfaceFactState.KNOWN, local.storage.state)
+            assertEquals(listOf("automatic"), local.storage.values)
+            assertEquals(listOf(fixture.locator("unreachable-b")), local.type.values)
+            assertTrue("type-graph-not-expanded-for-automatic-local" in local.type.reasons)
             val census = facts.physicalDies.associateBy { it.locator }
             assertEquals(10, census.size)
             assertEquals("function", census.getValue(fixture.locator("declaration")).category)
@@ -111,7 +117,7 @@ class BoundedDwarfInterfaceFactsTest {
             assertTrue(facts.physicalDies.flatMap { it.references }.any { "reference-cycle" in it.reasons })
             val unit = facts.physicalUnits.single()
             assertEquals(census.size.toLong(), unit.nonNullRecordCount)
-            assertEquals(3L, unit.nullRecordCount)
+            assertEquals(4L, unit.nullRecordCount)
             assertEquals(unit.nonNullRecordCount + unit.nullRecordCount, facts.scannedDies)
             val repeated = scanInterfaceFixture(artifact, root, facts.limits)
             assertContentEquals(facts.canonicalBytes(), repeated.canonicalBytes())
@@ -151,7 +157,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `physical census keeps cross unit references and exact separate unit counts`() =
+    fun `physical census keeps cross unit references and exact separate unit counts`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElfUnits(listOf(
                 TypeGraphCompilationUnit("one", listOf(die("declaration", DW_TAG_SUBPROGRAM,
@@ -176,7 +182,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `converging function origins charge the retained name once without losing provenance`() =
+    fun `converging function origins charge the retained name once without losing provenance`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val longName = "F".repeat(4096)
             val branches = (0 until 15).map { index ->
@@ -206,7 +212,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `compiled scalar pointer typedef aggregate and variadic interfaces preserve independent rich facts`() =
+    fun `compiled scalar pointer typedef aggregate and variadic interfaces preserve independent rich facts`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val artifact = compileInterfaceFixture(root, "interfaces.c", """
                 #include <stdarg.h>
@@ -265,7 +271,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `compiled C++ specification links retain return parameters linkage and source language`() =
+    fun `compiled C++ specification links retain return parameters linkage and source language`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val artifact = compileInterfaceFixture(root, "declarations.cpp", """
                 typedef unsigned long Counter;
@@ -287,7 +293,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `artifact identity and resource ceilings fail before interface evidence escapes`() =
+    fun `artifact identity and resource ceilings fail before interface evidence escapes`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val artifact = compileInterfaceFixture(root, "limits.c", """
                 int add(int left, int right) { return left + right; }
@@ -319,7 +325,7 @@ class BoundedDwarfInterfaceFactsTest {
         }
 
     @Test
-    fun `stripped input reports missing DWARF without manufacturing a source signature`() =
+    fun `stripped input reports missing DWARF without manufacturing a source signature`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val artifact = compileInterfaceFixture(root, "stripped.c", "int main(void) { return 0; }")
             runInterfaceCommand(root, listOf("strip", "--strip-debug", artifact.toString()))

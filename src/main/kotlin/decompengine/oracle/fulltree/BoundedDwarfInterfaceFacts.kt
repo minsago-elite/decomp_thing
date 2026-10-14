@@ -374,12 +374,18 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         "retainedFactAccounting" to JsonPrimitive("charged-primitive-census-block-capacity-and-traversal-arrays;other-facts-fixed-allowances-plus-utf16;not-rss"),
     ))
     fun physicalCensusJson(): JsonObject = JsonObject(linkedMapOf(
-        "schema" to JsonPrimitive(DwarfPhysicalDieRowEncoding.CENSUS_SCHEMA), "present" to JsonPrimitive(physicalCensusPresent),
-        "recordEncoding" to JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME),
+        "schema" to JsonPrimitive(DwarfPhysicalDieTableEncoding.CENSUS_SCHEMA), "present" to JsonPrimitive(physicalCensusPresent),
+        "recordEncoding" to JsonPrimitive(DwarfPhysicalDieTableEncoding.NAME),
+        "rowEncoding" to JsonPrimitive(DwarfPhysicalDieRowEncoding.NAME),
+        "maximumRowsPerWireRecord" to JsonPrimitive(DwarfPhysicalDieTableEncoding.MAXIMUM_ROWS),
+        "wireRecordUnit" to JsonPrimitive("bounded-contiguous-CU-table"),
+        "decodedRecordUnit" to JsonPrimitive("non-null-physical-DIE"),
         "complete" to JsonPrimitive(physicalCensusPresent), "scope" to JsonPrimitive("all-non-null-physical-debug-info-DIEs"),
         "compilationUnitCount" to JsonPrimitive(physicalUnits.size), "physicalRecordCount" to JsonPrimitive(physicalUnits.sumOf { it.physicalRecordCount }),
         "nullRecordCount" to JsonPrimitive(physicalUnits.sumOf { it.nullRecordCount }),
         "nonNullRecordCount" to JsonPrimitive(physicalDies.size),
+        "referenceCount" to JsonPrimitive(if (physicalDies is CompactPhysicalDieList) physicalDies.referenceCount.toLong()
+            else physicalDies.sumOf { it.references.size.toLong() }),
         "semanticPopulationComplete" to JsonPrimitive(false),
         "verificationBoundary" to JsonPrimitive("authenticated-input-scan-replay-required;bundle-hashes-alone-are-not-coverage-proof"),
     ))
@@ -429,7 +435,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         consumer("globals", globals.asSequence().map { it.toJson() })
         consumer("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
         consumer("physicalUnits", physicalUnits.asSequence().map { it.toJson() })
-        consumer("physicalDies", physicalDies.asSequence().map(DwarfPhysicalDieRowEncoding::encode))
+        consumer("physicalDies", DwarfPhysicalDieTableEncoding.records(physicalDies))
     }
 
     /** Project the header directly: inline child JSON can itself exceed a shard's node bound. */
@@ -469,7 +475,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
 
 /** Program-neutral source interface facts, independent of recovered models and ABI scoring. */
 internal object BoundedDwarfInterfaceFactScanner {
-    const val PRODUCER = "bounded-dwarf-interface-facts-v4"
+    const val PRODUCER = "bounded-dwarf-interface-facts-v5"
 
     /** Replays every physical record from the held authenticated input without retaining a second census. */
     fun verifyPhysicalCensus(
