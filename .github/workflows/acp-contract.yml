@@ -39,6 +39,8 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Verify bounded provider guardian fixtures
+        run: python3 -B scripts/verify-acp-provider-guardian.py
       - name: Prepare finite ACP quota fixture
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Qualify every required ACP and shared-agent suite
@@ -54,3 +56,4 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/acp-contract-qualification
+            build/provider-guardian-qualification
