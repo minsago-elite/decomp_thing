@@ -346,9 +346,9 @@
     {
       "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
       "rule": "generic-layout",
-      "fragment": "objectValue[\"include\"]?.let { require(it.jsonArray.all { item -> item.jsonPrimitive.isString && item.jsonPrimitive.content == \"reasoning.encrypted_content\" }) }",
+      "fragment": "request[\"include\"]?.let {\n            require(it.jsonArray.size <= 1)\n            it.jsonArray.forEach { item -> require(string(item, 27) == \"reasoning.encrypted_content\") }\n        }",
       "count": 1,
-      "reason": "Validates the Responses request JSON include field against its single approved encrypted-reasoning value; this exact expression does not select a reconstructed source directory."
+      "reason": "Validates the Responses request JSON include field as a bounded singleton encrypted-reasoning array; this exact block does not select a reconstructed source directory."
     },
     {
       "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
