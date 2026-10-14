@@ -989,6 +989,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 else:
                     contract["profile"]["snapshot"] = "20240703T000000Z"
                     record["profile"]["snapshot"] = contract["profile"]["snapshot"]
+                    contract["profile"]["snapshotBase"] = f"https://snapshot.ubuntu.com/ubuntu/{contract['profile']['snapshot']}/"
+                    record["profile"]["snapshotBase"] = contract["profile"]["snapshotBase"]
                 selected = Path(temp) / "contract.json"
                 selected.write_bytes(provision.canonical_json(contract))
                 record["recipe"] = provision.recipe_identity(selected)
