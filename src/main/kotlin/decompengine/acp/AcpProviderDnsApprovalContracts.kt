@@ -11,7 +11,9 @@ internal object AcpProviderDnsApprovalCandidates {
         val references: Map<Node, String> = Collections.unmodifiableMap(references.toMap())
     }
     class Receipt internal constructor(val sha256: String, val kind: String, val root: String,
-        internal val subjects: Map<Node, String>)
+        subjects: Map<Node, String>) {
+        internal val subjects: Map<Node, String> = Collections.unmodifiableMap(subjects.toMap())
+    }
     private val receiptSubjects = mapOf("source" to setOf(Node.A, Node.I), "provisioning" to setOf(Node.P),
         "policy-decision" to setOf(Node.P), "independent-review" to setOf(Node.M, Node.P))
     private val generatedResources = setOf("META-INF/provider-dns/application-input-v1.json",

@@ -309,6 +309,64 @@ class AcpProviderDnsBuildInputTest {
             putJsonObject("receipts") { receipts.forEach { put(it.kind, it.sha256) } } }
         return Dag(a, i, m, p, receipts, envelope, roots)
     }
+    @Test fun `parsed receipt subjects reject mutation without changing digest or envelope binding`() {
+        val d = dag()
+        val review = d.receipts.single { it.kind == "independent-review" }
+        val subjects = review.subjects.toMap()
+        val digest = review.sha256
+        val originalEnvelope = AcpProviderDnsApprovalCandidates.envelope(bytes(d.envelope),
+            d.a, d.i, d.m, d.p, d.receipts, d.roots)
+        val exposed = review.subjects as MutableMap<AcpProviderDnsApprovalCandidates.Node, String>
+        assertFailsWith<UnsupportedOperationException> { exposed[AcpProviderDnsApprovalCandidates.Node.M] = "0".repeat(64) }
+        assertFailsWith<UnsupportedOperationException> { exposed.remove(AcpProviderDnsApprovalCandidates.Node.P) }
+        assertFailsWith<UnsupportedOperationException> { exposed.clear() }
+        assertFailsWith<UnsupportedOperationException> { exposed.entries.first().setValue("0".repeat(64)) }
+        assertEquals(subjects, review.subjects)
+        assertEquals(digest, review.sha256)
+        assertEquals(originalEnvelope.sha256, AcpProviderDnsApprovalCandidates.envelope(bytes(d.envelope),
+            d.a, d.i, d.m, d.p, d.receipts, d.roots).sha256)
+        assertFailsWith<AcpProviderDnsRuntimeUnavailableException> {
+            AcpProviderDnsRuntimeProfiles.requireApproved("linux-x86_64-jdk21-dns-v2", d.m.sha256, d.p.sha256)
+        }
+    }
+
+    @Test fun `receipt constructor detaches caller aliases and cannot retarget a retained review digest`() {
+        val d = dag()
+        val review = d.receipts.single { it.kind == "independent-review" }
+        val originalSubjects = review.subjects.toMap()
+        val alias = LinkedHashMap(originalSubjects)
+        val detached = AcpProviderDnsApprovalCandidates.Receipt(review.sha256, review.kind, review.root, alias)
+        alias[AcpProviderDnsApprovalCandidates.Node.M] = "0".repeat(64)
+        alias.clear()
+        assertEquals(originalSubjects, detached.subjects)
+        assertEquals(review.sha256, detached.sha256)
+        val receipts = d.receipts.map { if (it.kind == review.kind) detached else it }
+        AcpProviderDnsApprovalCandidates.envelope(bytes(d.envelope), d.a, d.i, d.m, d.p, receipts, d.roots)
+
+        val wrongReview = AcpProviderDnsApprovalCandidates.receipt(bytes(buildJsonObject {
+            put("schema", "provider-dns-approval-receipt-candidate-v1")
+            put("kind", "independent-review"); put("rootSha256", review.root)
+            putJsonObject("subjects") { put("M", "0".repeat(64)); put("P", "1".repeat(64)) }
+            put("evidenceSha256", "9".repeat(64)); put("signatureSha256", "8".repeat(64))
+        }))
+        val wrongSubjects = wrongReview.subjects.toMap()
+        val retargetingAlias = LinkedHashMap(wrongSubjects)
+        val retained = AcpProviderDnsApprovalCandidates.Receipt(wrongReview.sha256, wrongReview.kind,
+            wrongReview.root, retargetingAlias)
+        retargetingAlias.putAll(originalSubjects)
+        assertEquals(wrongSubjects, retained.subjects)
+        assertEquals(wrongReview.sha256, retained.sha256)
+        assertNotEquals(review.sha256, retained.sha256)
+        val substitutedReceipts = d.receipts.map { if (it.kind == review.kind) retained else it }
+        val declaration = JsonObject(d.envelope + ("receipts" to buildJsonObject {
+            substitutedReceipts.forEach { put(it.kind, it.sha256) }
+        }))
+        assertFailsWith<IllegalArgumentException> {
+            AcpProviderDnsApprovalCandidates.envelope(bytes(declaration), d.a, d.i, d.m, d.p,
+                substitutedReceipts, d.roots)
+        }
+    }
+
     @Test fun `acyclic A I M P E F Q candidates bind immutable upstream identities only`() {
         val d = dag(); val e = AcpProviderDnsApprovalCandidates.envelope(bytes(d.envelope), d.a, d.i, d.m, d.p, d.receipts, d.roots)
         val f = AcpProviderDnsApprovalCandidates.finalArtifactObservation(bytes(buildJsonObject {
