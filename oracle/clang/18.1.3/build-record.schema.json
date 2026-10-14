@@ -302,7 +302,7 @@
     },
     "recipe": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256", "hostWorkerSha256", "hostPolicySha256", "hostEnvironmentRecipeSha256", "aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256", "hostTransportSha256", "hostJournalSha256", "gradleBuildSha256", "gradleSettingsSha256", "gradlePropertiesSha256", "gradleWrapperPropertiesSha256", "gradleWrapperSha256", "gradleLauncherSha256"],
+      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256", "hostWorkerSha256", "hostPolicySha256", "hostEnvironmentRecipeSha256", "aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256", "hostTransportSha256", "hostJournalSha256", "gradleBuildSha256", "gradleSettingsSha256", "gradlePropertiesSha256", "gradleWrapperPropertiesSha256", "gradleWrapperSha256", "gradleLauncherSha256", "aLoaderControlSupportSha256", "aLoaderSchemasSha256", "aLoaderLinuxFilesystemSha256"],
       "properties": {
         "contractSha256": {"$ref": "#/$defs/sha256"},
         "schemaSha256": {"$ref": "#/$defs/sha256"},
@@ -316,6 +316,9 @@
         "hostWorkerSha256": {"$ref": "#/$defs/sha256"},
         "hostPolicySha256": {"$ref": "#/$defs/sha256"},
         "hostEnvironmentRecipeSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderControlSupportSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderSchemasSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderLinuxFilesystemSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderArtifactsSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderJsonSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderSnapshotSha256": {"$ref": "#/$defs/sha256"},

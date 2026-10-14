@@ -4775,7 +4775,8 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
     def test_recipe_rejects_changed_transitive_loader_helpers_and_snapshot_recipe(self):
         record = self.valid_build_record()
         provision.validate_build_record(record, self.contract)
-        for key in ("aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256",
+        for key in ("aLoaderControlSupportSha256", "aLoaderSchemasSha256", "aLoaderLinuxFilesystemSha256",
+                    "aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256",
                     "hostTransportSha256", "hostJournalSha256", "gradleBuildSha256"):
             with self.subTest(key=key), self.temporary_directory() as temp:
                 changed = Path(temp) / "changed-source"
@@ -6458,7 +6459,7 @@ class LoaderCompileSnapshotTests(unittest.TestCase):
                 (root / name).write_bytes(b"later checkout mutation")
             jar.write_bytes(b"later dependency mutation")
             self.assertEqual(snapshot.verify(output, digest), manifest)
-            self.assertEqual(len(manifest["files"]), 5)
+            self.assertEqual(len(manifest["files"]), len(snapshot.SOURCE_PATHS) + 1)
             self.assertEqual((output / "classpath/000.jar").read_bytes(), b"authored inert dependency, not executable")
 
     def test_changed_source_refuses_before_snapshot_creation(self):

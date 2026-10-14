@@ -11,6 +11,10 @@ from pathlib import Path
 import stat
 
 SOURCE_PATHS = (
+    "src/main/kotlin/decompengine/oracle/fulltree/FullTreeControlSupport.kt",
+    "src/main/kotlin/decompengine/oracle/core/OracleSchemas.kt",
+    "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+
     "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
     "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt",
     "src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt",
