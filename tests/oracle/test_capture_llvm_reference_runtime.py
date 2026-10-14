@@ -47,6 +47,16 @@ def engine():
     return server, info
 
 
+def package_stdout(*, include_optional=True):
+    # Public metadata retained by actual read-only run38593975791; no runtime execution.
+    rows = [b"dbus-user-session\t1.12.20-2ubuntu4.1\tamd64\n",
+            b"slirp4netns\t1.0.1-2\tamd64\n", b"systemd\t249.11-0ubuntu3.22\tamd64\n",
+            b"uidmap\t1:4.8.1-2ubuntu2.2\tamd64\n"]
+    if include_optional:
+        rows.append(b"rootlesskit\t3.0.2\tamd64\n")  # Authored positive, not observed installed.
+    return b"".join(rows)
+
+
 class CaptureRuntimeTest(unittest.TestCase):
     def setUp(self):
         global GUARD_ACTIVE
@@ -404,6 +414,7 @@ class CaptureRuntimeTest(unittest.TestCase):
         budget = {"end": time.monotonic() + 30, "bytes": 0}
         with patch.object(capture, "command", return_value=(b"authored", b"", 0, None)) as command:
             for label in ("packages", "user-manager", "user-service"):
+                command.return_value = (package_stdout() if label == "packages" else b"authored", b"", 0, None)
                 self.assertEqual("observed", capture._inspect_query(label, 1001, self.directory, budget)["status"])
             calls = command.call_args_list
             self.assertEqual(3, len(calls))
@@ -416,6 +427,70 @@ class CaptureRuntimeTest(unittest.TestCase):
                 self.assertEqual(8192, call.kwargs["limit"])
             self.refuse("INSPECT_QUERY", lambda: capture._inspect_query("start", 1001, self.directory, budget))
             self.assertEqual(3, command.call_count)
+
+    def test_optional_package_absence_preserves_exact_mixed_query_evidence(self):
+        out = package_stdout(include_optional=False)
+        err = b"dpkg-query: no packages found matching rootlesskit\n"
+        with patch.object(capture, "command", return_value=(out, err, 1, None)):
+            row = capture._inspect_query("packages", 1001, self.directory,
+                                         {"end": time.monotonic() + 30, "bytes": 0})
+        self.assertEqual("observed", row["status"])
+        self.assertEqual(1, row["exitCode"])
+        self.assertEqual(out.decode("ascii"), row["stdout"])
+        for stream, raw in (("stdout", out), ("stderr", err)):
+            self.assertEqual(len(raw), row[stream + "Bytes"])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), row[stream + "Sha256"])
+        self.assertEqual("399b526f433dbd5df1180ddf3bf733736fcfc5c9b8d1f51fc775fd05e67cc4b5", row["stderrSha256"])
+        self.assertEqual("observed-unqualified", row["packageFacts"]["status"])
+        self.assertEqual(["rootlesskit"], row["packageFacts"]["optionalAbsent"])
+        self.assertIs(False, row["packageFacts"]["capturePrerequisitesQualified"])
+        self.assertEqual({"dbus-user-session", "slirp4netns", "systemd", "uidmap"},
+                         {item["name"] for item in row["packageFacts"]["installed"]})
+        with self.mocked_host_inspection() as queries:
+            previous = queries.side_effect
+            queries.side_effect = lambda name, *args: row if name == "packages" else previous(name, *args)
+            self.assertTrue(capture.inspect_host(ROOT, self.directory))
+        receipt = json.loads((self.directory / "artifacts/host-inspection.json").read_bytes())
+        self.assertEqual("observed-unqualified", receipt["status"])
+        self.assertEqual(row, receipt["facts"]["queries"]["packages"])
+        for flag in ("approved", "supportedBaseline", "captureRouteAdmitted", "workerStarted",
+                     "targetExecuted", "referenceExecutionQualified"):
+            self.assertIs(False, receipt[flag])
+
+    def test_package_query_only_accepts_complete_exact_supported_outcomes(self):
+        absent = package_stdout(include_optional=False)
+        present = package_stdout()
+        canonical = b"dpkg-query: no packages found matching rootlesskit\n"
+        cases = [
+            (absent.replace(b"uidmap\t1:4.8.1-2ubuntu2.2\tamd64\n", b""), canonical, 1),
+            (absent, b"dpkg-query: no packages found matching uidmap\n", 1),
+            (absent, canonical + b"another error\n", 1),
+            (absent, canonical.rstrip(b"\n"), 1),
+            (absent, b"", 1), (absent, canonical, 2), (present, canonical, 1),
+            (present, b"unexpected warning\n", 0), (absent, b"", 0),
+            (present + b"uidmap\t1:4.8.1-2ubuntu2.2\tamd64\n", b"", 0),
+            (present + b"unexpected\t1.0\tamd64\n", b"", 0),
+            (present.replace(b"amd64", b"bad arch", 1), b"", 0),
+            (present.replace(b"1.0.1-2", b"not-a-version"), b"", 0),
+            (present.replace(b"\n", b"\r\n"), b"", 0),
+            (present.rstrip(b"\n"), b"", 0), (present + b"\n", b"", 0),
+        ]
+        for out, err, code in cases:
+            with self.subTest(out=out, err=err, code=code), \
+                 patch.object(capture, "command", return_value=(out, err, code, None)):
+                row = capture._inspect_query("packages", 1001, self.directory,
+                                             {"end": time.monotonic() + 30, "bytes": 0})
+                self.assertEqual("refused", row["status"])
+                self.assertEqual("INSPECT_PACKAGE_RESULT_UNSUPPORTED", row["code"])
+                self.assertNotIn("packageFacts", row)
+                self.assertEqual(code, row["exitCode"])
+                self.assertEqual(hashlib.sha256(out).hexdigest(), row["stdoutSha256"])
+                self.assertEqual(hashlib.sha256(err).hexdigest(), row["stderrSha256"])
+        with patch.object(capture, "command", return_value=(present, b"", 0, None)):
+            row = capture._inspect_query("packages", 1001, self.directory,
+                                         {"end": time.monotonic() + 30, "bytes": 0})
+        self.assertEqual("observed", row["status"])
+        self.assertEqual([], row["packageFacts"]["optionalAbsent"])
 
     @contextmanager
     def mocked_host_inspection(self, *, missing_bus=False):
