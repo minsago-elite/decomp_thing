@@ -82,7 +82,7 @@ internal fun repairAcpReceiptSchemaVersion(bytes: ByteArray): Int {
         maximumTotalStringBytes = MAXIMUM_REPAIR_ACP_RECEIPT_BYTES.toInt(),
     )).jsonObject
     val version = root["schemaVersion"] as? JsonPrimitive
-    require(version != null && !version.isString && version.intOrNull in setOf(2, 5)) {
+    require(version != null && !version.isString && version.intOrNull in setOf(2, 6)) {
         "repair ACP receipt schema is unsupported"
     }
     return requireNotNull(version.intOrNull)
@@ -1376,12 +1376,12 @@ data class RepairAgentInvocationBinding(
     init {
         require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
         require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
-        // Historical v3/v4 bindings remain readable unqualified metadata, never verified receipt contents.
-        require(receiptSchemaVersion in 2..5) { "repair ACP receipt schema is unsupported" }
-        if (receiptSchemaVersion in 3..5) {
+        // Historical v3/v4/v5 bindings remain readable unqualified metadata, never verified receipt contents.
+        require(receiptSchemaVersion in 2..6) { "repair ACP receipt schema is unsupported" }
+        if (receiptSchemaVersion in 3..6) {
             require(!receiptReleaseComplete && assessmentStatus in setOf(
                 RepairAgentAssessmentStatus.PENDING, RepairAgentAssessmentStatus.REJECTED,
-            )) { "provider schema-v3/v4/v5 ACP evidence may only be retained pending or rejected as nonrelease" }
+            )) { "provider schema-v3/v4/v5/v6 ACP evidence may only be retained pending or rejected as nonrelease" }
         }
         require(requestSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP request digest is invalid" }
         require(resultChangesSha256.matches(REPAIR_BLOB_DIGEST)) {

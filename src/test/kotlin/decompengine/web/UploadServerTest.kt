@@ -1389,7 +1389,7 @@ class UploadServerTest {
                 "requestSha256":"${document.requestSha256}","resultChangesSha256":"${document.resultChangesSha256}",
                 "terminalOutcome":"${document.terminalOutcome}","receiptReleaseComplete":false,"assessmentStatus":"rejected"}}]}
             """.trimIndent()
-            history.writeText(historyWithVersion(5))
+            history.writeText(historyWithVersion(6))
             val valid = request(server, "GET", "/jobs/$jobId")
             val validBody = valid.body.decodeToString()
             assertEquals(200, valid.status)
