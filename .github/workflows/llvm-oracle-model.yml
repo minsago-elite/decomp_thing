@@ -12,7 +12,7 @@ on:
         type: choice
         required: true
         default: native-runtime-measurement
-        options: [native-runtime-measurement]
+        options: [native-runtime-measurement, produced-program-observation]
       listener_continuity:
         description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
         type: boolean
@@ -706,3 +706,68 @@ jobs:
           path: |
             build/nrm-live/evidence
             build/nrm-live/raw-oci
+
+  produced-program-reference-observation:
+    # Explicit compatibility qualification only. Historical runtime provisioning is
+    # a prerequisite, never a stock-runtime fallback or a skipped passing result.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'produced-program-observation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/issue97-live/gradle-home
+      DOCKER_CONFIG: ${{ github.workspace }}/build/issue97-live/docker-config
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-live/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-live/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-live/data
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ github.workspace }}/build/issue97-live/tmp -Djna.tmpdir=${{ github.workspace }}/build/issue97-live/tmp -Duser.home=${{ github.workspace }}/build/issue97-live/home -XX:-UsePerfData -XX:+DisableAttachMechanism
+      TMPDIR: ${{ github.workspace }}/build/issue97-live/tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create repository-owned observation paths
+        run: |
+          install -d -m 0700 build/issue97-live/tmp build/issue97-live/home \
+            build/issue97-live/docker-config build/issue97-live/evidence
+      - name: Require the exact historical control client
+        run: |
+          test -x /usr/bin/docker || { echo 'Unsupported host: pinned Docker client absent'; exit 1; }
+          echo 'e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13  /usr/bin/docker' \
+            | sha256sum --check --strict
+          # Full engine, image, cgroup and helper identities are checked by the
+          # generic runner. A different build/tag/version is not a substitute.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: true
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/issue97-live/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/issue97-live/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Fetch authenticated locked Clang artifacts
+        run: |
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$GITHUB_WORKSPACE/build/issue97-live/artifacts"
+      - name: Run pure compatibility contract controls
+        run: python3 -B -m unittest tests.oracle.test_llvm_oracle_profiles.ProducedProgramObservationTest -v
+      - name: Observe locked Clang compilation and exact produced-program execution
+        env:
+          HOME: ${{ github.workspace }}/build/issue97-live/home
+        run: |
+          python3 -B -m oracle.llvm.produced_program \
+            --artifact-root "$GITHUB_WORKSPACE/build/issue97-live/artifacts" \
+            --temporary-root "$GITHUB_WORKSPACE/build/issue97-live/tmp" \
+            --container-runtime /usr/bin/docker \
+            --json-output "$GITHUB_WORKSPACE/build/issue97-live/evidence/produced-program-observation.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-produced-program-compatibility-observation
+          path: build/issue97-live/evidence
+          if-no-files-found: warn
