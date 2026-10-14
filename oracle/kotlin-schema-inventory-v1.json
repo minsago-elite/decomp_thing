@@ -58,7 +58,7 @@
       "name": "clang/18.1.3/build-record",
       "path": "oracle/clang/18.1.3/build-record.schema.json",
       "registration": "separate-non-authoritative-validator",
-      "schemaSha256": "ba1a763ddc614f5aae8dfc3e684f32d6d4a3e3929cecc2a33eb0e3c2e516eae1",
+      "schemaSha256": "aed977204f99432e424f5bd15fa905120b39406413af29e520d1f144c40ae01c",
       "scopeNote": "Clang 18.1.3 provisioning uses its separate Python build-record validator; no accepted toolchain, image, frontend adapter, or production scoring authority is registered."
     },
     {
