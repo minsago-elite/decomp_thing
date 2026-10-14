@@ -120,6 +120,156 @@ def authored_deb_payload(package, entries, conffiles=b"", compression=""):
     return bytes(output)
 
 
+@contextlib.contextmanager
+def authored_retained_root_binding(path):
+    """Real inert descriptors; root-owned deployment admission is separately tested/mocked."""
+    parent_fd=provision.open_directory_without_links(path.parent)
+    root_fd=os.open(path.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+    parent,root=os.fstat(parent_fd),os.fstat(root_fd)
+    binding=provision.PinnedRootfsDirectory(path,path.parent,parent_fd,root_fd,(parent.st_dev,parent.st_ino),(root.st_dev,root.st_ino))
+    try:yield binding
+    finally:binding.close()
+
+
+class PackagingLifetimeTests(unittest.TestCase):
+    def setUp(self):
+        parent=ROOT/"build/clang-packaging-lifetime-correction-001/test-tmp";parent.mkdir(parents=True,exist_ok=True)
+        temporary=tempfile.TemporaryDirectory(dir=parent);self.addCleanup(temporary.cleanup)
+        self.base=Path(temporary.name)
+
+    def authority_metadata(self, metadata, identity):
+        from types import SimpleNamespace
+        if (metadata.st_dev,metadata.st_ino)!=identity:return metadata
+        values={name:getattr(metadata,name) for name in dir(metadata) if name.startswith("st_")};values["st_uid"]=0
+        return SimpleNamespace(**values)
+
+    def test_actual_retained_pin_requires_root_authority_and_closes_on_failure(self):
+        root=self.base/"rootfs";root.mkdir();opened=[];actual_open=os.open
+        def track(*args,**kwargs):
+            descriptor=actual_open(*args,**kwargs);opened.append(descriptor);return descriptor
+        with mock.patch.object(provision.os,"open",side_effect=track):
+            with self.assertRaisesRegex(provision.ProvisionError,"root-owned"):
+                with provision.pin_retained_rootfs_directory(root):self.fail("caller-owned tree admitted")
+        for descriptor in set(opened):
+            with self.assertRaises(OSError):os.fstat(descriptor)
+
+    def test_actual_pin_with_authored_root_owner_metadata_holds_fd_and_detects_replacement(self):
+        root=self.base/"rootfs";root.mkdir();(root/"canary").write_bytes(b"original inode")
+        metadata=root.stat();identity=(metadata.st_dev,metadata.st_ino)
+        actual_fstat=os.fstat;actual_stat=os.stat
+        def fstat(fd):return self.authority_metadata(actual_fstat(fd),identity)
+        def stat(path,*args,**kwargs):return self.authority_metadata(actual_stat(path,*args,**kwargs),identity)
+        held=[]
+        with mock.patch.object(provision.os,"fstat",side_effect=fstat),mock.patch.object(provision.os,"stat",side_effect=stat):
+            with self.assertRaisesRegex(provision.ProvisionError,"pathname binding"):
+                with provision.pin_retained_rootfs_directory(root) as binding:
+                    held.extend((binding.root_fd,binding.parent_fd))
+                    self.assertEqual((binding.descriptor_path/"canary").read_bytes(),b"original inode")
+                    root.rename(self.base/"original-rootfs");root.mkdir();(root/"canary").write_bytes(b"replacement canary")
+                    self.assertEqual((binding.descriptor_path/"canary").read_bytes(),b"original inode")
+                    binding.require_path_binding()
+        for descriptor in held:
+            with self.assertRaises(OSError):os.fstat(descriptor)
+        self.assertEqual((root/"canary").read_bytes(),b"replacement canary")
+
+    def test_root_pin_refuses_symlink_ancestor_without_consuming_it(self):
+        real=self.base/"real";real.mkdir();(real/"rootfs").mkdir();alias=self.base/"alias";alias.symlink_to(real,target_is_directory=True)
+        with self.assertRaises(provision.ProvisionError):
+            with provision.pin_retained_rootfs_directory(alias/"rootfs"):self.fail("symlink ancestor admitted")
+
+    def test_actual_packaging_consumer_receives_descriptor_and_rejects_late_root_swap(self):
+        root=self.base/"rootfs";root.mkdir();(root/"canary").write_bytes(b"held")
+        args=provision.argparse.Namespace(oci_archive=self.base/"inert-image")
+        seen=[]
+        with authored_retained_root_binding(root) as binding:
+            def verify(path,*args,**kwargs):
+                self.assertEqual(path,binding.descriptor_path);self.assertIs(kwargs["binding"],binding);seen.append("verify")
+            def installed(path,contract):
+                self.assertEqual(path,binding.descriptor_path);self.assertEqual((path/"canary").read_bytes(),b"held");seen.append("installed")
+                root.rename(self.base/"retained");root.mkdir();return set()
+            with mock.patch.object(provision,"verify_retained_rootfs_and_image",side_effect=verify),mock.patch.object(provision,"package_metadata_map",return_value={}),mock.patch.object(provision,"installed_package_keys",side_effect=installed),mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not execute driver after swap")) as driver:
+                with self.assertRaisesRegex(provision.ProvisionError,"pathname binding"):
+                    provision._package_provenance_pinned(args,{}, {}, {},None,None,None,None,[],{},[],binding)
+                driver.assert_not_called()
+        self.assertEqual(seen,["verify","installed"])
+
+    def test_private_archive_tar_roundtrip_and_exact_fd_identity_publication(self):
+        destination=self.base/"provenance.tar";held=[]
+        with provision.PinnedProvenanceArchive(destination,65536) as output:
+            held.extend((output.stream.fileno(),output.parent_fd))
+            with tarfile.open(fileobj=output,mode="w") as archive:
+                info=tarfile.TarInfo("authored.txt");info.size=3;archive.addfile(info,io.BytesIO(b"abc"))
+            self.assertFalse(destination.exists())
+            identity=os.fstat(output.stream.fileno());result=output.publish()
+            self.assertEqual((destination.stat().st_dev,destination.stat().st_ino),(identity.st_dev,identity.st_ino))
+            self.assertEqual(result,{"bytes":destination.stat().st_size,"sha256":provision.sha256_file(destination)})
+            with self.assertRaises(provision.ProvisionError):output.write(b"late mutation")
+        with tarfile.open(destination) as archive:self.assertEqual(archive.extractfile("authored.txt").read(),b"abc")
+        for descriptor in held:
+            with self.assertRaises(OSError):os.fstat(descriptor)
+
+    def test_archive_boundary_and_preexisting_canary_never_unlinked(self):
+        destination=self.base/"provenance.tar"
+        with provision.PinnedProvenanceArchive(destination,3) as output:
+            output.write(b"abc");self.assertEqual(output.publish()["bytes"],3)
+        destination.unlink();destination.write_bytes(b"canary")
+        with provision.PinnedProvenanceArchive(destination,3) as output:
+            output.write(b"abc")
+            with self.assertRaises(provision.ProvisionError):output.publish()
+        self.assertEqual(destination.read_bytes(),b"canary")
+        destination.unlink()
+        with provision.PinnedProvenanceArchive(destination,3) as output:
+            with self.assertRaisesRegex(provision.ProvisionError,"byte budget"):output.write(b"abcd")
+            self.assertEqual(output.tell(),0)
+        self.assertFalse(destination.exists())
+
+    def test_same_inode_mutation_after_publication_digest_is_refused(self):
+        destination=self.base/"provenance.tar";actual_fsync=os.fsync
+        with provision.PinnedProvenanceArchive(destination,16) as output:
+            output.write(b"abc")
+            def fsync(fd):
+                actual_fsync(fd)
+                if fd==output.parent_fd and destination.exists():
+                    destination.chmod(0o600);destination.write_bytes(b"bad");destination.chmod(0o400)
+            with mock.patch.object(provision.os,"fsync",side_effect=fsync):
+                with self.assertRaisesRegex(provision.ProvisionError,"changed before completion"):output.publish()
+        self.assertEqual(destination.read_bytes(),b"bad") # unaccepted name is never blindly deleted
+
+    def test_archive_fdopen_failure_and_close_failure_release_parent_descriptors(self):
+        destination=self.base/"provenance.tar";opened=[];actual_open=os.open
+        def track(*args,**kwargs):
+            fd=actual_open(*args,**kwargs);opened.append(fd);return fd
+        with mock.patch.object(provision.os,"open",side_effect=track),mock.patch.object(provision.os,"fdopen",side_effect=OSError("authored fdopen failure")):
+            with self.assertRaises(OSError):provision.PinnedProvenanceArchive(destination,16)
+        for fd in set(opened):
+            with self.assertRaises(OSError):os.fstat(fd)
+        output=provision.PinnedProvenanceArchive(destination,16);parent_fd=output.parent_fd;stream=output.stream
+        actual_close=stream.close
+        def failed_close():
+            actual_close();raise OSError("authored close failure")
+        with mock.patch.object(stream,"close",side_effect=failed_close):
+            with self.assertRaises(OSError):output.close()
+        with self.assertRaises(OSError):os.fstat(parent_fd)
+        self.assertFalse(destination.exists())
+
+    def test_output_parent_replacement_and_post_link_swap_preserve_canaries(self):
+        parent=self.base/"output";parent.mkdir();destination=parent/"provenance.tar"
+        with provision.PinnedProvenanceArchive(destination,16) as output:
+            output.write(b"authored")
+            parent.rename(self.base/"retained-parent");parent.mkdir();destination.write_bytes(b"new-parent canary")
+            with self.assertRaisesRegex(provision.ProvisionError,"parent binding"):output.publish()
+        self.assertEqual(destination.read_bytes(),b"new-parent canary")
+        destination.unlink();actual_link=os.link
+        def link(*args,**kwargs):
+            actual_link(*args,**kwargs);destination.rename(parent/"unaccepted-original");destination.write_bytes(b"post-link canary")
+        with provision.PinnedProvenanceArchive(destination,16) as output:
+            output.write(b"authored")
+            with mock.patch.object(provision.os,"link",side_effect=link):
+                with self.assertRaisesRegex(provision.ProvisionError,"destination binding"):output.publish()
+        self.assertEqual(destination.read_bytes(),b"post-link canary")
+        self.assertEqual((parent/"unaccepted-original").read_bytes(),b"authored")
+
+
 class AuthenticatedDebPayloadTests(unittest.TestCase):
     def setUp(self):
         self.contract=provision.read_contract()
@@ -337,7 +487,7 @@ class AuthenticatedDebPayloadTests(unittest.TestCase):
         args=provision.argparse.Namespace(contract=provision.CONTRACT_PATH,record=self.base/"record.json",acquisition=acquisition,rootfs=self.root,oci_archive=image,probe_report=self.base/"probe.json",loader_report=self.base/"loader.json",negative_report=self.base/"negative.json",negative_compiler=self.base/"negative",keyring=self.base/"keyring",output=self.base/"must-not-exist.tar")
         key=(row["name"],row["version"],row["architecture"])
         # Authored upstream signed metadata/image gates only; actual new payload gate is not mocked out.
-        with mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_installed_package_payloads",wraps=provision.verify_installed_package_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
+        with mock.patch.object(provision,"pin_retained_rootfs_directory",side_effect=authored_retained_root_binding),mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_installed_package_payloads",wraps=provision.verify_installed_package_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
             with self.assertRaisesRegex(provision.ProvisionError,"regular evidence input"):
                 provision._package_provenance_unqualified(args)
             gate.assert_called_once();native.assert_not_called()
@@ -5040,7 +5190,8 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                       stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
                                       text=True, timeout=timeout)
 
-            with mock.patch.object(provision, "load_candidate", return_value=(candidate, signed_rows)) as load, \
+            with mock.patch.object(provision, "pin_retained_rootfs_directory", side_effect=authored_retained_root_binding), \
+                    mock.patch.object(provision, "load_candidate", return_value=(candidate, signed_rows)) as load, \
                     mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
                     mock.patch.object(provision, "runtime_dependencies",
                                       return_value=record["runtime"]["entries"]) as runtime, \
@@ -5134,7 +5285,8 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
                 text=True, timeout=timeout)
 
-        with mock.patch.object(provision, "verify_candidate_data", return_value=rows), \
+        with mock.patch.object(provision, "pin_retained_rootfs_directory", side_effect=authored_retained_root_binding), \
+                mock.patch.object(provision, "verify_candidate_data", return_value=rows), \
                 mock.patch.object(provision, "audit_fresh_source_payloads", return_value=audit), \
                 mock.patch.object(provision, "installed_package_keys", return_value=installed), \
                 mock.patch.object(provision, "runtime_dependencies", return_value=record["runtime"]["entries"]), \

@@ -3847,10 +3847,17 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
 
 
 def verify_retained_rootfs_and_image(rootfs: Path, oci_archive: Path,
-                                     record: dict, contract: dict) -> None:
+                                     record: dict, contract: dict, *, binding=None) -> None:
     """Independently bind the retained directory, deterministic tar, and OCI layer."""
-    if rootfs.is_symlink() or not rootfs.is_dir():
-        raise ProvisionError("provenance packaging requires a retained regular rootfs directory")
+    if binding is not None:
+        binding.require_path_binding()
+        if rootfs != binding.descriptor_path:
+            raise ProvisionError("rootfs verification descriptor differs from the retained binding")
+        temporary_parent = binding.parent_path
+    else:
+        if rootfs.is_symlink() or not rootfs.is_dir():
+            raise ProvisionError("provenance packaging requires a retained regular rootfs directory")
+        temporary_parent = rootfs.parent
     if oci_archive.is_symlink() or not oci_archive.is_file():
         raise ProvisionError("provenance packaging requires the retained OCI image archive")
     limits = contract["profile"]["bounds"]
@@ -3860,10 +3867,11 @@ def verify_retained_rootfs_and_image(rootfs: Path, oci_archive: Path,
         raise ProvisionError("build record rootfs identity exceeds the bounded artifact contract")
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     try:
-        with tempfile.TemporaryDirectory(prefix="clang1813-rootfs-verify-", dir=rootfs.parent) as temporary:
+        with tempfile.TemporaryDirectory(prefix="clang1813-rootfs-verify-", dir=temporary_parent) as temporary:
             archive = Path(temporary) / "rootfs.tar"
             actual = deterministic_rootfs_tar(
                 rootfs, archive, epoch, normalize=False, max_bytes=limits["maxArtifactBytes"],
+                held_rootfs_descriptor=binding is not None,
             )
     except OSError as error:
         raise ProvisionError(f"could not create bounded rootfs verification archive: {error}") from error
@@ -4039,6 +4047,7 @@ class PinnedRootfsDirectory:
         self.parent_identity = parent_identity
         self.root_identity = root_identity
         self.descriptor_path = Path(f"/proc/{os.getpid()}/fd/{root_fd}")
+        self.require_root_authority = False
 
     def require_path_binding(self) -> None:
         try:
@@ -4053,6 +4062,10 @@ class PinnedRootfsDirectory:
                 (current_root.st_dev, current_root.st_ino) != self.root_identity or
                 (held_root.st_dev, held_root.st_ino) != self.root_identity):
             raise ProvisionError("rootfs directory pathname binding changed")
+        if self.require_root_authority and any(
+                metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022
+                for metadata in (current_root, held_root)):
+            raise ProvisionError("retained rootfs root ownership or permissions changed")
 
     def remove_empty_path(self) -> None:
         self.require_path_binding()
@@ -4074,6 +4087,58 @@ class PinnedRootfsDirectory:
 
     def __del__(self):
         self.close()
+
+
+def open_directory_without_links(path: Path) -> int:
+    """Bounded component walk; never normalize away a link or parent traversal."""
+    if (not path.is_absolute() or ".." in path.parts or len(path.parts) > 128 or
+            len(str(path)) > 4096):
+        raise ProvisionError("directory requires a bounded absolute path without parent traversal")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        result, descriptor = descriptor, -1
+        return result
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextlib.contextmanager
+def pin_retained_rootfs_directory(path: Path):
+    """Pin an existing root-owned rootfs before any retained privileged consumer."""
+    parent_fd = root_fd = -1
+    binding = None
+    try:
+        if path.name in ("", ".", ".."):
+            raise ProvisionError("retained rootfs requires an explicit child directory")
+        parent_fd = open_directory_without_links(path.parent)
+        root_fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=parent_fd)
+        parent, root = os.fstat(parent_fd), os.fstat(root_fd)
+        if root.st_uid != 0 or stat.S_IMODE(root.st_mode) & 0o022:
+            raise ProvisionError("retained rootfs must be root-owned and not group/world-writable")
+        binding = PinnedRootfsDirectory(path, path.parent, parent_fd, root_fd,
+                                       (parent.st_dev, parent.st_ino), (root.st_dev, root.st_ino))
+        binding.require_root_authority = True
+        parent_fd = root_fd = -1
+        binding.require_path_binding()
+        try:
+            yield binding
+        finally:
+            binding.require_path_binding()
+    except OSError as error:
+        raise ProvisionError("could not pin retained rootfs without following links") from error
+    finally:
+        if binding is not None:
+            binding.close()
+        for descriptor in (root_fd, parent_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def create_pinned_rootfs_directory(path: Path) -> PinnedRootfsDirectory:
@@ -5368,6 +5433,133 @@ def read_provenance_report(path: Path, label: str, *, captured: dict[Path, bytes
     return report
 
 
+class PinnedProvenanceArchive:
+    """Private output inode, held parent, bounded writes and exclusive publication.
+
+    No error cleanup unlinks a caller-controlled name. Before publication the
+    anonymous inode is reclaimed by close; a post-publication refusal leaves an
+    explicitly unaccepted destination for independently owned recovery.
+    """
+    def __init__(self, destination: Path, maximum_bytes: int):
+        self.destination = destination
+        self.maximum_bytes = maximum_bytes
+        self.parent_fd = -1
+        self.stream = None
+        self.published = False
+        try:
+            if type(maximum_bytes) is not int or not 0 < maximum_bytes <= MAX_DOWNLOAD_BYTES:
+                raise ProvisionError("invalid provenance output byte budget")
+            self.parent_fd = open_directory_without_links(destination.parent)
+            self.parent = os.fstat(self.parent_fd)
+            if self.parent.st_uid != os.geteuid() or stat.S_IMODE(self.parent.st_mode) & 0o022:
+                raise ProvisionError("provenance output parent must be owned and not group/world-writable")
+            descriptor = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600,
+                                 dir_fd=self.parent_fd)
+            try:
+                self.stream = os.fdopen(descriptor, "w+b")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            self.identity = os.fstat(self.stream.fileno())
+            self.require_parent_binding()
+        except BaseException:
+            self.close()
+            raise
+
+    def require_parent_binding(self):
+        descriptor = open_directory_without_links(self.destination.parent)
+        try:
+            current = os.fstat(descriptor)
+            if ((current.st_dev, current.st_ino, current.st_uid, current.st_gid, stat.S_IMODE(current.st_mode)) !=
+                    (self.parent.st_dev, self.parent.st_ino, self.parent.st_uid, self.parent.st_gid, stat.S_IMODE(self.parent.st_mode))):
+                raise ProvisionError("provenance output parent binding changed")
+        finally:
+            os.close(descriptor)
+
+    def tell(self):
+        return self.stream.tell()
+
+    def write(self, data):
+        if self.published:
+            raise ProvisionError("published provenance archive is read-only")
+        if len(data) > self.maximum_bytes - self.stream.tell():
+            raise ProvisionError("provenance archive exceeds the configured artifact byte budget")
+        return self.stream.write(data)
+
+    def flush(self):
+        self.stream.flush()
+
+    def _identity_and_digest(self):
+        self.stream.flush()
+        before = os.fstat(self.stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+                (before.st_dev, before.st_ino) != (self.identity.st_dev, self.identity.st_ino) or
+                not 0 <= before.st_size <= self.maximum_bytes):
+            raise ProvisionError("provenance private archive identity or byte budget changed")
+        self.stream.seek(0)
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            data = self.stream.read(min(65536, remaining))
+            if not data:
+                raise ProvisionError("provenance private archive was truncated")
+            digest.update(data)
+            remaining -= len(data)
+        after = os.fstat(self.stream.fileno())
+        if self.stream.read(1) or any(getattr(before, key) != getattr(after, key) for key in
+                                    ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")):
+            raise ProvisionError("provenance private archive changed while hashing")
+        self.last_digest_metadata = after
+        return {"bytes": before.st_size, "sha256": digest.hexdigest()}
+
+    def publish(self, require_inputs=lambda: None):
+        if self.published:
+            raise ProvisionError("provenance archive publication cannot be repeated")
+        expected = self._identity_and_digest()
+        os.fchmod(self.stream.fileno(), 0o400)
+        os.fsync(self.stream.fileno())
+        require_inputs()
+        self.require_parent_binding()
+        try:
+            os.link(f"/proc/self/fd/{self.stream.fileno()}", self.destination.name,
+                    dst_dir_fd=self.parent_fd, follow_symlinks=True)
+        except OSError as error:
+            raise ProvisionError("could not exclusively publish the held provenance archive inode") from error
+        self.published = True
+        require_inputs()
+        self.require_parent_binding()
+        current = os.stat(self.destination.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(current.st_mode) or
+                (current.st_dev, current.st_ino) != (self.identity.st_dev, self.identity.st_ino) or
+                self._identity_and_digest() != expected):
+            raise ProvisionError("provenance archive destination binding or bytes changed during publication")
+        verified = self.last_digest_metadata
+        os.fsync(self.parent_fd)
+        self.require_parent_binding()
+        current = os.stat(self.destination.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        held = os.fstat(self.stream.fileno())
+        if any(getattr(current, key) != getattr(held, key) or getattr(held, key) != getattr(verified, key)
+               for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")):
+            raise ProvisionError("provenance archive destination changed before completion")
+        return expected
+
+    def close(self):
+        stream, self.stream = self.stream, None
+        parent_fd, self.parent_fd = self.parent_fd, -1
+        try:
+            if stream is not None:
+                stream.close()
+        finally:
+            if parent_fd >= 0:
+                os.close(parent_fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
 def preflight_provenance_output(output: Path, input_roots: list[Path], input_files: list[Path]) -> Path:
     """Resolve output aliases and reject all packaged-tree overlaps before creating paths."""
     if output.is_symlink() or output.exists():
@@ -5793,25 +5985,45 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
                                                          build_record=record, captured=captured)
     if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
         raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
-    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
+    with pin_retained_rootfs_directory(args.rootfs) as binding:
+        return _package_provenance_pinned(
+            args, contract, record, captured, candidate, patch_audit, comparator_lock,
+            comparator_manifest, expected_artifacts, validated_candidate, parsed_indexes, binding,
+        )
+
+
+def _package_provenance_pinned(args, contract, record, captured, candidate, patch_audit,
+                               comparator_lock, comparator_manifest, expected_artifacts,
+                               validated_candidate, parsed_indexes, binding):
+    """Every retained-root consumer uses the held inode, with named binding checks."""
+    rootfs = binding.descriptor_path
+
+    def bound(action, *values, **options):
+        binding.require_path_binding()
+        try:
+            return action(*values, **options)
+        finally:
+            binding.require_path_binding()
+
+    bound(verify_retained_rootfs_and_image, rootfs, args.oci_archive, record, contract, binding=binding)
     signed_package_metadata = package_metadata_map(parsed_indexes)
     validate_record_package_metadata(
-        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
+        record, signed_package_metadata, bound(installed_package_keys, rootfs, contract),
     )
     payload_directory = args.record.parent / "package-payloads"
-    package_manifest = verify_installed_package_payloads(
-        args.rootfs, payload_directory, record["packages"], contract,
+    package_manifest = bound(verify_installed_package_payloads,
+        rootfs, payload_directory, record["packages"], contract,
     )
-    verify_recorded_driver_identities(args.rootfs, record, contract)
-    verify_recorded_runtime_closure(args.rootfs, record, contract)
+    bound(verify_recorded_driver_identities, rootfs, record, contract)
+    bound(verify_recorded_runtime_closure, rootfs, record, contract)
     record_sha256 = sha256(captured[args.record])
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe", captured=captured)
     loader_report = read_provenance_report(args.loader_report, "A-loader", captured=captured)
     negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative", captured=captured)
-    probe_binary, probe_fixture, probe_source, probe_mode = validate_provenance_probe_report(
-        probe_report, record, args.rootfs, contract,
+    probe_binary, probe_fixture, probe_source, probe_mode = bound(validate_provenance_probe_report,
+        probe_report, record, rootfs, contract,
     )
-    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
+    bound(validate_provenance_loader_report, loader_report, record, record_sha256, rootfs)
     comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
         negative_report, record, contract, captured=captured,
     )
@@ -5831,119 +6043,110 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts) != output_path:
         raise ProvisionError("provenance output path changed after its preflight")
-    archive_created = False
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     try:
-        with tarfile.open(output_path, mode="x", format=tarfile.PAX_FORMAT) as archive:
-            archive_created = True
-            for source in expected_artifacts:
-                if not source.exists():
-                    raise ProvisionError(f"provenance evidence file is missing: {source}")
-                if source.is_dir():
-                    if source != args.acquisition / "downloads":
-                        raise ProvisionError("provenance contains an unexpected input directory")
-                    for row in sorted(candidate_download_rows(validated_candidate), key=lambda row: row["path"]):
-                        child = args.acquisition / row["path"]
-                        _add_provenance_file(archive, child, "acquisition/" + row["path"], epoch,
-                                             expected_sha256=row["sha256"], expected_bytes=row["bytes"])
-                else:
-                    if source.is_symlink() or not source.is_file():
-                        raise ProvisionError(f"provenance input is not a regular file: {source}")
-                    if source == candidate:
-                        arcname = "acquisition/acquisition-candidate.json"
-                    elif source == patch_audit:
-                        arcname = "acquisition/patch-audit.json"
-                    elif source == args.record:
-                        arcname = "build-record.json"
-                    elif source == args.probe_report:
-                        arcname = "probe-report.json"
-                    elif source == args.loader_report:
-                        arcname = "a-loader-smoke.json"
-                    elif source == args.negative_report:
-                        arcname = "clang-22.1.6-negative-smoke.json"
-                    elif source == args.contract:
-                        arcname = "provisioning-contract.json"
-                    elif source.name == "build-record.schema.json":
-                        arcname = "build-record.schema.json"
-                    elif source.name == "libtooling-probe.cpp":
-                        arcname = "libtooling-probe.cpp"
-                    elif source.name == "libtooling-positive.cpp":
-                        arcname = "fixtures/libtooling-positive.cpp"
-                    elif source == ROOT / "scripts/oracle/provision_clang_18_1_3.py":
-                        arcname = "provision_clang_18_1_3.py"
-                    elif source in (RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
-                                     RECIPE_FILES["hostEnvironmentRecipeSha256"]):
-                        arcname = "host-execution/" + source.name
-                    elif source == RECIPE_FILES["aLoaderSha256"]:
-                        arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
-                    elif source == ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java":
-                        arcname = "Clang1813AProfileLoaderSmoke.java"
-                    elif source == ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle":
-                        arcname = "clang1813-loader-smoke.init.gradle"
-                    elif source == ROOT / "oracle/clang/18.1.3/test_provisioning.py":
-                        arcname = "test_provisioning.py"
-                    elif source == ROOT / ".github/workflows/generic-template-toolchain.yml":
-                        arcname = "generic-template-toolchain.yml"
-                    elif source == ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md":
-                        arcname = "ACQUISITION_STATUS.md"
-                    elif source == comparator_lock:
-                        arcname = "trusted_keys/clang-22.1.6-release-artifacts.json"
-                    elif source == comparator_manifest:
-                        arcname = "trusted_keys/clang-22.1.6-oracle-manifest.json"
-                    elif source == args.keyring:
-                        arcname = "trusted_keys/ubuntu-archive-keyring.gpg"
+        with PinnedProvenanceArchive(output_path, contract["profile"]["bounds"]["maxArtifactBytes"]) as output:
+            with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                for source in expected_artifacts:
+                    if not source.exists():
+                        raise ProvisionError(f"provenance evidence file is missing: {source}")
+                    if source.is_dir():
+                        if source != args.acquisition / "downloads":
+                            raise ProvisionError("provenance contains an unexpected input directory")
+                        for row in sorted(candidate_download_rows(validated_candidate), key=lambda row: row["path"]):
+                            child = args.acquisition / row["path"]
+                            _add_provenance_file(archive, child, "acquisition/" + row["path"], epoch,
+                                                 expected_sha256=row["sha256"], expected_bytes=row["bytes"])
                     else:
-                        arcname = "trusted_keys/llvm-release.asc"
-                    _add_provenance_file(
-                        archive, source, arcname, epoch,
-                        expected_sha256=(
-                            comparator_manifest_sha256 if source == comparator_manifest else
-                            comparator_lock_sha256 if source == comparator_lock else sha256(captured[source])
-                        ),
-                        expected_bytes=len(captured[source]), payload=captured[source],
-                    )
-            package_manifest_bytes = canonical_json(package_manifest)
-            _add_provenance_file(archive, args.record, "package-installed-file-manifest.json", epoch,
-                                 expected_sha256=sha256(package_manifest_bytes), payload=package_manifest_bytes)
-            for package in record["packages"]:
-                source = payload_directory / (package["sha256"] + ".deb")
-                _add_provenance_file(archive, source, "package-payloads/" + source.name, epoch,
-                                     expected_sha256=package["sha256"], expected_bytes=package["bytes"])
-            if verify_installed_package_payloads(args.rootfs, payload_directory, record["packages"], contract) != package_manifest:
-                raise ProvisionError("installed package payload manifest changed while packaging")
-            current_probe_binary, current_probe_mode = rootfs_regular_file(
-                args.rootfs, PROBE_BINARY_IN_ROOT, executable=True,
-            )
-            current_probe_fixture, _ = rootfs_regular_file(args.rootfs, PROBE_FIXTURE_IN_ROOT)
-            current_probe_source, _ = rootfs_regular_file(args.rootfs, PROBE_SOURCE_IN_ROOT)
-            if (current_probe_mode != probe_mode or sha256_file(current_probe_binary) != record["probe"]["binarySha256"] or
-                    sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"] or
-                    sha256_file(current_probe_source) != record["probe"]["sourceSha256"]):
-                raise ProvisionError("retained probe source/binary/fixture changed after sandbox replay")
-            _add_provenance_file(
-                archive, probe_binary, "rootfs" + PROBE_BINARY_IN_ROOT, epoch,
-                expected_sha256=record["probe"]["binarySha256"], mode=probe_mode,
-            )
-            _add_provenance_file(
-                archive, probe_fixture, "rootfs" + PROBE_FIXTURE_IN_ROOT, epoch,
-                expected_sha256=record["probe"]["fixtureSha256"], mode=0o444,
-            )
-            _add_provenance_file(
-                archive, probe_source, "rootfs" + PROBE_SOURCE_IN_ROOT, epoch,
-                expected_sha256=record["probe"]["sourceSha256"], mode=0o444,
-            )
-    except ProvisionError:
-        if archive_created:
-            output_path.unlink(missing_ok=True)
-        raise
+                        if source.is_symlink() or not source.is_file():
+                            raise ProvisionError(f"provenance input is not a regular file: {source}")
+                        if source == candidate:
+                            arcname = "acquisition/acquisition-candidate.json"
+                        elif source == patch_audit:
+                            arcname = "acquisition/patch-audit.json"
+                        elif source == args.record:
+                            arcname = "build-record.json"
+                        elif source == args.probe_report:
+                            arcname = "probe-report.json"
+                        elif source == args.loader_report:
+                            arcname = "a-loader-smoke.json"
+                        elif source == args.negative_report:
+                            arcname = "clang-22.1.6-negative-smoke.json"
+                        elif source == args.contract:
+                            arcname = "provisioning-contract.json"
+                        elif source.name == "build-record.schema.json":
+                            arcname = "build-record.schema.json"
+                        elif source.name == "libtooling-probe.cpp":
+                            arcname = "libtooling-probe.cpp"
+                        elif source.name == "libtooling-positive.cpp":
+                            arcname = "fixtures/libtooling-positive.cpp"
+                        elif source == ROOT / "scripts/oracle/provision_clang_18_1_3.py":
+                            arcname = "provision_clang_18_1_3.py"
+                        elif source in (RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
+                                         RECIPE_FILES["hostEnvironmentRecipeSha256"]):
+                            arcname = "host-execution/" + source.name
+                        elif source == RECIPE_FILES["aLoaderSha256"]:
+                            arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
+                        elif source == ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java":
+                            arcname = "Clang1813AProfileLoaderSmoke.java"
+                        elif source == ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle":
+                            arcname = "clang1813-loader-smoke.init.gradle"
+                        elif source == ROOT / "oracle/clang/18.1.3/test_provisioning.py":
+                            arcname = "test_provisioning.py"
+                        elif source == ROOT / ".github/workflows/generic-template-toolchain.yml":
+                            arcname = "generic-template-toolchain.yml"
+                        elif source == ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md":
+                            arcname = "ACQUISITION_STATUS.md"
+                        elif source == comparator_lock:
+                            arcname = "trusted_keys/clang-22.1.6-release-artifacts.json"
+                        elif source == comparator_manifest:
+                            arcname = "trusted_keys/clang-22.1.6-oracle-manifest.json"
+                        elif source == args.keyring:
+                            arcname = "trusted_keys/ubuntu-archive-keyring.gpg"
+                        else:
+                            arcname = "trusted_keys/llvm-release.asc"
+                        _add_provenance_file(
+                            archive, source, arcname, epoch,
+                            expected_sha256=(
+                                comparator_manifest_sha256 if source == comparator_manifest else
+                                comparator_lock_sha256 if source == comparator_lock else sha256(captured[source])
+                            ),
+                            expected_bytes=len(captured[source]), payload=captured[source],
+                        )
+                package_manifest_bytes = canonical_json(package_manifest)
+                _add_provenance_file(archive, args.record, "package-installed-file-manifest.json", epoch,
+                                     expected_sha256=sha256(package_manifest_bytes), payload=package_manifest_bytes)
+                for package in record["packages"]:
+                    source = payload_directory / (package["sha256"] + ".deb")
+                    _add_provenance_file(archive, source, "package-payloads/" + source.name, epoch,
+                                         expected_sha256=package["sha256"], expected_bytes=package["bytes"])
+                if bound(verify_installed_package_payloads, rootfs, payload_directory, record["packages"], contract) != package_manifest:
+                    raise ProvisionError("installed package payload manifest changed while packaging")
+                current_probe_binary, current_probe_mode = bound(rootfs_regular_file,
+                    rootfs, PROBE_BINARY_IN_ROOT, executable=True,
+                )
+                current_probe_fixture, _ = bound(rootfs_regular_file, rootfs, PROBE_FIXTURE_IN_ROOT)
+                current_probe_source, _ = bound(rootfs_regular_file, rootfs, PROBE_SOURCE_IN_ROOT)
+                if (current_probe_mode != probe_mode or sha256_file(current_probe_binary) != record["probe"]["binarySha256"] or
+                        sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"] or
+                        sha256_file(current_probe_source) != record["probe"]["sourceSha256"]):
+                    raise ProvisionError("retained probe source/binary/fixture changed after sandbox replay")
+                _add_provenance_file(
+                    archive, probe_binary, "rootfs" + PROBE_BINARY_IN_ROOT, epoch,
+                    expected_sha256=record["probe"]["binarySha256"], mode=probe_mode,
+                )
+                _add_provenance_file(
+                    archive, probe_fixture, "rootfs" + PROBE_FIXTURE_IN_ROOT, epoch,
+                    expected_sha256=record["probe"]["fixtureSha256"], mode=0o444,
+                )
+                _add_provenance_file(
+                    archive, probe_source, "rootfs" + PROBE_SOURCE_IN_ROOT, epoch,
+                    expected_sha256=record["probe"]["sourceSha256"], mode=0o444,
+                )
+            published = output.publish(binding.require_path_binding)
+            print(f"packaged authenticated provenance archive ({published['bytes']} bytes)")
     except (OSError, tarfile.TarError) as error:
-        if archive_created:
-            output_path.unlink(missing_ok=True)
         raise ProvisionError(f"could not build provenance archive: {error}") from error
-    if output_path.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
-        output_path.unlink(missing_ok=True)
-        raise ProvisionError("provenance archive exceeds the configured artifact byte budget")
-    print(f"packaged authenticated provenance archive ({output_path.stat().st_size} bytes)")
     return 0
 
 
