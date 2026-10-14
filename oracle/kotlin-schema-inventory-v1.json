@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 80,
+  "schemaCount": 82,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -503,6 +503,24 @@
       "path": "oracle/gcc/oracle-manifest.schema.json",
       "registration": "shared-kotlin",
       "schemaSha256": "f75499d2b24ac755576dbc62c8a39d5be324c1404743cfcdb8b7ab3765522521"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-build-ownership-action-receipt-v1",
+      "path": "oracle/gcc/source-build-ownership-action-receipt-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c2a4547c7d852e89b84c9aabc9d29b4879330e1638308a7ad2dd796912bf76bf"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-build-ownership-profile-v1",
+      "path": "oracle/gcc/source-build-ownership-profile-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d4fa1183fb3988291aa41fb5353247eefd02edd784ccfdb4b2cf680b0c9e3a02"
     },
     {
       "formatVersions": [

@@ -1445,6 +1445,7 @@ private val v3BoundaryIsolatedTestMethods = listOf(
 private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3BoundaryTests")
     .map { it == "true" }
     .orElse(false)
+private val gccCompilerEnginePlanningTestClass = "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
 
 private fun configureOracleTestRuntime(testTask: Test) {
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
@@ -1554,7 +1555,34 @@ tasks.test {
     if (isolateV3BoundaryTests.get() && shard != "live") {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
+    if (shard != "live") {
+        // Its production RSS monitor observes process-wide history, including earlier tests.
+        filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
+        dependsOn("gccCompilerEnginePlanningIsolated")
+    }
     configureOracleTestRuntime(this)
+}
+
+// Select the entire class, including future methods, in a worker with no earlier suite RSS peak.
+// A dependency of test keeps this required for local check and the full/core CI entry points.
+tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
+    group = "verification"
+    description = "Runs GCC planning RSS-sensitive tests in a fresh bounded test JVM"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { excludeTags("ci-live") }
+    filter {
+        includeTestsMatching(gccCompilerEnginePlanningTestClass)
+        isFailOnNoMatchingTests = true
+    }
+    forkEvery = 1
+    maxParallelForks = 1
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("GCC planning tests must measure a fresh test JVM") { false }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull != "live" }
+    configureOracleTestRuntime(this)
+    // Leave headroom below the unchanged 2 GiB production/fixture RSS cap, even with live env flags.
+    maxHeapSize = "512m"
 }
 
 private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String) =
