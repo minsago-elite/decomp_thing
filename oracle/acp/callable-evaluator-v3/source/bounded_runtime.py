@@ -5,6 +5,7 @@ import hashlib
 import fcntl
 import errno
 import json
+import math
 import os
 from pathlib import Path
 import resource
@@ -18,6 +19,12 @@ import time
 import uuid
 
 BASE = Path(__file__).resolve().parent
+
+# Controller census bounds, distinct from sandbox/worker inventory authority.
+# The scan budget includes the advance that must observe EOF; exhausting it
+# without EOF is unverified, even if the next advance would have ended the scan.
+CONTROLLER_PROC_SCAN_ENTRIES = 256
+CONTROLLER_PROC_STAT_BYTES = 4096
 
 from build_contract import load_profile_with_digest, enforced_process_limits
 
@@ -666,18 +673,80 @@ def process_identity(pid: int) -> dict | None:
         return None
 
 
-def owned_processes(leader: int, root_start: int | None) -> list[dict]:
-    current = process_identity(leader)
+def _controller_metadata_timely(deadline):
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ValueError('finite absolute controller metadata deadline required')
+    if time.monotonic() >= deadline:
+        raise TimeoutError('controller metadata absolute deadline expired')
+
+
+def _cleanup_process_identity(pid: int, deadline) -> dict | None:
+    """Bounded absence observation only; never authority to signal a numeric PID."""
+    _controller_metadata_timely(deadline)
+    if type(pid) is not int or not 0 < pid < (1 << 31):
+        raise ValueError('invalid controller census PID')
+    try:
+        descriptor = os.open(f'/proc/{pid}/stat', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (FileNotFoundError, ProcessLookupError):
+        _controller_metadata_timely(deadline)
+        return None
+    raw = None
+    try:
+        try:
+            _controller_metadata_timely(deadline)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError('controller process stat is not a regular file')
+            _controller_metadata_timely(deadline)
+            raw = os.read(descriptor, CONTROLLER_PROC_STAT_BYTES + 1)
+            _controller_metadata_timely(deadline)
+            if not raw or len(raw) > CONTROLLER_PROC_STAT_BYTES:
+                raise ValueError('controller process stat byte bound')
+        except (FileNotFoundError, ProcessLookupError):
+            _controller_metadata_timely(deadline)
+    finally:
+        os.close(descriptor)
+    _controller_metadata_timely(deadline)
+    if raw is None:
+        return None
+    value = raw.decode('utf-8')
+    end = value.rfind(')')
+    if not value.startswith(f'{pid} (') or end < len(f'{pid} ('):
+        raise ValueError('malformed controller process stat')
+    fields = value[end + 2:].split()
+    if end + 1 >= len(value) or value[end + 1] != ' ' or len(fields) < 20:
+        raise ValueError('incomplete controller process stat')
+    record = {'pid': pid, 'start': int(fields[19]), 'pgid': int(fields[2]), 'sid': int(fields[3])}
+    if record['start'] <= 0 or record['pgid'] < 0 or record['sid'] < 0:
+        raise ValueError('invalid controller process stat identity')
+    _controller_metadata_timely(deadline)
+    return record
+
+
+def owned_processes(leader: int, root_start: int | None, deadline) -> list[dict]:
+    _controller_metadata_timely(deadline)
     if root_start is None:
         raise RuntimeError('owned launcher start identity is unknown')
+    current = _cleanup_process_identity(leader, deadline)
     if current and current['start'] != root_start:
         raise RuntimeError('owned subprocess root PID reused')
     records = []
-    for entry in Path('/proc').iterdir():
-        if entry.name.isdecimal():
-            record = process_identity(int(entry.name))
-            if record and (record['sid'] == leader or record['pgid'] == leader):
-                records.append(record)
+    _controller_metadata_timely(deadline)
+    with os.scandir('/proc') as entries:
+        for _ in range(CONTROLLER_PROC_SCAN_ENTRIES):
+            _controller_metadata_timely(deadline)
+            try:
+                entry = next(entries)
+            except StopIteration:
+                break
+            _controller_metadata_timely(deadline)
+            if entry.name.isdecimal():
+                record = _cleanup_process_identity(int(entry.name), deadline)
+                if record and (record['sid'] == leader or record['pgid'] == leader):
+                    records.append(record)
+            _controller_metadata_timely(deadline)
+        else:
+            raise RuntimeError('controller process scan entry budget exhausted without EOF')
+    _controller_metadata_timely(deadline)
     return records
 
 
@@ -1068,15 +1137,22 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
             'compilerRecording': compiler_recording}
 
 
-def _read_private_json(path, maximum=4096):
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def _read_private_json(path, maximum=4096, *, deadline):
+    _controller_metadata_timely(deadline)
+    if type(maximum) is not int or not 0 < maximum <= 4096:
+        raise ValueError('private controller JSON byte bound')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
+        _controller_metadata_timely(deadline)
         metadata = os.fstat(descriptor)
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or
-                stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1):
+                stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1 or
+                not 0 <= metadata.st_size <= maximum):
             raise ValueError('private controller file identity differs')
+        _controller_metadata_timely(deadline)
         raw = os.read(descriptor, maximum + 1)
-        if len(raw) > maximum:
+        _controller_metadata_timely(deadline)
+        if len(raw) > maximum or len(raw) != metadata.st_size:
             raise ValueError('private controller file byte bound')
         def unique(pairs):
             result = {}
@@ -1085,36 +1161,54 @@ def _read_private_json(path, maximum=4096):
                     raise ValueError('duplicate controller key')
                 result[key] = value
             return result
-        return json.loads(raw, object_pairs_hook=unique)
+        value = json.loads(raw, object_pairs_hook=unique)
+        _controller_metadata_timely(deadline)
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError as failure:
+            # A close error must not masquerade as a missing gate at admission.
+            raise RuntimeError('private controller metadata descriptor close failed') from failure
+    _controller_metadata_timely(deadline)
+    return value
 
 
-def _admit_scope(receipt, launch, bounds):
+def _admit_scope(receipt, launch, bounds, deadline):
+    _controller_metadata_timely(deadline)
     path = receipt['directory'] / 'gate.json'
-    if not path.exists():
+    try:
+        gate = _read_private_json(path, deadline=deadline)
+    except FileNotFoundError:
+        _controller_metadata_timely(deadline)
         return None
-    gate = _read_private_json(path)
-    if (set(gate) != {'pid', 'start'} or any(type(gate[k]) is not int or gate[k] <= 0 for k in gate)):
+    if (type(gate) is not dict or set(gate) != {'pid', 'start'} or
+            any(type(gate[k]) is not int or gate[k] <= 0 for k in gate)):
         raise ValueError('scope gate process identity is invalid')
     child = process_identity(gate['pid'])
+    _controller_metadata_timely(deadline)
     if not child or child['start'] != gate['start']:
         raise ValueError('scope gate process identity changed')
     cgroup_record = Path(f"/proc/{gate['pid']}/cgroup").read_text().strip()
+    _controller_metadata_timely(deadline)
     if not cgroup_record.startswith('0::/') or '\n' in cgroup_record:
         raise ValueError('scope gate cgroup record is invalid')
     cgroup = Path('/sys/fs/cgroup') / cgroup_record[4:]
     if not cgroup.resolve().is_relative_to(Path('/sys/fs/cgroup')) or cgroup.name != launch['unit']:
         raise ValueError('scope gate cgroup path differs')
-    values = {name: (cgroup / name).read_text().strip() for name in ('pids.max', 'memory.max', 'memory.swap.max')}
+    values = {}
+    for name in ('pids.max', 'memory.max', 'memory.swap.max'):
+        _controller_metadata_timely(deadline)
+        values[name] = (cgroup / name).read_text().strip()
+        _controller_metadata_timely(deadline)
     if values != {'pids.max': str(bounds['cgroup']['tasks']), 'memory.max': str(bounds['cgroup']['memoryBytes']), 'memory.swap.max': str(bounds['cgroup']['swapBytes'])}:
         raise ValueError('scope gate kernel limits differ')
+    _controller_metadata_timely(deadline)
     directory_fd = os.open(cgroup, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    metadata = os.fstat(directory_fd)
-    if not stat.S_ISDIR(metadata.st_mode):
-        os.close(directory_fd)
-        raise ValueError('scope descriptor is not a cgroup directory')
     try:
+        _controller_metadata_timely(deadline)
+        metadata = os.fstat(directory_fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('scope descriptor is not a cgroup directory')
         gate_pidfd = _acquire_gate_pidfd(gate, launch)
     except BaseException:
         os.close(directory_fd)
@@ -1127,9 +1221,12 @@ def _admit_scope(receipt, launch, bounds):
         # Reread limits via the acquired directory, so pathname substitution cannot authenticate it.
         acquired = {}
         for name in ('pids.max','memory.max','memory.swap.max'):
+            _controller_metadata_timely(deadline)
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
             try:
+                _controller_metadata_timely(deadline)
                 raw = os.read(fd, 65)
+                _controller_metadata_timely(deadline)
                 if len(raw) > 64:
                     raise ValueError('scope limit metadata byte bound')
                 acquired[name] = raw.decode('ascii').strip()
@@ -1137,13 +1234,17 @@ def _admit_scope(receipt, launch, bounds):
                 os.close(fd)
         if acquired != values:
             raise ValueError('acquired scope kernel limits differ')
+        _controller_metadata_timely(deadline)
         current = cgroup.stat()
+        _controller_metadata_timely(deadline)
         if (current.st_dev,current.st_ino) != (metadata.st_dev,metadata.st_ino):
             raise ValueError('scope path changed during acquisition')
         if process_identity(gate['pid']) != child:
             raise ValueError('scope gate identity changed during acquisition')
+        _controller_metadata_timely(deadline)
         if Path(f"/proc/{gate['pid']}/cgroup").read_text().strip() != cgroup_record:
             raise ValueError('scope gate membership changed during acquisition')
+        _controller_metadata_timely(deadline)
         return evidence
     except BaseException:
         os.close(gate_pidfd)
@@ -1285,7 +1386,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             if remaining <= 0:
                 raise TimeoutError('bounded worker phase deadline')
             if scope_evidence is None:
-                scope_evidence = _admit_scope(receipt, launch, bounds)
+                scope_evidence = _admit_scope(receipt, launch, bounds, began + timeout)
                 if scope_evidence is not None:
                     result.update(scopeVerified=True, kernelScope={k:v for k,v in scope_evidence.items() if not k.startswith('_')})
                     # State owns cgroup/gate handles before any authenticated release attempt.
@@ -1346,7 +1447,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                     if time.monotonic() >= verification_end:
                         raise TimeoutError('cleanup absence window expired before observation')
                     scoped = scope_processes(scope_evidence)
-                    session = owned_processes(process.pid, root_start)
+                    session = owned_processes(process.pid, root_start, verification_end)
                     if time.monotonic() >= verification_end:
                         raise TimeoutError('cleanup absence observation returned after its absolute end')
                     if not scoped and not session:

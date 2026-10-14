@@ -177,7 +177,8 @@ class ProfileLimits(unittest.TestCase):
         self.assertEqual(1048576,p['bounds']['helperOutputBytesPerStream'])
 
     def simulate(self, *, output=b'ok', limit=None, clock=None, cleanup_failure=False,
-                 wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0):
+                 wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0,
+                 metadata_failure=None, census_failure=None):
         import worker_exec_proof as parser
         stack = ExitStack(); self.addCleanup(stack.close)
         temporary = Path(stack.enter_context(tempfile.TemporaryDirectory(dir=TEMP)))
@@ -201,7 +202,12 @@ class ProfileLimits(unittest.TestCase):
             if late_absence:now[0]+=6.0
             return []
         stack.enter_context(patch.object(runtime,'scope_processes',side_effect=scoped))
-        stack.enter_context(patch.object(runtime,'owned_processes',return_value=[{'pid':123}] if cleanup_failure else []))
+        self.last_census_deadlines=[]
+        def census(leader,start,deadline):
+            self.last_census_deadlines.append(deadline)
+            if census_failure is not None:raise census_failure
+            return [{'pid':123}] if cleanup_failure else []
+        stack.enter_context(patch.object(runtime,'owned_processes',side_effect=census))
         if cleanup_failure:
             stack.enter_context(patch.object(runtime,'kill_exact'))
             stack.enter_context(patch.object(runtime.time,'sleep'))
@@ -247,7 +253,10 @@ class ProfileLimits(unittest.TestCase):
             self.assertGreater(deadline,0)
         release_mock=stack.enter_context(patch.object(runtime,'_release_scope',side_effect=release))
         self.last_release=release_mock
-        def admit(receipt,launch,bounds):
+        self.last_admission_deadlines=[]
+        def admit(receipt,launch,bounds,deadline):
+            self.last_admission_deadlines.append(deadline)
+            if metadata_failure is not None:raise metadata_failure
             if not admission:
                 return None
             runtime.write_json(receipt['directory']/'gate.json',{'pid':123,'start':9})
@@ -280,6 +289,30 @@ class ProfileLimits(unittest.TestCase):
             else:
                 release_mock.assert_called_once()
                 self.assertIs(self.last_scope_evidence,release_mock.call_args.args[0])
+
+    def test_controller_metadata_refusals_preserve_original_deadlines_and_unknown_results(self):
+        result=self.simulate()
+        self.assertTrue(runtime.worker_execution_complete(result))
+        self.assertTrue(self.last_admission_deadlines)
+        self.assertEqual({100+runtime.execution_bounds(phase='runtime')['wallSeconds']},set(self.last_admission_deadlines))
+        self.assertEqual([105],self.last_census_deadlines)
+        for kind in ('metadata','census'):
+            for failure in (TimeoutError('authored original deadline'),ValueError('authored metadata refusal'),
+                            PermissionError('authored inspection denial'),RuntimeError('authored census cap')):
+                with self.subTest(kind=kind,failure=type(failure).__name__):
+                    with self.assertRaises(type(failure)) as caught:
+                        self.simulate(**{kind+'_failure':failure})
+                    result=caught.exception.bounded_result
+                    self.assertTrue(result['infrastructureFailure'])
+                    self.assertFalse(runtime.worker_execution_complete(result))
+                    self.assertIsNone(result['exitCode'])
+                    if kind=='census':
+                        self.assertFalse(result['cleanupVerified']);self.assertFalse(result['finalAbsenceVerified'])
+                        self.assertEqual([105],self.last_census_deadlines)
+                    else:
+                        self.assertFalse(result['scopeAdmitted'])
+                        self.assertEqual(isinstance(failure,TimeoutError),result['timedOut'])
+                        self.last_release.assert_not_called()
 
     def test_mock_complete_proof_separates_worker_from_launcher_and_public_bytes(self):
         result = self.simulate()

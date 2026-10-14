@@ -624,20 +624,20 @@ class RuntimeWorkerProof(unittest.TestCase):
                 def read(fd,n):
                     name=next(k for k,v in descriptors.items() if v==fd)
                     return ('999' if mutation=='acquired' and name=='memory.max' else values[name]).encode()
-                with patch.dict(namespace,{'_read_private_json':lambda p:dict(gate),
+                with patch.dict(namespace,{'_read_private_json':lambda p,**kw:dict(gate),
                                            'process_identity':lambda pid:dict(child,start=999) if mutation=='start' else dict(child),
                                            '_acquire_gate_pidfd':Mock(side_effect=ValueError('gate acquisition') if mutation=='gate-pidfd' else None,return_value=89)}), \
-                        patch.object(Path,'exists',return_value=True),patch.object(Path,'resolve',lambda p,*a,**k:p), \
+                        patch.object(runtime.time,'monotonic',return_value=1),patch.object(Path,'resolve',lambda p,*a,**k:p), \
                         patch.object(Path,'read_text',text),patch.object(Path,'stat',return_value=metadata), \
                         patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'fstat',return_value=metadata), \
                         patch.object(runtime.os,'read',side_effect=read),patch.object(runtime.os,'close'), \
                         patch.object(runtime.os,'write') as write, \
                         patch.object(runtime.os,'replace') as publish:
                     if mutation is None:
-                        self.assertEqual(unit,admit({'directory':self.work},launch,bounds)['unit'])
+                        self.assertEqual(unit,admit({'directory':self.work},launch,bounds,10)['unit'])
                         write.assert_not_called();publish.assert_not_called()
                     else:
-                        with self.assertRaises(ValueError):admit({'directory':self.work},launch,bounds)
+                        with self.assertRaises(ValueError):admit({'directory':self.work},launch,bounds,10)
                         publish.assert_not_called()
 
     def test_gate_policy_checks_survive_optimized_compilation(self):
@@ -663,6 +663,148 @@ class RuntimeWorkerProof(unittest.TestCase):
         with patch.object(runtime,'BASE',self.directory):
             with self.assertRaises(ValueError):runtime.private_directory(self.directory.parent/'outside')
             with self.assertRaises(ValueError):runtime.write_json(self.directory.parent/'outside.json',{})
+
+    def test_private_json_nonblocking_descriptor_admission_and_deadline_closure(self):
+        cases=(None,'fifo','uid','mode','links','oversize','short','duplicate','malformed','permission','expired','late-open','late-read','late-close','close')
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                now=[10 if mutation=='expired' else 1]
+                raw=b'{"pid":12,"start":123}'
+                if mutation=='duplicate':raw=b'{"pid":12,"pid":13}'
+                if mutation=='malformed':raw=b'{bad'
+                metadata=types.SimpleNamespace(st_mode=(stat.S_IFIFO if mutation=='fifo' else stat.S_IFREG)|(0o644 if mutation=='mode' else 0o600),
+                    st_uid=56 if mutation=='uid' else 55,st_nlink=2 if mutation=='links' else 1,
+                    st_size=4097 if mutation=='oversize' else len(raw)+(mutation=='short'))
+                def opened(*args,**kwargs):
+                    if mutation=='permission':raise PermissionError('authored metadata denial')
+                    if mutation=='late-open':now[0]=10
+                    return 41
+                def read(*args):
+                    if mutation=='late-read':now[0]=10
+                    return raw
+                def close(*args):
+                    if mutation=='late-close':now[0]=10
+                    if mutation=='close':raise FileNotFoundError('authored close failure is not a missing gate')
+                with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime.os,'getuid',return_value=55), \
+                        patch.object(runtime.os,'open',side_effect=opened) as opening, \
+                        patch.object(runtime.os,'fstat',return_value=metadata), \
+                        patch.object(runtime.os,'read',side_effect=read) as reading, \
+                        patch.object(runtime.os,'close',side_effect=close) as closing:
+                    if mutation is None:
+                        self.assertEqual({'pid':12,'start':123},runtime._read_private_json(self.work/'gate.json',deadline=10))
+                    else:
+                        with self.assertRaises((ValueError,OSError,RuntimeError)):
+                            runtime._read_private_json(self.work/'gate.json',deadline=10)
+                    if mutation=='expired':opening.assert_not_called()
+                    else:
+                        flags=opening.call_args.args[1]
+                        for flag in (os.O_NONBLOCK,os.O_NOFOLLOW,os.O_CLOEXEC):self.assertTrue(flags&flag)
+                    if mutation in ('fifo','uid','mode','links','oversize','permission','expired','late-open'):reading.assert_not_called()
+                    if mutation in ('permission','expired'):closing.assert_not_called()
+                    else:closing.assert_called_once_with(41)
+                    if reading.called:reading.assert_called_once_with(41,4097)
+        with patch.object(runtime.time,'monotonic',return_value=1),patch.object(runtime.os,'open') as opening:
+            for maximum in (0,-1,4097,True):
+                with self.assertRaises(ValueError):runtime._read_private_json(self.work/'gate.json',maximum,deadline=10)
+            for deadline in (None,float('inf'),float('nan'),True):
+                with self.assertRaises(ValueError):runtime._read_private_json(self.work/'gate.json',deadline=deadline)
+            opening.assert_not_called()
+
+    def test_scope_admission_uses_actual_missing_open_and_rejects_nonclosed_gate_shape(self):
+        for gate in (None,[],{'pid':12,'start':123,'extra':1},{'pid':True,'start':123}):
+            with self.subTest(gate=gate),patch.object(runtime.time,'monotonic',return_value=1), \
+                    patch.object(Path,'exists',side_effect=AssertionError('no existence precheck')), \
+                    patch.object(runtime,'_read_private_json',side_effect=FileNotFoundError() if gate is None else None,
+                                 return_value=gate) as reading, \
+                    patch.object(runtime,'process_identity',side_effect=AssertionError('invalid gate must not inspect processes')):
+                if gate is None:self.assertIsNone(runtime._admit_scope({'directory':self.work},{},{},10))
+                else:
+                    with self.assertRaises(ValueError):runtime._admit_scope({'directory':self.work},{},{},10)
+                reading.assert_called_once_with(self.work/'gate.json',deadline=10)
+
+    def test_cleanup_stat_is_bounded_and_all_descriptor_failures_stay_unknown(self):
+        fields=['S','1','12','12']+['0']*15+['123']
+        valid=('12 (authored name) '+' '.join(fields)+'\n').encode()
+        cases=(None,'gone','gone-read','permission','fifo','oversize','malformed','negative','late-open','late-read','close')
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                now=[1];raw=valid
+                if mutation=='oversize':raw=b'x'*4097
+                if mutation=='malformed':raw=b'12 (bad) S'
+                if mutation=='negative':raw=valid.replace(b'12 12',b'-1 12',1)
+                def opened(*args,**kwargs):
+                    if mutation=='gone':raise FileNotFoundError()
+                    if mutation=='permission':raise PermissionError('authored proc denial')
+                    if mutation=='late-open':now[0]=10
+                    return 41
+                def read(*args):
+                    if mutation=='gone-read':raise ProcessLookupError()
+                    if mutation=='late-read':now[0]=10
+                    return raw
+                with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime.os,'open',side_effect=opened) as opening, \
+                        patch.object(runtime.os,'fstat',return_value=types.SimpleNamespace(
+                            st_mode=stat.S_IFIFO if mutation=='fifo' else stat.S_IFREG)), \
+                        patch.object(runtime.os,'read',side_effect=read) as reading, \
+                        patch.object(runtime.os,'close',side_effect=FileNotFoundError('authored close failure') if mutation=='close' else None) as closing:
+                    if mutation is None:
+                        self.assertEqual({'pid':12,'start':123,'pgid':12,'sid':12},runtime._cleanup_process_identity(12,10))
+                    elif mutation in ('gone','gone-read'):self.assertIsNone(runtime._cleanup_process_identity(12,10))
+                    else:
+                        with self.assertRaises((ValueError,OSError)):runtime._cleanup_process_identity(12,10)
+                    if mutation in ('gone','permission'):closing.assert_not_called()
+                    else:closing.assert_called_once_with(41)
+                    if mutation in ('gone','permission','fifo','late-open'):reading.assert_not_called()
+                    if reading.called:reading.assert_called_once_with(41,4097)
+                    self.assertEqual('/proc/12/stat',opening.call_args.args[0])
+        with patch.object(runtime.time,'monotonic',return_value=10),patch.object(runtime.os,'open') as opening:
+            with self.assertRaises(TimeoutError):runtime._cleanup_process_identity(12,10)
+            opening.assert_not_called()
+
+    def test_controller_census_stream_budget_deadline_and_unknown_are_not_absence(self):
+        class Entries:
+            def __init__(self,names,now,mutation):self.names=iter(names);self.now=now;self.mutation=mutation;self.advances=0;self.closed=False
+            def __enter__(self):return self
+            def __exit__(self,*args):
+                self.closed=True
+                if self.mutation=='late-close':self.now[0]=10
+            def __next__(self):
+                self.advances+=1
+                if self.mutation=='permission':raise PermissionError('authored census denial')
+                if self.mutation=='late-advance':self.now[0]=10
+                return types.SimpleNamespace(name=next(self.names))
+        self.assertEqual(256,runtime.CONTROLLER_PROC_SCAN_ENTRIES)
+        self.assertEqual(4096,runtime.CONTROLLER_PROC_STAT_BYTES)
+        for mutation in (None,'empty','budget','permission','bad-stat','late-advance','late-close','reused'):
+            with self.subTest(mutation=mutation):
+                now=[1];root={'pid':12,'start':123,'pgid':12,'sid':12}
+                names=['self','net','12','99'] if mutation!='budget' else ['not-numeric']*256
+                entries=Entries(names,now,mutation)
+                def identity(pid,deadline):
+                    self.assertEqual(10,deadline)
+                    if pid==12:
+                        if mutation=='empty':return None
+                        return dict(root,start=999) if mutation=='reused' else root
+                    if mutation=='bad-stat':raise ValueError('authored malformed stat')
+                    return {'pid':pid,'start':9,'pgid':99,'sid':99}
+                with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime.os,'scandir',return_value=entries) as scan, \
+                        patch.object(runtime,'_cleanup_process_identity',side_effect=identity) as reading, \
+                        patch.object(runtime,'process_identity',side_effect=AssertionError('no unbounded stat reader')), \
+                        patch.object(runtime,'kill_exact',side_effect=AssertionError('census is never signal authority')) as killing:
+                    if mutation in (None,'empty'):
+                        self.assertEqual([] if mutation=='empty' else [root],runtime.owned_processes(12,123,10))
+                    else:
+                        with self.assertRaises((RuntimeError,ValueError,OSError)):runtime.owned_processes(12,123,10)
+                    killing.assert_not_called()
+                    if mutation=='reused':scan.assert_not_called()
+                    else:
+                        scan.assert_called_once_with('/proc');self.assertTrue(entries.closed)
+                    if mutation=='budget':
+                        self.assertEqual(256,entries.advances)
+                        reading.assert_called_once_with(12,10)  # Every nonnumeric entry consumed budget.
+                    if mutation=='late-advance':self.assertEqual(1,entries.advances)
 
     def receipt_fixture(self,*,close=True):
         # Authored protocol bytes only: actual parser/completion predicate, no
