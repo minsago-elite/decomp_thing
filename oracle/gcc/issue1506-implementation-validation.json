@@ -1,97 +1,65 @@
 {
   "issue": 1506,
-  "status": "finite direct-RAM arithmetic read correction verified on authored bundled fixtures only; independent review and original replay pending",
-  "parentGeneration": "42efc8c5c55999ee27228fd7f676411b53e43449",
-  "scope": "FLOAT_ADD/FLOAT_MULT direct memory value-input association, authored controls, current exporter12 identity bindings and policy documentation",
+  "status": "current schema4/exporter13 source/profile bindings; static identity checks only, not a new execution qualification",
+  "recordKind": "current-static-source-and-profile-bindings",
+  "parentGeneration": "f1f1216c7f31c95a8ef507fe107765ceab8a483a",
+  "scope": "Current schema4/exporter13/evidence2 byte-evidence implementation and active GCC controls; documentation profile selection and unsupported-schema test correction. Historical exporter12 execution results remain in the exact predecessor only.",
   "files": {
-    "docs/referenced-data-byte-evidence.md": "38feedaa8f4c27d9a22080f5ca5e702fa9a139820dc87d963a0e8a1eaf2d2af8",
-    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19",
-    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f",
-    "oracle/gcc/historical/issue1506-migration005-validation.json": "a04e062d58073329b448c51c0ee1f032415b2d3b1406acb007c7ebb8cf665541",
-    "src/main/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfile.kt": "139eb9b2f90d44b66391630b8045165f4d7ba9568fba849ba4a36e30cdb67204",
-    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "6874e17183348605cd23927e2ad993c402ba0ebd32caa9a1010058abc3fff79e",
-    "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfileTest.kt": "67ce362d7782fd5ffd222d4d251ed2eea3b81fd3f983fc041ce6f6d076d834a3",
-    "src/test/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfileTest.kt": "fc0ca9fa41a0f51191dcc04732c0f619b2f62e49470085d59fa171326ec4e3f4",
-    "src/test/kotlin/decompengine/project/GhidraReferencedBytesExporterTest.kt": "eec102cb26321316fbd5d352be2365c69a0102498f1122b59a07498976a9083e",
+    "docs/gcc-cc1-source-archive.md": "eba115643ec03a624697f6f96151acb883fa833dea64fe3a03ede52461148bdf",
+    "docs/referenced-data-byte-evidence.md": "ca1e2de7c1c5e51e683cc7aad95662504d484694f50b449cbab0e5af1a243dd6",
+    "oracle/gcc/16.2.0/compiler-engines-exporter13.json": "0d2c6f571b1ee7a977b2baf496823186da3fa95c97ede358e2c4ef75403927ca",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter13.json": "1075cd580b0a5bc872149633c1aa95a30b08b9da2f2e9feb689352571032b615",
+    "oracle/gcc/historical/issue1506-direct-arithmetic-exporter12-ffaf4088b5a3bcf0-validation.json": "ffaf4088b5a3bcf0d4cf04cb57dbba2b79a0693fba1fb61aea89a9b328ad66eb",
+    "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfile.kt": "b011aef1ae7b80b0b875102174693a0b2fd007b9fb515c3c56e5cd0a2c2f2053",
+    "src/main/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfile.kt": "4aea2857720ed3f0a6825b4ef192c2f41dbf40e9e58c28ec46d0a2ef8814b787",
+    "src/main/kotlin/decompengine/project/ProgramModel.kt": "bef8a5329ded5869e4199f5c75e6a4004e6138bd605e24af35b6ba37029ee3e7",
+    "src/main/kotlin/decompengine/project/ReferencedByteEvidenceAdmission.kt": "850d3e8e7829e4d0403d5dd02273d997d8cc48a1741e3ce8cdba16bed1bf6f32",
+    "src/main/kotlin/decompengine/project/ReferencedDataByteEvidence.kt": "1bb4d0deab70c19097c328e2d534593ace5db4a2982573655eb8a18bb0dac645",
+    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "a607b41b7c0cb7d871ca5c92c674b42602284d9d12570746054b38382603d265",
+    "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfileTest.kt": "f3f11ea81320163e81d18fc97a91a06d90d87fa39ab155c743210b31fda0f6cf",
+    "src/test/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfileTest.kt": "1d2b495e38758aedc4f827073ecffcbe6c06109ee3aab86e4bae4227639877d3",
+    "src/test/kotlin/decompengine/project/GeneratedCByteEvidencePromptTest.kt": "d63e49fa38b9fbe31700d47a89cb2bde57632f15a301b6a34fa6731f431caa4e",
+    "src/test/kotlin/decompengine/project/GhidraReferencedBytesExporterTest.kt": "664d42792bc6e841e7ec7d456c4ceec7ff9e46f0f498fc59345e86fcf029f223",
+    "src/test/kotlin/decompengine/project/ProgramModelTest.kt": "d6454e5a4ecf5779659db916f6fe765eb5068961f140227e9a34b6c54683e3f4",
+    "src/test/kotlin/decompengine/project/ReferencedByteEvidenceAdmissionTest.kt": "6dd5eb0261b3a01b74f36ee50cfd3083ae6d40651fc36dffeed0c94daa685d7d",
     "src/test/resources/ghidra/ControlledByteListingProbe.java": "514c46474ed7a0f948ede56e5dfa3482250999a4a295db19ca94b8ff71ad8e24",
-    "src/test/resources/ghidra/ReferencedBytesProbe.java": "2d5257f17cb9cbff6b4582c1cc8f56f4abbfd2384af0d32fc00e881a6d4e6ac5"
+    "src/test/resources/ghidra/ReferencedBytesProbe.java": "b3826e8d609ce47049d1f5604681e864b98160fbadc6ba3d8f1aa50e7e4bf473"
   },
   "historicalReceipt": {
-    "path": "oracle/gcc/historical/issue1506-migration005-validation.json",
-    "sha256": "a04e062d58073329b448c51c0ee1f032415b2d3b1406acb007c7ebb8cf665541",
-    "meaning": "Exact previous migration005 receipt at committed generation42efc8c5 retained unchanged. Old identities/tests are historical, not retrofitted."
+    "path": "oracle/gcc/historical/issue1506-direct-arithmetic-exporter12-ffaf4088b5a3bcf0-validation.json",
+    "sha256": "ffaf4088b5a3bcf0d4cf04cb57dbba2b79a0693fba1fb61aea89a9b328ad66eb",
+    "meaning": "Exact previous active record retained byte for byte. Its exporter12/schema3 source hashes, commands, 34-test pass and evidence hashes describe that historical execution only; they do not qualify exporter13 or these current source bytes."
   },
-  "diagnosisReferences": {
-    "root .omo/evidence/issue1517-original-retained-db-diagnosis-sol.md": "76dd3aad5d8db677f52f74f8eb90ac6cdea1f5ff3c2952eb02043b04917b10fd",
-    "root build/acp-decomp-effectiveness/callable-next-1517-retained-db-diagnosis/output/retained-db-probe.txt": "aa7656d899b5a1f575c9709106d2d4a1282850adf6cc06ee89c27e265344389a",
-    "scope": "Read-only diagnosis consumed for correction; no fresh original analysis/export/runtime/model execution by this source owner."
-  },
-  "policy": {
-    "newDirectReadOpcodes": [
-      "FLOAT_ADD",
-      "FLOAT_MULT"
-    ],
-    "guards": "Binary floating value-input reads, nonnull output, equal input/output sizes; exact memory address/space and exactly one whole-instruction association. Target output alias, multiple associations, size conflicts, dynamic pointers and unreviewed opcodes remain unknown. Existing LOAD/STORE/COPY retained.",
-    "wire": "schema3/exporter12 unchanged; existing pcode_direct_read covers semantic direct reads. No field/enum/object/type/extent/initializer authority added; exact source/profile digests distinguish implementation."
+  "currentIdentity": {
+    "programModelSchemaVersion": 4,
+    "exporterVersion": 13,
+    "byteEvidenceVersion": 2,
+    "compilerEngineProfile": "oracle/gcc/16.2.0/compiler-engines-exporter13.json",
+    "structuralFullExportProfile": "oracle/gcc/16.2.0/structural-full-export-profile-exporter13.json",
+    "exporterSource": "src/main/resources/ghidra_scripts/ExportProgramModel.java"
   },
   "verification": {
-    "command": "GRADLE_USER_HOME=$PWD/build/gradle-home TMPDIR=$PWD/build/issue1506-direct-arithmetic/tmp npm_config_cache=$PWD/build/issue1506-corrections/npm-cache ./gradlew --offline --no-daemon -I build/issue1506-corrections/focused.init.gradle -PfrontendNodeHome=/home/june/decomp_thing/build/d12-acp-node-pin/node verifyReconstructionNeutrality test --tests decompengine.project.GhidraReferencedBytesExporterTest --tests decompengine.oracle.gcc.GccCompilerEngineProfileTest --tests decompengine.oracle.gcc.GccDriverStructuralProfileTest --tests decompengine.project.GeneratedCByteEvidencePromptTest --tests decompengine.project.ReferencedByteEvidenceAdmissionTest -Djava.io.tmpdir=$PWD/build/issue1506-direct-arithmetic/tmp",
-    "tests": 34,
-    "failures": 0,
-    "skipped": 0,
-    "scope": "Five full focused classes: authored bundled publicAPI/ProgramDB1, current and historical profile identity19, F2prompt5, F1admission9. Prior005 migration code unchanged; no claim all005 classes reran.",
-    "authoredProgramDB": "Actual SLEIGH MOVSD/COPY, ADDSD/FLOAT_ADD and MULSD/FLOAT_MULT, distinct authored targets and deliberate one-byte00h listings. Export retains initializer and all eight leading-zero bytes. Separate from natural original listing observations.",
-    "negativeControls": "Both value slots; mismatched target offset/RAM space/constant space; size conflict; duplicate input/operation associations; read/write alias; unreviewed FLOAT_SUB/FLOAT_DIV/INT_MULT/BRANCH/CALL. Existing LOAD/STORE/COPY/dynamic/unsupported and bound controls retained.",
-    "processBounds": "Each javac/probe60s plus5s finalwait. Fixture JVM/javac home/tmp/preferences/JNA repository-local; perfdata disabled. No original input/native target program executed.",
-    "earlierFailure": "focused001 javac rejected duplicate local test-variable name before fixture execution; renamed; focused002 passed. Failure retained, not qualification.",
-    "docs": "UTF8/LF/header/fence syntax and whitespace checks pass; finite policy and authored/natural distinction documented."
-  },
-  "evidence": {
-    "build/issue1506-direct-arithmetic/focused-001.log": "d884314e4ccab1106d3a436d21431c6090a341379b939115371ec9e4f6109f9c",
-    "build/issue1506-direct-arithmetic/focused-002.log": "fea98ed44ed16db9b1f04d0d235527b0887784c9276d795af94a25a12e65f75a",
-    "build/issue1506-direct-arithmetic/doc-check-003.log": "f8c080d0e025a8f73913ceffed7af6b49f8dd39a8d5e6e9e8dabda98976d3d0b",
-    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.oracle.gcc.GccCompilerEngineProfileTest.xml": "c83004366d31f26b5779223a044ff440104d972aba8b45d99bc21f34e6512aa1",
-    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.oracle.gcc.GccDriverStructuralProfileTest.xml": "bfbf2f5258de0d8f44e4ebd6f45ed61c4f7329df22eeadf48d9ca2fea3207c5c",
-    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.GeneratedCByteEvidencePromptTest.xml": "b8617f387b826c2d650f05ee5ab7b21c1ac7e9e1c68ca1cbd08135f0e772cbc5",
-    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.GhidraReferencedBytesExporterTest.xml": "233bc36e1bf2fb7f5468b49393556716486a8f8b52d064fa8c91cba616722993",
-    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.ReferencedByteEvidenceAdmissionTest.xml": "183aa1973837806c864453fc3657279e26128212c49bd19630227c945c38f444",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/controlled-listing.log": "9ec923ddb48194517dce0490ca0b7a3f5f0d7a7a97fa299750bbc50fa8852398",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/probe.log": "629f43830a4563a7cd52f99fddc811cde9bac203f1fafc8fa0bf57cabfa11a8d",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/compile.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ControlledByteListingProbe.class": "829ee4bcc8496aa0aa55b30196f5560cb54ac6895314c626a6166b5744e903ba",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$BoundFragment.class": "a0b4d1cddae6d021ba8a84c321b40253bd35579e4bf8e4ca25a9640e88a671f7",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$BoundedOutput.class": "ea9dd440ce697d472289ca50ac95297102acd9999df17a8fccf977c744064261",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$ByteWindow.class": "7fa040ff20f0c83d70ff27265b62822260697f644c16af15692b5be12ca75dff",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$FunctionExport.class": "06b64de859da450da9ba0f1a05c8f1cd102c1de6257df1bde2d83912a3f9f9e5",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$GlobalEvidence.class": "99bc799f0d594242fa0770eee01886c23b99988936588bbebe98cac83a10b6c6",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningBatchEvidence.class": "a71a4503fc626f8a39d022d7531bce8d951d7f721d3497d06200780ef0b57b75",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningBatchValidation.class": "26175cc873d21c760620b4ea437265d18ee4d613f75fc3f1e79393961485e2b6",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningEvidenceCursor.class": "0625f25b47636f0bef2183bab04ec3b08778003a2d1c7e639d3211974af3029f",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningEvidenceFragmentValidation.class": "5d3cefd8f518d753b6ec7279259939eb66365dac2cf1479240c994067a1d4ed4",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningFunctionFragmentValidation.class": "9102c0026b8f64806d054d6d6b8604422cbc93f962bab09956195dae8ecbfa0b",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningIntegrityException.class": "ed0aa278019b2d72d7bccee7a3cd4eddda18f05df4caebca9dd3f738cc8b03d0",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningSemanticState.class": "5f121fbc1247ad199ecd99b1ea3d40ac33ac1f2a3edf2028fdda69f041498a4a",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$RawLine.class": "2eace6d709dca48d827adb77e84d2d5edb280c5aa55308eaf8ed48acd36a5058",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$TypeEvidence.class": "6f825ddbca7af3dab9ef76c1b5404c2d4458d1680b3e07e52d7b1c372c679ca6",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel.class": "17d3f39a7bc2479b4314cd8eadc04c7f01af226e81dbb7d1d2ee021d096ab236",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$BatchCommitment.class": "28ec6d1ecc98312dc72b2e667a0e2676eae7861055e3d352ccfc88c0a323ed2f",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$Binding.class": "4a61bfaddf80bf6bfcbb9544bd38c254b2c0fb12a6a75c39f99cf62fedfad819",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$FragmentCommitment.class": "ab4bd01bd0714f2583b367df9cbe601b52c022cf37bfafbbd884c6b64871e090",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1.class": "d93ef1080002a3c4c1d05fea126e15991b68e6972e4d295881ddd1b9b1ea486d",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ReferencedBytesProbe$Call.class": "33725d827dc1b03c0f679562409048b76c396110fab3ded7b05ed35a5d4dd87c",
-    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ReferencedBytesProbe.class": "6422d7a29689f26457ea6f11949d10e1ce1e2d3c24c3f5f556295c204b476b10",
-    "build/issue1506-direct-arithmetic/prepare-source-freeze.py": "dfa61e3cfc7937a2e68054b13a2047b473cc5c332b22a54a575fba1f681af949",
-    "build/issue1506-direct-arithmetic/public-api-classpath.json": "d5cc24b5da55ac4415281a51e715b2d99fcb440b2d67951f2a04a4582a5fe22d"
+    "scope": "Static JSON/hash/source/documentation checks only. No compiler, JVM, bundled-Ghidra, native target, original-input, provider or model execution for this record. No newly passing Kotlin test result is claimed.",
+    "checks": [
+      "every files entry matches current bytes",
+      "exporter13 compiler-engine profile source digest equals current exporter source digest",
+      "structural full-export profile binds the current exporter13 compiler-engine profile and exporter source",
+      "historical predecessor equals the previous active record byte for byte",
+      "archive example selects the active exporter13 profile and uses repository-contained output/temp paths",
+      "ProgramModelTest rejects unsupported schema5; missing-array and other controls remain unchanged"
+    ],
+    "executionResults": "No current execution results in this static record. The predecessor owns its historical commands, counts and results. Hosted CI must verify the proposed correction."
   },
   "unchangedHistoricalProfiles": {
     "oracle/gcc/16.2.0/compiler-engines.json": "d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732",
-    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4"
+    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4",
+    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f"
   },
   "remainingGates": [
-    "independent review of exact new freeze",
-    "separate original replay by assigned Ghidra owner after review",
-    "root Git checkpoint and hosted CI/review",
-    "no issueclosure/native/model/ABI/production qualification from authored controls"
+    "independent review and root checkpoint of the exact proposed source freeze",
+    "hosted CI and review for current source bytes; historical passes are not substituted",
+    "separate original-input replay and later experiment evidence remain outside this static record"
   ],
   "authority": {
     "originalInputExecution": false,
@@ -101,5 +69,5 @@
     "abi": false,
     "productionQualification": false
   },
-  "identityNote": "Self digest and future commit identity omitted; external sourcefreeze/root checkpoint bind this receipt."
+  "identityNote": "Self digest and future commit identity omitted; external source freeze/root checkpoint bind this receipt. The parent generation is context, not a claim that the modified files already exist in that commit."
 }
