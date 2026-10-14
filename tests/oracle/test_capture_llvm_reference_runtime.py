@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -15,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "scripts/oracle/capture_llvm_reference_runtime.py"
+SOURCE = ROOT / "oracle/llvm/capture_reference_runtime.py"
 capture = types.ModuleType("capture_llvm_reference_runtime_test_subject")
 capture.__file__ = str(SOURCE)
 exec(compile(SOURCE.read_bytes(), str(SOURCE), "exec"), capture.__dict__)
@@ -189,6 +190,8 @@ class CaptureRuntimeTest(unittest.TestCase):
 
     def test_workflow_pr_pure_only_dispatch_capture_no_host_install(self):
         raw = (ROOT / capture.WORKFLOW).read_text()
+        self.assertEqual(str(SOURCE.relative_to(ROOT)), capture.SCRIPT)
+        self.assertIn(capture.SCRIPT, raw)
         self.assertIn("workflow_dispatch:", raw)
         self.assertIn("pull_request:", raw)
         self.assertIn("if: github.event_name == 'pull_request'", raw)
@@ -202,7 +205,8 @@ class CaptureRuntimeTest(unittest.TestCase):
         self.assertIn("--preflight", raw)
         self.assertIn(str(self.directory / "tools/docker-rootless-extras"), capture.environment(self.directory)["PATH"])
 
-    def test_mocked_command_caps_streaming_image_and_closes_owned_pipes(self):
+    @contextmanager
+    def mocked_command(self, stdout, *, code=0, fail_after=None, cap=4):
         class Pipe:
             def __init__(self, number):
                 self.number, self.closed = number, False
@@ -219,8 +223,8 @@ class CaptureRuntimeTest(unittest.TestCase):
             def kill(self):
                 self.killed = True
             def wait(self, timeout):
-                self.returncode = 0
-                return 0
+                self.returncode = code
+                return code
         class Selector:
             def __init__(self):
                 self.rows = {}
@@ -237,20 +241,83 @@ class CaptureRuntimeTest(unittest.TestCase):
             def select(self, timeout):
                 return [(row, 1) for row in list(self.rows.values())]
         process = Process()
-        pending = {101: bytearray(b"12345"), 102: bytearray()}
+        pending = {101: bytearray(stdout), 102: bytearray()}
+        consumed = 0
         def read(fd, size):
-            block = bytes(pending[fd][:size])
-            del pending[fd][:size]
+            nonlocal consumed
+            if fd == 101 and fail_after is not None and consumed >= fail_after:
+                raise OSError("authored read failure")
+            block = bytes(pending[fd][:min(size, 2)])
+            del pending[fd][:len(block)]
+            if fd == 101:
+                consumed += len(block)
             return block
-        archive = self.directory / "limited-image.tar"
         with patch.object(capture.subprocess, "Popen", return_value=process), \
              patch.object(capture.selectors, "DefaultSelector", Selector), \
              patch.object(capture.os, "set_blocking"), patch.object(capture.os, "read", side_effect=read), \
-             patch.object(capture, "MAX_IMAGE", 4):
-            self.refuse("COMMAND_OUTPUT_LIMIT", lambda: capture.command(["authored-no-exec"], {}, self.directory,
-                        stdout_path=archive))
-        self.assertLessEqual(archive.stat().st_size, 4)
+             patch.object(capture, "MAX_IMAGE", cap):
+            yield process
+
+    def streamed_receipt(self):
+        receipt = json.loads((self.directory / "raw/image-save.json").read_bytes())
+        archive = self.directory / "runtime-image.tar"
+        actual = capture.file_pin(archive)
+        stream = receipt["stdoutArtifact"]
+        self.assertEqual("streamed-file", receipt["stdoutCapture"])
+        self.assertEqual(actual["bytes"], receipt["stdoutBytes"])
+        self.assertEqual(actual["sha256"], receipt["stdoutSha256"])
+        self.assertTrue(stream["identityVerified"])
+        self.assertTrue(all(stream[key] == value for key, value in actual.items()))
+        self.assertFalse((self.directory / "raw/image-save.stdout").exists())
+        return receipt
+
+    def run_streamed_command(self):
+        (self.directory / "raw").mkdir()
+        return capture.control_command(Path("authored-no-exec"), {}, self.directory, {}, "image-save",
+                                       ["image", "save", "authored-image"],
+                                       stdout_path=self.directory / "runtime-image.tar")
+
+    def test_streamed_command_success_receipt_binds_actual_archive_not_empty_stdout(self):
+        with self.mocked_command(b"1234") as process:
+            self.assertEqual(b"", self.run_streamed_command())
+        receipt = self.streamed_receipt()
+        self.assertEqual(4, receipt["stdoutBytes"])
+        self.assertNotEqual(hashlib.sha256(b"").hexdigest(), receipt["stdoutSha256"])
+        self.assertTrue(receipt["stdoutArtifact"]["eofObserved"])
+        self.assertIsNone(receipt["failureCode"])
+        self.assertEqual(0, receipt["exitCode"])
+        self.assertFalse(process.killed)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_streamed_command_limit_receipt_binds_only_retained_prefix(self):
+        with self.mocked_command(b"12345") as process:
+            self.refuse("COMMAND_OUTPUT_LIMIT", self.run_streamed_command)
+        receipt = self.streamed_receipt()
+        self.assertEqual(4, receipt["stdoutBytes"])
+        self.assertFalse(receipt["stdoutArtifact"]["eofObserved"])
+        self.assertEqual("COMMAND_OUTPUT_LIMIT", receipt["failureCode"])
         self.assertTrue(process.killed)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_streamed_command_io_failure_receipt_retains_actual_prefix_and_primary_error(self):
+        with self.mocked_command(b"12345", fail_after=2) as process:
+            self.refuse("COMMAND_IO", self.run_streamed_command)
+        receipt = self.streamed_receipt()
+        self.assertEqual(2, receipt["stdoutBytes"])
+        self.assertFalse(receipt["stdoutArtifact"]["eofObserved"])
+        self.assertEqual("COMMAND_IO", receipt["failureCode"])
+        self.assertTrue(process.killed)
+        self.assertTrue(process.stdout.closed and process.stderr.closed)
+
+    def test_streamed_command_nonzero_exit_retains_full_bytes_without_success_claim(self):
+        with self.mocked_command(b"1234", code=7) as process:
+            self.refuse("COMMAND_EXIT", self.run_streamed_command)
+        receipt = self.streamed_receipt()
+        self.assertEqual(4, receipt["stdoutBytes"])
+        self.assertTrue(receipt["stdoutArtifact"]["eofObserved"])
+        self.assertEqual("COMMAND_EXIT", receipt["failureCode"])
+        self.assertEqual(7, receipt["exitCode"])
+        self.assertFalse(process.killed)
         self.assertTrue(process.stdout.closed and process.stderr.closed)
 
     def test_controller_never_signals_directory_before_scope_admission(self):
@@ -266,7 +333,7 @@ class CaptureRuntimeTest(unittest.TestCase):
             opens.append(str(path))
             return real_open(path, *args, **kwargs)
         with patch.object(capture, "public_environment", return_value={"GITHUB_RUN_ID": "12", "GITHUB_RUN_ATTEMPT": "1"}), \
-             patch.object(capture, "command", return_value=(b"", b"", 0)), \
+             patch.object(capture, "command", return_value=(b"", b"", 0, None)), \
              patch.object(capture, "service_properties", side_effect=[admitted, changed]), \
              patch.object(capture, "directory_fd", return_value=fd), \
              patch.object(capture.os, "open", side_effect=tracked_open):

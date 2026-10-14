@@ -48,7 +48,7 @@ SOURCE_PINS = {
 }
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 WORKFLOW = ".github/workflows/llvm-reference-runtime-capture.yml"
-SCRIPT = "scripts/oracle/capture_llvm_reference_runtime.py"
+SCRIPT = "oracle/llvm/capture_reference_runtime.py"
 PUBLIC_ENV = ("GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
               "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_EVENT_NAME",
               "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")
@@ -139,12 +139,33 @@ def command(argv, environment, directory, *, seconds=CONTROL_SECONDS, limit=MAX_
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
     streams = {"stdout": bytearray(), "stderr": bytearray()}
     sink = None
+    sink_identity = None
     count = 0
+    streamed_digest = hashlib.sha256()
+    stdout_eof = False
     failure = None
+    def streamed_stdout():
+        if sink is None or sink_identity is None:
+            return None
+        verified = False
+        try:
+            current, named = os.fstat(sink), stdout_path.lstat()
+            stable = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            verified = ((current.st_dev, current.st_ino, current.st_mode) ==
+                        (sink_identity.st_dev, sink_identity.st_ino, sink_identity.st_mode)
+                        and current.st_size == count and stable(current) == stable(named))
+        except OSError:
+            pass
+        return {"path": str(stdout_path), "bytes": count, "sha256": streamed_digest.hexdigest(),
+                "device": sink_identity.st_dev, "inode": sink_identity.st_ino,
+                "mode": stat.S_IMODE(sink_identity.st_mode),
+                "identityVerified": verified, "eofObserved": stdout_eof}
     try:
         if stdout_path is not None:
-            sink = os.fdopen(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                                    os.O_NOFOLLOW | os.O_CLOEXEC, 0o600), "wb")
+            sink = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                           os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            sink_identity = os.fstat(sink)
+            require(stat.S_ISREG(sink_identity.st_mode) and sink_identity.st_size == 0, "COMMAND_STREAM_FILE")
         with selectors.DefaultSelector() as selector:
             for label, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
                 os.set_blocking(pipe.fileno(), False)
@@ -156,24 +177,35 @@ def command(argv, environment, directory, *, seconds=CONTROL_SECONDS, limit=MAX_
                     used = count if sink is not None and key.data == "stdout" else len(streams[key.data])
                     block = os.read(key.fileobj.fileno(), min(8192, bound - used + 1))
                     if not block:
+                        if key.data == "stdout":
+                            stdout_eof = True
                         selector.unregister(key.fileobj)
                     else:
                         require(used + len(block) <= bound, "COMMAND_OUTPUT_LIMIT")
                         if sink is not None and key.data == "stdout":
-                            sink.write(block)
-                            count += len(block)
+                            position = 0
+                            while position < len(block):
+                                written = os.write(sink, memoryview(block)[position:])
+                                require(written > 0, "COMMAND_STREAM_WRITE")
+                                streamed_digest.update(block[position:position + written])
+                                count += written
+                                position += written
                         else:
                             streams[key.data].extend(block)
             require(time.monotonic() < end, "COMMAND_DEADLINE")
             code = process.wait(timeout=max(0.001, end - time.monotonic()))
             require(time.monotonic() < end, "COMMAND_DEADLINE")
         require(code in success_codes, "COMMAND_EXIT")
-        return bytes(streams["stdout"]), bytes(streams["stderr"]), code
-    except (subprocess.TimeoutExpired, CaptureFailure) as error:
-        failure = error if isinstance(error, CaptureFailure) else CaptureFailure("COMMAND_DEADLINE")
+        stream = streamed_stdout()
+        require(stream is None or stream["identityVerified"], "COMMAND_STREAM_CHANGED")
+        return bytes(streams["stdout"]), bytes(streams["stderr"]), code, stream
+    except (subprocess.TimeoutExpired, CaptureFailure, OSError) as error:
+        failure = error if isinstance(error, CaptureFailure) else CaptureFailure(
+            "COMMAND_DEADLINE" if isinstance(error, subprocess.TimeoutExpired) else "COMMAND_IO")
         failure.stdout = bytes(streams["stdout"])
         failure.stderr = bytes(streams["stderr"])
         failure.exit_code = process.returncode
+        failure.stdout_stream = streamed_stdout()
         raise failure
     finally:
         # This is our unreleased Popen child, not a PID supplied by a file/daemon.
@@ -189,7 +221,37 @@ def command(argv, environment, directory, *, seconds=CONTROL_SECONDS, limit=MAX_
             process.stdout.close()
             process.stderr.close()
             if sink is not None:
-                sink.close()
+                os.close(sink)
+
+
+def control_command(client, env, root, raw, label, args, seconds=CONTROL_SECONDS,
+                    limit=MAX_STREAM, stdout_path=None):
+    """Retain actual pipe bytes or the actual streamed file, never an empty stand-in."""
+    out = err = b""
+    exit_code = failure_code = stream = None
+    try:
+        out, err, exit_code, stream = command([str(client), *args], env, root, seconds=seconds,
+                                             limit=limit, stdout_path=stdout_path)
+    except (CaptureFailure, OSError) as failure:
+        out, err = getattr(failure, "stdout", b""), getattr(failure, "stderr", b"")
+        failure_code, exit_code = getattr(failure, "code", "COMMAND_IO"), getattr(failure, "exit_code", None)
+        stream = getattr(failure, "stdout_stream", None)
+        raise
+    finally:
+        if stdout_path is None:
+            (root / "raw" / (label + ".stdout")).write_bytes(out)
+            output = {"stdoutCapture": "memory", "stdoutSha256": hashlib.sha256(out).hexdigest(),
+                      "stdoutBytes": len(out)}
+        else:
+            output = {"stdoutCapture": "streamed-file", "stdoutArtifact": stream,
+                      "stdoutSha256": stream["sha256"] if stream else None,
+                      "stdoutBytes": stream["bytes"] if stream else None}
+        (root / "raw" / (label + ".stderr")).write_bytes(err)
+        raw[label] = {"argv": [str(client), *args], **output,
+                      "stderrSha256": hashlib.sha256(err).hexdigest(), "stderrBytes": len(err),
+                      "failureCode": failure_code, "exitCode": exit_code}
+        save(root / "raw" / (label + ".json"), raw[label])
+    return out
 
 
 def components_hash(components):
@@ -436,11 +498,11 @@ def preflight(root):
             tools.append(file_pin(Path(path).resolve(strict=True)))
         except FileNotFoundError as error:
             raise CaptureFailure("HOST_PREREQUISITE_MISSING") from error
-    packages, _, _ = command(["/usr/bin/dpkg-query", "--show", "--showformat=${Package}\t${Version}\n", "slirp4netns"],
+    packages, _, _, _ = command(["/usr/bin/dpkg-query", "--show", "--showformat=${Package}\t${Version}\n", "slirp4netns"],
                              env, root, limit=4096)
     require(packages == b"slirp4netns\t1.2.1-1build2\n", "HOST_SLIRP_PACKAGE_UNSUPPORTED")
     # A read-only query verifies the existing user manager; no start/enable/linger.
-    manager, _, _ = command(["/usr/bin/systemctl", "--user", "show", "--property=Version,ControlGroup"], env, root, limit=4096)
+    manager, _, _, _ = command(["/usr/bin/systemctl", "--user", "show", "--property=Version,ControlGroup"], env, root, limit=4096)
     require(b"Version=" in manager and b"ControlGroup=/user.slice/" in manager, "EXISTING_USER_MANAGER_REQUIRED")
     fields = {}
     for line in manager.decode("ascii").splitlines():
@@ -489,24 +551,7 @@ def worker(workspace, root):
         "/usr/bin/slirp4netns", "/usr/bin/newuidmap", "/usr/bin/newgidmap", "/bin/bash")]
     raw = {}
     def control(label, args, seconds=CONTROL_SECONDS, limit=MAX_STREAM, stdout_path=None):
-        out = err = b""
-        exit_code = None
-        failure_code = None
-        try:
-            out, err, exit_code = command([str(client), *args], env, root, seconds=seconds,
-                                  limit=limit, stdout_path=stdout_path)
-        except CaptureFailure as failure:
-            out, err = getattr(failure, "stdout", b""), getattr(failure, "stderr", b"")
-            failure_code, exit_code = failure.code, getattr(failure, "exit_code", None)
-            raise
-        finally:
-            (root / "raw" / (label + ".stdout")).write_bytes(out)
-            (root / "raw" / (label + ".stderr")).write_bytes(err)
-            raw[label] = {"argv": [str(client), *args], "stdoutSha256": hashlib.sha256(out).hexdigest(),
-                          "stderrSha256": hashlib.sha256(err).hexdigest(), "stdoutBytes": len(out), "stderrBytes": len(err),
-                          "failureCode": failure_code, "exitCode": exit_code}
-            save(root / "raw" / (label + ".json"), raw[label])
-        return out
+        return control_command(client, env, root, raw, label, args, seconds, limit, stdout_path)
     require(control("client-version", ["--version"]) == CLIENT_VERSION, "CLIENT_VERSION")
     daemon_log = bytearray()
     daemon_overflow = threading.Event()
@@ -553,6 +598,10 @@ def worker(workspace, root):
         archive = root / "artifacts/runtime-image.tar"
         control("image-save", ["image", "save", image["imageDigest"]], 180, stdout_path=archive)
         image_archive = file_pin(archive, MAX_IMAGE)
+        stream = raw["image-save"]["stdoutArtifact"]
+        require(stream["identityVerified"] and stream["eofObserved"]
+                and all(stream[key] == image_archive[key] for key in ("path", "bytes", "sha256", "device", "inode", "mode")),
+                "IMAGE_STREAM_ARCHIVE_CHANGED")
         require(file_pin(client) == client_pin and file_pin(root / "home/.docker/cli-plugins/docker-buildx") == builder,
                 "CONTROL_INPUT_CHANGED")
         for row in input_pins:
@@ -569,7 +618,7 @@ def worker(workspace, root):
                              (root / "home/.docker/cli-plugins/docker-buildx", "docker-buildx"),
                              *[(workspace / path, Path(path).name) for path in SOURCE_PINS],
                              (workspace / WORKFLOW, "llvm-reference-runtime-capture.yml"),
-                             (workspace / SCRIPT, "capture_llvm_reference_runtime.py")]:
+                             (workspace / SCRIPT, Path(SCRIPT).name)]:
             before = file_pin(source)
             with source.open("rb") as incoming, (retained / name).open("xb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing, 65536)
@@ -608,7 +657,7 @@ def worker(workspace, root):
 
 
 def service_properties(unit, env, root):
-    out, _, code = command(["/usr/bin/systemctl", "--user", "show", unit,
+    out, _, code, _ = command(["/usr/bin/systemctl", "--user", "show", unit,
         "--property=LoadState,InvocationID,ControlGroup,ActiveState,ExecMainCode,ExecMainStatus"],
         env, root, success_codes=(0, 1))
     rows = {}
