@@ -6,7 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/llvm-reference-runtime-capture.yml'
-      - 'scripts/oracle/capture_llvm_reference_runtime.py'
+      - 'oracle/llvm/capture_reference_runtime.py'
       - 'tests/oracle/test_capture_llvm_reference_runtime.py'
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /.github/workflows/llvm-reference-runtime-capture.yml
-            /scripts/oracle/capture_llvm_reference_runtime.py
+            /oracle/llvm/capture_reference_runtime.py
             /tests/oracle/test_capture_llvm_reference_runtime.py
       - name: Run guarded pure capture source controls only
         run: python3 -I -B tests/oracle/test_capture_llvm_reference_runtime.py
@@ -73,7 +73,7 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /.github/workflows/llvm-reference-runtime-capture.yml
-            /scripts/oracle/capture_llvm_reference_runtime.py
+            /oracle/llvm/capture_reference_runtime.py
             /oracle/gcc/16.2.0/build-toolchain.Dockerfile
             /oracle/gcc/16.2.0/toolchain-reproduction.json
             /oracle/gcc/16.2.0/build-record.json
@@ -83,7 +83,7 @@ jobs:
         run: |
           root="$GITHUB_WORKSPACE/build/r97"
           python3 -I -B -X "pycache_prefix=$root/cache/python" \
-            scripts/oracle/capture_llvm_reference_runtime.py --root "$root" --preflight
+            oracle/llvm/capture_reference_runtime.py --root "$root" --preflight
       - name: Authenticate the existing Docker distributions and prepare inputs
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -101,13 +101,13 @@ jobs:
             https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
             --output "$root/downloads/extras.tgz"
           python3 -I -B -X "pycache_prefix=$root/cache/python" \
-            scripts/oracle/capture_llvm_reference_runtime.py --root "$root" --prepare-inputs
+            oracle/llvm/capture_reference_runtime.py --root "$root" --prepare-inputs
       - name: Capture the bounded runtime draft without executing any target
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
           root="$GITHUB_WORKSPACE/build/r97"
           python3 -I -B -X "pycache_prefix=$root/cache/python" \
-            scripts/oracle/capture_llvm_reference_runtime.py --root "$root"
+            oracle/llvm/capture_reference_runtime.py --root "$root"
       - name: Retain a typed bootstrap refusal when capture did not start
         if: failure()
         shell: bash --noprofile --norc -euo pipefail {0}
