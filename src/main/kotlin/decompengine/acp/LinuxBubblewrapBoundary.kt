@@ -2464,6 +2464,9 @@ private class RuntimePrivateControlScope private constructor(
 ) : AutoCloseable {
     private var closed = false
     private var mountChanged = false
+    private var firstMountChange: String? = null
+    private val initialProcessMountNamespace = observedMountNamespace("/proc/self/ns/mnt")
+    private val initialThreadMountNamespace = observedMountNamespace("/proc/thread-self/ns/mnt")
     private var fast = fastEligible(controls)
 
     private fun fastEligible(identities: Map<PinnedControlDirectory, ManifestControlIdentity>): Boolean {
@@ -2477,10 +2480,28 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun requireMountsUnchanged() {
-        if (mountChanged || LinuxFilesystemSyscalls.mountMetadataChanged(mountEvents)) {
-            mountChanged = true
-            throw IOException("host mounts changed during runtime manifest")
-        }
+        if (mountChanged) throw IOException("host mounts changed during runtime manifest; observation=latched; ${firstMountChange ?: "details-unavailable"}")
+        val pollStart = System.nanoTime()
+        val observation = LinuxFilesystemSyscalls.mountMetadataPoll(mountEvents)
+        val pollEnd = System.nanoTime()
+        if (!LinuxFilesystemSyscalls.mountMetadataPollChanged(observation)) return
+        // Latch before any diagnostic work; no observation can restore acceptance or repoll this epoch.
+        mountChanged = true
+        firstMountChange = "pollResult=${observation ushr 32}; revents=${observation.toInt() and 0xffff}; " +
+            "pollStartNanos=$pollStart; pollEndNanos=$pollEnd; " +
+            "initialProcessMountNs=$initialProcessMountNamespace; initialThreadMountNs=$initialThreadMountNamespace; " +
+            "observedProcessMountNs=${observedMountNamespace("/proc/self/ns/mnt")}; " +
+            "observedThreadMountNs=${observedMountNamespace("/proc/thread-self/ns/mnt")}; " +
+            "mountInfoDevice=${mountEvents.identity.key.device}; mountInfoInode=${mountEvents.identity.key.inode}"
+        throw IOException("host mounts changed during runtime manifest; observation=first; $firstMountChange")
+    }
+
+    /** Bounded raw proc labels for diagnosis only; these observations grant no namespace authority. */
+    private fun observedMountNamespace(path: String): String = try {
+        val label = Files.readSymbolicLink(Path.of(path)).toString()
+        if (label.length <= 40 && label.matches(Regex("mnt:\\[[0-9]+\\]"))) label else "unexpected-label"
+    } catch (failure: Exception) {
+        "unavailable(${failure.javaClass.simpleName.take(64)})"
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {

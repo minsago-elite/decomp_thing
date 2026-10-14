@@ -117,23 +117,30 @@ internal object LinuxFilesystemSyscalls {
     }
 
     /** Checks the original mountinfo handle's event epoch without rereading its metadata. */
-    fun mountMetadataChanged(handle: LinuxDescriptor): Boolean = handle.whileOpen { descriptor ->
-        val polled = Memory(POLLFD_BYTES.toLong())
-        polled.setInt(0, descriptor)
-        polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
-        polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
-        while (true) {
-            val result = libc.poll(polled, NativeLong(1), 0)
-            if (result >= 0) {
-                val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
-                if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
-                return@whileOpen result > 0 && events and (POLLPRI or POLLERR) != 0
+    fun mountMetadataChanged(handle: LinuxDescriptor): Boolean = mountMetadataPollChanged(mountMetadataPoll(handle))
+
+    /** Raw successful poll result (high32) and revents (low16), from that same retained descriptor. */
+    fun mountMetadataPoll(handle: LinuxDescriptor): Long = handle.whileOpen { descriptor ->
+        Memory(POLLFD_BYTES.toLong()).use { polled ->
+            polled.setInt(0, descriptor)
+            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
+            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            while (true) {
+                val result = libc.poll(polled, NativeLong(1), 0)
+                if (result >= 0) {
+                    val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    return@whileOpen (result.toLong() shl 32) or events.toLong()
+                }
+                if (Native.getLastError() != EINTR) throw syscallFailure("inspect host mount metadata events")
             }
-            if (Native.getLastError() != EINTR) throw syscallFailure("inspect host mount metadata events")
         }
         @Suppress("UNREACHABLE_CODE")
-        false
+        0L
     }
+
+    fun mountMetadataPollChanged(observation: Long): Boolean =
+        observation ushr 32 > 0 && observation.toInt() and (POLLPRI or POLLERR) != 0
 
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
