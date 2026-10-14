@@ -483,14 +483,16 @@ class AcpProviderCredentialFreeTlsFixtureTest {
     fun `unjoined owned work produces bounded unverified cleanup instead of a terminal future claim`() {
         val fixture = RawTlsFixture(RawMode.RESET)
         val owner = Any(); val policy = issueFixture(owner, fixture.port)
+        val initialClientThreads = ownedClientThreads()
         val broker = open(policy, owner)
         val transport = backend(broker)
         val executor = transport.javaClass.getDeclaredField("executor").also { it.isAccessible = true }.get(transport) as ThreadPoolExecutor
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        executor.submit {
+        val worker = executor.submit {
             entered.countDown()
             while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { }
         }
+        var primaryFailure: Throwable? = null
         try {
             assertTrue(entered.await(1, TimeUnit.SECONDS))
             val started = System.nanoTime()
@@ -501,9 +503,31 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             assertFalse(snapshot.executorTerminated)
             assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
             assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
         } finally {
+            // Test-owned recovery releases resources without upgrading the missed broker proof.
+            val deadline = System.nanoTime() + policy.bounds.cleanupTimeout.toNanos()
             release.countDown()
-            closeRawVerified(broker, fixture)
+            try {
+                try {
+                    val lifecycle = AcpProviderBroker::class.java.getDeclaredField("lifecycle").also { it.isAccessible = true }
+                        .get(broker) as java.util.concurrent.ScheduledThreadPoolExecutor
+                    lifecycle.shutdownNow()
+                    worker.get((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+                    assertTrue(transport.closeWithin(Duration.ofNanos((deadline - System.nanoTime()).coerceAtLeast(0))))
+                    assertBackendCleanup(broker)
+                    assertTrue(lifecycle.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS))
+                    assertTrue(lifecycle.isTerminated)
+                    assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                    assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+                } finally { fixture.closeVerified(deadline) }
+                assertTrue((ownedClientThreads() - initialClientThreads).isEmpty(), "test-owned client threads remained")
+                assertTrue(System.nanoTime() <= deadline, "negative fixture recovery grace expired")
+            } catch (cleanupFailure: Throwable) {
+                if (primaryFailure != null) primaryFailure.addSuppressed(cleanupFailure) else throw cleanupFailure
+            }
         }
     }
 
