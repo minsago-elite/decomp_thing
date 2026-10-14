@@ -4,6 +4,8 @@ import com.sun.jna.Native
 import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
 import com.sun.jna.ptr.IntByReference
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileIdentity
 import decompengine.analysis.AnalysisDeadline
 import decompengine.oracle.core.OracleArtifacts
 import java.lang.reflect.InvocationTargetException
@@ -170,6 +172,49 @@ class PinnedDockerRuntimeBindingsTest {
                     )
             }
             assertTrue(exposed.isEmpty(), "private listener state or bridge became public: $exposed")
+        }
+    }
+
+    @Test
+    fun `simulated ucred and pinned socket UID agree across the unsigned 32 bit boundary`() {
+        val boundaries = listOf(
+            0x7fffffff to 2_147_483_647L,
+            Int.MIN_VALUE /* 0x80000000 uid_t bits */ to 2_147_483_648L,
+            -1 /* 0xffffffff uid_t bits */ to 4_294_967_295L,
+        )
+        for ((rawUid, unsignedUid) in boundaries) {
+            withSimulatedPinnedListenerUidForTest(rawUid) { endpoint ->
+                val control = ListenerNativeFaultControl(rawUid)
+                val credentials = checkNotNull(readListenerCredentialsForTest(endpoint, control.proxy))
+                val uid = credentials.javaClass.declaredMethods.single { it.name == "getUid" }
+                assertEquals(unsignedUid, invokeListenerForTest(uid, credentials))
+                assertEquals(listOf(17 /* SO_PEERCRED */), control.socketOptions)
+                assertEquals(1, control.credentialReads)
+                assertTrue(control.descriptorCommands.isEmpty())
+                assertEquals(0, control.livenessProbes)
+                assertTrue(control.closedDescriptors.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `simulated unsigned UID mismatch is refused before pidfd acquisition including across sign boundary`() {
+        val boundaries = listOf(0x7fffffff, Int.MIN_VALUE /* 0x80000000 */, -1 /* 0xffffffff */)
+        for (pinnedUid in boundaries) {
+            for (peerUid in boundaries.filter { it != pinnedUid }) {
+                withSimulatedPinnedListenerUidForTest(pinnedUid) { endpoint ->
+                    val control = ListenerNativeFaultControl(peerUid)
+                    val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                        readListenerSnapshotForTest(endpoint, control.proxy)
+                    }
+                    assertTrue(failure.message.orEmpty().contains("socket-owner UID is invalid"), failure.message)
+                    assertEquals(listOf(17 /* SO_PEERCRED */), control.socketOptions)
+                    assertEquals(1, control.credentialReads)
+                    assertTrue(control.descriptorCommands.isEmpty())
+                    assertEquals(0, control.livenessProbes)
+                    assertTrue(control.closedDescriptors.isEmpty())
+                }
+            }
         }
     }
 
@@ -439,6 +484,34 @@ private fun withListenerEndpointForTest(action: (Any, Int) -> Unit) {
             fixture.assertNoPendingConnection()
         }
     }
+}
+
+/** Only the pinned identity and ucred ABI are simulated; the host socket retains its real UID. */
+private fun withSimulatedPinnedListenerUidForTest(uid: Int, action: (Any) -> Unit) {
+    withListenerEndpointForTest { endpoint, _ ->
+        val type = listenerEndpointType()
+        fun field(name: String): Any = type.getDeclaredField(name).also {
+            assertTrue(it.trySetAccessible())
+        }.get(endpoint)
+        val constructor = type.getDeclaredConstructor(
+            Path::class.java, LinuxDescriptor::class.java, LinuxDescriptor::class.java,
+            LinuxFileIdentity::class.java, LinuxFileIdentity::class.java, java.lang.Boolean.TYPE,
+        )
+        assertTrue(constructor.trySetAccessible())
+        // This read-only private fixture borrows existing descriptors. Its operations do not use
+        // or close them; the original runtime binding remains their sole cleanup owner.
+        val simulated = constructor.newInstance(
+            field("runtimeSocketPath"), field("runtimeSocketParent"), field("runtimeSocketDescriptor"),
+            field("runtimeSocketParentIdentity"), (field("runtimeSocketIdentity") as LinuxFileIdentity).copy(uid = uid),
+            true,
+        )
+        action(simulated)
+    }
+}
+
+private fun readListenerCredentialsForTest(endpoint: Any, libc: Any): Any? {
+    val method = listenerEndpointType().declaredMethods.single { it.name == "readListenerCredentials" }
+    return invokeListenerForTest(method, endpoint, libc, LISTENER_TEST_SOCKET_FD)
 }
 
 private fun readListenerSnapshotForTest(endpoint: Any, libc: Any): Any? {

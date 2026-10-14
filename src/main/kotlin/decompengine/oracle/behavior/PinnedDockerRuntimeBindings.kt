@@ -909,7 +909,7 @@ private class PinnedDockerEndpointState private constructor(
         }
         val peer = ListenerCredentials(value.getInt(0), Integer.toUnsignedLong(value.getInt(4)),
             Integer.toUnsignedLong(value.getInt(8)))
-        if (peer.pid <= 0 || peer.uid != runtimeSocketIdentity.uid.toLong()) {
+        if (peer.pid <= 0 || peer.uid != Integer.toUnsignedLong(runtimeSocketIdentity.uid)) {
             bindingFail("kernel listener PID or socket-owner UID is invalid")
         }
         peer
