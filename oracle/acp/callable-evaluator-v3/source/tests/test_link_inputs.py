@@ -278,6 +278,49 @@ class LinkInputTests(unittest.TestCase):
   with patch.object(l.Resolver,'file',side_effect=AssertionError('typed validation must precede filesystem reads')):
    for record in cases:
     with self.subTest(record=record),self.assertRaises(l.Refusal):pin.collect_pin(record,self.root)
+ def test_dso_interpreter_is_recorded_hash_bound_metadata_not_an_edge(self):
+  def dso(interpreter):
+   raw=bytearray(authored_elf(['libother.so.1'],soname='libfixture.so.1',interpreter=interpreter));struct.pack_into('<H',raw,16,3);return bytes(raw)
+  self.write('/runtime/libfixture.so.1',dso('/absent/metadata-only-loader.so'))
+  opened=[];original=l.Resolver.file
+  def tracked(resolver,name,*args,**kwargs):
+   opened.append(name)
+   if name.startswith('/absent/'):raise AssertionError('nonroot interpreter must not be opened')
+   return original(resolver,name,*args,**kwargs)
+  with patch.object(l.Resolver,'file',tracked):value=pin.collect_pin(self.manifest,self.root)
+  closure=value['monitorClosure'];self.assertEqual(closure['elfGraph']['/runtime/libfixture.so.1']['interpreter'],'/absent/metadata-only-loader.so')
+  self.assertNotIn('/absent/metadata-only-loader.so',opened)
+  self.assertIn('/runtime/libother.so.1',closure['elfGraph'])
+  self.assertEqual(closure['files']['/runtime/libfixture.so.1']['sha256'],hashlib.sha256(dso('/absent/metadata-only-loader.so')).hexdigest())
+  record=copy.deepcopy(self.manifest);record['monitor']['runtimeLibraries'].append({'soname':'metadata-only-loader.so','path':'/absent/metadata-only-loader.so'})
+  with patch.object(l.Resolver,'file',tracked),self.assertRaisesRegex(l.Refusal,'unreachable'):pin.collect_pin(record,self.root)
+  self.write('/runtime/libfixture.so.1',dso('/absent/changed-loader.so'))
+  with self.assertRaises(l.Refusal):pin.revalidate_pin(value,self.root)
+ def test_dso_interpreter_does_not_relax_type_or_metadata_validation(self):
+  for interpreter in (None,'/absent/metadata-loader.so'):
+   raw=bytearray(authored_elf(soname='libother.so.1',interpreter=interpreter));struct.pack_into('<H',raw,16,2)
+   self.write('/runtime/libother.so.1',bytes(raw))
+   with self.subTest(interpreter=interpreter),self.assertRaisesRegex(l.Refusal,'ET_DYN'):pin.collect_pin(self.manifest,self.root)
+  cases=[]
+  for text in ('relative-loader.so','/absent/../loader.so'):
+   raw=bytearray(authored_elf(soname='libother.so.1',interpreter=text));struct.pack_into('<H',raw,16,3);cases.append(raw)
+  valid=bytearray(authored_elf(soname='libother.so.1',interpreter='/absent/loader.so'));struct.pack_into('<H',valid,16,3)
+  raw=bytearray(valid);raw[0x180+len('/absent/loader.so')]=65;cases.append(raw)
+  raw=bytearray(valid);struct.pack_into('<Q',raw,208,4097);cases.append(raw)
+  raw=bytearray(valid);struct.pack_into('<H',raw,56,4);raw[232:288]=raw[176:232];cases.append(raw)
+  for raw in cases:
+   self.write('/runtime/libother.so.1',bytes(raw))
+   with self.subTest(raw=bytes(raw[176:240])),self.assertRaises(l.Refusal):pin.collect_pin(self.manifest,self.root)
+ def test_root_interpreter_remains_required_and_hash_bound(self):
+  record=self.manifest['monitor'];inventory=record['runtimeLibraries']
+  self.write('/runtime/monitor',authored_elf(['libfixture.so.1']))
+  with self.assertRaisesRegex(l.Refusal,'dynamic operational'):pin.monitor_inputs.graph('/runtime/monitor',inventory,l.Resolver(self.root),l,{})
+  self.write('/runtime/monitor',authored_elf(['libfixture.so.1'],interpreter='/runtime/ld-runtime.so'))
+  value=pin.collect_pin(self.manifest,self.root)
+  self.assertIn('/runtime/ld-runtime.so',value['monitorClosure']['elfGraph'])
+  self.write('/runtime/ld-runtime.so',authored_elf(soname='changed-loader.so'))
+  with self.assertRaises(l.Refusal):pin.revalidate_pin(value,self.root)
+
  def test_exact_transitive_graph_rejects_missing_extra_wrong_soname_and_interpreter(self):
   for field in ['monitor','inspection']:
    record=copy.deepcopy(self.manifest);record[field]['runtimeLibraries'].pop()

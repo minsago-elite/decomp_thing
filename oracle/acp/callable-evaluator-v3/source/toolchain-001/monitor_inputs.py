@@ -182,8 +182,11 @@ def graph(binary, inventory, resolver, l, files):
             if info['interpreter'] is None or info['interpreter'] == binary or not info['needed']:
                 raise l.Refusal('dynamic operational executable/loader/nonempty dependencies required')
             pending.append(info['interpreter'])
-        elif info['interpreter'] is not None or info['type'] != 3:
-            raise l.Refusal('runtime dependency must not be another executable interpreter')
+        elif info['type'] != 3:
+            raise l.Refusal('runtime dependency must be ET_DYN')
+        # Only the exec root's PT_INTERP creates a kernel interpreter edge.
+        # Nonroot ET_DYN PT_INTERP remains validated, hash-bound metadata;
+        # neither glibc DSO mapping nor kernel interpreter mapping follows it.
         for soname in info['needed']:
             if soname not in selections: raise l.Refusal('missing transitive runtime SONAME: ' + soname)
             used.add(soname); target = selections[soname]
