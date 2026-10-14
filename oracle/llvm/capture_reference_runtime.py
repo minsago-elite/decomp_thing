@@ -494,6 +494,36 @@ def _inspect_read(path, budget, *, maximum=65536, retain=True):
             os.close(fd)
 
 
+def _inspect_package_facts(out, err, code):
+    """Recognize only complete package observations, including one optional absence.
+
+    This describes installed metadata; it never approves the capture prerequisites.
+    In particular, repository-pinned RootlessKit extras and the exact capture slirp
+    version remain subject to the separate, unchanged capture preflight.
+    """
+    required = {"uidmap", "slirp4netns", "dbus-user-session", "systemd"}
+    optional = "rootlesskit"
+    require(code in (0, 1) and len(out) <= 8192 and len(err) <= 8192
+            and out.endswith(b"\n"), "INSPECT_PACKAGE_RESULT_UNSUPPORTED")
+    rows = {}
+    for line in out.decode("ascii", errors="strict").split("\n")[:-1]:
+        parts = line.split("\t")
+        require(len(parts) == 3, "INSPECT_PACKAGE_RESULT_UNSUPPORTED")
+        name, version, architecture = parts
+        require(name in required | {optional} and name not in rows
+                and re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]{0,255}", version)
+                and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", architecture),
+                "INSPECT_PACKAGE_RESULT_UNSUPPORTED")
+        rows[name] = {"name": name, "version": version, "architecture": architecture}
+    absent = code == 1
+    require((not absent and set(rows) == required | {optional} and err == b"")
+            or (absent and set(rows) == required
+                and err == b"dpkg-query: no packages found matching rootlesskit\n"),
+            "INSPECT_PACKAGE_RESULT_UNSUPPORTED")
+    return {"status": "observed-unqualified", "installed": [rows[name] for name in sorted(rows)],
+            "optionalAbsent": [optional] if absent else [], "capturePrerequisitesQualified": False}
+
+
 def _inspect_query(label, uid, root, budget):
     # Closed read-only argv: never run a helper --version, service operation or shell.
     queries = {
@@ -513,10 +543,17 @@ def _inspect_query(label, uid, root, budget):
         require(remaining > 0, "INSPECT_DEADLINE")
         out, err, code, _ = command(queries[label], env, root, seconds=min(8, remaining), limit=8192, success_codes=(0, 1))
         require(time.monotonic() < budget["end"], "INSPECT_DEADLINE")
-        return {"status": "observed" if code == 0 else "refused", "argv": queries[label], "exitCode": code,
-                "stdout": out.decode("utf-8", errors="strict"), "stdoutBytes": len(out),
-                "stdoutSha256": hashlib.sha256(out).hexdigest(), "stderrBytes": len(err),
-                "stderrSha256": hashlib.sha256(err).hexdigest()}
+        result = {"status": "observed" if code == 0 else "refused", "argv": queries[label], "exitCode": code,
+                  "stdout": out.decode("utf-8", errors="strict"), "stdoutBytes": len(out),
+                  "stdoutSha256": hashlib.sha256(out).hexdigest(), "stderrBytes": len(err),
+                  "stderrSha256": hashlib.sha256(err).hexdigest()}
+        if label == "packages":
+            try:
+                result["packageFacts"] = _inspect_package_facts(out, err, code)
+                result["status"] = "observed"
+            except (CaptureFailure, UnicodeError):
+                result.update(status="refused", code="INSPECT_PACKAGE_RESULT_UNSUPPORTED")
+        return result
     except (CaptureFailure, OSError, UnicodeError) as failure:
         out, err = getattr(failure, "stdout", b""), getattr(failure, "stderr", b"")
         return {"status": "unknown", "argv": queries[label], "code": getattr(failure, "code", "INSPECT_QUERY_IO"),
