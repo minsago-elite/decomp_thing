@@ -350,6 +350,9 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
      * `releaseComplete=true` marker meaningful.
      */
     internal fun verifyReleaseCompleteReceipt(root: JsonObject): VerifiedAcpReleaseReceiptFacts {
+        require(root.requiredLong("schemaVersion", "ACP release receipt") == 2L &&
+            "providerTransport" !in root
+        ) { "ACP release receipt requires schema-v2 evidence without provider transport" }
         val requestBounds = verifyGenericReceiptRequest(root)
         val provider = root.requiredObject("provider", "ACP receipt")
         provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
@@ -382,6 +385,26 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         verifyReceiptProcess(root)
         verifyReceiptSandbox(root)
         return VerifiedAcpReleaseReceiptFacts(session, resultChanges.records)
+    }
+
+    /** Provider transport v3 is retained evidence, not archive release authority. */
+    internal fun requireV2ReleaseReceiptEnvelope(
+        root: JsonObject,
+        taskIdentityField: String,
+        label: String,
+    ) {
+        require(root.requiredLong("schemaVersion", label) == 2L) {
+            "$label requires schema-v2 evidence; provider transport receipts are non-release"
+        }
+        require("providerTransport" !in root) {
+            "$label contains unsupported provider transport evidence"
+        }
+        root.requireExactKeys(RECEIPT_FIELDS - "moduleId" + taskIdentityField, label)
+        val provider = root.requiredObject("provider", label)
+        provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "$label provider")
+        require(provider.requiredString("id", "$label provider") == "acp" &&
+            provider.requiredLong("evidenceSchemaVersion", "$label provider") == 2L
+        ) { "$label requires invocation-bound ACP schema-v2 provider evidence" }
     }
 
     private fun parseCheckpoint(
@@ -586,10 +609,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         checkpoint: ReconstructionCheckpoint,
     ): VerifiedAcpExecutionReceiptDocument {
         val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
-        root.requireExactKeys(RECEIPT_FIELDS, "reconstruction ACP execution receipt")
-        require(root.requiredLong("schemaVersion", "ACP receipt") == 2L) {
-            "unsupported reconstruction ACP execution receipt schema: $moduleId"
-        }
+        requireV2ReleaseReceiptEnvelope(root, "moduleId", "reconstruction ACP execution receipt: $moduleId")
         require(root.requiredString("kind", "ACP receipt") == RECONSTRUCTION_ACP_RECEIPT_KIND) {
             "wrong reconstruction ACP execution receipt kind: $moduleId"
         }
@@ -598,12 +618,6 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
 
         val requestBounds = verifyReceiptRequest(root, checkpoint)
-        val provider = root.requiredObject("provider", "ACP receipt")
-        provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
-        require(provider.requiredString("id", "ACP receipt provider") == "acp" &&
-            provider.requiredLong("evidenceSchemaVersion", "ACP receipt provider") == 2L
-        ) { "reconstruction receipt is not invocation-bound ACP-v2 evidence" }
-
         val lifecycle = root.requiredObject("lifecycle", "ACP receipt")
         lifecycle.requireExactKeys(RECEIPT_LIFECYCLE_FIELDS, "ACP receipt lifecycle")
         require(lifecycle.requiredString("phaseReached", "ACP receipt lifecycle") ==

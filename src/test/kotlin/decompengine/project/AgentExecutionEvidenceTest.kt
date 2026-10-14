@@ -1,6 +1,7 @@
 package decompengine.project
 
 import com.agentclientprotocol.model.PermissionOptionKind
+import decompengine.acp.*
 import decompengine.acp.ACP_KOTLIN_SDK_VERSION
 import decompengine.acp.ACP_STABLE_PROTOCOL_VERSION
 import decompengine.acp.AcpExecutionEvidenceSnapshot
@@ -61,6 +62,8 @@ import decompengine.agent.AgentWorkspaceRoot
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Verifier
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
+import java.security.MessageDigest
+import java.util.IdentityHashMap
 import java.time.Duration
 import java.nio.file.Files
 import java.nio.file.Path
@@ -73,6 +76,11 @@ import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -83,10 +91,221 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AgentExecutionEvidenceTest {
+    @Test
+    fun `provider absent full and compact v2 receipts retain exact baseline bytes`() {
+        val expected = listOf(64 * 1024 * 1024 to "a133bfcbc1f7e47884aadd6a44c9783c1accf295fa8d78f7bb99726f350880d7",
+            1 to "fb0ff169ae3387bb1ba3ff5bfde7a4f46fc9cc3563f83df7da74de0fc7d46527")
+        for ((maximum, sha256) in expected) {
+            val request = legacyReceiptDataRequest()
+            val invocation = AcpInvocationEvidenceSnapshot(providerDataProvenance(),
+                AcpExecutionLifecyclePhase.REQUEST_BOUND, AcpExecutionCleanupDisposition.NOT_REQUIRED,
+                null, null, null, emptyList(), emptyList(), emptyList(), null,
+                AcpExecutionEvidenceCompleteness(true, true, true), null)
+            val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+                AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.CONFIGURATION, "fixed data fixture")), invocation)
+            val document = receiptDocument(request, receipt, maximum)
+            assertEquals(sha256, document.sha256)
+            assertEquals(2, document.schemaVersion)
+            assertFalse(document.json.contains("providerTransport"))
+            val verified = verifyDataReceipt(document.json)
+            assertFalse(verified.releaseComplete)
+            assertNull(verified.releaseFacts)
+        }
+    }
+
+    @Test
+    fun `full and compact provider v3 receipts strictly retain nonrelease fixture commitments`() {
+        val request = legacyReceiptDataRequest()
+        val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance())
+        val canary = "CANARY-token-account-capability-provider-body-environment"
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.REFUSED, canary,
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))), invocation)
+        val full = receiptDocument(request, receipt)
+        val compact = receiptDocument(request, receipt, 1)
+        for (document in listOf(full, compact)) {
+            assertEquals(3, document.schemaVersion)
+            assertFalse(document.releaseComplete)
+            assertFalse(canary in document.json)
+            val verified = verifyDataReceipt(document.json)
+            assertFalse(verified.releaseComplete)
+            assertNull(verified.releaseFacts)
+            assertEquals(receipt.requestBinding.requestSha256, verified.requestSha256)
+            assertEquals("returned-refused", verified.terminalOutcome)
+            assertTrue(document.json.toByteArray().size < 64 * 1024)
+        }
+        val first = Json.parseToJsonElement(full.json).jsonObject
+        val second = Json.parseToJsonElement(compact.json).jsonObject
+        assertEquals(first.getValue("providerTransport"), second.getValue("providerTransport"))
+        assertEquals(full.json, receiptDocument(request, receipt).json)
+        for (peak in listOf(32, 33)) {
+            var negative = mutateReceiptField(first, listOf("providerTransport", "resources", "observedTaskPeak"), JsonPrimitive(peak))
+            negative = mutateReceiptField(negative, listOf("providerTransport", "resources", "taskHeadroomVerified"), JsonPrimitive(false))
+            val verified = verifyDataReceipt(negative.toString())
+            assertFalse(verified.releaseComplete)
+            assertNull(verified.releaseFacts)
+        }
+        assertEquals(JsonPrimitive(false), second.getValue("events").jsonObject.getValue("complete"))
+    }
+
+    @Test
+    fun `provider v3 context usage retains finite scientific cost observations as nonauthority`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure")),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()))
+        for (amount in listOf(0.0, -0.0, Double.MIN_VALUE, Double.MAX_VALUE, 1.0E-4, 1.0E20)) {
+            val recorder = BoundedAgentExecutionEventRecorder()
+            recorder.record(decompengine.agent.AgentContextUsageEvent(0, 1, 128, amount, "CANARY-CURRENCY"))
+            val document = requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, "a".repeat(64), receipt,
+                recorder.receiptSnapshot(), "acp-provider-data-fixture", "fixtureId", "stable"))
+            assertFalse("CANARY-CURRENCY" in document.json)
+            assertNull(verifyDataReceipt(document.json).releaseFacts)
+            val root = Json.parseToJsonElement(document.json).jsonObject
+            assertFailsWith<Exception> { verifyDataReceipt(mutateReceiptField(root,
+                listOf("events", "records", "0", "costCurrency"), JsonNull).toString()) }
+            assertFailsWith<Exception> { verifyDataReceipt(mutateReceiptField(root,
+                listOf("events", "records", "0", "costAmount"), JsonPrimitive("NaN")).toString()) }
+        }
+    }
+
+    @Test
+    fun `rich provider v3 envelope roundtrips all event and audit variants without releasing peer text`() {
+        val request = legacyReceiptDataRequest()
+        val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance(), richProjection = true)
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.REFUSED,
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))), invocation)
+        val recorder = BoundedAgentExecutionEventRecorder()
+        val canary = "CANARY-rich-provider-data"
+        val target = AgentWorkspacePath("project", "candidate.c")
+        recorder.record(AgentMessageEvent(0, canary, AgentMessageRole.ASSISTANT, canary, true))
+        recorder.record(decompengine.agent.AgentPlanEvent(1, listOf(decompengine.agent.AgentPlanEntry(canary,
+            canary, decompengine.agent.AgentPlanStatus.PENDING))))
+        recorder.record(AgentToolEvent(2, canary, canary, AgentToolStatus.SUCCEEDED, mapOf(canary to canary)))
+        recorder.record(AgentPermissionEvent(3, canary, AgentPermissionDecision.DENY, reason = canary))
+        recorder.record(AgentFileChangeEvent(4, AgentFileChange(target, AgentFileChangeKind.CREATED,
+            beforeSha256 = null, afterSha256 = "a".repeat(64), sizeBytes = 1)))
+        recorder.record(decompengine.agent.AgentContextUsageEvent(5, 1, 128, Double.MIN_VALUE, canary))
+        for (maximum in listOf(64 * 1024 * 1024, 1)) {
+            val document = requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, "a".repeat(64), receipt,
+                recorder.receiptSnapshot(), "acp-provider-data-fixture", "fixtureId", "stable", maximum))
+            assertFalse(canary in document.json)
+            assertNull(verifyDataReceipt(document.json).releaseFacts)
+            if (maximum > 1) {
+                val root = Json.parseToJsonElement(document.json).jsonObject
+                for (path in listOf(listOf("agent", "negotiatedImplementation", "name"),
+                    listOf("events", "records", "0", "text"), listOf("outcome", "result", "summary"))) {
+                    assertFailsWith<Exception> { verifyDataReceipt(mutateReceiptField(root, path, JsonPrimitive(canary)).toString()) }
+                }
+                assertFailsWith<Exception> { verifyDataReceipt(mutateReceiptField(root,
+                    listOf("events", "records", "1", "sequence"), JsonPrimitive(7)).toString()) }
+            }
+        }
+    }
+
+    @Test
+    fun `reject forged provider v3 qualification cleanup limits commitments and field mixtures`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure")),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()))
+        val root = Json.parseToJsonElement(receiptDocument(request, receipt).json).jsonObject
+        val other = JsonPrimitive("b".repeat(64))
+        val mutations = listOf(
+            listOf("schemaVersion") to JsonPrimitive(4),
+            listOf("schemaVersion") to JsonPrimitive(2),
+            listOf("provider", "evidenceSchemaVersion") to JsonPrimitive(2),
+            listOf("lifecycle", "releaseComplete") to JsonPrimitive(true),
+            listOf("providerTransport", "adapterQualified") to JsonPrimitive(true),
+            listOf("providerTransport", "providerCostCancellationProven") to JsonPrimitive(true),
+            listOf("providerTransport", "releaseComplete") to JsonPrimitive(true),
+            listOf("providerTransport", "credentialFreeFixture") to JsonPrimitive(false),
+            listOf("providerTransport", "modelSha256") to JsonPrimitive("CANARY-token-capability"),
+            listOf("providerTransport", "requestBindingSha256") to other,
+            listOf("providerTransport", "descriptors", "factoryConfigurationSha256") to other,
+            listOf("providerTransport", "descriptors", "qualificationIssuerSha256") to other,
+            listOf("providerTransport", "descriptors", "qualificationConsumerSha256") to other,
+            listOf("providerTransport", "sessionSha256") to other,
+            listOf("providerTransport", "requests", "0", "turnSha256") to other,
+            listOf("providerTransport", "outputTokens") to JsonPrimitive(31),
+            listOf("providerTransport", "wireRequestBytes") to JsonPrimitive(999),
+            listOf("providerTransport", "bounds", "maximumRequests") to JsonPrimitive(2),
+            listOf("providerTransport", "maximumInvocationOutputTokens") to JsonPrimitive(31),
+            listOf("providerTransport", "remainingOverallTimeoutMillis") to JsonPrimitive(10001),
+            listOf("providerTransport", "resources", "enforcementVerified") to JsonPrimitive(false),
+            listOf("providerTransport", "cleanup", "guardian", "cgroupRemoved") to JsonPrimitive(false),
+            listOf("providerTransport", "cleanup", "guardian", "childReaped") to JsonPrimitive(false),
+            listOf("providerTransport", "cleanup", "guardian", "remainingDescendants") to JsonPrimitive(1),
+            listOf("providerTransport", "cleanup", "guardian", "teardownCause") to JsonPrimitive("UNKNOWN"),
+            listOf("providerTransport", "cleanup", "broker") to JsonPrimitive("UNVERIFIED"),
+            listOf("events", "unknown") to JsonPrimitive(true),
+            listOf("events", "complete") to JsonPrimitive("CANARY-token-capability"),
+            listOf("events", "records") to JsonPrimitive("CANARY-token-capability"),
+            listOf("events", "retainedEventCount") to JsonPrimitive(1),
+            listOf("lifecycle", "filesystemAuditComplete") to JsonPrimitive("CANARY-token-capability"),
+            listOf("process", "producedOutputBytes") to JsonPrimitive("CANARY-token-capability"),
+            listOf("request", "objective") to JsonArray(emptyList()),
+            listOf("process", "unknown") to JsonPrimitive(true),
+            listOf("process") to JsonNull,
+            listOf("lifecycle", "cleanupDisposition") to JsonPrimitive("not-required"),
+            listOf("request", "objective") to JsonPrimitive("CANARY-token-capability"),
+            listOf("outcome", "failure", "message") to JsonPrimitive("CANARY-token-capability"),
+            listOf("request", "objective", "unknown") to JsonPrimitive(true),
+            listOf("policyAudits", "permission", "unknown") to JsonPrimitive(true),
+            listOf("providerTransport", "unknown") to JsonPrimitive("CANARY-token-capability"),
+            listOf("providerTransport", "requests", "0", "unknown") to JsonPrimitive(true),
+            listOf("providerTransport", "bounds", "maximumRetries") to JsonPrimitive(1),
+            listOf("providerTransport", "outputTokens") to JsonPrimitive("1"),
+        )
+        for ((path, replacement) in mutations) {
+            val malformed = mutateReceiptField(root, path, replacement).toString()
+            val error = assertFailsWith<Exception>(path.joinToString(".")) { verifyDataReceipt(malformed) }
+            assertFalse("CANARY-token-capability" in error.toString())
+        }
+        assertFailsWith<Exception> { verifyDataReceipt(JsonObject(root - "providerTransport").toString()) }
+        assertFailsWith<Exception> {
+            verifyDataReceipt(root.toString().replace("\"adapterQualified\":false", "\"adapterQualified\":false,\"adapterQualified\":true"))
+        }
+    }
+
+    @Test
+    fun `unverified provider teardown is retained truthfully but refused by strict fixture verification`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.TRANSPORT, "unknown teardown")),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance(), cleanupVerified = false))
+        val document = receiptDocument(request, receipt)
+        val root = Json.parseToJsonElement(document.json).jsonObject
+        assertEquals(JsonPrimitive("UNVERIFIED"), root.getValue("providerTransport").jsonObject.getValue("cleanup").jsonObject.getValue("disposition"))
+        assertFalse(document.releaseComplete)
+        assertFailsWith<Exception> { verifyDataReceipt(document.json) }
+    }
+
+    private fun legacyReceiptDataRequest() = AgentExecutionRequest("stable legacy receipt",
+        listOf(AgentWorkspaceRoot("project", Path.of("/acp-receipt-data-fixture"))), accessPolicy = AgentAccessPolicy(emptyList()))
+    private fun providerDataProvenance() = AcpHarnessProvenance("acp", "fixture-v1", 1, ACP_STABLE_PROTOCOL_VERSION,
+        ACP_KOTLIN_SDK_VERSION, "1".repeat(64), false)
+    private fun receiptDocument(request: AgentExecutionRequest, receipt: AgentExecutionReceipt, maximum: Int = 64 * 1024 * 1024) =
+        requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, "a".repeat(64), receipt,
+            BoundedAgentExecutionEventRecorder().receiptSnapshot(), "acp-provider-data-fixture", "fixtureId", "stable", maximum))
+    private fun verifyDataReceipt(text: String) = verifyAcpExecutionReceiptDocument(text.toByteArray(),
+        "acp-provider-data-fixture", "fixtureId", "stable")
+    private fun mutateReceiptField(value: JsonElement, path: List<String>, replacement: JsonElement): JsonElement {
+        if (path.isEmpty()) return replacement
+        return when (value) {
+            is JsonObject -> JsonObject(value + (path.first() to mutateReceiptField(value[path.first()] ?: JsonNull, path.drop(1), replacement)))
+            is JsonArray -> JsonArray(value.mapIndexed { index, child -> if (index.toString() == path.first())
+                mutateReceiptField(child, path.drop(1), replacement) else child })
+            else -> error("invalid mutation path")
+        }
+    }
+
     @Test
     fun `schema v1 launch JSON retains every field bound by sandbox evidence`() {
         val temp = createTempDirectory("acp-v1-launch-evidence-")
@@ -1112,3 +1331,69 @@ private fun AcpExecutionEvidenceSnapshot.asInvocationEvidence(): AcpInvocationEv
         completeness = AcpExecutionEvidenceCompleteness(true, true, true),
         completeExecutionEvidence = this,
     )
+
+/** Synthetic data contract for parser tests only; it performs no launch or qualification. */
+internal fun providerDataFixtureInvocationForTest(
+    request: AgentExecutionRequest,
+    provenance: AcpHarnessProvenance,
+    sessionId: String = "provider-data-session",
+    cleanupVerified: Boolean = true,
+    richProjection: Boolean = false,
+): AcpInvocationEvidenceSnapshot {
+    fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        .joinToString("") { "%02x".format(it) }
+    val profile = AcpProviderQualificationProfile.CREDENTIAL_FREE
+    val requestDigest = AgentExecutionRequestBinding.capture(request).requestSha256
+    val invocationDigest = hash("provider-data-invocation")
+    val sessionDigest = hash(sessionId)
+    val turnDigest = hash("provider-data-turn")
+    val sha = "a".repeat(64)
+    val disposition = if (cleanupVerified) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.UNVERIFIED
+    val guardian = AcpProviderGuardianCleanupEvidence(disposition,
+        if (cleanupVerified) AcpProviderGuardianTeardownCause.BOUNDED_CANCELLATION else AcpProviderGuardianTeardownCause.UNKNOWN,
+        true, false, AcpProviderChildExitKind.SIGTERM, null, 15, cleanupVerified, false,
+        if (cleanupVerified) 0 else null, cleanupVerified, cleanupVerified, cleanupVerified)
+    val transport = AcpProviderInvocationEvidenceSnapshot(AcpProviderExecutionAuthority.CREDENTIAL_FREE_LOOPBACK_TLS_V1,
+        sha, sha, profile.descriptorSha256, hash(profile.model), AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1,
+        profile.reasoning, AcpProviderExecutionDescriptorEvidence(requireNotNull(provenance.configurationSha256),
+            providerExecutionEvidenceIssuerSha256(requireNotNull(provenance.configurationSha256), profile.descriptorSha256),
+            providerExecutionEvidenceConsumerSha256(requestDigest, invocationDigest), sha, sha, sha, sha, sha, sha, sha, sha),
+        invocationDigest, requestDigest, sessionDigest, turnDigest, profile.bounds,
+        minOf(profile.bounds.maximumOutputTokens.toLong(), request.limits.maxOutputTokens ?: Long.MAX_VALUE).toInt(),
+        request.limits.maxInputTokens, minOf(profile.bounds.overallTimeout.toMillis(), request.limits.wallClockTimeout.toMillis()),
+        AcpProviderExecutionResourceEvidence(observedMaximumProcesses = 32, observedMaximumOpenFiles = 128,
+            observedMaximumAddressSpaceBytes = 2_147_483_648, observedMaximumMemoryBytes = 2_147_483_648,
+            observedMaximumSwapBytes = 0, observedTaskPeak = 7), 5, 7, 1, 1, true, null,
+        listOf(AcpProviderExecutionRequestEvidence(1, sessionDigest, turnDigest, sha, sha, 5, 7, sha,
+            1, 1, 1, AcpProviderExecutionTerminal.COMPLETED)),
+        AcpProviderExecutionCleanupEvidence(disposition, AcpExecutionCleanupDisposition.VERIFIED,
+            AcpExecutionCleanupDisposition.VERIFIED, guardian, disposition))
+    val target = AgentWorkspacePath(request.workspaceRoots.first().id, "candidate.c")
+    val invocation = AcpInvocationEvidenceSnapshot(provenance, AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT,
+        disposition, if (richProjection) AcpNegotiatedAgentEvidence(ACP_STABLE_PROTOCOL_VERSION, "data-agent", "1", "data title",
+            AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false)) else null,
+        sha, AcpProcessDiagnostics(7, 0, "", false, 0, 1024, false, true, true,
+            emptyList(), "linux-bubblewrap", true, cleanupVerified),
+        if (richProjection) listOf(AcpFilesystemAuditRecord(0, sessionId, "fs/write_text_file", sha, target,
+            AcpFilesystemAuditOutcome.ALLOWED, AcpFilesystemAuditReason.COMPLETED)) else emptyList(),
+        if (richProjection) listOf(AcpTerminalAuditRecord(0, sessionId, "terminal/create", sha, sha, sha,
+            AcpTerminalAuditOutcome.ALLOWED, AcpTerminalAuditReason.CREATED, true, 1, 1, false)) else emptyList(),
+        if (richProjection) listOf(AcpPermissionAuditRecord(0, sessionId, sha, 1, sha, PermissionOptionKind.ALLOW_ONCE,
+            AcpPermissionAuditOutcome.ALLOWED, AcpPermissionAuditReason.SELECTED, false)) else emptyList(),
+        if (richProjection) AcpSandboxEvidence("data-sandbox", "1", sha, 365, sha, sha, sha, sha, emptyList(),
+            AcpSandboxResourceLimits(maximumProcesses = 32, maximumOpenFiles = 128, maximumAddressSpaceBytes = 2_147_483_648),
+            AcpRuntimeClosureLimits(), true, true, true, true, true, true, true, true, sha, null, emptyList(), emptyList(), emptyList()) else null,
+        AcpExecutionEvidenceCompleteness(true, true, true), null)
+    val permitType = AcpHarnessFactory::class.java.declaredClasses.single { it.simpleName == "FactoryProviderPermit" }
+    val permit = permitType.getDeclaredConstructor().apply { isAccessible = true }.newInstance() as AcpProviderQualificationPermit
+    val recordType = AcpHarnessFactory::class.java.declaredClasses.single { it.simpleName == "ProviderPermitRecord" }
+    val record = recordType.getDeclaredConstructor(Any::class.java, AcpProviderQualificationPurpose::class.java, String::class.java)
+        .apply { isAccessible = true }.newInstance(invocation, AcpProviderQualificationPurpose.INVOCATION_EVIDENCE, requestDigest)
+    @Suppress("UNCHECKED_CAST")
+    val registry = AcpHarnessFactory::class.java.getDeclaredField("providerPermits").apply { isAccessible = true }
+        .get(AcpHarnessFactory) as IdentityHashMap<AcpProviderQualificationPermit, Any>
+    synchronized(registry) { registry[permit] = record }
+    val bound = invocation.bindProviderExecutionEvidence(permit, transport)
+    synchronized(registry) { check(!registry.containsKey(permit)) }
+    return bound
+}
