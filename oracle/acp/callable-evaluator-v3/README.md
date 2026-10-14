@@ -1,5 +1,7 @@
 # Callable evaluator v3 correction workspace
 
+The current contract compares exact stdout/stderr bytes and process termination across 24 scenarios. Candidate marker bytes remain part of behavior comparison; load, API entry/completion and callback observations remain unverified/null, with no API coverage claim. The [v2 archive notice](../callable-evaluator-v2/README.md) withdraws its earlier marker-based semantic acceptance while preserving the original claims and evidence as history. This v3 source generation still requires native qualification and a final preparation seal.
+
 This is a new, unqualified static source generation under the independently reviewed correction plan. The initial-copy manifest records provenance only; edited source must receive its own new checkpoint, tests and review. Version2 and preparations001/002 remain historical.
 
 The public archive contains source/support/schema files only. Private fixtures, caller, scenarios, expected observations and coordinator execution copies remain in the separate trusted repository-local build namespace and must not be published here.
