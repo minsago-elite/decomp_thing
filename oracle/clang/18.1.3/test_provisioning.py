@@ -68,6 +68,62 @@ class ProvisioningNegativeTests(unittest.TestCase):
     def temporary_directory(self):
         return tempfile.TemporaryDirectory(dir=self.temp_root)
 
+    def simulate_privileged_rootfs_helper(self, command):
+        self.assertEqual(command[0], "sudo")
+        if command[5] == provision.ROOTFS_PARENT_RESTORE_PROGRAM:
+            return mock.Mock(stdout="")
+        self.assertEqual(command[5], provision.ROOTFS_DIRECTORY_CREATE_PROGRAM)
+        parent_path, name = command[6:8]
+        parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.mkdir(name, dir_fd=parent_fd)
+            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                metadata = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent_fd)
+        return mock.Mock(stdout=f"{metadata.st_dev}:{metadata.st_ino}\n")
+
+    def simulate_privileged_rootfs_tar_publication(self, command, timeout=None):
+        self.assertEqual(command[0], "sudo")
+        self.assertEqual(command[5], provision.ROOTFS_TAR_PUBLISH_PROGRAM)
+        source_parent, source_name, output_parent, destination_name = command[6:10]
+        expected_bytes, expected_sha256 = int(command[10]), command[11]
+        source = Path(source_parent) / source_name
+        destination = Path(output_parent) / destination_name
+        payload = source.read_bytes()
+        if len(payload) != expected_bytes:
+            raise provision.ProvisionError("verified rootfs tar pathname differs from its recorded identity")
+        if provision.sha256(payload) != expected_sha256:
+            raise provision.ProvisionError("verified rootfs tar bytes changed before publication")
+        with destination.open("xb") as stream:
+            stream.write(payload)
+        destination.chmod(0o444)
+        metadata = destination.stat()
+        return mock.Mock(stdout=f"{metadata.st_dev}:{metadata.st_ino}\n")
+
+    def report_fixture_publications_as_root_owned(self, original_stat):
+        def fixture(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            if stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o444:
+                fields = list(metadata)
+                fields[stat.ST_UID] = 0
+                return os.stat_result(fields)
+            return metadata
+        return fixture
+
+    def report_fixture_descriptors_as_root_owned(self, original_fstat):
+        def fixture(descriptor):
+            metadata = original_fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o444:
+                fields = list(metadata)
+                fields[stat.ST_UID] = 0
+                return os.stat_result(fields)
+            return metadata
+        return fixture
+
     def valid_build_record(self):
         digest = "a" * 64
         profile = self.contract["profile"]
@@ -775,7 +831,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             events = []
 
             def bootstrap(command, timeout=None):
-                rootfs.mkdir(parents=True)
+                rootfs.mkdir(parents=True, exist_ok=True)
                 (rootfs / "usr/share/keyrings").mkdir(parents=True)
                 (rootfs / "etc/apt").mkdir(parents=True)
                 (rootfs / "etc/ssl/certs").mkdir(parents=True)
@@ -783,6 +839,10 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 return mock.Mock(stdout="")
 
             def run_checked(command, timeout=None):
+                if provision.ROOTFS_DIRECTORY_CREATE_PROGRAM in command:
+                    return self.simulate_privileged_rootfs_helper(command)
+                if provision.ROOTFS_PARENT_RESTORE_PROGRAM in command:
+                    return self.simulate_privileged_rootfs_helper(command)
                 if "debootstrap" in command:
                     return bootstrap(command, timeout)
                 if command[1:4] == ["install", "-m", "0644"]:
@@ -1274,16 +1334,24 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 contract=provision.CONTRACT_PATH, workdir=base, rootfs=base / "rootfs",
                 output=base / "output", acquisition=base / "acquisition", keyring=base / "keyring")
             args.acquisition.mkdir()
+            bootstrap_commands = []
+            def bootstrap(command, timeout=None):
+                if provision.ROOTFS_DIRECTORY_CREATE_PROGRAM in command:
+                    return self.simulate_privileged_rootfs_helper(command)
+                if provision.ROOTFS_PARENT_RESTORE_PROGRAM in command:
+                    return self.simulate_privileged_rootfs_helper(command)
+                bootstrap_commands.append(command)
+                return mock.Mock(stdout="")
             with mock.patch.object(provision, "load_candidate", return_value=({}, [])), \
                     mock.patch.object(provision, "check_runner_bounds"), \
-                    mock.patch.object(provision, "run_checked") as bootstrap, \
+                    mock.patch.object(provision, "run_checked", side_effect=bootstrap), \
                     mock.patch.object(provision, "installed_package_keys", return_value=set()), \
                     mock.patch.object(provision, "rootfs_run") as apt, \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 with self.assertRaisesRegex(provision.ProvisionError, "package closure"):
                     provision.provision_rootfs(args)
-                self.assertIn("--include=ca-certificates", bootstrap.call_args.args[0])
-                bootstrap.assert_called_once()
+                self.assertEqual(len(bootstrap_commands), 1)
+                self.assertIn("--include=ca-certificates", bootstrap_commands[0])
                 apt.assert_not_called()
                 network.assert_not_called()
             self.assertFalse(args.output.exists())
@@ -1610,6 +1678,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 provision.normalize_rootfs(rootfs, 1714003200)
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any(str(rootfs / "var/cache/ldconfig/aux-cache") in command for command in commands))
+            self.assertTrue(any(command[:3] == ["sudo", "find", f"{rootfs}/."] for command in commands))
 
     def test_successful_retained_probe_replay_returns_authenticated_source_and_file_identities(self):
         with self.temporary_directory() as temporary:
@@ -2415,6 +2484,215 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     provision.provision_rootfs(args)
                 candidate.assert_not_called()
 
+    def test_rootfs_directory_creation_pins_identity_and_refuses_same_uid_path_replacement(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs = (base / "rootfs").resolve()
+            retained = base / "retained-rootfs"
+            canary = base / "unintended-root-owned-tree"
+            canary.mkdir()
+            (canary / "canary").write_bytes(b"must remain untouched")
+            observed = []
+
+            def create_fixture(command, timeout=None):
+                self.assertEqual(command[0], "sudo")
+                if provision.ROOTFS_PARENT_RESTORE_PROGRAM in command:
+                    return mock.Mock(stdout="")
+                parent_path, name = command[6:8]
+                parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.mkdir(name, dir_fd=parent_fd)
+                    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                         dir_fd=parent_fd)
+                    try:
+                        metadata = os.fstat(descriptor)
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    os.close(parent_fd)
+                observed.append(tuple(command[:2]))
+                return mock.Mock(stdout=f"{metadata.st_dev}:{metadata.st_ino}\n")
+
+            with mock.patch.object(provision, "run_checked", side_effect=create_fixture):
+                binding = provision.create_pinned_rootfs_directory(rootfs)
+            try:
+                binding.require_path_binding()
+                rootfs.rename(retained)
+                rootfs.symlink_to(canary, target_is_directory=True)
+                with self.assertRaisesRegex(provision.ProvisionError, "pathname binding changed"):
+                    binding.require_path_binding()
+                (binding.descriptor_path / "held-only").write_bytes(b"retained inode")
+                self.assertEqual((retained / "held-only").read_bytes(), b"retained inode")
+                self.assertEqual((canary / "canary").read_bytes(), b"must remain untouched")
+                self.assertFalse((canary / "held-only").exists())
+            finally:
+                binding.close()
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0][0], "sudo")
+
+            rootfs.unlink()
+            (retained / "held-only").unlink()
+            retained.rename(rootfs)
+            rootfs.rmdir()
+            def replace_before_pin(command, timeout=None):
+                result = create_fixture(command, timeout=timeout)
+                if provision.ROOTFS_PARENT_RESTORE_PROGRAM in command:
+                    return result
+                rootfs.rename(retained)
+                rootfs.symlink_to(canary, target_is_directory=True)
+                return result
+            with mock.patch.object(provision, "run_checked", side_effect=replace_before_pin):
+                with self.assertRaisesRegex(provision.ProvisionError, "privileged rootfs directory"):
+                    provision.create_pinned_rootfs_directory(rootfs)
+            self.assertEqual((canary / "canary").read_bytes(), b"must remain untouched")
+            self.assertFalse((canary / "held-only").exists())
+
+    def test_rootfs_directory_creation_recovers_parent_after_invalid_helper_result(self):
+        with self.temporary_directory() as temp:
+            parent = Path(temp)
+            rootfs = (parent / "rootfs").resolve()
+            calls = []
+
+            def invalid_result_then_restore(command, timeout=None):
+                calls.append(command)
+                if provision.ROOTFS_DIRECTORY_CREATE_PROGRAM in command:
+                    rootfs.mkdir()
+                    return mock.Mock(stdout="invalid\n")
+                self.assertIn(provision.ROOTFS_PARENT_RESTORE_PROGRAM, command)
+                return mock.Mock(stdout="")
+
+            with mock.patch.object(provision, "run_checked", side_effect=invalid_result_then_restore):
+                with self.assertRaisesRegex(provision.ProvisionError, "invalid directory identity"):
+                    provision.create_pinned_rootfs_directory(rootfs)
+            self.assertEqual(len(calls), 2)
+            self.assertIn(provision.ROOTFS_PARENT_RESTORE_PROGRAM, calls[1])
+            self.assertEqual(calls[1][14:16], ["-1", "-1"])
+
+    def run_authority_helper_fixture(self, program, arguments, states, *, fail_mkdir=False,
+                                     fail_marker_retirement=False):
+        """Execute the real helper with real FDs and simulated privileged metadata."""
+        real_fstat = os.fstat
+        operations = []
+
+        def metadata(descriptor):
+            original = real_fstat(descriptor)
+            values = list(original)
+            uid, gid, mode = states[(original.st_dev, original.st_ino)]
+            values[0] = stat.S_IFMT(original.st_mode) | mode
+            values[4], values[5] = uid, gid
+            return os.stat_result(values)
+
+        def change_owner(descriptor, uid, gid):
+            original = real_fstat(descriptor)
+            identity = (original.st_dev, original.st_ino)
+            operations.append(("chown", identity, uid, gid))
+            if fail_marker_retirement and stat.S_ISREG(original.st_mode) and uid != 0:
+                raise OSError("marker retirement failed")
+            states[identity] = (uid, gid, states[identity][2])
+
+        def change_mode(descriptor, mode):
+            original = real_fstat(descriptor)
+            identity = (original.st_dev, original.st_ino)
+            operations.append(("chmod", identity, mode))
+            uid, gid, _ = states[identity]
+            states[identity] = (uid, gid, mode)
+
+        with mock.patch.object(sys, "argv", ["helper", *map(str, arguments)]), \
+                mock.patch.object(os, "fstat", side_effect=metadata), \
+                mock.patch.object(os, "fchown", side_effect=change_owner), \
+                mock.patch.object(os, "fchmod", side_effect=change_mode), \
+                mock.patch.object(os, "mkdir", side_effect=OSError("injected creation failure") if fail_mkdir else None):
+            try:
+                exec(compile(program, "<rootfs-authority-helper>", "exec"), {})
+            except (OSError, SystemExit) as error:
+                return operations, error
+        return operations, None
+
+    def test_failed_creator_retires_marker_before_release_and_stale_helpers_cannot_unlock_successor(self):
+        with self.temporary_directory() as temp:
+            parent = Path(temp).resolve()
+            marker = parent / "marker"
+            marker.touch(mode=0o600)
+            parent_stat, marker_stat = parent.stat(), marker.stat()
+            parent_id = (parent_stat.st_dev, parent_stat.st_ino)
+            marker_id = (marker_stat.st_dev, marker_stat.st_ino)
+            expected_parent = (*parent_id, 12345, 12345, 0o700, stat.S_IFDIR)
+            expected_marker = (*marker_id, 12345, 12345, 0o600, stat.S_IFREG)
+            create_args = [parent, "rootfs", marker, *expected_parent, *expected_marker]
+            recover_args = [parent, "rootfs", marker, *parent_id, 12345, 12345, 0o700,
+                            -1, -1, *expected_marker]
+            for retirement_fails in (False, True):
+                with self.subTest(retirement_fails=retirement_fails):
+                    states = {parent_id: (12345, 12345, 0o700), marker_id: (12345, 12345, 0o600)}
+                    operations, error = self.run_authority_helper_fixture(
+                        provision.ROOTFS_DIRECTORY_CREATE_PROGRAM, create_args, states,
+                        fail_mkdir=True, fail_marker_retirement=retirement_fails)
+                    self.assertIsInstance(error, OSError)
+                    if retirement_fails:
+                        self.assertEqual(states[parent_id], (0, 12345, 0o710))
+                        self.assertNotIn(("chown", parent_id, 12345, 12345), operations)
+                        continue
+                    self.assertEqual(states[marker_id], (12345, 12345, 0o600))
+                    self.assertLess(operations.index(("chmod", marker_id, 0o600)),
+                                    operations.index(("chown", parent_id, 12345, 12345)))
+                    # A second attempt now holds the parent; the first attempt's
+                    # delayed creation and recovery must both leave it locked.
+                    states[parent_id] = (0, 12345, 0o710)
+                    for program, arguments in ((provision.ROOTFS_DIRECTORY_CREATE_PROGRAM, create_args),
+                                               (provision.ROOTFS_PARENT_RESTORE_PROGRAM, recover_args)):
+                        operations, error = self.run_authority_helper_fixture(program, arguments, states)
+                        self.assertIsInstance(error, SystemExit)
+                        self.assertNotEqual(error.code, 0)
+                        self.assertEqual(operations, [])
+                        self.assertEqual(states[parent_id], (0, 12345, 0o710))
+
+    def test_parent_recovery_refuses_unknown_marker_without_mutating_authority(self):
+        with self.temporary_directory() as temp:
+            parent = Path(temp).resolve()
+            marker = parent / "marker"
+            marker.touch(mode=0o600)
+            parent_stat, marker_stat = parent.stat(), marker.stat()
+            parent_id = (parent_stat.st_dev, parent_stat.st_ino)
+            marker_id = (marker_stat.st_dev, marker_stat.st_ino)
+            states = {parent_id: (0, 12345, 0o710), marker_id: (12345, 12345, 0o600)}
+            arguments = [parent, "rootfs", marker, *parent_id, 12345, 12345, 0o700, -1, -1,
+                         *marker_id, 12345, 12345, 0o600, stat.S_IFREG]
+            operations, error = self.run_authority_helper_fixture(
+                provision.ROOTFS_PARENT_RESTORE_PROGRAM, arguments, states)
+            self.assertIsInstance(error, SystemExit)
+            self.assertIn("authority changed", str(error))
+            self.assertEqual(operations, [])
+            self.assertEqual(states[parent_id], (0, 12345, 0o710))
+
+    def test_recovery_failure_closes_actual_parent_marker_and_root_descriptors(self):
+        with self.temporary_directory() as temp:
+            rootfs = (Path(temp) / "rootfs").resolve()
+            descriptors = []
+            real_open = os.open
+
+            def record_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            def create_then_fail_recovery(command, timeout=None):
+                if provision.ROOTFS_DIRECTORY_CREATE_PROGRAM in command:
+                    rootfs.mkdir()
+                    metadata = rootfs.stat()
+                    return mock.Mock(stdout=f"{metadata.st_dev}:{metadata.st_ino}\n")
+                raise provision.ProvisionError("injected recovery failure")
+
+            with mock.patch.object(provision, "run_checked", side_effect=create_then_fail_recovery), \
+                    mock.patch.object(os, "open", side_effect=record_open):
+                with self.assertRaisesRegex(provision.ProvisionError, "could not restore rootfs parent authority"):
+                    provision.create_pinned_rootfs_directory(rootfs)
+            self.assertEqual(len(descriptors), 3)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError) as caught:
+                    os.fstat(descriptor)
+                self.assertEqual(caught.exception.errno, errno.EBADF)
+            self.assertEqual(list(rootfs.parent.glob(".clang1813-rootfs-authority-*")), [])
+
     def test_provisioning_rejects_output_containing_workdir_before_all_mutations(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -2467,6 +2745,23 @@ class ProvisioningNegativeTests(unittest.TestCase):
     def test_rootfs_tar_output_accepts_relative_parent_and_rejects_escape(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
+            def identity(path):
+                payload = path.read_bytes()
+                return {"bytes": len(payload), "sha256": provision.sha256(payload)}
+            original_stat = provision.os.stat
+            original_fstat = provision.os.fstat
+            execute_patch = mock.patch.object(
+                provision, "run_checked", side_effect=self.simulate_privileged_rootfs_tar_publication,
+            )
+            stat_patch = mock.patch.object(
+                provision.os, "stat", side_effect=self.report_fixture_publications_as_root_owned(original_stat),
+            )
+            fstat_patch = mock.patch.object(
+                provision.os, "fstat", side_effect=self.report_fixture_descriptors_as_root_owned(original_fstat),
+            )
+            execute_patch.start()
+            stat_patch.start()
+            fstat_patch.start()
             previous_cwd = Path.cwd()
             try:
                 os.chdir(base)
@@ -2476,7 +2771,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 source.parent.mkdir()
                 source.write_bytes(b"verified rootfs tar")
                 destination = output / "rootfs.tar"
-                provision.publish_rootfs_tar(source, output, destination)
+                provision.publish_rootfs_tar(source, output, destination, identity(source))
                 self.assertFalse(source.exists())
                 self.assertEqual(destination.read_bytes(), b"verified rootfs tar")
 
@@ -2484,7 +2779,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 source.write_bytes(b"absolute spelling")
                 absolute_output = output.resolve(strict=True)
                 absolute_destination = absolute_output / "rootfs-absolute.tar"
-                provision.publish_rootfs_tar(source, absolute_output, absolute_destination)
+                provision.publish_rootfs_tar(source, absolute_output, absolute_destination, identity(source))
                 self.assertFalse(source.exists())
                 self.assertEqual(absolute_destination.read_bytes(), b"absolute spelling")
 
@@ -2492,7 +2787,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 alias.symlink_to(output, target_is_directory=True)
                 source = base / "work/rootfs-alias.tar"
                 source.write_bytes(b"directory alias spelling")
-                provision.publish_rootfs_tar(source, output, alias / "rootfs-alias.tar")
+                provision.publish_rootfs_tar(source, output, alias / "rootfs-alias.tar", identity(source))
                 self.assertFalse(source.exists())
                 self.assertEqual((output / "rootfs-alias.tar").read_bytes(), b"directory alias spelling")
 
@@ -2501,7 +2796,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 source = base / "work/rootfs-existing.tar"
                 source.write_bytes(b"must remain before existing refusal")
                 with self.assertRaisesRegex(provision.ProvisionError, "must not already exist"):
-                    provision.publish_rootfs_tar(source, output, existing)
+                    provision.publish_rootfs_tar(source, output, existing, identity(source))
                 self.assertEqual(source.read_bytes(), b"must remain before existing refusal")
                 self.assertEqual(existing.read_bytes(), b"existing destination")
 
@@ -2512,7 +2807,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 source = base / "work/rootfs-symlink.tar"
                 source.write_bytes(b"must remain before symlink refusal")
                 with self.assertRaisesRegex(provision.ProvisionError, "must not already exist"):
-                    provision.publish_rootfs_tar(source, output, destination_link)
+                    provision.publish_rootfs_tar(source, output, destination_link, identity(source))
                 self.assertEqual(source.read_bytes(), b"must remain before symlink refusal")
                 self.assertEqual(target.read_bytes(), b"symlink target")
 
@@ -2520,10 +2815,91 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 source.write_bytes(b"must remain on refusal")
                 (base / "outside").mkdir()
                 with self.assertRaisesRegex(provision.ProvisionError, "canonical run output directory"):
-                    provision.publish_rootfs_tar(source, output, base / "outside/rootfs.tar")
+                    provision.publish_rootfs_tar(
+                        source, output, base / "outside/rootfs.tar", identity(source),
+                    )
                 self.assertEqual(source.read_bytes(), b"must remain on refusal")
             finally:
                 os.chdir(previous_cwd)
+                fstat_patch.stop()
+                stat_patch.stop()
+                execute_patch.stop()
+
+    def test_rootfs_tar_publication_holds_authenticated_bytes_across_source_replacement(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            work = base / "work"
+            output = base / "output"
+            work.mkdir()
+            output.mkdir()
+            source = work / "rootfs.tar"
+            original = b"authenticated deterministic rootfs tar"
+            attacker = b"same-uid replacement must not be published"
+            source.write_bytes(original)
+            expected = {"bytes": len(original), "sha256": provision.sha256(original)}
+            destination = output / "rootfs.tar"
+            original_stat = provision.os.stat
+            original_fstat = provision.os.fstat
+            with mock.patch.object(
+                    provision, "run_checked", side_effect=self.simulate_privileged_rootfs_tar_publication), \
+                    mock.patch.object(
+                        provision.os, "stat",
+                        side_effect=self.report_fixture_publications_as_root_owned(original_stat)), \
+                    mock.patch.object(
+                        provision.os, "fstat",
+                        side_effect=self.report_fixture_descriptors_as_root_owned(original_fstat)):
+                provision.publish_rootfs_tar(source, output, destination, expected)
+            self.assertEqual(destination.read_bytes(), original)
+            self.assertFalse(source.exists())
+
+            replaced = work / "replaced.tar"
+            replaced.write_bytes(original)
+            refused_replacement = output / "replaced.tar"
+            def replace_before_privileged_copy(command, timeout=None):
+                replaced.write_bytes(attacker)
+                return self.simulate_privileged_rootfs_tar_publication(command)
+            with mock.patch.object(provision, "run_checked", side_effect=replace_before_privileged_copy):
+                with self.assertRaisesRegex(provision.ProvisionError, "differs from its recorded identity"):
+                    provision.publish_rootfs_tar(replaced, output, refused_replacement, expected)
+            self.assertFalse(refused_replacement.exists())
+            self.assertEqual(replaced.read_bytes(), attacker)
+
+            changed = work / "changed.tar"
+            changed.write_bytes(attacker)
+            refused = output / "refused.tar"
+            with mock.patch.object(
+                    provision, "run_checked", side_effect=self.simulate_privileged_rootfs_tar_publication):
+                with self.assertRaisesRegex(provision.ProvisionError, "differs from its recorded identity"):
+                    provision.publish_rootfs_tar(changed, output, refused, expected)
+            self.assertFalse(refused.exists())
+            self.assertEqual(changed.read_bytes(), attacker)
+
+            substituted_source = work / "substituted-source.tar"
+            substituted_source.write_bytes(original)
+            substituted = output / "substituted.tar"
+            same_size_attacker = b"x" * len(original)
+            original_stat = provision.os.stat
+            original_fstat = provision.os.fstat
+
+            def substitute_after_privileged_publication(command, timeout=None):
+                result = self.simulate_privileged_rootfs_tar_publication(command, timeout)
+                substituted.unlink()
+                substituted.write_bytes(same_size_attacker)
+                substituted.chmod(0o444)
+                return result
+
+            with mock.patch.object(
+                    provision, "run_checked", side_effect=substitute_after_privileged_publication), \
+                    mock.patch.object(
+                        provision.os, "stat",
+                        side_effect=self.report_fixture_publications_as_root_owned(original_stat)), \
+                    mock.patch.object(
+                        provision.os, "fstat",
+                        side_effect=self.report_fixture_descriptors_as_root_owned(original_fstat)):
+                with self.assertRaisesRegex(provision.ProvisionError, "did not retain the privileged inode"):
+                    provision.publish_rootfs_tar(substituted_source, output, substituted, expected)
+            self.assertEqual(substituted.read_bytes(), same_size_attacker)
+            self.assertEqual(substituted_source.read_bytes(), original)
 
     def test_provisioning_rejects_workdir_equal_or_beneath_rootfs_before_all_mutations(self):
         with self.temporary_directory() as temp:

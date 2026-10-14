@@ -2285,9 +2285,14 @@ if __name__ == "__main__":
     parser.add_argument("command", choices=("check-rootfs-tar-budget",))
     parser.add_argument("--rootfs", type=Path, required=True)
     parser.add_argument("--max-bytes", type=int, required=True)
+    parser.add_argument("--held-descriptor", action="store_true")
     args = parser.parse_args()
     rootfs = args.rootfs
-    if not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir():
+    held_descriptor = (args.held_descriptor and len(rootfs.parts) == 5 and
+                       rootfs.parts[0:2] == ("/", "proc") and rootfs.parts[2].isdigit() and
+                       rootfs.parts[3] == "fd" and rootfs.parts[4].isdigit())
+    if (not rootfs.is_absolute() or ".." in rootfs.parts or not rootfs.is_dir() or
+            (rootfs.is_symlink() and not held_descriptor)):
         parser.error("rootfs budget inspection requires an absolute non-symlink directory")
     if args.max_bytes < 1:
         parser.error("rootfs archive budget must be a positive integer")
@@ -2301,11 +2306,15 @@ exec(compile(ROOTFS_TAR_BUDGET_PROGRAM, "<clang1813-read-only-budget>", "exec"),
 _inspect_rootfs_tar_budget = _budget_namespace["inspect_rootfs_tar_budget"]
 
 
-def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int) -> list[str]:
+def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int, *, held_descriptor: bool = False) -> list[str]:
     if type(maximum_bytes) is not int or maximum_bytes < 1:
         raise ProvisionError("rootfs archive budget must be a positive integer")
-    return ["sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_TAR_BUDGET_PROGRAM,
-            "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()), "--max-bytes", str(maximum_bytes)]
+    command = ["sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_TAR_BUDGET_PROGRAM,
+               "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()),
+               "--max-bytes", str(maximum_bytes)]
+    if held_descriptor:
+        command.append("--held-descriptor")
+    return command
 
 
 def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
@@ -2980,17 +2989,20 @@ def normalize_rootfs(rootfs: Path, epoch: int) -> None:
                 "var/cache/ldconfig/aux-cache"):
         run_checked(["sudo", "rm", "-f", str(rootfs / rel)])
     run_checked(["sudo", "truncate", "-s", "0", str(rootfs / "etc/machine-id")])
-    run_checked(["sudo", "find", str(rootfs), "-xdev", "-exec", "touch", "-h", "-d", f"@{epoch}", "{}", "+"], timeout=300)
+    run_checked(["sudo", "find", f"{rootfs}/.", "-xdev", "-exec", "touch", "-h", "-d", f"@{epoch}", "{}", "+"], timeout=300)
 
 
 def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
-                              normalize: bool = True, max_bytes: int | None = None) -> dict:
+                              normalize: bool = True, max_bytes: int | None = None,
+                              held_rootfs_descriptor: bool = False) -> dict:
     if destination.exists() or destination.is_symlink():
         raise ProvisionError("could not exclusively create rootfs archive destination: path already exists")
     if normalize:
         normalize_rootfs(rootfs, epoch)
     if max_bytes is not None:
-        run_checked(rootfs_tar_budget_command(rootfs, max_bytes), timeout=ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
+        run_checked(rootfs_tar_budget_command(
+            rootfs, max_bytes, held_descriptor=held_rootfs_descriptor,
+        ), timeout=ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
     command = [
         "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
@@ -3372,6 +3384,314 @@ def debootstrap_command(contract: dict, profile_root: str, keyring: Path) -> lis
     ]
 
 
+ROOTFS_DIRECTORY_CREATE_PROGRAM = r'''import fcntl
+import os
+import stat
+import sys
+
+parent_path = sys.argv[1]
+name = sys.argv[2]
+marker_path = sys.argv[3]
+expected = tuple(int(value) for value in sys.argv[4:10])
+expected_marker = tuple(int(value) for value in sys.argv[10:16])
+if not name or name in (".", "..") or "/" in name or "\0" in name:
+    raise SystemExit("invalid rootfs directory name")
+parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+marker_fd = os.open(marker_path, os.O_RDONLY | os.O_CLOEXEC)
+success = False
+parent_acquired = False
+try:
+    fcntl.flock(parent_fd, fcntl.LOCK_EX)
+    parent = os.fstat(parent_fd)
+    marker = os.fstat(marker_fd)
+    actual = (parent.st_dev, parent.st_ino, parent.st_uid, parent.st_gid,
+              stat.S_IMODE(parent.st_mode), stat.S_IFMT(parent.st_mode))
+    actual_marker = (marker.st_dev, marker.st_ino, marker.st_uid, marker.st_gid,
+                     stat.S_IMODE(marker.st_mode), stat.S_IFMT(marker.st_mode))
+    if actual != expected or not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) & 0o022:
+        raise SystemExit("rootfs parent descriptor identity or permissions changed")
+    if actual_marker != expected_marker or not stat.S_ISREG(marker.st_mode):
+        raise SystemExit("rootfs authority marker identity changed")
+    if not (parent.st_mode & stat.S_IXUSR):
+        raise SystemExit("rootfs parent owner lacks traversal permission")
+    os.fchown(marker_fd, 0, 0)
+    os.fchmod(marker_fd, 0)
+    held_marker = os.fstat(marker_fd)
+    if (held_marker.st_uid != 0 or held_marker.st_gid != 0 or
+            stat.S_IMODE(held_marker.st_mode) != 0):
+        raise SystemExit("rootfs authority marker acquisition failed")
+    os.fchown(parent_fd, 0, expected[3])
+    parent_acquired = True
+    os.fchmod(parent_fd, 0o710)
+    locked = os.fstat(parent_fd)
+    if locked.st_uid != 0 or locked.st_gid != expected[3] or stat.S_IMODE(locked.st_mode) != 0o710:
+        raise SystemExit("rootfs parent authority lock failed")
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        raise SystemExit("rootfs target appeared before privileged creation")
+    except FileNotFoundError:
+        pass
+    os.mkdir(name, 0o755, dir_fd=parent_fd)
+    root_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=parent_fd)
+    try:
+        metadata = os.fstat(root_fd)
+        if metadata.st_uid != 0:
+            raise SystemExit("privileged rootfs directory is not owned by root")
+        print(f"{metadata.st_dev}:{metadata.st_ino}")
+        success = True
+    finally:
+        os.close(root_fd)
+finally:
+    if not success and parent_acquired:
+        try:
+            # Retire this attempt's authority before releasing the parent while
+            # still holding its flock. A delayed recovery must not release a
+            # newer attempt's lock using this attempt's stale root-owned marker.
+            os.fchown(marker_fd, expected_marker[2], expected_marker[3])
+            os.fchmod(marker_fd, expected_marker[4])
+            os.fchown(parent_fd, expected[2], expected[3])
+            os.fchmod(parent_fd, expected[4])
+        except OSError:
+            pass
+    os.close(marker_fd)
+    os.close(parent_fd)
+'''
+
+ROOTFS_PARENT_RESTORE_PROGRAM = r'''import fcntl
+import os
+import stat
+import sys
+
+parent_path, name, marker_path = sys.argv[1:4]
+expected_parent = tuple(int(value) for value in sys.argv[4:6])
+restore_uid, restore_gid, restore_mode = (int(value) for value in sys.argv[6:9])
+expected_root = tuple(int(value) for value in sys.argv[9:11])
+expected_marker = tuple(int(value) for value in sys.argv[11:17])
+parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+marker_fd = os.open(marker_path, os.O_RDONLY | os.O_CLOEXEC)
+try:
+    fcntl.flock(parent_fd, fcntl.LOCK_EX)
+    parent = os.fstat(parent_fd)
+    marker = os.fstat(marker_fd)
+    if (parent.st_dev, parent.st_ino) != expected_parent or not stat.S_ISDIR(parent.st_mode):
+        raise SystemExit("rootfs parent identity changed during recovery")
+    if ((marker.st_dev, marker.st_ino, stat.S_IFMT(marker.st_mode)) !=
+            (expected_marker[0], expected_marker[1], expected_marker[5]) or
+            not stat.S_ISREG(marker.st_mode)):
+        raise SystemExit("rootfs authority marker identity changed during recovery")
+    if parent.st_uid == restore_uid and parent.st_gid == restore_gid and stat.S_IMODE(parent.st_mode) == restore_mode:
+        if (marker.st_uid, marker.st_gid, stat.S_IMODE(marker.st_mode)) == expected_marker[2:5]:
+            raise SystemExit(0)
+        if marker.st_uid != 0 or marker.st_gid != 0 or stat.S_IMODE(marker.st_mode) != 0:
+            raise SystemExit("rootfs authority marker state is ambiguous")
+        os.fchown(marker_fd, expected_marker[2], expected_marker[3])
+        os.fchmod(marker_fd, expected_marker[4])
+        raise SystemExit(0)
+    if (parent.st_uid != 0 or parent.st_gid != restore_gid or
+            marker.st_uid != 0 or marker.st_gid != 0 or stat.S_IMODE(marker.st_mode) != 0):
+        raise SystemExit("locked rootfs parent authority changed")
+    os.fchmod(parent_fd, 0o710)
+    try:
+        root = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if expected_root != (-1, -1):
+            raise SystemExit("created rootfs directory disappeared during recovery")
+    else:
+        if (not stat.S_ISDIR(root.st_mode) or root.st_uid != 0 or
+                (expected_root != (-1, -1) and (root.st_dev, root.st_ino) != expected_root)):
+            raise SystemExit("locked rootfs child identity changed")
+    os.fchown(marker_fd, expected_marker[2], expected_marker[3])
+    os.fchmod(marker_fd, expected_marker[4])
+    os.fchown(parent_fd, restore_uid, restore_gid)
+    os.fchmod(parent_fd, restore_mode)
+finally:
+    os.close(marker_fd)
+    os.close(parent_fd)
+'''
+
+
+class PinnedRootfsDirectory:
+    """A root-owned rootfs whose original pathname and inode remain bound."""
+
+    def __init__(self, path: Path, parent_path: Path, parent_fd: int, root_fd: int,
+                 parent_identity: tuple[int, int], root_identity: tuple[int, int]):
+        self.path = path
+        self.parent_path = parent_path
+        self.parent_fd = parent_fd
+        self.root_fd = root_fd
+        self.parent_identity = parent_identity
+        self.root_identity = root_identity
+        self.descriptor_path = Path(f"/proc/{os.getpid()}/fd/{root_fd}")
+
+    def require_path_binding(self) -> None:
+        try:
+            current_parent = self.parent_path.stat(follow_symlinks=False)
+            current_root = os.stat(self.path.name, dir_fd=self.parent_fd, follow_symlinks=False)
+            held_root = os.fstat(self.root_fd)
+        except OSError as error:
+            raise ProvisionError("rootfs directory pathname binding changed") from error
+        if (not stat.S_ISDIR(current_parent.st_mode) or
+                (current_parent.st_dev, current_parent.st_ino) != self.parent_identity or
+                not stat.S_ISDIR(current_root.st_mode) or
+                (current_root.st_dev, current_root.st_ino) != self.root_identity or
+                (held_root.st_dev, held_root.st_ino) != self.root_identity):
+            raise ProvisionError("rootfs directory pathname binding changed")
+
+    def remove_empty_path(self) -> None:
+        self.require_path_binding()
+        try:
+            os.rmdir(self.path.name, dir_fd=self.parent_fd)
+        except OSError as error:
+            raise ProvisionError("could not remove the emptied bound rootfs directory") from error
+
+    def close(self) -> None:
+        root_fd, parent_fd = self.root_fd, self.parent_fd
+        self.root_fd = -1
+        self.parent_fd = -1
+        for descriptor in (root_fd, parent_fd):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def __del__(self):
+        self.close()
+
+
+def create_pinned_rootfs_directory(path: Path) -> PinnedRootfsDirectory:
+    """Create the rootfs as root through a held no-follow parent descriptor."""
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        raise ProvisionError("rootfs directory must have a canonical absolute pathname")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        parent_fd = os.open(path.parent, flags)
+    except OSError as error:
+        raise ProvisionError("could not open the rootfs parent directory without following links") from error
+    root_fd = -1
+    marker_fd = -1
+    marker_name = ""
+    marker = None
+    parent = None
+    parent_mode = -1
+    expected_identity = (-1, -1)
+    helper_attempted = False
+    restored = False
+    try:
+        parent = os.fstat(parent_fd)
+        parent_mode = stat.S_IMODE(parent.st_mode)
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or
+                parent.st_gid not in ({os.getegid()} | set(os.getgroups()))):
+            raise ProvisionError("rootfs parent directory must be owned and traversable by the caller")
+        if parent_mode & 0o022:
+            raise ProvisionError("rootfs parent directory must not be group- or world-writable")
+        for _ in range(8):
+            marker_name = f".clang1813-rootfs-authority-{os.urandom(16).hex()}"
+            try:
+                marker_fd = os.open(
+                    marker_name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600, dir_fd=parent_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise ProvisionError("could not exclusively create a rootfs authority marker")
+        marker = os.fstat(marker_fd)
+        marker_identity = (
+            marker.st_dev, marker.st_ino, marker.st_uid, marker.st_gid,
+            stat.S_IMODE(marker.st_mode), stat.S_IFMT(marker.st_mode),
+        )
+        parent_descriptor_path = f"/proc/{os.getpid()}/fd/{parent_fd}"
+        marker_descriptor_path = f"/proc/{os.getpid()}/fd/{marker_fd}"
+        command = [
+            "sudo", "/usr/bin/python3", "-I", "-B", "-c",
+            ROOTFS_DIRECTORY_CREATE_PROGRAM, parent_descriptor_path, path.name, marker_descriptor_path,
+            str(parent.st_dev), str(parent.st_ino), str(parent.st_uid), str(parent.st_gid),
+            str(parent_mode), str(stat.S_IFMT(parent.st_mode)),
+            *(str(value) for value in marker_identity),
+        ]
+        helper_attempted = True
+        result = run_checked(command, timeout=30)
+        payload = result.stdout.encode("ascii", errors="strict")
+        if len(payload) > 128 or re.fullmatch(rb"[0-9]+:[0-9]+\n", payload) is None:
+            raise ProvisionError("privileged rootfs creation returned an invalid directory identity")
+        expected_identity = tuple(int(value) for value in payload.rstrip(b"\n").split(b":"))
+        root_fd = os.open(path.name, flags, dir_fd=parent_fd)
+        root = os.fstat(root_fd)
+        if (root.st_dev, root.st_ino) != expected_identity:
+            raise ProvisionError("rootfs directory changed after privileged no-follow creation")
+        restore = [
+            "sudo", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_PARENT_RESTORE_PROGRAM,
+            parent_descriptor_path, path.name, marker_descriptor_path,
+            str(parent.st_dev), str(parent.st_ino),
+            str(parent.st_uid), str(parent.st_gid), str(parent_mode),
+            str(expected_identity[0]), str(expected_identity[1]),
+            *(str(value) for value in marker_identity),
+        ]
+        run_checked(restore, timeout=30)
+        restored = True
+        named_marker = os.stat(marker_name, dir_fd=parent_fd, follow_symlinks=False)
+        held_marker = os.fstat(marker_fd)
+        if ((named_marker.st_dev, named_marker.st_ino) != (held_marker.st_dev, held_marker.st_ino)):
+            raise ProvisionError("rootfs authority marker pathname changed")
+        os.unlink(marker_name, dir_fd=parent_fd)
+        marker_name = ""
+        os.close(marker_fd)
+        marker_fd = -1
+        binding = PinnedRootfsDirectory(
+            path, path.parent, parent_fd, root_fd,
+            (parent.st_dev, parent.st_ino), expected_identity,
+        )
+        parent_fd = root_fd = -1
+        try:
+            binding.require_path_binding()
+        except BaseException:
+            binding.close()
+            raise
+        return binding
+    except OSError as error:
+        raise ProvisionError(f"could not pin the privileged rootfs directory: {error}") from error
+    finally:
+        recovery_error = None
+        if helper_attempted and not restored and parent is not None:
+            recovery = [
+                "sudo", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_PARENT_RESTORE_PROGRAM,
+                f"/proc/{os.getpid()}/fd/{parent_fd}", path.name,
+                f"/proc/{os.getpid()}/fd/{marker_fd}",
+                str(parent.st_dev), str(parent.st_ino), str(parent.st_uid), str(parent.st_gid),
+                str(parent_mode), str(expected_identity[0]), str(expected_identity[1]),
+                *(str(value) for value in marker_identity),
+            ]
+            try:
+                run_checked(recovery, timeout=30)
+            except BaseException as error:
+                recovery_error = error
+        marker_cleanup_error = None
+        if marker_fd >= 0 and parent_fd >= 0 and marker_name:
+            try:
+                named_marker = os.stat(marker_name, dir_fd=parent_fd, follow_symlinks=False)
+                held_marker = os.fstat(marker_fd)
+                if ((named_marker.st_dev, named_marker.st_ino) != (held_marker.st_dev, held_marker.st_ino)):
+                    raise ProvisionError("rootfs authority marker pathname changed")
+                os.unlink(marker_name, dir_fd=parent_fd)
+            except BaseException as error:
+                marker_cleanup_error = error
+        for descriptor in (root_fd, marker_fd, parent_fd):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if recovery_error is not None:
+            raise ProvisionError("could not restore rootfs parent authority after privileged creation") from recovery_error
+        if marker_cleanup_error is not None:
+            raise ProvisionError("could not remove the rootfs authority marker") from marker_cleanup_error
+
+
 def apt_command_prefix() -> list[str]:
     return ["/usr/bin/apt-get", "-o", "Acquire::Check-Valid-Until=false", "-o", "Acquire::Retries=0",
             "-o", "APT::Get::AllowUnauthenticated=false", "-o", "APT::Install-Recommends=false"]
@@ -3408,9 +3728,9 @@ def probe_compile_command() -> list[str]:
             "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", PROBE_BINARY_IN_ROOT]
 
 
-def stage_probe_inputs(rootfs: Path) -> tuple[Path, Path]:
+def stage_probe_inputs(rootfs: Path, *, held_rootfs_descriptor: bool = False) -> tuple[Path, Path]:
     """Install immutable probe inputs under /usr/local so /tmp normalization cannot erase them."""
-    if rootfs.is_symlink() or not rootfs.is_dir():
+    if (rootfs.is_symlink() and not held_rootfs_descriptor) or not rootfs.is_dir():
         raise ProvisionError("probe staging requires the fresh non-symlink rootfs")
     source = RECIPE_FILES["probeSha256"]
     fixture = RECIPE_FILES["fixtureSha256"]
@@ -3555,8 +3875,82 @@ def remove_optional_source_caches(acquisition: Path) -> None:
         os.close(acquisition_fd)
 
 
-def publish_rootfs_tar(rootfs_tar_path: Path, output: Path, destination: Path) -> None:
-    """Move the verified tar only to the canonical output directory."""
+ROOTFS_TAR_PUBLISH_PROGRAM = r'''import hashlib
+import os
+import re
+import stat
+import sys
+
+source_parent_path, source_name, output_parent_path, destination_name = sys.argv[1:5]
+expected_bytes = int(sys.argv[5])
+expected_sha256 = sys.argv[6]
+for name in (source_name, destination_name):
+    if not name or name in (".", "..") or "/" in name or "\0" in name:
+        raise SystemExit("invalid rootfs tar leaf name")
+if expected_bytes < 1 or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+    raise SystemExit("invalid rootfs tar identity")
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+source_parent_fd = os.open(source_parent_path, directory_flags)
+output_parent_fd = os.open(output_parent_path, directory_flags)
+try:
+    try:
+        os.stat(destination_name, dir_fd=output_parent_fd, follow_symlinks=False)
+        raise SystemExit("rootfs tar destination already exists")
+    except FileNotFoundError:
+        pass
+    source_fd = os.open(source_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                        dir_fd=source_parent_fd)
+    try:
+        source = os.fstat(source_fd)
+        if not stat.S_ISREG(source.st_mode) or source.st_size != expected_bytes:
+            raise SystemExit("rootfs tar source identity changed")
+        private_fd = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o400,
+                             dir_fd=output_parent_fd)
+        try:
+            digest = hashlib.sha256()
+            remaining = expected_bytes
+            while remaining:
+                block = os.read(source_fd, min(remaining, 1024 * 1024))
+                if not block:
+                    break
+                remaining -= len(block)
+                digest.update(block)
+                offset = 0
+                while offset < len(block):
+                    offset += os.write(private_fd, block[offset:])
+            if remaining or os.read(source_fd, 1) or digest.hexdigest() != expected_sha256:
+                raise SystemExit("rootfs tar bytes changed before publication")
+            private = os.fstat(private_fd)
+            if (private.st_uid != 0 or not stat.S_ISREG(private.st_mode) or
+                    private.st_size != expected_bytes):
+                raise SystemExit("private rootfs tar publication inode is invalid")
+            os.fchmod(private_fd, 0o444)
+            os.link(f"/proc/self/fd/{private_fd}", destination_name,
+                    dst_dir_fd=output_parent_fd, follow_symlinks=True)
+            published = os.stat(destination_name, dir_fd=output_parent_fd, follow_symlinks=False)
+            if (published.st_uid != 0 or not stat.S_ISREG(published.st_mode) or
+                    stat.S_IMODE(published.st_mode) != 0o444 or
+                    (published.st_dev, published.st_ino) != (private.st_dev, private.st_ino)):
+                raise SystemExit("published rootfs tar inode identity changed")
+            print(f"{private.st_dev}:{private.st_ino}")
+        finally:
+            os.close(private_fd)
+    finally:
+        os.close(source_fd)
+finally:
+    os.close(output_parent_fd)
+    os.close(source_parent_fd)
+'''
+
+
+def publish_rootfs_tar(rootfs_tar_path: Path, output: Path, destination: Path,
+                       expected_identity: dict) -> None:
+    """Publish verified bytes through a root-owned private helper inode."""
+    if (set(expected_identity) != {"bytes", "sha256"} or
+            type(expected_identity["bytes"]) is not int or expected_identity["bytes"] < 1 or
+            not isinstance(expected_identity["sha256"], str) or
+            re.fullmatch(r"[0-9a-f]{64}", expected_identity["sha256"]) is None):
+        raise ProvisionError("verified rootfs tar identity is malformed")
     if destination.exists() or destination.is_symlink():
         raise ProvisionError("verified rootfs tar output path must not already exist")
     output_parent = output.resolve(strict=True)
@@ -3566,7 +3960,72 @@ def publish_rootfs_tar(rootfs_tar_path: Path, output: Path, destination: Path) -
         raise ProvisionError("verified rootfs tar output parent could not be resolved") from error
     if destination_parent != output_parent:
         raise ProvisionError("verified rootfs tar output must be inside the canonical run output directory")
-    os.replace(rootfs_tar_path, output_parent / destination.name)
+    source_parent_fd = output_parent_fd = -1
+    try:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        source_parent_fd = os.open(rootfs_tar_path.parent, directory_flags)
+        output_parent_fd = os.open(output_parent, directory_flags)
+        source_parent_identity = os.fstat(source_parent_fd)
+        output_parent_identity = os.fstat(output_parent_fd)
+        source_metadata = os.stat(rootfs_tar_path.name, dir_fd=source_parent_fd, follow_symlinks=False)
+        command = [
+            "sudo", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_TAR_PUBLISH_PROGRAM,
+            f"/proc/{os.getpid()}/fd/{source_parent_fd}", rootfs_tar_path.name,
+            f"/proc/{os.getpid()}/fd/{output_parent_fd}", destination.name,
+            str(expected_identity["bytes"]), expected_identity["sha256"],
+        ]
+        result = run_checked(command, timeout=600)
+        payload = result.stdout.encode("ascii", errors="strict")
+        if len(payload) > 128 or re.fullmatch(rb"[0-9]+:[0-9]+\n", payload) is None:
+            raise ProvisionError("privileged rootfs tar publication returned an invalid inode identity")
+        expected_published_identity = tuple(int(value) for value in payload.rstrip(b"\n").split(b":"))
+        current_output_parent = output_parent.stat(follow_symlinks=False)
+        if ((current_output_parent.st_dev, current_output_parent.st_ino) !=
+                (output_parent_identity.st_dev, output_parent_identity.st_ino)):
+            raise ProvisionError("verified rootfs tar output parent changed during publication")
+        published_fd = os.open(
+            destination.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=output_parent_fd,
+        )
+        try:
+            published = os.fstat(published_fd)
+            if ((published.st_dev, published.st_ino) != expected_published_identity or
+                    published.st_uid != 0 or not stat.S_ISREG(published.st_mode) or
+                    stat.S_IMODE(published.st_mode) != 0o444 or
+                    published.st_size != expected_identity["bytes"]):
+                raise ProvisionError("verified rootfs tar publication did not retain the privileged inode")
+            digest = hashlib.sha256()
+            remaining = expected_identity["bytes"]
+            while remaining:
+                block = os.read(published_fd, min(remaining, 1024 * 1024))
+                if not block:
+                    break
+                remaining -= len(block)
+                digest.update(block)
+            if remaining or os.read(published_fd, 1) or digest.hexdigest() != expected_identity["sha256"]:
+                raise ProvisionError("verified rootfs tar publication bytes changed")
+            named = os.stat(destination.name, dir_fd=output_parent_fd, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != expected_published_identity:
+                raise ProvisionError("verified rootfs tar publication pathname changed")
+        finally:
+            os.close(published_fd)
+        current_source_parent = rootfs_tar_path.parent.stat(follow_symlinks=False)
+        if ((current_source_parent.st_dev, current_source_parent.st_ino) !=
+                (source_parent_identity.st_dev, source_parent_identity.st_ino)):
+            raise ProvisionError("verified rootfs tar source parent changed during publication")
+        try:
+            current_source = os.stat(rootfs_tar_path.name, dir_fd=source_parent_fd, follow_symlinks=False)
+            if ((current_source.st_dev, current_source.st_ino) ==
+                    (source_metadata.st_dev, source_metadata.st_ino)):
+                os.unlink(rootfs_tar_path.name, dir_fd=source_parent_fd)
+        except FileNotFoundError:
+            pass
+    except OSError as error:
+        raise ProvisionError(f"could not publish the verified rootfs tar: {error}") from error
+    finally:
+        for descriptor in (output_parent_fd, source_parent_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def provision_rootfs(args: argparse.Namespace) -> int:
@@ -3592,24 +4051,34 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
     remove_optional_source_caches(args.acquisition)
     check_runner_bounds(args.workdir, profile)
-    profile_root = args.rootfs
-    profile_root.parent.mkdir(parents=True, exist_ok=True)
-    run_checked(debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
+    rootfs_binding = create_pinned_rootfs_directory(canonical_rootfs)
+    profile_root = rootfs_binding.descriptor_path
+
+    def bound_call(action, *values, **options):
+        rootfs_binding.require_path_binding()
+        try:
+            return action(*values, **options)
+        finally:
+            rootfs_binding.require_path_binding()
+
+    bound_call(run_checked, debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
     bootstrap_package_keys = installed_package_keys(profile_root, contract)
     require_bootstrap_ca_certificates(profile_root, bootstrap_package_keys)
     selected_keyring_sha256 = candidate["trustedKeyring"]["sha256"]
-    install_selected_archive_keyring(profile_root, args.keyring, selected_keyring_sha256)
+    bound_call(install_selected_archive_keyring, profile_root, args.keyring, selected_keyring_sha256)
 
     sources = apt_source_list(contract)
     sources_path = args.workdir / f"clang-source-list-{args.label}.list"
     atomic_write(sources_path, sources)
-    run_checked(["sudo", "install", "-m", "0644", str(sources_path), str(profile_root / "etc/apt/sources.list")])
+    bound_call(run_checked, ["sudo", "install", "-m", "0644", str(sources_path),
+                             str(profile_root / "etc/apt/sources.list")])
     apt_prefix = apt_command_prefix()
-    rootfs_run(profile_root, [*apt_prefix, "update"], contract, timeout=600,
+    bound_call(rootfs_run, profile_root, [*apt_prefix, "update"], contract, timeout=600,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
     pinned_args = [f"{row['name']}={row['version']}" for row in profile["binaryRoots"]]
-    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", "--download-only", *pinned_args], contract, timeout=900,
-               environment={"DEBIAN_FRONTEND": "noninteractive"})
+    bound_call(rootfs_run, profile_root,
+               [*apt_prefix, "install", "--yes", "--no-install-recommends", "--download-only", *pinned_args],
+               contract, timeout=900, environment={"DEBIAN_FRONTEND": "noninteractive"})
     downloaded_debs = sorted((profile_root / "var/cache/apt/archives").glob("*.deb"))
     if not downloaded_debs:
         raise ProvisionError("APT download-only phase produced no package archives")
@@ -3634,22 +4103,25 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     downloaded_names = {row["name"] for row in downloaded_rows}
     if not {row["name"] for row in profile["binaryRoots"]}.issubset(downloaded_names):
         raise ProvisionError("APT download-only phase did not acquire every explicitly pinned toolchain root package")
-    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", *pinned_args], contract, timeout=900,
-               environment={"DEBIAN_FRONTEND": "noninteractive"})
-    rootfs_run(profile_root, [*apt_prefix, "check"], contract, timeout=300,
+    bound_call(rootfs_run, profile_root,
+               [*apt_prefix, "install", "--yes", "--no-install-recommends", *pinned_args],
+               contract, timeout=900, environment={"DEBIAN_FRONTEND": "noninteractive"})
+    bound_call(rootfs_run, profile_root, [*apt_prefix, "check"], contract, timeout=300,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
 
     package_rows = installed_packages(profile_root, metadata, expected_final_keys, contract)
     package_total = sum(row["bytes"] for row in package_rows)
     if package_total > profile["bounds"]["maxAcquisitionBytes"]:
         raise ProvisionError("installed package closure exceeds cumulative package-byte budget")
-    c_version = rootfs_run(profile_root, ["/usr/bin/clang-18", "--version"], contract).strip()
-    cxx_version = rootfs_run(profile_root, ["/usr/bin/clang++-18", "--version"], contract).strip()
+    c_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang-18", "--version"], contract).strip()
+    cxx_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang++-18", "--version"], contract).strip()
     tools = [
         driver_record(profile_root, "/usr/bin/clang-18", "c-driver", c_version),
         driver_record(profile_root, "/usr/bin/clang++-18", "cxx-driver", cxx_version),
     ]
-    reported_resource_dir = rootfs_run(profile_root, ["/usr/bin/clang-18", "-print-resource-dir"], contract).strip()
+    reported_resource_dir = bound_call(
+        rootfs_run, profile_root, ["/usr/bin/clang-18", "-print-resource-dir"], contract,
+    ).strip()
     if not reported_resource_dir.startswith("/usr/lib/llvm-18/"):
         raise ProvisionError(f"Clang resource directory is outside the versioned LLVM 18 root: {reported_resource_dir}")
     resource_path = rootfs_path(profile_root, reported_resource_dir).resolve(strict=True)
@@ -3663,18 +4135,20 @@ def provision_rootfs(args: argparse.Namespace) -> int:
 
     fixture = RECIPE_FILES["fixtureSha256"]
     expected_probe_source_sha256 = recipe_identity(args.contract)["probeSha256"]
-    probe_in_root, fixture_in_root = stage_probe_inputs(profile_root)
+    probe_in_root, fixture_in_root = bound_call(
+        stage_probe_inputs, profile_root, held_rootfs_descriptor=True,
+    )
     staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
-    libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
+    libdir = bound_call(rootfs_run, profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
     if libdir != "/usr/lib/llvm-18/lib":
         raise ProvisionError("llvm-config library directory differs from the versioned probe recipe")
     # Retain the diagnostic command, but use the fixed reviewed probe arguments.
     # Tool-reported flags cannot inject additional compiler/linker operations.
-    rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
+    bound_call(rootfs_run, profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
     probe_path = PROBE_BINARY_IN_ROOT
     compile_command = probe_compile_command()
     source_sha256_before_compile = staged_probe_source_sha256
-    rootfs_run(profile_root, compile_command, contract, timeout=600)
+    bound_call(rootfs_run, profile_root, compile_command, contract, timeout=600)
     staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
     if staged_probe_source_sha256 != source_sha256_before_compile:
         raise ProvisionError("staged probe source changed during compilation")
@@ -3696,8 +4170,9 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     runtime_manifest = manifest(runtime_files)
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     rootfs_tar_path = args.workdir / f"clang-rootfs-{args.label}.tar"
-    rootfs_identity = deterministic_rootfs_tar(
-        profile_root, rootfs_tar_path, epoch, max_bytes=profile["bounds"]["maxArtifactBytes"],
+    rootfs_identity = bound_call(
+        deterministic_rootfs_tar, profile_root, rootfs_tar_path, epoch,
+        max_bytes=profile["bounds"]["maxArtifactBytes"], held_rootfs_descriptor=True,
     )
     if rootfs_identity["bytes"] > profile["bounds"]["maxArtifactBytes"]:
         raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
@@ -3738,12 +4213,18 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     record_path = args.output / "build-record-fragment.json"
     atomic_write(record_path, canonical_json(record))
     atomic_write(args.output / "probe-report.json", canonical_json(probe_checked))
+    rootfs_binding.require_path_binding()
     if args.rootfs_tar_output is not None:
-        publish_rootfs_tar(rootfs_tar_path, args.output, args.rootfs_tar_output)
+        publish_rootfs_tar(rootfs_tar_path, args.output, args.rootfs_tar_output, rootfs_identity)
     else:
         rootfs_tar_path.unlink()
     if not args.keep_rootfs:
-        run_checked(["sudo", "rm", "-rf", str(profile_root)])
+        bound_call(run_checked, ["sudo", "find", f"{profile_root}/.", "-xdev", "-depth", "-mindepth", "1",
+                                 "-delete"], timeout=300)
+        rootfs_binding.remove_empty_path()
+    else:
+        rootfs_binding.require_path_binding()
+    rootfs_binding.close()
     print(f"provisioned {profile['id']} rootfs sha256:{rootfs_identity['sha256']} image {image_record['imageDigest']}")
     return 0
 
