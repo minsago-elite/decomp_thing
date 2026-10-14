@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.LinuxBubblewrapBoundaryTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-10-14T05:37:48.199Z" hostname="whatsername" time="0.872">
+  <properties/>
+  <testcase name="manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.545"/>
+  <testcase name="unproved partial control creation poisons all later authority admission without descriptor leaks()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.295"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
