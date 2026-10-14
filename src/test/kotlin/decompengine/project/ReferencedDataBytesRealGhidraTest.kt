@@ -69,7 +69,12 @@ class ReferencedDataBytesRealGhidraTest {
         source.toFile().delete()
         val model = GhidraHeadlessProgramModelAnalyzer(limits = GhidraProgramModelExportLimits(Duration.ofMinutes(2)))
             .analyze(binary, root.resolve("analysis"))
-        assertEquals(3, model.schemaVersion)
+        assertEquals(4, model.schemaVersion)
+        model.globals.forEach { global ->
+            val evidence = requireNotNull(global.byteEvidence)
+            assertEquals(2, evidence.schemaVersion)
+            assertEquals(emptyList(), evidence.collectionOmissions, "small fixture must retain all supported references")
+        }
         for ((name, address) in addresses) {
             val windows = model.globals.flatMap { it.byteEvidence!!.windows }.filter { it.address == address && it.requestedLength == 8 }
             assertTrue(windows.isNotEmpty(), "missing eight-byte access for $name at $address")
@@ -83,6 +88,7 @@ class ReferencedDataBytesRealGhidraTest {
         val planning = GhidraHeadlessProgramModelAnalyzer(
             limits = GhidraProgramModelExportLimits(Duration.ofMinutes(2)),
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING).analyze(binary, root.resolve("planning-analysis"))
+        assertEquals(4, planning.schemaVersion)
         assertEquals(model.globals.associate { it.id to it.byteEvidence }, planning.globals.associate { it.id to it.byteEvidence },
             "planning and full exports must retain identical windows")
         val request = ModuleReconstructionRequest(
