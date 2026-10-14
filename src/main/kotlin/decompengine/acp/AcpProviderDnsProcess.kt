@@ -22,9 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.jar.JarInputStream
 
-/** Component only. There is deliberately no factory/broker launch entry point before qualification. */
+/** Closed resolver owner. Production construction consumes one registered boundary dispatch ticket. */
 internal class AcpProviderDnsProcess private constructor(
-    private val artifact: ProviderDnsArtifact,
+    @Volatile private var artifact: ProviderDnsArtifact?,
     private val requestDeadlineNanos: Long,
 ) {
     private val revoked = AtomicBoolean()
@@ -43,9 +43,13 @@ internal class AcpProviderDnsProcess private constructor(
     private val selected = AtomicReference<ByteArray?>()
     private val reaped = AtomicBoolean()
     private val streamsClosed = AtomicBoolean()
+    private val preparing = AtomicBoolean(artifact == null)
+    @Volatile private var ticket: AcpProviderDnsDispatchTicket? = null
+    @Volatile private var material: AcpProviderDnsLaunchMaterial? = null
 
     /** Called only by the future closed issuer, or reflectively by component controls. */
     private fun start() {
+        check(!preparing.get()) { DNS_FAILURE }
         check(started.compareAndSet(false, true)) { DNS_FAILURE }
         if (revoked.get() || ProviderDnsOwners.quarantined.get() || remainingNanos(requestDeadlineNanos) == 0L) {
             if (remainingNanos(requestDeadlineNanos) == 0L) expired.set(true)
@@ -64,6 +68,14 @@ internal class AcpProviderDnsProcess private constructor(
             ProviderDnsOwners.executor.execute(task)
         } catch (_: RejectedExecutionException) { refuseBeforeExecution() }
     }
+
+    internal fun resolveAddress(): InetAddress {
+        start()
+        return awaitAddress()
+    }
+
+    /** Pure denial fact; the retained material never receives a generic cancellation callback. */
+    internal fun admissionRevoked(): Boolean = revoked.get()
 
     /** Cancellation here proves only that no task/process was ever accepted by the executor. */
     private fun refuseBeforeExecution() {
@@ -149,11 +161,14 @@ internal class AcpProviderDnsProcess private constructor(
         var child: Process? = null
         try {
             checkActive()
-            artifact.requireCurrent()
+            // All manifest/hash/artifact IO stays on this capped, credential-free owner.
+            val admittedArtifact = artifact ?: ProviderDnsArtifact.fromMaterial(material ?: throw IOException(DNS_FAILURE))
+                .also { artifact = it }
+            admittedArtifact.requireCurrent()
             checkActive()
             // ProcessBuilder.start may ignore interruption. This capped task retains ownership
             // until it returns; a revoked late child is never accepted as a DNS result.
-            child = artifact.builder().start()
+            child = admittedArtifact.builder().start()
             publish(child)
             child.outputStream.close()
             val bytes = child.inputStream.readNBytes(MAXIMUM_DNS_FRAME_BYTES + 1)
@@ -198,20 +213,49 @@ internal class AcpProviderDnsProcess private constructor(
         }
         var interrupted = Thread.interrupted()
         try {
-            while ((finished.count != 0L || !task.isDone || !deadlineJoined()) && remainingNanos(cleanupDeadlineNanos) != 0L) {
+            while ((!cleanupVerified()) && remainingNanos(cleanupDeadlineNanos) != 0L) {
                 try { finished.await(minOf(remainingNanos(cleanupDeadlineNanos), TimeUnit.MILLISECONDS.toNanos(1)), TimeUnit.NANOSECONDS) }
                 catch (_: InterruptedException) { interrupted = true; killPublished() }
             }
-            val verified = finished.count == 0L && task.isDone && deadlineJoined() && streamsClosed.get() && (process.get() == null || reaped.get() && !process.get()!!.isAlive)
+            val verified = cleanupVerified() && try { ticket?.completeVerified(this) != false } catch (_: Exception) { false }
             if (!verified) ProviderDnsOwners.quarantined.set(true)
             return verified
         } finally { if (interrupted) Thread.currentThread().interrupt() }
     }
 
+    /** Ticket completion may inspect facts, never supply a caller-controlled success boolean. */
+    internal fun cleanupVerified(): Boolean = !preparing.get() && finished.count == 0L && task.isDone && deadlineJoined() &&
+        streamsClosed.get() && (process.get() == null || reaped.get() && !process.get()!!.isAlive)
+
     internal fun cleanupSnapshot(): AcpProviderDnsCleanupSnapshot = AcpProviderDnsCleanupSnapshot(
-        revoked.get(), process.get()?.pid(), reaped.get(), finished.count == 0L && task.isDone && deadlineJoined(),
+        revoked.get(), process.get()?.pid(), reaped.get(), !preparing.get() && finished.count == 0L && task.isDone && deadlineJoined(),
         streamsClosed.get(), ProviderDnsOwners.quarantined.get(),
     )
+
+    companion object {
+        /** No path, runtime, classpath or process-starter parameter is accepted here. */
+        internal fun fromTicket(ticket: AcpProviderDnsDispatchTicket): AcpProviderDnsProcess {
+            val owner = AcpProviderDnsProcess(null, ticket.deadlineNanos)
+            var prepared = false
+            try {
+                val material = ticket.bindOwner(owner)
+                owner.ticket = ticket
+                owner.material = material
+                prepared = true
+                return owner
+            } catch (_: Exception) {
+                owner.cancel()
+                throw IOException(DNS_FAILURE)
+            } finally {
+                // A close racing registration cannot prove cleanup while publication can
+                // still attach material or admit work. Sticky revoke fences a later start.
+                owner.preparing.set(false)
+                if (!prepared) owner.closeBefore(System.nanoTime())
+            }
+        }
+
+        internal fun quarantine() { ProviderDnsOwners.quarantined.set(true) }
+    }
 }
 
 internal data class AcpProviderDnsCleanupSnapshot(
@@ -244,11 +288,18 @@ private class ProviderDnsArtifact private constructor(
     private val jar: Path,
     private val expectedSha256: String,
     private val directory: Path,
+    private val java: Path,
+    private val helperMode: Int,
+    private val launcherMode: Int,
+    private val material: AcpProviderDnsLaunchMaterial?,
 ) {
-    private val java = currentProviderJavaExecutable()
-    private val javaIdentity = dnsFileIdentity(java, MAXIMUM_DNS_LAUNCHER_BYTES, 0x1ed)
+    /** Privileged component controls use the original runtime, never a production issuer. */
+    private constructor(jar: Path, expectedSha256: String, directory: Path) :
+        this(jar, expectedSha256, directory, currentProviderJavaExecutable(), 0x1a4, 0x1ed, null)
+
+    private val javaIdentity = dnsFileIdentity(java, MAXIMUM_DNS_LAUNCHER_BYTES, launcherMode)
     private val javaSha256 = dnsSha256(boundedDnsRead(java, MAXIMUM_DNS_LAUNCHER_BYTES))
-    private val jarIdentity = dnsFileIdentity(jar, MAXIMUM_DNS_JAR_BYTES, 0x1a4)
+    private val jarIdentity = dnsFileIdentity(jar, MAXIMUM_DNS_JAR_BYTES, helperMode)
     private val directoryIdentity = dnsDirectoryIdentity(directory)
 
     init {
@@ -257,11 +308,12 @@ private class ProviderDnsArtifact private constructor(
     }
 
     fun requireCurrent() {
-        require(sameDnsIdentity(jarIdentity, dnsFileIdentity(jar, MAXIMUM_DNS_JAR_BYTES, 0x1a4)) &&
+        material?.requireCurrent()
+        require(sameDnsIdentity(jarIdentity, dnsFileIdentity(jar, MAXIMUM_DNS_JAR_BYTES, helperMode)) &&
             sameDnsIdentity(directoryIdentity, dnsDirectoryIdentity(directory)) &&
             dnsSha256(boundedDnsRead(jar, MAXIMUM_DNS_JAR_BYTES)) == expectedSha256 &&
-            currentProviderJavaExecutable() == java &&
-            sameDnsIdentity(javaIdentity, dnsFileIdentity(java, MAXIMUM_DNS_LAUNCHER_BYTES, 0x1ed)) &&
+            (material != null || currentProviderJavaExecutable() == java) &&
+            sameDnsIdentity(javaIdentity, dnsFileIdentity(java, MAXIMUM_DNS_LAUNCHER_BYTES, launcherMode)) &&
             dnsSha256(boundedDnsRead(java, MAXIMUM_DNS_LAUNCHER_BYTES)) == javaSha256) { DNS_FAILURE }
     }
 
@@ -271,6 +323,15 @@ private class ProviderDnsArtifact private constructor(
         "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash", "-XX:-DumpReplayDataOnError",
         "-Djava.io.tmpdir=$directory", "-Duser.home=$directory", "-cp", jar.toString(), "decompengine.acp.ProviderDnsWorker",
     ).directory(directory.toFile()).redirectErrorStream(true).also { it.environment().clear() }
+
+    companion object {
+        fun fromMaterial(material: AcpProviderDnsLaunchMaterial): ProviderDnsArtifact {
+            material.requireCurrent()
+            require(material.runtimeManifestSha256.matches(Regex("[0-9a-f]{64}"))) { DNS_FAILURE }
+            return ProviderDnsArtifact(material.jar, material.expectedSha256, material.directory,
+                material.javaExecutable, 0x124, 0x16d, material)
+        }
+    }
 }
 
 /** Compare the trusted app resource commitment; an adjacent checksum never issues authority. */

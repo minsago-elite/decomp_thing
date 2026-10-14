@@ -97,7 +97,9 @@ object AcpHarnessFactory {
     ) {
         init {
             require(
-                if (purpose == AcpProviderQualificationPurpose.INVOCATION_EVIDENCE) {
+                if (purpose == AcpProviderQualificationPurpose.INVOCATION_EVIDENCE ||
+                    purpose == AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT
+                ) {
                     expectedRequestBindingSha256?.matches(Regex("[0-9a-f]{64}")) == true
                 } else expectedRequestBindingSha256 == null,
             ) { "ACP invocation evidence permit requires its factory-owned request commitment" }
@@ -132,7 +134,9 @@ object AcpHarnessFactory {
         purpose: AcpProviderQualificationPurpose,
     ): AcpProviderQualificationProfile = synchronized(providerPermits) {
         val record = consumeProviderPermitRecord(permit, consumer, purpose)
-        require(record.purpose != AcpProviderQualificationPurpose.INVOCATION_EVIDENCE) {
+        require(record.purpose != AcpProviderQualificationPurpose.INVOCATION_EVIDENCE &&
+            record.purpose != AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT
+        ) {
             "ACP invocation evidence permit requires request-bound consumption"
         }
         AcpProviderQualificationProfile.CREDENTIAL_FREE
@@ -148,6 +152,21 @@ object AcpHarnessFactory {
         )
         require(record.expectedRequestBindingSha256 == requestBindingSha256) {
             "ACP invocation evidence does not match its factory-owned request commitment"
+        }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE
+    }
+
+    /** No issuer exists until the protected factory/invocation composition is qualified. */
+    internal fun consumeDnsRuntimeContextQualificationPermit(
+        permit: AcpProviderQualificationPermit,
+        consumer: Any,
+        requestBindingSha256: String,
+    ): AcpProviderQualificationProfile = synchronized(providerPermits) {
+        val record = consumeProviderPermitRecord(
+            permit, consumer, AcpProviderQualificationPurpose.DNS_RUNTIME_CONTEXT,
+        )
+        require(record.expectedRequestBindingSha256 == requestBindingSha256) {
+            "ACP DNS runtime context does not match its factory-owned request commitment"
         }
         AcpProviderQualificationProfile.CREDENTIAL_FREE
     }

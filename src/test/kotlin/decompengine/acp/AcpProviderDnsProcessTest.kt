@@ -354,7 +354,11 @@ private fun newComponentOwner(jar: Path, directory: Path, deadline: Long): AcpPr
     val artifactClass = Class.forName("decompengine.acp.ProviderDnsArtifact")
     val constructor = artifactClass.getDeclaredConstructor(Path::class.java, String::class.java, Path::class.java).also { it.isAccessible = true }
     val digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(jar)).joinToString("") { "%02x".format(it) }
-    val artifact = constructor.newInstance(jar, digest, directory)
+    val artifact = try { constructor.newInstance(jar, digest, directory) }
+    catch (failure: java.lang.reflect.InvocationTargetException) {
+        printProviderDnsLauncherDiagnostic()
+        throw failure
+    }
     return AcpProviderDnsProcess::class.java.getDeclaredConstructor(artifactClass, Long::class.javaPrimitiveType).also { it.isAccessible = true }
         .newInstance(artifact, deadline)
 }
@@ -364,4 +368,29 @@ private fun componentTask(owner: AcpProviderDnsProcess): FutureTask<*> =
 private fun dnsOwnersField(name: String): Any {
     val type = Class.forName("decompengine.acp.ProviderDnsOwners")
     return type.getDeclaredField(name).also { it.isAccessible = true }.get(null)
+}
+
+/** Fixed, credential-free metadata only; authentication predicates are unchanged. */
+private fun printProviderDnsLauncherDiagnostic() {
+    val facts = linkedMapOf<String, String>()
+    try {
+        val launcher = Path.of(System.getProperty("java.home"), "bin/java").toRealPath()
+        val identity = Files.readAttributes(launcher, java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        val mode = (Files.getAttribute(launcher, "unix:mode", java.nio.file.LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff
+        facts["regular"] = identity.isRegularFile.toString()
+        facts["symbolicLink"] = identity.isSymbolicLink.toString()
+        facts["fileKeyPresent"] = (identity.fileKey() != null).toString()
+        facts["size"] = identity.size().toString()
+        facts["modeOctal"] = mode.toString(8)
+        facts["absoluteCanonicalNormalized"] = (launcher.isAbsolute && launcher == launcher.normalize() && launcher == launcher.toRealPath()).toString()
+        facts["sizeWithin1048576"] = (identity.size() in 1..1048576).toString()
+        facts["modeEquals0755"] = (mode == 0x1ed).toString()
+        if (identity.isRegularFile && identity.size() in 1..1048576) {
+            val bytes = Files.newInputStream(launcher).use { it.readNBytes(1048577) }
+            if (bytes.size <= 1048576) facts["sha256"] = MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }
+        }
+    } catch (_: Exception) { facts["metadataUnavailable"] = "true" }
+    println("PROVIDER_DNS_LAUNCHER_METADATA_V1 " + facts.entries.joinToString(" ") { "${it.key}=${it.value}" })
 }

@@ -16,6 +16,7 @@ internal enum class AcpProviderQualificationPurpose {
     FIXTURE_POLICY,
     INVOCATION_EVIDENCE,
     GUARDIAN_LAUNCH_DESCRIPTOR,
+    DNS_RUNTIME_CONTEXT,
 }
 
 /** Closed credential-free profile; none of its authority is selected by operator input. */

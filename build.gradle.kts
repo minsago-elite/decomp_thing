@@ -1,3 +1,4 @@
+import java.util.Base64
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -107,11 +108,89 @@ val providerDnsProtocolFixtureJar = tasks.register<Jar>("providerDnsProtocolFixt
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
+val providerDnsNativeDirectory = layout.buildDirectory.dir("provider-dns/native")
+val providerDnsLoopbackHelper = providerDnsNativeDirectory.map { it.file("provider-dns-loopback-fixture") }
+val providerDnsLoopbackReference = providerDnsNativeDirectory.map { it.file("loopback-reference.properties") }
+val providerDnsLoopbackReferenceDigest = providerDnsNativeDirectory.map { it.file("loopback-reference.sha256") }
+val buildProviderDnsLoopbackFixture = tasks.register("buildProviderDnsLoopbackFixture") {
+    description = "Builds the fixed test-only native DNS namespace setup helper"
+    inputs.file("src/test/provider-dns/native/provider_dns_loopback_fixture.c")
+    inputs.files("/usr/bin/cc", "/usr/bin/ld")
+    outputs.files(providerDnsLoopbackHelper, providerDnsLoopbackReference, providerDnsLoopbackReferenceDigest)
+    // Compiler/linker identity upgrades must never reuse a prior authenticated native fixture.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("native DNS helper requires current compiler provenance") { false }
+    doLast {
+        val source = layout.projectDirectory.file("src/test/provider-dns/native/provider_dns_loopback_fixture.c").asFile.toPath().toRealPath()
+        require(Files.size(source) in 1..65536)
+        val compiler = Path.of("/usr/bin/cc").toRealPath()
+        val linker = Path.of("/usr/bin/ld").toRealPath()
+        require(Files.isExecutable(compiler) && Files.isExecutable(linker))
+        fun digest(path: Path): String = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+        val sourceDigest = digest(source)
+        val compilerDigest = digest(compiler)
+        val linkerDigest = digest(linker)
+        val directory = providerDnsNativeDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+        Files.createDirectories(directory)
+        val scratch = directory.resolve("tmp")
+        Files.createDirectories(scratch)
+        val helper = providerDnsLoopbackHelper.get().asFile.toPath().toAbsolutePath().normalize()
+        val argv = listOf(compiler.toString(), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fno-ident", "-Wl,--build-id=none",
+            source.toString(), "-o", helper.toString())
+        val log = directory.resolve("compile.log")
+        val compile = ProcessBuilder(argv).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).also {
+            it.environment().clear()
+            it.environment()["PATH"] = "/usr/bin:/bin"
+            it.environment()["TMPDIR"] = scratch.toString()
+            it.environment()["LC_ALL"] = "C"
+        }.start()
+        compile.outputStream.close()
+        val exited = compile.waitFor(30, TimeUnit.SECONDS)
+        if (!exited) {
+            compile.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+            compile.toHandle().destroyForcibly()
+        }
+        require(compile.waitFor(2, TimeUnit.SECONDS) && exited && compile.exitValue() == 0 && Files.size(log) <= 65536) {
+            "test-only provider DNS loopback helper compilation failed"
+        }
+        require(digest(source) == sourceDigest && digest(compiler) == compilerDigest && digest(linker) == linkerDigest)
+        require(Files.size(helper) in 64..(256 * 1024))
+        Files.setPosixFilePermissions(helper, PosixFilePermissions.fromString("rwxr-xr-x"))
+        val argvBytes = argv.joinToString("\u0000").toByteArray(Charsets.UTF_8)
+        val reference = listOf(
+            "schema=1", "sourceSha256=$sourceDigest", "compilerPath=$compiler", "compilerSha256=$compilerDigest",
+            "linkerPath=$linker", "linkerSha256=$linkerDigest", "helperSha256=${digest(helper)}",
+            "compileArgvSha256=${MessageDigest.getInstance("SHA-256").digest(argvBytes).joinToString("") { "%02x".format(it) }}",
+            "compileArgvBase64=${Base64.getEncoder().encodeToString(argvBytes)}",
+        ).joinToString("\n", postfix = "\n").toByteArray(Charsets.UTF_8)
+        Files.write(providerDnsLoopbackReference.get().asFile.toPath(), reference)
+        val referenceDigest = MessageDigest.getInstance("SHA-256").digest(reference).joinToString("") { "%02x".format(it) }
+        Files.writeString(providerDnsLoopbackReferenceDigest.get().asFile.toPath(), "$referenceDigest\n", Charsets.US_ASCII)
+    }
+}
+tasks.processTestResources {
+    dependsOn(buildProviderDnsLoopbackFixture)
+    from(listOf("src/test/provider-dns/native/provider_dns_loopback_fixture.c", "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt")) {
+        into("acp-provider-dns-native")
+    }
+    from(providerDnsLoopbackReferenceDigest) { into("acp-provider-dns-native") }
+}
 tasks.withType<Test>().configureEach {
-    dependsOn(providerDnsWorkerJar, providerDnsFixtureJar, providerDnsProtocolFixtureJar)
+    val nativeDnsRequired = providers.environmentVariable("DECOMP_REQUIRE_NATIVE_PROVIDER_DNS").orElse("")
+    val liveAcpRequired = providers.environmentVariable("DECOMP_REQUIRE_LIVE_ACP_CONTRACT").orElse("")
+    inputs.property("requiredNativeProviderDns", nativeDnsRequired)
+    inputs.property("requiredLiveAcpContract", liveAcpRequired)
+    inputs.property("nativeProviderDnsRunId", providers.environmentVariable("DECOMP_ACP_CONTRACT_RUN_ID").orElse(""))
+    if (nativeDnsRequired.get() == "1" || liveAcpRequired.get() == "1") {
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("native DNS qualification requires fresh execution and receipts") { false }
+    }
+    dependsOn(providerDnsWorkerJar, providerDnsFixtureJar, providerDnsProtocolFixtureJar, buildProviderDnsLoopbackFixture)
     systemProperty("decompengine.acp.providerDns.workerJar", providerDnsWorkerJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
     systemProperty("decompengine.acp.providerDns.fixtureJar", providerDnsFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
     systemProperty("decompengine.acp.providerDns.protocolJar", providerDnsProtocolFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.loopbackHelper", providerDnsLoopbackHelper.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.loopbackReference", providerDnsLoopbackReference.get().asFile.absolutePath)
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")

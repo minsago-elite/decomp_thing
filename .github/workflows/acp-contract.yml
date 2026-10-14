@@ -43,7 +43,9 @@ jobs:
         run: python3 -B scripts/verify-acp-provider-guardian.py --include-v2
       - name: Prepare finite ACP quota fixture
         run: bash scripts/ci-prepare-acp-quota.sh
-      - name: Qualify every required ACP and shared-agent suite
+      - name: Qualify every required ACP, native DNS and shared-agent suite
+        env:
+          DECOMP_REQUIRE_NATIVE_PROVIDER_DNS: '1'
         run: bash scripts/validate-acp-contract.sh
       - name: Release finite ACP quota fixture
         if: always()
@@ -57,3 +59,5 @@ jobs:
             build/test-results/test
             build/acp-contract-qualification
             build/provider-guardian-qualification
+            build/provider-dns-native-qualification
+            build/provider-dns
