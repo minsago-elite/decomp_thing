@@ -186,7 +186,8 @@ class RepairAcpEvidenceArchiveVerifierTest {
             emptyList(), emptyList(), emptyList(), null, AcpExecutionEvidenceCompleteness(true, true, true), null)
         val outcome = if (refused) AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.REFUSED,
             "synthetic refused invocation", emptyList(), AgentSessionReference("repair-test-acp", "repair-session")))
-        else AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "synthetic protocol failure"))
+        else AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "synthetic protocol failure",
+            session = if (providerV3) AgentSessionReference("provider-fixture", "provider-data-session") else null))
         return requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, sha256(PROMPT.toByteArray()),
             AgentExecutionReceipt(binding, outcome, invocation), BoundedAgentExecutionEventRecorder().receiptSnapshot(),
             KIND, TASK_FIELD, attemptId))

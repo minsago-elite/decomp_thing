@@ -123,7 +123,7 @@ data class AcpProviderGuardianCleanupEvidence(
         )
         require(disposition != AcpExecutionCleanupDisposition.VERIFIED ||
             (expectedTeardown && childExitKind != AcpProviderChildExitKind.UNOBSERVED &&
-                (childReaped || finalEchildObserved) && remainingDescendants == 0 && cgroupRemoved &&
+                childReaped && finalEchildObserved && remainingDescendants == 0 && cgroupRemoved &&
                 privateStateRemoved && descriptorsClosed)
         ) { "ACP provider verified guardian cleanup lacks terminal observations" }
         require(disposition != AcpExecutionCleanupDisposition.NOT_REQUIRED ||
@@ -283,6 +283,9 @@ class AcpProviderInvocationEvidenceSnapshot(
         require(maximumInvocationInputTokens == null || inputTokens == null ||
             inputTokens <= maximumInvocationInputTokens
         ) { "ACP provider input usage exceeds invocation budget" }
+        require(maximumInvocationInputTokens == null ||
+            this.requests.none { it.terminal == AcpProviderExecutionTerminal.COMPLETED && it.inputTokens == null }
+        ) { "ACP provider completed request lacks input usage under invocation cap" }
         admissionDenial?.let {
             require(revoked) { "ACP provider denial did not revoke authority" }
         }

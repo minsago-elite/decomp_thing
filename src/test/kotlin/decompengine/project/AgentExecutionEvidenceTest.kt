@@ -1404,7 +1404,7 @@ internal fun providerDataFixtureInvocationForTest(
     val disposition = if (cleanupVerified) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.UNVERIFIED
     val guardian = AcpProviderGuardianCleanupEvidence(disposition,
         if (cleanupVerified) AcpProviderGuardianTeardownCause.BOUNDED_CANCELLATION else AcpProviderGuardianTeardownCause.UNKNOWN,
-        true, false, AcpProviderChildExitKind.SIGTERM, null, 15, cleanupVerified, false,
+        true, false, AcpProviderChildExitKind.SIGTERM, null, 15, cleanupVerified, cleanupVerified,
         if (cleanupVerified) 0 else null, cleanupVerified, cleanupVerified, cleanupVerified)
     val transport = AcpProviderInvocationEvidenceSnapshot(AcpProviderExecutionAuthority.CREDENTIAL_FREE_LOOPBACK_TLS_V1,
         sha, sha, profile.descriptorSha256, hash(profile.model), AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1,

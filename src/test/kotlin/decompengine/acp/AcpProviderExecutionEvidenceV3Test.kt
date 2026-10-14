@@ -183,6 +183,15 @@ class AcpProviderExecutionEvidenceV3Test {
         assertFailsWith<IllegalArgumentException> { snapshot(inputTokens = null) }
         assertFailsWith<IllegalArgumentException> { snapshot(outputLimit = 2) }
         assertFailsWith<IllegalArgumentException> { snapshot(inputLimit = 1) }
+        assertFailsWith<IllegalArgumentException> {
+            snapshot(inputLimit = 10, requests = listOf(request().copy(inputTokens = null)), inputTokens = null)
+        }
+        val incomplete = request().copy(
+            terminal = AcpProviderExecutionTerminal.RESOURCE_EXHAUSTED,
+            inputTokens = null,
+            admittedOutputTokens = 0,
+        )
+        assertNull(snapshot(inputLimit = 10, requests = listOf(incomplete), outputTokens = 0, inputTokens = null).inputTokens)
         assertFailsWith<IllegalArgumentException> { snapshot(remainingMillis = 0) }
         assertFailsWith<IllegalArgumentException> { snapshot(remainingMillis = PROFILE.bounds.overallTimeout.toMillis() + 1) }
         assertFailsWith<IllegalArgumentException> { snapshot(requests = listOf(request(), request().copy(sequence = 2))) }
@@ -255,7 +264,8 @@ class AcpProviderExecutionEvidenceV3Test {
             val unverified = guardian().copy(disposition = AcpExecutionCleanupDisposition.UNVERIFIED, teardownCause = cause)
             assertTrue(snapshot(cleanup = cleanup(unverified, AcpExecutionCleanupDisposition.UNVERIFIED)).cleanup.admissionSticky)
         }
-        assertFailsWith<IllegalArgumentException> { guardian().copy(childReaped = false, finalEchildObserved = false) }
+        assertFailsWith<IllegalArgumentException> { guardian().copy(childReaped = false) }
+        assertFailsWith<IllegalArgumentException> { guardian().copy(finalEchildObserved = false) }
         assertFailsWith<IllegalArgumentException> { guardian().copy(remainingDescendants = null) }
         assertFailsWith<IllegalArgumentException> { guardian().copy(remainingDescendants = 1) }
         assertFailsWith<IllegalArgumentException> { guardian().copy(cgroupRemoved = false) }
