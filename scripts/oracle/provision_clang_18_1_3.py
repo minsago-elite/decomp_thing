@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import lzma
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -52,9 +53,10 @@ OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 OCI_GZIP_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 OCI_REFERENCE_NAME = "clang-18.1.3-noble-amd64"
+FRONTEND_DRIVER_ROOTS = (("c-driver", "/usr/bin/clang-18"), ("cxx-driver", "/usr/bin/clang++-18"))
 FRONTEND_RUNTIME_ROOTS = (
-    "/usr/bin/clang-18",
-    "/usr/bin/clang++-18",
+    *(path for _, path in FRONTEND_DRIVER_ROOTS),
+    PROBE_BINARY_IN_ROOT,
     "/usr/lib/llvm-18/lib/libclang-cpp.so",
     "/usr/lib/llvm-18/lib/libLLVM-18.so",
 )
@@ -2902,8 +2904,10 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict)
                                 "/usr/lib/llvm-18/lib/libclang-cpp.so",
                                 "/usr/lib/llvm-18/lib/libLLVM-18.so"]))
     for logical in roots:
-        output = rootfs_run(rootfs, ["/usr/bin/ldd", logical], contract)
+        output = run_probe_sandboxed(rootfs, ["/usr/bin/ldd", logical], contract)
         for line in output.splitlines():
+            if re.search(r"=>\s+not found(?:\s|$)", line):
+                raise ProvisionError(f"runtime dependency is unresolved for {logical}: {line.strip()}")
             match = re.search(r"=>\s+(/\S+)", line)
             if match:
                 paths.add(match.group(1))
@@ -2982,7 +2986,66 @@ def verified_frontend_runtime_library_digests(rootfs: Path, record: dict) -> lis
     return frontend_runtime_library_digests(record)
 
 
+NETWORK_IDENTITY_NORMALIZE_PROGRAM = r'''import os
+import stat
+import sys
+
+root_fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+etc_fd = -1
+try:
+    root = os.fstat(root_fd)
+    if ((root.st_dev, root.st_ino) != (int(sys.argv[2]), int(sys.argv[3])) or
+            root.st_uid != 0 or stat.S_IMODE(root.st_mode) & 0o022):
+        raise SystemExit("network normalization rootfs authority changed")
+    etc_fd = os.open("etc", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+    etc = os.fstat(etc_fd)
+    if etc.st_uid != 0 or stat.S_IMODE(etc.st_mode) & 0o022:
+        raise SystemExit("network normalization etc directory is not protected")
+    for name, payload in (("hostname", b"clang1813\n"), ("resolv.conf", b"")):
+        temporary = ".clang1813-network-" + os.urandom(16).hex()
+        descriptor = -1
+        created = False
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=etc_fd)
+            created = True
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                output.write(payload)
+                output.flush()
+            # Replace the leaf itself, including links; never open its target.
+            os.replace(temporary, name, src_dir_fd=etc_fd, dst_dir_fd=etc_fd)
+            created = False
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if created:
+                os.unlink(temporary, dir_fd=etc_fd)
+finally:
+    if etc_fd >= 0:
+        os.close(etc_fd)
+    os.close(root_fd)
+'''
+
+
+def normalize_network_identity_files(rootfs: Path) -> None:
+    # rootfs may already be the pinned /proc descriptor pathname. Open it once,
+    # then pass that held identity to the fixed privileged helper.
+    descriptor = os.open(rootfs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        identity = os.fstat(descriptor)
+        run_checked([
+            "sudo", "/usr/bin/python3", "-I", "-B", "-c", NETWORK_IDENTITY_NORMALIZE_PROGRAM,
+            f"/proc/{os.getpid()}/fd/{descriptor}", str(identity.st_dev), str(identity.st_ino),
+        ], timeout=30)
+    finally:
+        os.close(descriptor)
+
+
 def normalize_rootfs(rootfs: Path, epoch: int) -> None:
+    normalize_network_identity_files(rootfs)
     for rel in ("var/cache/apt/archives", "var/lib/apt/lists", "var/log/apt", "var/log/journal", "tmp", "var/tmp"):
         target = rootfs / rel
         if not target.exists() or target.is_symlink():
@@ -3373,6 +3436,17 @@ def verify_retained_rootfs_and_image(rootfs: Path, oci_archive: Path,
     if actual != expected:
         raise ProvisionError("retained rootfs differs from the deterministic rootfs identity in the build record")
     verify_oci_archive(oci_archive, record, limits["maxArtifactBytes"])
+
+
+def verify_recorded_driver_identities(rootfs: Path, record: dict, contract: dict) -> None:
+    """Replay both fixed driver identities through the bounded execution boundary."""
+    actual = {}
+    for role, logical_path in FRONTEND_DRIVER_ROOTS:
+        output = run_probe_sandboxed(rootfs, [logical_path, "--version"], contract).strip()
+        actual[role] = driver_record(rootfs, logical_path, role, output)
+    expected = {row["role"]: row for row in record["tools"]}
+    if actual != expected:
+        raise ProvisionError("build record driver identities differ from the retained C/C++ drivers")
 
 
 def verify_recorded_runtime_closure(rootfs: Path, record: dict, contract: dict) -> dict:
@@ -3793,6 +3867,9 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "llvmConfigCxxflags": in_root(["/usr/bin/llvm-config-18", "--cxxflags"]),
         "probeCompile": in_root(probe_compile_command()),
         "probeRun": in_root([PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT]),
+        "normalizeNetworkIdentity": ["sudo", "/usr/bin/python3", "-I", "-B", "-c",
+                                     NETWORK_IDENTITY_NORMALIZE_PROGRAM,
+                                     "<HELD_ROOTFS_DESCRIPTOR>", "<ROOTFS_DEVICE>", "<ROOTFS_INODE>"],
         "rootfsTarBudget": budget_command,
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
                       "--numeric-owner", f"--mtime=@{epoch}",
@@ -4237,50 +4314,226 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     return 0
 
 
+SCHEMA_MAX_BYTES = 1024 * 1024
+SCHEMA_MAX_DEPTH = 64
+SCHEMA_MAX_NODES = 100_000
+# These reviewed expressions use only the common Python/ECMA-262 subset.
+SCHEMA_PATTERNS = frozenset((
+    "^/usr/lib/llvm-18/.*$", "^(0|[1-9][0-9]*)$", "^sha256:[0-9a-f]{64}$",
+    "^[0-9a-f]{64}$", "^[^/].*\\.deb$", "^/usr/", "^[0-7]{4}$",
+    "^[0-9A-F]{40}$", "^18\\.1\\.3", "^[A-Za-z_][A-Za-z0-9_]*$",
+))
+
+
+def validate_finite_build_record_schema(instance: object, schema: object) -> None:
+    """Validate the reviewed local schema vocabulary, never fetching references.
+
+    Meta-validation walks every branch before checking the instance. Unsupported
+    schema constructs fail closed even when their instance branch is not taken.
+    """
+    budget = [SCHEMA_MAX_NODES]
+
+    def visit(depth: int) -> None:
+        budget[0] -= 1
+        if depth > SCHEMA_MAX_DEPTH or budget[0] < 0:
+            raise ProvisionError("checked-in schema validation exceeds its depth/node budget")
+
+    def json_key(value: object, depth: int = 0) -> tuple:
+        visit(depth)
+        if value is None:
+            return ("null",)
+        if type(value) is bool:
+            return ("boolean", value)
+        if type(value) in (int, float):
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ProvisionError("checked-in schema validation requires finite JSON numbers")
+            # Python's exact numeric equality/hash unifies 1 and 1.0 without
+            # unifying true and 1. Integral floats also satisfy integer below.
+            return ("number", value)
+        if isinstance(value, str):
+            return ("string", value)
+        if isinstance(value, list):
+            return ("array", tuple(json_key(child, depth + 1) for child in value))
+        if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+            return ("object", tuple((key, json_key(value[key], depth + 1)) for key in sorted(value)))
+        raise ProvisionError("checked-in schema validation requires a JSON value")
+
+    json_key(instance)
+    json_key(schema)
+    if not isinstance(schema, dict):
+        raise ProvisionError("checked-in build-record schema must be an object")
+    allowed = {
+        "$schema", "$id", "title", "description", "$defs", "$ref", "type", "const", "enum",
+        "required", "additionalProperties", "properties", "items", "allOf", "if", "then", "else",
+        "pattern", "minimum", "minItems", "maxItems", "minLength", "maxLength", "uniqueItems",
+    }
+    types = {"null", "boolean", "object", "array", "number", "integer", "string"}
+
+    def reference(rule: dict) -> tuple[str, object]:
+        ref = rule["$ref"]
+        if not isinstance(ref, str) or re.fullmatch(r"#/\$defs/[A-Za-z_][A-Za-z0-9_]*", ref) is None:
+            raise ProvisionError("checked-in build-record schema has an unsupported local reference")
+        name = ref.removeprefix("#/$defs/")
+        definitions = schema.get("$defs", {})
+        if name not in definitions:
+            raise ProvisionError("checked-in build-record schema reference is missing")
+        return name, definitions[name]
+
+    def meta(rule: object, depth: int = 0, references: tuple[str, ...] = ()) -> None:
+        visit(depth)
+        if type(rule) is bool:
+            return
+        if not isinstance(rule, dict) or set(rule) - allowed:
+            raise ProvisionError("checked-in build-record schema has an unsupported keyword or shape")
+        for key in ("$schema", "$id", "title", "description"):
+            if key in rule and not isinstance(rule[key], str):
+                raise ProvisionError(f"checked-in build-record schema has invalid {key}")
+        if "$schema" in rule and rule["$schema"] != "https://json-schema.org/draft/2020-12/schema":
+            raise ProvisionError("checked-in build-record schema declares an unsupported dialect")
+        for key in ("$defs", "properties"):
+            if key in rule:
+                if not isinstance(rule[key], dict):
+                    raise ProvisionError(f"checked-in build-record schema has invalid {key}")
+                for child in rule[key].values():
+                    meta(child, depth + 1, references)
+        if "$ref" in rule:
+            name, child = reference(rule)
+            if name in references or len(references) >= SCHEMA_MAX_DEPTH:
+                raise ProvisionError("checked-in build-record schema has a cyclic or excessive reference")
+            meta(child, depth + 1, (*references, name))
+        if "type" in rule:
+            declared = rule["type"] if isinstance(rule["type"], list) else [rule["type"]]
+            if (not declared or any(not isinstance(item, str) or item not in types for item in declared)
+                    or len(set(declared)) != len(declared)):
+                raise ProvisionError("checked-in build-record schema has invalid type")
+        if "enum" in rule:
+            choices = rule["enum"]
+            if not isinstance(choices, list) or not choices:
+                raise ProvisionError("checked-in build-record schema has invalid enum")
+            keys = [json_key(item) for item in choices]
+            if len(set(keys)) != len(keys):
+                raise ProvisionError("checked-in build-record schema has duplicate enum values")
+        if "required" in rule:
+            required = rule["required"]
+            if (not isinstance(required, list) or any(not isinstance(item, str) for item in required)
+                    or len(set(required)) != len(required)):
+                raise ProvisionError("checked-in build-record schema has invalid required")
+        for key in ("minItems", "maxItems", "minLength", "maxLength"):
+            if key in rule and (type(rule[key]) not in (int, float) or rule[key] < 0 or
+                                (type(rule[key]) is float and (not math.isfinite(rule[key]) or not rule[key].is_integer()))):
+                raise ProvisionError(f"checked-in build-record schema has invalid {key}")
+        if "minimum" in rule and (type(rule["minimum"]) not in (int, float) or
+                                     (type(rule["minimum"]) is float and not math.isfinite(rule["minimum"]))):
+            raise ProvisionError("checked-in build-record schema has invalid minimum")
+        if "uniqueItems" in rule and type(rule["uniqueItems"]) is not bool:
+            raise ProvisionError("checked-in build-record schema has invalid uniqueItems")
+        if "pattern" in rule and (not isinstance(rule["pattern"], str) or rule["pattern"] not in SCHEMA_PATTERNS):
+            raise ProvisionError("checked-in build-record schema has an unreviewed pattern")
+        for key in ("additionalProperties", "items", "if", "then", "else"):
+            if key in rule:
+                meta(rule[key], depth + 1, references)
+        if "allOf" in rule:
+            if not isinstance(rule["allOf"], list) or not rule["allOf"]:
+                raise ProvisionError("checked-in build-record schema has invalid allOf")
+            for child in rule["allOf"]:
+                meta(child, depth + 1, references)
+
+    meta(schema)
+
+    def matches_type(value: object, name: str) -> bool:
+        return {
+            "null": value is None,
+            "boolean": type(value) is bool,
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "number": type(value) in (int, float),
+            "integer": type(value) is int or (type(value) is float and value.is_integer()),
+            "string": isinstance(value, str),
+        }[name]
+
+    def validate(value: object, rule: object, location: str, depth: int = 0) -> str | None:
+        visit(depth)
+        if type(rule) is bool:
+            return None if rule else f"{location}: false schema"
+        if "$ref" in rule:
+            _, child = reference(rule)
+            error = validate(value, child, location, depth + 1)
+            if error:
+                return error
+        declared = rule.get("type")
+        if declared is not None:
+            declared = declared if isinstance(declared, list) else [declared]
+            if not any(matches_type(value, name) for name in declared):
+                return f"{location}: type mismatch"
+        if "const" in rule and json_key(value) != json_key(rule["const"]):
+            return f"{location}: const mismatch"
+        if "enum" in rule and json_key(value) not in {json_key(item) for item in rule["enum"]}:
+            return f"{location}: enum mismatch"
+        if type(value) in (int, float) and "minimum" in rule and value < rule["minimum"]:
+            return f"{location}: below minimum"
+        if isinstance(value, str):
+            if len(value) < rule.get("minLength", 0) or ("maxLength" in rule and len(value) > rule["maxLength"]):
+                return f"{location}: string length mismatch"
+            if "pattern" in rule and re.search(rule["pattern"], value) is None:
+                return f"{location}: pattern mismatch"
+        if isinstance(value, dict):
+            if any(name not in value for name in rule.get("required", [])):
+                return f"{location}: required field missing"
+            properties = rule.get("properties", {})
+            for name, child in value.items():
+                child_rule = properties.get(name, rule.get("additionalProperties", True))
+                if name not in properties and child_rule is False:
+                    return f"{location}.{name}: unknown field"
+                error = validate(child, child_rule, f"{location}.{name}", depth + 1)
+                if error:
+                    return error
+        if isinstance(value, list):
+            if len(value) < rule.get("minItems", 0) or ("maxItems" in rule and len(value) > rule["maxItems"]):
+                return f"{location}: array length mismatch"
+            if rule.get("uniqueItems", False):
+                keys = [json_key(item) for item in value]
+                if len(set(keys)) != len(keys):
+                    return f"{location}: duplicate array item"
+            if "items" in rule:
+                for index, child in enumerate(value):
+                    error = validate(child, rule["items"], f"{location}[{index}]", depth + 1)
+                    if error:
+                        return error
+        for child in rule.get("allOf", []):
+            error = validate(value, child, location, depth + 1)
+            if error:
+                return error
+        if "if" in rule:
+            branch = "then" if validate(value, rule["if"], location, depth + 1) is None else "else"
+            if branch in rule:
+                return validate(value, rule[branch], location, depth + 1)
+        return None
+
+    error = validate(instance, schema, "$")
+    if error:
+        raise ProvisionError(f"build record violates checked-in schema at {error}")
+
+
 def reject_build_record_schema_unknown_fields(record: object, *,
-                                                captured: dict[Path, bytes] | None = None) -> None:
-    """Enforce every additionalProperties:false object boundary in the pinned schema."""
+                                                captured: dict[Path, bytes] | None = None,
+                                                allow_fragment: bool = False) -> None:
+    """Enforce the entire finite checked-in schema, including object boundaries."""
     try:
-        schema = strict_json_loads(captured_evidence(RECIPE_FILES["schemaSha256"], captured).decode("utf-8"))
+        schema = strict_json_loads(captured_evidence(
+            RECIPE_FILES["schemaSha256"], captured, maximum_bytes=SCHEMA_MAX_BYTES).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"could not read checked-in build-record schema: {error}") from error
-
-    def validate(value: object, rule: dict, location: str) -> None:
-        reference = rule.get("$ref")
-        if reference is not None:
-            match = re.fullmatch(r"#/(\$defs)/([^/]+)", str(reference))
-            if match is None:
-                raise ProvisionError(f"checked-in build-record schema has an unsupported reference at {location}")
-            definition = schema.get(match.group(1), {}).get(match.group(2))
-            if not isinstance(definition, dict):
-                raise ProvisionError(f"checked-in build-record schema reference is missing at {location}")
-            validate(value, definition, location)
-            rule = {key: child for key, child in rule.items() if key != "$ref"}
-            if not rule:
-                return
-
-        if isinstance(value, dict):
-            properties = rule.get("properties", {})
-            additional = rule.get("additionalProperties", True)
-            for name, child in value.items():
-                child_location = f"{location}.{name}"
-                if name in properties:
-                    validate(child, properties[name], child_location)
-                elif additional is False:
-                    raise ProvisionError(f"build record violates checked-in schema at {child_location}: unknown field")
-                elif isinstance(additional, dict):
-                    validate(child, additional, child_location)
-        elif isinstance(value, list):
-            item_rule = rule.get("items")
-            if isinstance(item_rule, dict):
-                for index, item in enumerate(value):
-                    validate(item, item_rule, f"{location}[{index}]")
-
-    validate(record, schema, "$")
+    if allow_fragment and isinstance(record, dict) and "reproducibility" not in record:
+        # Only compare-runs consumes provisional fragments. They obey the same
+        # schema except for the final evidence it creates after comparison.
+        schema = {**schema, "required": [name for name in schema["required"] if name != "reproducibility"]}
+    validate_finite_build_record_schema(record, schema)
 
 
 def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH, *,
-                            captured: dict[Path, bytes] | None = None) -> None:
+                            captured: dict[Path, bytes] | None = None,
+                            allow_fragment: bool = False) -> None:
+    reject_build_record_schema_unknown_fields(record, captured=captured, allow_fragment=allow_fragment)
     if not isinstance(record, dict):
         raise ProvisionError("build record must be a JSON object")
     profile = contract["profile"]
@@ -4466,7 +4719,6 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
             raise ProvisionError(f"build record lacks a valid signed index digest: {field}")
     if record["acquisition"].get("signatureFingerprints") != [row["signerPrimaryFingerprint"] for row in repositories]:
         raise ProvisionError("build record repository signer summary is inconsistent")
-    reject_build_record_schema_unknown_fields(record, captured=captured)
 
 
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
@@ -4487,8 +4739,8 @@ def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, c
             second = strict_json_loads(second_file.read().decode("utf-8"))
     except OSError as error:
         raise ProvisionError(f"could not inspect independent build records: {error}") from error
-    validate_build_record(first, contract, contract_path)
-    validate_build_record(second, contract, contract_path)
+    validate_build_record(first, contract, contract_path, allow_fragment=True)
+    validate_build_record(second, contract, contract_path, allow_fragment=True)
     if canonical_json(first) != canonical_json(second):
         raise ProvisionError("two clean rootfs/image/probe runs did not reproduce identical identity")
     record = dict(first)
@@ -5054,6 +5306,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     validate_record_package_metadata(
         record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
     )
+    verify_recorded_driver_identities(args.rootfs, record, contract)
     verify_recorded_runtime_closure(args.rootfs, record, contract)
     record_sha256 = sha256(captured[args.record])
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe", captured=captured)

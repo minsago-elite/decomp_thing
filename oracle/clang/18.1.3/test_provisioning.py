@@ -38,6 +38,43 @@ def signed_package_rows_for_fixture(record):
     return list(rows.values())
 
 
+def finite_schema_corpus():
+    conditional = {"type": "object", "required": ["kind", "target"], "properties": {
+        "kind": {"enum": ["regular-file", "symlink"]}, "target": {"type": ["string", "null"]}},
+        "allOf": [{"if": {"properties": {"kind": {"const": "regular-file"}}},
+                   "then": {"properties": {"target": {"type": "null"}}},
+                   "else": {"properties": {"target": {"type": "string", "minLength": 1}}}}]}
+    return [
+        ("const numeric equality", {"const": 1}, 1.0, True),
+        ("const boolean distinction", {"const": 1}, True, False),
+        ("enum numeric equality", {"enum": [1]}, 1.0, True),
+        ("enum boolean distinction", {"enum": [1]}, True, False),
+        ("integral float", {"type": "integer"}, 1.0, True),
+        ("fractional float", {"type": "integer"}, 1.5, False),
+        ("integer boolean distinction", {"type": "integer"}, True, False),
+        ("unique numeric equality", {"uniqueItems": True}, [1, 1.0], False),
+        ("unique boolean distinction", {"uniqueItems": True}, [1, True], True),
+        ("object key order equality", {"uniqueItems": True}, [{"a": 1, "b": 2}, {"b": 2.0, "a": 1.0}], False),
+        ("regular conditional valid", conditional, {"kind": "regular-file", "target": None}, True),
+        ("regular conditional invalid", conditional, {"kind": "regular-file", "target": "link"}, False),
+        ("symlink conditional valid", conditional, {"kind": "symlink", "target": "link"}, True),
+        ("symlink conditional invalid", conditional, {"kind": "symlink", "target": None}, False),
+        ("required object", conditional, {"kind": "regular-file"}, False),
+        ("type conditional", conditional, [], False),
+        ("additional properties", {"additionalProperties": False}, {"unknown": 1}, False),
+        ("additional properties schema", {"additionalProperties": {"type": "integer"}}, {"any": 1.0}, True),
+        ("array min", {"minItems": 2}, [1], False),
+        ("array max", {"maxItems": 1}, [1, 2], False),
+        ("string length", {"minLength": 2, "maxLength": 3}, "x", False),
+        ("reviewed digest pattern", {"pattern": "^[0-9a-f]{64}$"}, "f" * 64, True),
+        ("invalid digest pattern", {"pattern": "^[0-9a-f]{64}$"}, "F" * 64, False),
+        ("minimum", {"minimum": 1}, 0.5, False),
+        ("reference siblings", {"$defs": {"n": {"type": "number"}}, "$ref": "#/$defs/n", "minimum": 2}, 1, False),
+        ("boolean true schema", {"items": True}, [1, False], True),
+        ("boolean false schema", {"items": False}, [1], False),
+    ]
+
+
 class DownloadResponseFixture(io.BytesIO):
     def __init__(self, payload, announced=None):
         super().__init__(payload)
@@ -58,8 +95,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contract = provision.read_contract()
-        cls.temp_root = ROOT / "build/clang1813-offline-tests"
-        cls.temp_root.mkdir(parents=True, exist_ok=True)
+        (ROOT / "build").mkdir(exist_ok=True)
+        cls.temp_root = Path(tempfile.mkdtemp(prefix="clang1813-offline-tests-", dir=ROOT / "build"))
 
     @classmethod
     def tearDownClass(cls):
@@ -903,8 +940,142 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 record["commands"].pop("aptCheck")
             else:
                 record["commands"]["extra"] = ["unreviewed"]
-            with self.subTest(mutation=mutation), self.assertRaisesRegex(provision.ProvisionError, "canonical recipe"):
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(provision.ProvisionError, r"canonical recipe|checked-in schema.*commands"):
                 provision.validate_build_record(record, self.contract)
+
+    def test_finite_schema_matches_json_numeric_and_conditional_corpus(self):
+        for label, rule, instance, expected in finite_schema_corpus():
+            with self.subTest(label=label):
+                if expected:
+                    provision.validate_finite_build_record_schema(instance, rule)
+                else:
+                    with self.assertRaisesRegex(provision.ProvisionError, "checked-in schema"):
+                        provision.validate_finite_build_record_schema(instance, rule)
+
+    def test_finite_schema_meta_validates_unselected_branches_and_reference_bounds(self):
+        unsupported = [
+            {"if": {"const": 1}, "then": {}, "else": {"unreviewed": True}},
+            {"$defs": {"unused": {"unreviewed": True}}},
+            {"$ref": "https://untrusted.invalid/schema.json"},
+            {"$ref": "#/$defs/missing"},
+            {"$defs": {"cycle": {"$ref": "#/$defs/cycle"}}},
+            {"type": ["integer", "integer"]}, {"required": ["a", "a"]},
+            {"items": []}, {"uniqueItems": 1}, {"minimum": True},
+            {"pattern": "^(a+)+$"}, {"allOf": []},
+            {"$schema": "http://json-schema.org/draft-07/schema#"},
+        ]
+        for rule in unsupported:
+            with self.subTest(rule=rule), mock.patch.object(provision.BoundedDownloader, "get") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "checked-in.*schema"):
+                    provision.validate_finite_build_record_schema(1, rule)
+                network.assert_not_called()
+        nested = None
+        for _ in range(provision.SCHEMA_MAX_DEPTH + 1):
+            nested = [nested]
+        with self.assertRaisesRegex(provision.ProvisionError, "depth/node budget"):
+            provision.validate_finite_build_record_schema(nested, {})
+        with mock.patch.object(provision, "SCHEMA_MAX_NODES", 8):
+            with self.assertRaisesRegex(provision.ProvisionError, "depth/node budget"):
+                provision.validate_finite_build_record_schema(list(range(20)), {})
+
+    def test_selected_contract_cannot_override_fixed_schema_constants(self):
+        for mutation in ("locale", "snapshot"):
+            with self.subTest(mutation=mutation), self.temporary_directory() as temp:
+                contract = json.loads(json.dumps(self.contract))
+                record = self.valid_build_record()
+                if mutation == "locale":
+                    contract["environment"]["LC_ALL"] = "C.UTF-8"
+                    record["environment"] = contract["environment"]
+                else:
+                    contract["profile"]["snapshot"] = "20240703T000000Z"
+                    record["profile"]["snapshot"] = contract["profile"]["snapshot"]
+                selected = Path(temp) / "contract.json"
+                selected.write_bytes(provision.canonical_json(contract))
+                record["recipe"] = provision.recipe_identity(selected)
+                record["commands"] = provision.canonical_commands(contract, record["acquisition"]["ubuntuKeyring"]["sha256"])
+                with self.assertRaisesRegex(provision.ProvisionError, "checked-in schema.*const mismatch"):
+                    provision.validate_build_record(record, contract, selected)
+
+    def test_full_schema_rejects_record_types_bounds_patterns_and_conditional_targets(self):
+        mutations = [
+            lambda r: r.pop("reproducibility"),
+            lambda r: r.update(packages="not an array"),
+            lambda r: r["acquisition"].update(repositories=[]),
+            lambda r: r["source"]["files"][0].update(name=""),
+            lambda r: r["environment"].update(SOURCE_DATE_EPOCH="-1"),
+            lambda r: r["probe"]["generatedFieldNames"].__setitem__(0, "9bad"),
+            lambda r: r["runtime"]["entries"][0].update(target="non-null regular file target"),
+            lambda r: r["runtime"]["entries"][0].update(kind="symlink", target=None),
+        ]
+        for index, mutate in enumerate(mutations):
+            record = json.loads(json.dumps(self.valid_build_record()))
+            mutate(record)
+            with self.subTest(index=index), self.assertRaisesRegex(provision.ProvisionError, "checked-in schema"):
+                provision.validate_build_record(record, self.contract)
+
+    def test_compare_runs_alone_accepts_provisional_fragments_without_reproducibility(self):
+        record = self.valid_build_record()
+        record.pop("reproducibility")
+        with self.assertRaisesRegex(provision.ProvisionError, "required field missing"):
+            provision.validate_build_record(record, self.contract)
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second = base / "first.json", base / "second.json"
+            first.write_bytes(provision.canonical_json(record))
+            second.write_bytes(provision.canonical_json(record))
+            result = provision.compare_build_runs(first, second, base / "final.json", self.contract)
+            provision.validate_build_record(result, self.contract)
+
+    def test_network_identity_normalization_is_deterministic_and_replaces_leaf_links(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            canary = base / "resolver-canary"
+            canary.write_bytes(b"outside resolver must remain untouched")
+            archive_hashes = []
+            for index in range(2):
+                rootfs = base / str(index)
+                etc = rootfs / "etc"
+                etc.mkdir(parents=True)
+                (etc / "machine-id").write_bytes(b"")
+                (etc / "hostname").write_bytes(f"host-specific-{index}".encode())
+                if index == 0:
+                    (etc / "resolv.conf").write_bytes(b"nameserver 192.0.2.1\n")
+                else:
+                    (etc / "resolv.conf").symlink_to(canary)
+                with mock.patch.object(provision, "run_checked", side_effect=self.local_rootfs_command), \
+                        mock.patch.object(provision, "normalize_network_identity_files", side_effect=self.local_network_normalization_fixture):
+                    provision.normalize_rootfs(rootfs, 7)
+                self.assertEqual((etc / "hostname").read_bytes(), b"clang1813\n")
+                self.assertEqual((etc / "resolv.conf").read_bytes(), b"")
+                self.assertFalse((etc / "resolv.conf").is_symlink())
+                for leaf in ("hostname", "resolv.conf"):
+                    self.assertEqual(stat.S_IMODE((etc / leaf).stat().st_mode), 0o644)
+                self.assertEqual(list(etc.glob(".clang1813-network-*")), [])
+                archive = base / f"{index}.tar"
+                subprocess.run(["tar", "--sort=name", "--format=posix", "--numeric-owner", "--mtime=@7",
+                                "--pax-option=delete=atime,delete=ctime", "-cf", str(archive), "-C", str(rootfs), "."],
+                               check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                archive_hashes.append(provision.sha256_file(archive))
+            self.assertEqual(archive_hashes[0], archive_hashes[1])
+            self.assertEqual(canary.read_bytes(), b"outside resolver must remain untouched")
+
+    def test_network_identity_normalization_refuses_symlinked_etc_and_cleans_failed_temporaries(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs, canary = base / "rootfs", base / "canary"
+            rootfs.mkdir()
+            canary.mkdir()
+            (canary / "hostname").write_bytes(b"host canary")
+            (rootfs / "etc").symlink_to(canary, target_is_directory=True)
+            with self.assertRaises(OSError):
+                self.local_network_normalization_fixture(rootfs)
+            self.assertEqual((canary / "hostname").read_bytes(), b"host canary")
+            (rootfs / "etc").unlink()
+            (rootfs / "etc").mkdir()
+            with mock.patch.object(os, "replace", side_effect=OSError("injected replace failure")):
+                with self.assertRaisesRegex(OSError, "replace failure"):
+                    self.local_network_normalization_fixture(rootfs)
+            self.assertEqual(list((rootfs / "etc").iterdir()), [])
 
     def test_build_record_rejects_schema_disallowed_top_level_and_nested_fields(self):
         mutations = (
@@ -1285,12 +1456,12 @@ class ProvisioningNegativeTests(unittest.TestCase):
             record = self.valid_build_record()
             self.assertIn(old, record["commands"][name])
             record["commands"][name] = [new if arg == old else arg for arg in record["commands"][name]]
-            with self.subTest(command=name), self.assertRaisesRegex(provision.ProvisionError, "canonical recipe"):
+            with self.subTest(command=name), self.assertRaisesRegex(provision.ProvisionError, r"canonical recipe|checked-in schema.*commands"):
                 provision.validate_build_record(record, self.contract)
         for digest in (None, 123, int("1" * 64)):
             record = self.valid_build_record()
             record["acquisition"]["ubuntuKeyring"]["sha256"] = digest
-            with self.subTest(digest=digest), self.assertRaisesRegex(provision.ProvisionError, "keyring"):
+            with self.subTest(digest=digest), self.assertRaisesRegex(provision.ProvisionError, r"keyring|checked-in schema.*ubuntuKeyring"):
                 provision.validate_build_record(record, self.contract)
 
     def test_selected_environment_changes_canonical_chroot_and_archive_commands(self):
@@ -1383,7 +1554,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 else:
                     record["acquisition"][field] = value
                 with self.subTest(field=field, value=value), self.assertRaisesRegex(
-                    provision.ProvisionError, "acquisition candidate|signed index digest",
+                    provision.ProvisionError, r"checked-in schema.*acquisition",
                 ):
                     provision.validate_build_record(record, self.contract)
 
@@ -1409,7 +1580,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 (library_dir / name).write_bytes(content)
             (library_dir / "libclang-cpp.so").symlink_to("libclang-cpp.so.18.1")
             (library_dir / "libLLVM-18.so").symlink_to("libLLVM-18.so.1")
-            with mock.patch.object(provision, "rootfs_run", return_value="") as ldd:
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value="") as ldd:
                 rows = provision.runtime_dependencies(rootfs, [], self.contract)
             self.assertEqual([call.args[1] for call in ldd.call_args_list], [
                 ["/usr/bin/ldd", "/usr/lib/llvm-18/lib/libclang-cpp.so"],
@@ -1561,7 +1732,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             libc.parent.mkdir(parents=True)
             libc.write_bytes(b"libc library")
             (rootfs / "lib").symlink_to("usr/lib")
-            with mock.patch.object(provision, "rootfs_run", return_value="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1234)"):
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1234)"):
                 rows = provision.runtime_dependencies(rootfs, ["/usr/bin/clang-18"], self.contract)
             by_path = {row["path"]: row for row in rows}
             self.assertEqual(by_path["/lib"], {
@@ -1611,7 +1782,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "/usr/lib/llvm-18/lib/libclang-cpp.so -> intermediate",
                 "/usr/lib/llvm-18/lib/intermediate -> library-bytes",
             ])
-            with mock.patch.object(provision, "rootfs_run", return_value=""):
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value=""):
                 rows = provision.runtime_dependencies(rootfs, [], self.contract)
             self.assertEqual({row["path"] for row in rows}, {
                 "/usr/lib/llvm-18/lib/libclang-cpp.so", "/usr/lib/llvm-18/lib/libLLVM-18.so",
@@ -1669,6 +1840,20 @@ class ProvisioningNegativeTests(unittest.TestCase):
         }])
         self.assertEqual(provision.frontend_resource_manifest_sha256(record["resourceDirectory"], resources),
                          "26b8373fc116f0dd9ad8c09f98391092f66e87f254e6cff13d37cb2601208faf")
+
+    def local_network_normalization_fixture(self, rootfs):
+        """Run fixed network helper on real FDs, simulating only root ownership."""
+        metadata = rootfs.stat()
+        real_fstat = os.fstat
+        def root_metadata(descriptor):
+            fields = list(real_fstat(descriptor))
+            fields[stat.ST_UID], fields[stat.ST_GID] = 0, 0
+            return os.stat_result(fields)
+        with mock.patch.object(sys, "argv", ["helper", str(rootfs), str(metadata.st_dev), str(metadata.st_ino)]), \
+                mock.patch.object(os, "fstat", side_effect=root_metadata), \
+                mock.patch.object(os, "fchown") as chown:
+            exec(compile(provision.NETWORK_IDENTITY_NORMALIZE_PROGRAM, "<network-normalization>", "exec"), {})
+        self.assertEqual([call.args[1:] for call in chown.call_args_list], [(0, 0), (0, 0)])
 
     def test_normalization_removes_inode_bearing_ldconfig_aux_cache(self):
         with self.temporary_directory() as temp:
@@ -3093,6 +3278,21 @@ class ProvisioningNegativeTests(unittest.TestCase):
         with self.assertRaisesRegex(provision.ProvisionError, "macro expansion and MacroInfo classification"):
             provision.validate_probe_report(report, inventory, self.contract)
 
+    def test_runtime_discovery_refuses_unresolved_dependency(self):
+        with mock.patch.object(provision, "run_probe_sandboxed", return_value="libmissing.so => not found\n"):
+            with self.assertRaisesRegex(provision.ProvisionError, "runtime dependency is unresolved"):
+                provision.runtime_dependencies(ROOT / "build/inert-never-executed", list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
+
+    def test_runtime_and_driver_replay_refuse_without_reviewed_sandbox(self):
+        with mock.patch.object(provision, "rootfs_run") as chroot, \
+                mock.patch.object(provision, "run_checked") as child:
+            for operation in (provision.verify_recorded_driver_identities, provision.verify_recorded_runtime_closure):
+                with self.subTest(operation=operation.__name__), self.assertRaisesRegex(
+                        provision.ProvisionError, "no reviewed unprivileged"):
+                    operation(ROOT / "build/inert-never-executed", self.valid_build_record(), self.contract)
+            chroot.assert_not_called()
+            child.assert_not_called()
+
     def test_probe_runner_fails_closed_before_unbounded_chroot_or_subprocess(self):
         with mock.patch.object(provision, "rootfs_run") as chroot, \
                 mock.patch.object(provision, "run_checked") as unbounded, \
@@ -3181,7 +3381,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                         record["probe"].pop(field)
                     else:
                         record["probe"][field] = "not-a-sha256"
-                    with self.assertRaisesRegex(provision.ProvisionError, "probe bytes are not authenticated"):
+                    with self.assertRaisesRegex(provision.ProvisionError, r"checked-in schema.*probe"):
                         provision.validate_build_record(record, self.contract)
 
     def langoptions_definition_fixture(self, base):
@@ -3749,8 +3949,8 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contract = provision.read_contract()
-        cls.temp_root = ROOT / "build/clang1813-binding-tests"
-        cls.temp_root.mkdir(parents=True, exist_ok=True)
+        (ROOT / "build").mkdir(exist_ok=True)
+        cls.temp_root = Path(tempfile.mkdtemp(prefix="clang1813-binding-tests-", dir=ROOT / "build"))
 
     @classmethod
     def tearDownClass(cls):
@@ -3910,6 +4110,17 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
     def retained_rootfs_image_fixture(self, base, record):
         rootfs = base / "rootfs"
         ProvisioningNegativeTests.prepare_runtime_rootfs(self, record, rootfs)
+        for role, logical in provision.FRONTEND_DRIVER_ROOTS:
+            target = rootfs / "usr/lib/llvm-18/bin/clang"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"synthetic inert fixed driver bytes\n")
+            target.chmod(0o755)
+            link = rootfs / logical.lstrip("/")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to("../lib/llvm-18/bin/clang")
+            row = provision.driver_record(rootfs, logical, role, "clang version 18.1.3")
+            record["tools"] = [row if old["role"] == role else old for old in record["tools"]]
+        (rootfs / "etc").mkdir(exist_ok=True)
         probe_binary, probe_fixture, _ = ProvisioningNegativeTests.prepare_probe_rootfs(self, record, rootfs)
         cleanup_marker = rootfs / "tmp/unowned-normalization-marker"
         cleanup_marker.write_bytes(b"/tmp remains fully cleaned")
@@ -3920,7 +4131,9 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                   stderr=subprocess.STDOUT, text=True, timeout=timeout) if stdout_file is None else subprocess.run(
                                       command[1:], check=False, stdout=stdout_file, stderr=subprocess.PIPE, timeout=timeout)
 
-        with mock.patch.object(provision, "run_checked", side_effect=local_tar):
+        with mock.patch.object(provision, "run_checked", side_effect=local_tar), \
+                mock.patch.object(provision, "normalize_network_identity_files",
+                                  side_effect=lambda root: ProvisioningNegativeTests.local_network_normalization_fixture(self, root)):
             rootfs_identity = provision.deterministic_rootfs_tar(
                 rootfs, rootfs_tar, int(self.contract["environment"]["SOURCE_DATE_EPOCH"]),
                 normalize=True, max_bytes=self.contract["profile"]["bounds"]["maxArtifactBytes"],
@@ -3981,12 +4194,12 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record = self.valid_build_record()
             record["environment"] = contract["environment"]
             record["commands"] = provision.canonical_commands(contract, record["acquisition"]["ubuntuKeyring"]["sha256"])
-            with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+            with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
                 provision.validate_build_record(record, contract, selected)
             record["recipe"] = actual
             provision.validate_build_record(record, contract, selected)
             selected.write_bytes(selected.read_bytes() + b" ")
-            with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+            with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
                 provision.validate_build_record(record, contract, selected)
 
     def test_recipe_binds_production_a_loader_bytes_and_rejects_stale_records(self):
@@ -3999,10 +4212,10 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             changed_loader = Path(temp) / loader.name
             changed_loader.write_bytes(loader.read_bytes() + b"\n// changed loader semantics\n")
             with mock.patch.dict(provision.RECIPE_FILES, {"aLoaderSha256": changed_loader}):
-                with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+                with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
                     provision.validate_build_record(record, self.contract)
         del record["recipe"]["aLoaderSha256"]
-        with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+        with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
             provision.validate_build_record(record, self.contract)
 
     def test_record_commands_propagate_selected_contract_to_verification(self):
@@ -4435,7 +4648,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 with self.assertRaisesRegex(provision.ProvisionError, "no reviewed unprivileged"):
                     provision.command_package_provenance(args)
                 load.assert_called_once()
-                runtime.assert_called_once_with(rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
+                runtime.assert_not_called()
                 network.assert_not_called()
             chroot_run.assert_not_called()
             self.assertFalse(args.output.exists())
@@ -4497,10 +4710,88 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 mock.patch.object(provision, "audit_fresh_source_payloads", return_value=audit), \
                 mock.patch.object(provision, "installed_package_keys", return_value=installed), \
                 mock.patch.object(provision, "runtime_dependencies", return_value=record["runtime"]["entries"]), \
-                mock.patch.object(provision, "run_probe_sandboxed", return_value=provision.canonical_json(record["probe"])), \
+                mock.patch.object(provision, "run_probe_sandboxed", side_effect=lambda root, command, contract, **kw:
+                                      "clang version 18.1.3\n" if command[-1] == "--version"
+                                      else provision.canonical_json(record["probe"])), \
                 mock.patch.object(provision, "execute_locked_negative_comparator", return_value=negative), \
                 mock.patch.object(provision, "run_checked", side_effect=local_tar):
             yield args, candidate
+
+    def test_packaging_discovers_probe_only_runtime_dependency_from_ldd_output(self):
+        actual_discovery = provision.runtime_dependencies
+        with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
+            record = json.loads(args.record.read_bytes())
+            probe_only = "/usr/lib/llvm-18/lib/libclang.so"
+            self.assertIn(probe_only, [row["path"] for row in record["runtime"]["entries"]])
+            def inert_sandbox(root, command, contract, **kwargs):
+                if command[-1] == "--version":
+                    return "clang version 18.1.3\n"
+                if command[0] == "/usr/bin/ldd":
+                    return (f"\tlibclang.so => {probe_only} (0x1234)\n"
+                            if command[1] == provision.PROBE_BINARY_IN_ROOT else "")
+                return provision.canonical_json(record["probe"])
+            with mock.patch.object(provision, "runtime_dependencies", wraps=actual_discovery), \
+                    mock.patch.object(provision, "run_probe_sandboxed", side_effect=inert_sandbox) as sandbox:
+                self.assertEqual(provision.command_package_provenance(args), 0)
+                args.output.unlink()
+                ldd_roots = [call.args[1][1] for call in sandbox.call_args_list if call.args[1][0] == "/usr/bin/ldd"]
+                self.assertEqual(ldd_roots, list(provision.FRONTEND_RUNTIME_ROOTS))
+                self.assertIn(provision.PROBE_BINARY_IN_ROOT, ldd_roots)
+                record["runtime"] = provision.manifest([
+                    row for row in record["runtime"]["entries"] if row["path"] != probe_only])
+                args.record.write_bytes(provision.canonical_json(record))
+                loader = ProvisioningNegativeTests.valid_loader_report(
+                    self, record, provision.sha256_file(args.record), args.rootfs)
+                args.loader_report.write_bytes(provision.canonical_json(loader))
+                provision.validate_build_record(record, self.contract, args.contract)
+                provision.validate_provenance_loader_report(
+                    loader, record, provision.sha256_file(args.record), args.rootfs)
+                with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
+                    provision.command_package_provenance(args)
+                self.assertFalse(args.output.exists())
+
+    def test_driver_replay_canonicalizes_raw_version_stdout_like_provisioning(self):
+        with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
+            record = json.loads(args.record.read_bytes())
+            raw_stdout = "clang version 18.1.3\n"
+            produced = [provision.driver_record(args.rootfs, path, role, raw_stdout.strip())
+                        for role, path in provision.FRONTEND_DRIVER_ROOTS]
+            self.assertEqual(record["tools"], produced)
+            self.assertTrue(all(not row["versionOutput"].endswith("\n") for row in produced))
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value=raw_stdout) as sandbox:
+                provision.verify_recorded_driver_identities(args.rootfs, record, self.contract)
+            self.assertEqual([call.args[1] for call in sandbox.call_args_list],
+                             [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
+
+    def test_packaging_replays_both_drivers_and_rejects_rehashed_c_identity_changes(self):
+        mutations = {
+            "path": "/usr/bin/unrelated-18", "symlinkChain": [],
+            "resolvedPath": "/usr/lib/llvm-18/bin/unrelated",
+            "mode": "0555", "bytes": 999, "sha256": "f" * 64,
+            "versionOutput": "unrelated clang version 18.1.3\n",
+        }
+        for field, changed in mutations.items():
+            with self.subTest(field=field), self.temporary_directory() as temp, \
+                    self.offline_packaging_fixture(Path(temp)) as (args, _):
+                with mock.patch.object(provision, "run_probe_sandboxed", wraps=provision.run_probe_sandboxed) as sandbox:
+                    self.assertEqual(provision.command_package_provenance(args), 0)
+                self.assertEqual([call.args[1] for call in sandbox.call_args_list[:2]],
+                                 [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
+                args.output.unlink()
+                record = json.loads(args.record.read_bytes())
+                driver = next(row for row in record["tools"] if row["role"] == "c-driver")
+                self.assertNotEqual(driver[field], changed)
+                driver[field] = changed
+                args.record.write_bytes(provision.canonical_json(record))
+                loader = ProvisioningNegativeTests.valid_loader_report(
+                    self, record, provision.sha256_file(args.record), args.rootfs)
+                args.loader_report.write_bytes(provision.canonical_json(loader))
+                provision.validate_build_record(record, self.contract, args.contract)
+                provision.validate_provenance_loader_report(
+                    loader, record, provision.sha256_file(args.record), args.rootfs)
+                with self.assertRaisesRegex(provision.ProvisionError, "driver identities"):
+                    provision.command_package_provenance(args)
+                self.assertFalse(args.output.exists())
 
     def test_packaging_runtime_closure_rejects_rehashed_dependency_omission(self):
         with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
@@ -4520,11 +4811,12 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             provision.validate_provenance_loader_report(
                 loader, record, provision.sha256_file(args.record), args.rootfs)
             with mock.patch.object(provision, "runtime_dependencies", return_value=actual_entries) as discover, \
-                    mock.patch.object(provision, "run_probe_sandboxed") as probe:
+                    mock.patch.object(provision, "run_probe_sandboxed", wraps=provision.run_probe_sandboxed) as probe:
                 with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
                     provision.command_package_provenance(args)
             discover.assert_called_once_with(args.rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
-            probe.assert_not_called()
+            self.assertEqual([call.args[1] for call in probe.call_args_list],
+                             [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
             self.assertFalse(args.output.exists())
 
     def test_provenance_archives_captured_metadata_after_validated_path_replacement(self):
@@ -4643,8 +4935,8 @@ class ConsumerReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contract = provision.read_contract()
-        cls.temp_root = ROOT / "build/clang1813-consumer-replay-tests"
-        cls.temp_root.mkdir(parents=True, exist_ok=True)
+        (ROOT / "build").mkdir(exist_ok=True)
+        cls.temp_root = Path(tempfile.mkdtemp(prefix="clang1813-consumer-replay-tests-", dir=ROOT / "build"))
 
     @classmethod
     def tearDownClass(cls):
