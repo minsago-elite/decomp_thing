@@ -22,7 +22,7 @@ class OwnedJdkTest(unittest.TestCase):
         self.java = self.source / 'bin/java'; self.java.write_bytes(b'fixed owned fake launcher'); self.java.chmod(0o777)
         (self.source / 'release').write_text('JAVA_VERSION="21.0.12"\nIMPLEMENTOR="owned inert fixture"\n')
         (self.source / 'lib/modules').write_bytes(b'inert modules')
-        (self.source / 'lib/ambient-link').symlink_to('/does-not-exist/ambient')
+        (self.source / 'lib/internal-link').symlink_to('modules')
     def tearDown(self): self.temp.cleanup()
     def test_0777_source_unchanged_and_independent_clone_0755(self):
         before = fixture.identity(self.java.stat()); digest = hashlib.sha256(self.java.read_bytes()).hexdigest()
@@ -33,11 +33,61 @@ class OwnedJdkTest(unittest.TestCase):
         self.assertEqual(0o755, stat.S_IMODE(copied.stat().st_mode))
         self.assertNotEqual((copied.stat().st_dev, copied.stat().st_ino), before[:2])
         self.assertEqual(digest, hashlib.sha256(copied.read_bytes()).hexdigest())
-        self.assertEqual('/does-not-exist/ambient', os.readlink(Path(result['home']) / 'lib/ambient-link'))
+        self.assertEqual('modules', os.readlink(Path(result['home']) / 'lib/internal-link'))
         self.assertEqual(os.geteuid(), copied.stat().st_uid); self.assertEqual(1, copied.stat().st_nlink)
         fixture.verify_source(result)
         second = fixture.provision(self.repo, self.source)
         self.assertNotEqual(result['home'], second['home'])
+    def test_absolute_external_and_same_prefix_links_refused_before_copy(self):
+        sibling = self.repo/'selected-sibling';sibling.mkdir();(sibling/'ambient').write_bytes(b'outside')
+        for target in ('/does-not-exist/ambient', str(self.source/'lib/modules'), '../selected-sibling/ambient', '../../selected-sibling/ambient'):
+            link=self.source/'escape';link.symlink_to(target)
+            with self.subTest(target=target), mock.patch.object(fixture.os,'symlink',side_effect=AssertionError('copy before graph admission')), self.assertRaises(ValueError):
+                fixture.provision(self.repo,self.source)
+            link.unlink()
+
+    def test_internal_relative_chains_and_directory_components_stay_inside_clone(self):
+        (self.source/'alias-lib').symlink_to('lib')
+        (self.source/'lib/chain').symlink_to('../alias-lib/internal-link')
+        (self.source/'lib/root').symlink_to('..')
+        result=fixture.provision(self.repo,self.source);clone=Path(result['home'])
+        self.assertEqual(clone/'lib/modules',(clone/'lib/chain').resolve(strict=True))
+        self.assertEqual(b'inert modules',(clone/'lib/chain').read_bytes())
+        self.assertEqual(clone,(clone/'lib/root').resolve(strict=True))
+        fixture.verify_source(result)
+
+    def test_chained_escape_cycles_dangling_and_non_directory_refused(self):
+        cases=[{'a':'../selected-sibling/ambient','b':'a'}, {'a':'b','b':'a'},
+               {'a':'missing'}, {'a':'lib/modules/child'}, {'a':'lib/modules/..'},
+               {'a':'lib/modules/'}, {'a':'../selected/lib/modules'}]
+        for links in cases:
+            with self.subTest(links=links):
+                for name,target in links.items():(self.source/name).symlink_to(target)
+                with mock.patch.object(fixture.os,'symlink',side_effect=AssertionError('copy before graph admission')), self.assertRaises(ValueError):
+                    fixture.provision(self.repo,self.source)
+                for name in links:(self.source/name).unlink()
+
+    def test_link_resolution_work_and_chain_limits_refuse_without_external_reads(self):
+        for number in range(fixture.MAX_DEPTH+1):
+            (self.source/f'chain{number}').symlink_to(f'chain{number+1}' if number<fixture.MAX_DEPTH else 'lib/modules')
+        with self.assertRaisesRegex(ValueError,'chain/cycle bound'):fixture.provision(self.repo,self.source)
+        (self.source/'chain0').unlink()
+        self.assertTrue(Path(fixture.provision(self.repo,self.source)['home']).is_dir())
+        with mock.patch.object(fixture,'MAX_ENTRIES',2), mock.patch.object(fixture,'MAX_DEPTH',2), self.assertRaisesRegex(ValueError,'work bound'):
+            fixture.validate_link_graph({'a':{'kind':'link','target':'./././././file'},'file':{'kind':'file'}})
+
+    def test_link_change_after_preflight_refused_and_descriptors_recovered(self):
+        original=fixture.inventory_links
+        before=len(os.listdir('/proc/self/fd'))
+        def replaced(fd):
+            result=original(fd)
+            link=self.source/'lib/internal-link'
+            link.unlink();link.symlink_to('/does-not-exist/ambient')
+            return result
+        with mock.patch.object(fixture,'inventory_links',replaced), self.assertRaises(ValueError):
+            fixture.provision(self.repo,self.source)
+        self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+
     def test_chmod_never_targets_any_source_inode(self):
         sources = {(p.lstat().st_dev, p.lstat().st_ino) for p in [self.source, *self.source.rglob('*')]}
         original = os.fchmod

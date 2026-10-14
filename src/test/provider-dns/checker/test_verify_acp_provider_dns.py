@@ -62,6 +62,9 @@ class CheckerTest(unittest.TestCase):
         self.class_names = {
             'decompengine/acp/AcpProviderNativeDnsControl.class': b'current test bytecode',
             'decompengine/acp/NativeNamespace.class': b'current namespace bytecode',
+            **{'decompengine/acp/' + root + '.class': ('current ' + root).encode() for root in
+               ['NativeObserverBudget', 'NativeObserverBudgetOwner', 'NativeVisibilityAccumulator', 'NativeObserverFailure']},
+            'decompengine/acp/NativeObserverBudget$1.class': b'current generated nested observer bytecode',
             'decompengine/acp/AcpProviderDnsProcess.class': b'current main bytecode',
             'decompengine/acp/ProviderDnsWorkerOwner.class': b'current owner bytecode',
         }
@@ -112,6 +115,56 @@ class CheckerTest(unittest.TestCase):
         if path.exists():
             receipt = json.loads(path.read_text()); receipt['controlRuntimeClosureSha256'] = value
             path.write_text(json.dumps(receipt))
+
+    def test_observer_roots_and_actual_zip_nested_inventory_are_source_bound(self):
+        self.assertEqual(('NativeObserverBudget', 'NativeObserverBudgetOwner',
+                          'NativeVisibilityAccumulator', 'NativeObserverFailure'), gate.OBSERVER_CONTROL_ROOTS)
+        expected = gate.compiled_control_entries(self.root)
+        for root in gate.OBSERVER_CONTROL_ROOTS:
+            self.assertIn('decompengine/acp/' + root + '.class', expected)
+            self.assertTrue(gate.observer_control_class(root + '$generated.class'))
+            self.assertFalse(gate.observer_control_class(root + 'Unrelated.class'))
+        self.assertIn('decompengine/acp/NativeObserverBudget$1.class', expected)
+        with zipfile.ZipFile(self.closure_dir() / 'control.jar') as archive:
+            self.assertEqual(set(expected), set(archive.namelist()))
+            for name, data in expected.items(): self.assertEqual(data, archive.read(name))
+        self.assertEqual('PASS', self.verify()['status'])
+
+    def test_observer_archive_omission_and_hash_tamper_rejected_even_after_rehash(self):
+        names = ['decompengine/acp/' + root + '.class' for root in gate.OBSERVER_CONTROL_ROOTS]
+        names.append('decompengine/acp/NativeObserverBudget$1.class')
+        for name in names:
+            with self.subTest(name=name, mutation='omission'):
+                entries = dict(self.control_entries); del entries[name]
+                self.rewrite_control(entries.items())
+                with self.assertRaises(gate.Invalid): self.verify()
+            with self.subTest(name=name, mutation='tamper'):
+                entries = dict(self.control_entries); entries[name] = b'tampered observer bytecode'
+                self.rewrite_control(entries.items())
+                with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_observer_roots_cannot_disappear_from_both_compilation_and_archive(self):
+        for root in gate.OBSERVER_CONTROL_ROOTS:
+            name = 'decompengine/acp/' + root + '.class'
+            path = self.root / ('build/classes/kotlin/test/' + name)
+            with self.subTest(root=root):
+                path.unlink()
+                try:
+                    entries = dict(self.control_entries); del entries[name]
+                    self.rewrite_control(entries.items())
+                    with self.assertRaisesRegex(gate.Invalid, 'missing observer runtime dependency'): self.verify()
+                finally: path.write_bytes(self.class_names[name])
+
+    def test_observer_lookalikes_and_uncompiled_nested_extras_remain_rejected(self):
+        for name in ['NativeObserverBudgetUnrelated.class', 'Unrelated.class', 'NativeDnsObserverDiagnosticTest.class']:
+            self.write('build/classes/kotlin/test/decompengine/acp/' + name, b'extra unrelated compiled class')
+            self.assertNotIn('decompengine/acp/' + name, gate.compiled_control_entries(self.root))
+            entries = dict(self.control_entries); entries['decompengine/acp/' + name] = b'extra unrelated compiled class'
+            self.rewrite_control(entries.items())
+            with self.assertRaises(gate.Invalid): self.verify()
+        entries = dict(self.control_entries); entries['decompengine/acp/NativeObserverBudget$uncompiled.class'] = b'extra nested'
+        self.rewrite_control(entries.items())
+        with self.assertRaises(gate.Invalid): self.verify()
 
     def test_rehashed_substituted_control_rejected(self):
         entries = dict(self.control_entries)

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import uuid
 from itertools import islice
+from collections import deque
 
 MAX_ENTRIES = 20000
 MAX_BYTES = 4 * 1024**3
@@ -88,6 +89,78 @@ def socket_scratch(repo):
         os.close(fd)
 
 
+def validate_link_graph(entries):
+    """Resolve only the closed nofollow inventory, never ambient filesystem paths."""
+    work = 0
+    for key, entry in entries.items():
+        if entry['kind'] != 'link':
+            continue
+        require(entry['target'] and not entry['target'].startswith('/'), 'JDK absolute symlink refused')
+        stack = key.split('/')[:-1]
+        pending = deque(entry['target'].split('/'))
+        followed = 1
+        while pending:
+            work += 1
+            require(work <= MAX_ENTRIES * MAX_DEPTH, 'JDK symlink work bound')
+            if stack:
+                require(entries['/'.join(stack)]['kind'] == 'directory', 'JDK symlink non-directory component')
+            component = pending.popleft()
+            if component in ('', '.'):
+                continue
+            if component == '..':
+                require(stack, 'JDK symlink escapes root')
+                stack.pop()
+                continue
+            candidate = '/'.join([*stack, component])
+            require(candidate in entries, 'JDK dangling symlink')
+            target = entries[candidate]
+            if target['kind'] == 'link':
+                followed += 1
+                require(followed <= MAX_DEPTH, 'JDK symlink chain/cycle bound')
+                link = target['target']
+                require(link and not link.startswith('/'), 'JDK absolute symlink refused')
+                pending.extendleft(reversed(link.split('/')))
+            else:
+                stack.append(component)
+        # A link to the inventory root is allowed; it is still inside the clone.
+
+
+def inventory_links(root):
+    entries = {}
+    def visit(fd, prefix, depth):
+        require(depth <= MAX_DEPTH, 'JDK depth bound')
+        before = identity(os.fstat(fd))
+        with os.scandir(fd) as listing:
+            names = [entry.name for entry in islice(listing, MAX_ENTRIES + 1)]
+        require(len(names) <= MAX_ENTRIES, 'JDK directory bound')
+        for name in sorted(names):
+            require(name not in ('.','..') and '/' not in name, 'invalid JDK entry')
+            require(len(entries) < MAX_ENTRIES, 'JDK entry bound')
+            key = prefix + name
+            value = os.stat(name,dir_fd=fd,follow_symlinks=False)
+            kind = 'link' if stat.S_ISLNK(value.st_mode) else 'directory' if stat.S_ISDIR(value.st_mode) else 'file' if stat.S_ISREG(value.st_mode) else None
+            require(kind is not None, 'JDK special file refused')
+            entry = {'kind':kind,'identity':identity(value)}
+            entries[key] = entry
+            if kind == 'link':
+                link = os.readlink(name,dir_fd=fd)
+                require(len(os.fsencode(link)) <= 4096, 'JDK symlink bound')
+                require(link and not link.startswith('/'), 'JDK absolute symlink refused')
+                entry['target'] = link
+            elif kind == 'directory':
+                child = os.open(name,os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW,dir_fd=fd)
+                try:
+                    require(identity(os.fstat(child)) == identity(value), 'JDK source directory replaced')
+                    visit(child,key+'/',depth+1)
+                finally:
+                    os.close(child)
+            require(identity(os.stat(name,dir_fd=fd,follow_symlinks=False)) == identity(value), 'JDK source entry changed')
+        require(identity(os.fstat(fd)) == before, 'JDK source directory changed')
+    visit(root,'',0)
+    validate_link_graph(entries)
+    return entries
+
+
 def provision(repo: Path, source: Path):
     repo = repo.resolve(strict=True)
     require(re.fullmatch(r'/[A-Za-z0-9_./-]+', str(repo)) is not None, 'CI workspace path is not a safe JVM option path')
@@ -129,9 +202,11 @@ def provision(repo: Path, source: Path):
             require(count <= MAX_ENTRIES, 'JDK entry bound')
             key = relative + name
             entry = os.stat(name, dir_fd=src, follow_symlinks=False)
+            require(key in inventory and identity(entry) == inventory[key]['identity'], 'JDK preflight inventory changed')
             if stat.S_ISLNK(entry.st_mode):
                 link = os.readlink(name, dir_fd=src)
                 require(len(os.fsencode(link)) <= 4096, 'JDK symlink bound')
+                require(link == inventory[key].get('target'), 'JDK symlink changed after admission')
                 os.symlink(link, name, dir_fd=dst)
                 records[key] = {'kind': 'link', 'identity': identity(entry), 'target': link}
             elif stat.S_ISDIR(entry.st_mode):
@@ -183,7 +258,9 @@ def provision(repo: Path, source: Path):
         require(identity(os.fstat(src)) == before, 'JDK source directory changed')
 
     try:
+        inventory = inventory_links(source_fd)
         copy_tree(source_fd, target_fd, '', 0)
+        require(set(records) == set(inventory), 'JDK preflight inventory changed')
         require(identity(os.fstat(source_fd)) == source_root, 'JDK source root changed')
         require(records.get('bin/java', {}).get('kind') == 'file' and
                 records['bin/java']['identity'][5] <= 16 * 1024**2, 'JDK launcher must be a bounded regular file')
@@ -243,6 +320,7 @@ def write_json(path, value):
 
 
 def verify_source(receipt):
+    validate_link_graph(receipt['sourceEntries'])
     source = Path(receipt['source'])
     root = os.open(source, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
     seen = set()

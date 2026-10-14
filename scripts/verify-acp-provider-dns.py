@@ -24,6 +24,9 @@ HASH_FIELDS = '''testSourceSha256 helperSourceSha256 workerJarSha256 javaExecuta
 jdkModulesSha256 bwrapSha256 loopbackHelperSha256 envExecutableSha256 loopbackReferenceSha256
 compilerSha256 linkerSha256 compileArgvSha256 controlRuntimeClosureSha256'''.split()
 FLAGS = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fno-ident', '-Wl,--build-id=none']
+# Keep in lockstep with snapshotNativeControl's exact observer roots plus generated nested classes.
+OBSERVER_CONTROL_ROOTS = ('NativeObserverBudget', 'NativeObserverBudgetOwner',
+                          'NativeVisibilityAccumulator', 'NativeObserverFailure')
 MAX_JSON = 64 * 1024
 
 class Invalid(ValueError):
@@ -94,6 +97,11 @@ def commitment(path):
     require(re.fullmatch(rb'[0-9a-f]{64}\n', data) is not None, 'invalid SHA commitment')
     return data.decode('ascii').strip()
 
+def observer_control_class(name: str) -> bool:
+    return name.endswith('.class') and any(name == root + '.class' or name.startswith(root + '$')
+                                          for root in OBSERVER_CONTROL_ROOTS)
+
+
 def compiled_control_entries(root: Path) -> dict[str, bytes]:
     expected = {}
     for source_set, prefixes in [('test', ('AcpProviderNativeDns', 'NativeNamespace')),
@@ -102,12 +110,15 @@ def compiled_control_entries(root: Path) -> dict[str, bytes]:
         require(directory.resolve(strict=True) == directory, 'noncanonical compiled control directory')
         paths = sorted(islice(directory.glob('*.class'), 8193))
         require(len(paths) <= 8192, 'compiled class inventory oversized')
-        selected = [path for path in paths if path.name.startswith(prefixes)]
+        selected = [path for path in paths if path.name.startswith(prefixes) or
+                    source_set == 'test' and observer_control_class(path.name)]
         require(0 < len(selected) <= 128, 'missing/oversized compiled control set')
         for path in selected:
             name = 'decompengine/acp/' + path.name
             require(name not in expected, 'duplicate compiled control class')
             expected[name] = read(path, 1024 * 1024)
+    require(all('decompengine/acp/' + name + '.class' in expected for name in OBSERVER_CONTROL_ROOTS),
+            'compiled control missing observer runtime dependency')
     resource = 'acp-provider-dns/worker.sha256'
     expected[resource] = read(root / ('build/generated/provider-dns-resources/' + resource), 65)
     require(len(expected) <= 256 and sum(map(len, expected.values())) <= 16 * 1024**2,
