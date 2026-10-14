@@ -1,0 +1,54 @@
+{
+  "automaticProof": {
+    "location": {
+      "kinds": [
+        "frame-relative",
+        "register"
+      ],
+      "state": "known"
+    },
+    "scope": {
+      "state": "known",
+      "values": [
+        "function",
+        "block"
+      ]
+    },
+    "storage": {
+      "state": "known",
+      "values": [
+        "automatic"
+      ]
+    }
+  },
+  "countingUnit": "raw-dwarf-variable-record",
+  "declarationGuard": {
+    "accepted": [
+      {
+        "state": "absent",
+        "values": []
+      },
+      {
+        "state": "known",
+        "values": [
+          "0"
+        ]
+      }
+    ],
+    "role": "negative-definition-guard-only"
+  },
+  "entityDenominatorEstablished": false,
+  "excludedDecision": {
+    "classification": "excluded",
+    "reason": "positively-proved-automatic-local"
+  },
+  "inputKind": "authenticated-raw-dwarf-variable-record",
+  "otherExclusions": "exact-reviewed-identity-and-reason-required",
+  "policyId": "gcc-driver-automatic-local-population-policy-v1",
+  "retainedDecision": {
+    "classification": "retained-raw-candidate",
+    "declarationVetoReason": "declaration-is-not-a-proved-definition",
+    "defaultReason": "automatic-local-not-positively-proved"
+  },
+  "schema": "gcc-driver-automatic-local-population-policy-v1"
+}
