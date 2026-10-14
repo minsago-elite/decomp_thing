@@ -2486,13 +2486,17 @@ private fun verifyProviderTransportReceipt(root: JsonObject, request: JsonObject
     require(BigInteger.valueOf(evidence.remainingOverallTimeoutMillis).multiply(BigInteger.valueOf(1_000_000)) <= wallNanos) {
         "provider receipt deadline exceeds enclosing invocation"
     }
-    root.transportNullableObject("session")?.let { session ->
+    val session = root.transportNullableObject("session")
+    if (evidence.sessionSha256 != null) {
+        require(session != null) { "provider receipt session is absent for session-bound transport" }
         require(session.keys == setOf("harnessId", "sessionId", "resumeReference")) { "provider receipt session fields differ" }
         session.receiptTextCommitment("harnessId", expected = provenance.implementationId, requireNonEmpty = true)
         session.receiptTextCommitment("sessionId", requireNonEmpty = true)
         require(evidence.sessionSha256 == session.transportObject("sessionId").transportString("sha256")) {
             "provider receipt session commitment differs"
         }
+    } else {
+        require(session == null) { "provider receipt session is present without session-bound transport" }
     }
     val process = root.transportNullableObject("process")
     require((cleanup == AcpExecutionCleanupDisposition.VERIFIED && process != null) ||

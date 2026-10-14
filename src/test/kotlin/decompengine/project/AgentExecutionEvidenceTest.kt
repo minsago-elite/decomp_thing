@@ -154,10 +154,60 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
+    fun `provider v3 receipt requires its top level session when transport is session bound`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(
+            AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Returned(
+                AgentExecutionResult(
+                    AgentStopReason.REFUSED,
+                    session = AgentSessionReference("fixture-v1", "provider-data-session"),
+                ),
+            ),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()),
+        )
+        val valid = Json.parseToJsonElement(receiptDocument(request, receipt).json).jsonObject
+        assertFalse(verifyDataReceipt(valid.toString()).releaseComplete)
+
+        val missingSession = JsonObject(valid + ("session" to JsonNull))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            verifyDataReceipt(missingSession.toString())
+        }
+        assertEquals("provider receipt session is absent for session-bound transport", failure.message)
+
+        val crossSession = mutateReceiptField(
+            valid,
+            listOf("session", "sessionId", "sha256"),
+            JsonPrimitive("b".repeat(64)),
+        )
+        val crossSessionFailure = assertFailsWith<IllegalArgumentException> {
+            verifyDataReceipt(crossSession.toString())
+        }
+        assertEquals("provider receipt session commitment differs", crossSessionFailure.message)
+
+        val prebindingReceipt = AgentExecutionReceipt(
+            AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.CONFIGURATION, "prebinding fixture")),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance(), withProviderRequest = false),
+        )
+        val prebinding = Json.parseToJsonElement(receiptDocument(request, prebindingReceipt).json).jsonObject
+        assertEquals(JsonNull, prebinding.getValue("session"))
+        assertEquals(JsonNull, prebinding.getValue("providerTransport").jsonObject.getValue("sessionSha256"))
+        assertFalse(verifyDataReceipt(prebinding.toString()).releaseComplete)
+
+        val unboundTransportSession = JsonObject(prebinding + ("session" to valid.getValue("session")))
+        val unboundTransportFailure = assertFailsWith<IllegalArgumentException> {
+            verifyDataReceipt(unboundTransportSession.toString())
+        }
+        assertEquals("provider receipt session is present without session-bound transport", unboundTransportFailure.message)
+    }
+
+    @Test
     fun `provider v3 context usage retains finite scientific cost observations as nonauthority`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
-            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure")),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
             providerDataFixtureInvocationForTest(request, providerDataProvenance()))
         for (amount in listOf(0.0, -0.0, Double.MIN_VALUE, Double.MAX_VALUE, 1.0E-4, 1.0E20)) {
             val recorder = BoundedAgentExecutionEventRecorder()
@@ -213,7 +263,8 @@ class AgentExecutionEvidenceTest {
     fun `reject forged provider v3 qualification cleanup limits commitments and field mixtures`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
-            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure")),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
             providerDataFixtureInvocationForTest(request, providerDataProvenance()))
         val root = Json.parseToJsonElement(receiptDocument(request, receipt).json).jsonObject
         val other = JsonPrimitive("b".repeat(64))
@@ -278,7 +329,8 @@ class AgentExecutionEvidenceTest {
     fun `unverified provider teardown is retained truthfully but refused by strict fixture verification`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
-            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.TRANSPORT, "unknown teardown")),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.TRANSPORT, "unknown teardown",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
             providerDataFixtureInvocationForTest(request, providerDataProvenance(), cleanupVerified = false))
         val document = receiptDocument(request, receipt)
         val root = Json.parseToJsonElement(document.json).jsonObject
@@ -1339,14 +1391,15 @@ internal fun providerDataFixtureInvocationForTest(
     sessionId: String = "provider-data-session",
     cleanupVerified: Boolean = true,
     richProjection: Boolean = false,
+    withProviderRequest: Boolean = true,
 ): AcpInvocationEvidenceSnapshot {
     fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
     val profile = AcpProviderQualificationProfile.CREDENTIAL_FREE
     val requestDigest = AgentExecutionRequestBinding.capture(request).requestSha256
     val invocationDigest = hash("provider-data-invocation")
-    val sessionDigest = hash(sessionId)
-    val turnDigest = hash("provider-data-turn")
+    val sessionDigest = if (withProviderRequest) hash(sessionId) else null
+    val turnDigest = if (withProviderRequest) hash("provider-data-turn") else null
     val sha = "a".repeat(64)
     val disposition = if (cleanupVerified) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.UNVERIFIED
     val guardian = AcpProviderGuardianCleanupEvidence(disposition,
@@ -1363,9 +1416,12 @@ internal fun providerDataFixtureInvocationForTest(
         request.limits.maxInputTokens, minOf(profile.bounds.overallTimeout.toMillis(), request.limits.wallClockTimeout.toMillis()),
         AcpProviderExecutionResourceEvidence(observedMaximumProcesses = 32, observedMaximumOpenFiles = 128,
             observedMaximumAddressSpaceBytes = 2_147_483_648, observedMaximumMemoryBytes = 2_147_483_648,
-            observedMaximumSwapBytes = 0, observedTaskPeak = 7), 5, 7, 1, 1, true, null,
-        listOf(AcpProviderExecutionRequestEvidence(1, sessionDigest, turnDigest, sha, sha, 5, 7, sha,
-            1, 1, 1, AcpProviderExecutionTerminal.COMPLETED)),
+            observedMaximumSwapBytes = 0, observedTaskPeak = 7), if (withProviderRequest) 5 else 0,
+        if (withProviderRequest) 7 else 0, if (withProviderRequest) 1 else 0,
+        if (withProviderRequest) 1 else null, true, null,
+        if (withProviderRequest) listOf(AcpProviderExecutionRequestEvidence(1, requireNotNull(sessionDigest),
+            requireNotNull(turnDigest), sha, sha, 5, 7, sha, 1, 1, 1,
+            AcpProviderExecutionTerminal.COMPLETED)) else emptyList(),
         AcpProviderExecutionCleanupEvidence(disposition, AcpExecutionCleanupDisposition.VERIFIED,
             AcpExecutionCleanupDisposition.VERIFIED, guardian, disposition))
     val target = AgentWorkspacePath(request.workspaceRoots.first().id, "candidate.c")
