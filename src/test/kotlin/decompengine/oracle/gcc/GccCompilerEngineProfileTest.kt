@@ -103,7 +103,7 @@ class GccCompilerEngineProfileTest {
         assertEquals(16L * 1024 * 1024 * 1024, diagnostics.maximumResidentBytes)
         assertEquals(9_000L, diagnostics.wallClockSeconds)
         assertEquals(listOf(4, 4, 4), listOf(diagnostics.processorCount, diagnostics.analysisThreadCount, diagnostics.decompilerWorkerCount))
-        assertEquals(6, suite.fullRecoveryCc1Throughput!!.runtimeInvocationVersion)
+        assertEquals(null, suite.fullRecoveryCc1Throughput)
         assertEquals(listOf("cc1", "lto1"), suite.engines.map(GccCompilerEngine::id))
 
         val cc1 = suite.engine("cc1")

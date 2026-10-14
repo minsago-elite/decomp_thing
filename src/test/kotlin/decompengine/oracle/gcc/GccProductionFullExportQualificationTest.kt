@@ -891,6 +891,25 @@ class GccProductionFullExportQualificationTest {
     }
 
     @Test
+    fun `checked serial default refuses the parallel qualification before any CLI launch`() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            requireParallelCc1QualificationProfile(Path.of("oracle/gcc/16.2.0/compiler-engines.json").toAbsolutePath().normalize())
+        }
+        assertEquals(
+            "cc1 parallel qualification requires an explicit reviewed runtime6 profile; checked serial default is unqualified",
+            failure.message,
+        )
+    }
+
+    private fun requireParallelCc1QualificationProfile(profilePath: Path) {
+        GccRetainedCompilerEngineProfile.open(profilePath).use { retained ->
+            require(retained.suite.fullRecoveryCc1Throughput != null && retained.invocationVersion("cc1", true) == 6) {
+                "cc1 parallel qualification requires an explicit reviewed runtime6 profile; checked serial default is unqualified"
+            }
+        }
+    }
+
+    @Test
     fun `live selected GCC full export retains its profile-bound model and receipt evidence`() {
         assumeTrue(
             System.getenv("DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT") == "true",
@@ -898,8 +917,10 @@ class GccProductionFullExportQualificationTest {
         )
         val engine = System.getenv("DECOMP_GCC_CLI_FULL_EXPORT_ENGINE") ?: "cc1"
         require(engine in setOf("cc1", "driver")) { "qualification requires cc1 or driver" }
-        val installation = configured("DECOMP_GCC_CLI_INSTALLATION")
         val profilePath = configured("DECOMP_GCC_CLI_PROFILE")
+        // Refuse before preparing output or launching a CLI; serial success cannot qualify runtime6.
+        if (engine == "cc1") requireParallelCc1QualificationProfile(profilePath)
+        val installation = configured("DECOMP_GCC_CLI_INSTALLATION")
         val archive = configured("DECOMP_GCC_CLI_ARCHIVE")
         val binary = configured("DECOMP_GCC_CLI_EXPORT_BINARY", "DECOMP_GCC_CLI_CC1_BINARY")
         val scratch = configured("DECOMP_GCC_CLI_EXPORT_SCRATCH", "DECOMP_GCC_CLI_CC1_FRESH_SCRATCH")

@@ -33,9 +33,9 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc-cc1-16.2.0", profile.profileId)
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
-        assertEquals("0b4b02f0aa85b8ad8ae4a044389d543d1ece4b034051ce1d6f7a8021912b2cae",
+        assertEquals("5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab",
             profile.compilerEngineProfileSha256)
-        assertEquals("64b95c1b376c49a5c494008d4a797b4b0fc2c89afd040869719974f91b3f46f4",
+        assertEquals("e9642742f1ecde0fe63088d3e416a3a2ffab97be86f2988282d05d88eba0bbc7",
             profile.fullExportProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
@@ -182,7 +182,7 @@ class GccDriverStructuralProfileTest {
         assertEquals("0x400000", target.getValue("imageBase").jsonPrimitive.content)
         assertEquals(snapshot.outputTreeSha256, document.getValue("outputTreeSha256").jsonPrimitive.content)
         val lineage = document.getValue("receiptLineage").jsonObject
-        assertEquals("gcc-bundled-full-export-receipt-lineage-v2", lineage.getValue("provider").jsonPrimitive.content)
+        assertEquals("gcc-bundled-full-export-receipt-lineage-v1", lineage.getValue("provider").jsonPrimitive.content)
         assertEquals("a".repeat(64), lineage.getValue("operationId").jsonPrimitive.content)
         assertEquals(
             OracleArtifacts.sha256(OracleJson.canonicalBytes(lineage)),
@@ -192,14 +192,15 @@ class GccDriverStructuralProfileTest {
     }
 
     @Test
-    fun `cc1 full export lineage rejects legacy execution and altered throughput counts`() {
+    fun `checked serial full export rejects unapproved parallel runtime and execution substitution`() {
         val profile = profile()
         val snapshot = fullSnapshot(profile, modelBytes(profile, executableAddress(profile)))
-        for (count in listOf(1, 2, 3, 5)) {
-            assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, runtimeWorkers = count)) }
+        for (count in listOf(1, 2, 3, 4, 5)) {
+            assertFailsWith<IllegalArgumentException> {
+                profile.bindFullExport(fullOperation(profile, snapshot, runtimeWorkers = count, forceParallel = true))
+            }
         }
-        assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceLegacy = true)) }
-        assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceLegacyExecution = true)) }
+        assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceParallelExecution = true)) }
     }
 
     @Test
@@ -517,8 +518,8 @@ class GccDriverStructuralProfileTest {
         intentEngineId: String = profile.engineId,
         plannerEngineId: String = profile.engineId,
         runtimeWorkers: Int = 4,
-        forceLegacy: Boolean = false,
-        forceLegacyExecution: Boolean = false,
+        forceParallel: Boolean = false,
+        forceParallelExecution: Boolean = false,
         diagnosticIntent: Boolean = false,
         diagnosticRuntime: Boolean = false,
     ): GccBundledFullExportOperation {
@@ -526,7 +527,7 @@ class GccDriverStructuralProfileTest {
         val plannerProfile = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines.json"), plannerEngineId).use {
             OracleJson.parseCanonical(it.policyBytes()) as JsonObject
         }
-        val parallel = profile.engineId == "cc1" && !forceLegacy
+        val parallel = profile.engineId == "cc1" && forceParallel
         val intent = JsonObject(mapOf(
             "provider" to JsonPrimitive(if (diagnosticIntent) "gcc-bundled-operation-intent-v4"
                 else if (parallel) "gcc-bundled-operation-intent-v3" else "gcc-bundled-operation-intent-v2"),
@@ -549,8 +550,8 @@ class GccDriverStructuralProfileTest {
         val intentBytes = OracleJson.canonicalBytes(intent)
         val intentSha256 = OracleArtifacts.sha256(intentBytes)
         val executionUnsigned = JsonObject(mapOf(
-            "provider" to JsonPrimitive(if (parallel && !forceLegacyExecution) "kotlin-lease-contained-command-execution-v2" else "kotlin-lease-contained-command-execution-v1"),
-            "schemaVersion" to JsonPrimitive(if (parallel && !forceLegacyExecution) 2 else 1),
+            "provider" to JsonPrimitive(if (parallel || forceParallelExecution) "kotlin-lease-contained-command-execution-v2" else "kotlin-lease-contained-command-execution-v1"),
+            "schemaVersion" to JsonPrimitive(if (parallel || forceParallelExecution) 2 else 1),
             "childExitCode" to JsonPrimitive(0),
             "unitAbsent" to JsonPrimitive(true),
             "cgroupAbsent" to JsonPrimitive(true),

@@ -19,13 +19,6 @@
       "sha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29",
       "version": 16
     },
-    "fullRecoveryCc1Throughput": {
-      "analysisThreadCount": 4,
-      "decompilerWorkerCount": 4,
-      "processorCount": 4,
-      "runtimeInvocationVersion": 6,
-      "schemaVersion": 1
-    },
     "ghidra": {
       "archiveBytes": 569445154,
       "archiveFileName": "ghidra_12.1.3_PUBLIC_20260817.zip",
