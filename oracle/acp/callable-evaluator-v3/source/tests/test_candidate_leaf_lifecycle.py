@@ -70,6 +70,50 @@ class CandidateLeafLifecycle(unittest.TestCase):
         scope.call(leaf,lambda:{'execution':clean(),'sectionsExecution':{}})
         scope.close();self.assertTrue(leaf.exists())
 
+    def runtime_inputs(self, scope):
+        link=self.leaf(scope,'link');library=link/'library.so';library.write_bytes(b'owned library')
+        scope.call(link,lambda: ({},clean()))  # Successful producer cleanup.
+        caller_leaf=self.leaf(scope,'caller');caller=caller_leaf/'caller';caller.write_bytes(b'owned caller')
+        scope.call(caller_leaf,lambda: ({},clean()))
+        runtime=self.leaf(scope,'runtime')
+        command=['/usr/bin/bwrap','--ro-bind',str(caller),'/caller',
+                 '--ro-bind',str(library),'/library.so','--chdir','/workspace','/caller']
+        return link,library,caller_leaf,runtime,command
+
+    def test_unverified_runtime_retains_all_mounted_inputs_despite_later_verified_run(self):
+        scope=e.WorkerLeaves();link,library,caller_leaf,runtime,command=self.runtime_inputs(scope)
+        unrelated=self.leaf(scope,'unrelated');token=e._LEAF_SCOPE.set(scope)
+        try:
+            with patch.object(e,'_run',return_value=({},None)):
+                e.run(command,runtime,phase='runtime')
+            later=self.leaf(scope,'later-runtime')
+            with patch.object(e,'_run',return_value=({},clean())):
+                e.run(command,later,phase='runtime')
+        finally:e._LEAF_SCOPE.reset(token);scope.close()
+        self.assertEqual(library.read_bytes(),b'owned library')
+        self.assertTrue(caller_leaf.exists());self.assertTrue(runtime.exists())
+        self.assertFalse(later.exists());self.assertFalse(unrelated.exists())
+
+    def test_runtime_exception_preserves_every_mounted_owned_leaf_and_primary(self):
+        scope=e.WorkerLeaves();link,library,caller_leaf,runtime,command=self.runtime_inputs(scope)
+        error=ValueError('unverified runtime');token=e._LEAF_SCOPE.set(scope)
+        try:
+            with patch.object(e,'_run',side_effect=error),self.assertRaises(ValueError) as caught:
+                e.run(command,runtime,phase='runtime')
+            self.assertIs(caught.exception,error)
+        finally:e._LEAF_SCOPE.reset(token);scope.close()
+        self.assertEqual(library.read_bytes(),b'owned library')
+        self.assertTrue(caller_leaf.exists());self.assertTrue(runtime.exists())
+
+    def test_verified_runtime_reclaims_work_and_mounted_owned_leaves(self):
+        scope=e.WorkerLeaves();link,library,caller_leaf,runtime,command=self.runtime_inputs(scope)
+        token=e._LEAF_SCOPE.set(scope)
+        try:
+            with patch.object(e,'_run',return_value=({},clean())):
+                e.run(command,runtime,phase='runtime')
+        finally:e._LEAF_SCOPE.reset(token);scope.close()
+        self.assertFalse(link.exists());self.assertFalse(caller_leaf.exists());self.assertFalse(runtime.exists())
+
     def test_report_hashes_consumed_snapshot_not_reopened_candidate(self):
         candidate=self.root/'candidate.c';original=b'int snapshot;\n';candidate.write_bytes(original)
         for name in ('helper','caller','observations'): (self.root/name).write_bytes(b'fixture')

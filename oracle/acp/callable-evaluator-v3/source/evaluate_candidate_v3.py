@@ -240,7 +240,11 @@ def runtime_command(caller, library, scenario):
 
 
 def run(argv, work, timeout=None, phase='compiler'):
-    return _leaf_call(work, lambda: _run(argv, work, timeout, phase))
+    # Associate the same cleanup result with every owned mount source, not
+    # just the writable cwd. Runtime mounts the link leaf's library read-only.
+    mounted = [Path(argv[index + 1]) for index, argument in enumerate(argv[:-1])
+               if argument in ('--bind', '--ro-bind', '--bind-try', '--ro-bind-try')]
+    return _leaf_call(work, lambda: _run(argv, work, timeout, phase), mounted)
 
 
 def _run(argv, work, timeout=None, phase='compiler'):
@@ -277,19 +281,24 @@ class WorkerLeaves:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         self.leaves[path] = {'fd': fd, 'identity': os.fstat(fd), 'safe': True}
 
-    def call(self, path, operation):
-        row = self.leaves.get(path)
-        if row is None:
+    def call(self, path, operation, mounted=()):
+        involved = [row for leaf, row in self.leaves.items()
+                    if leaf == path or any(source == leaf or source.is_relative_to(leaf)
+                                           for source in mounted)]
+        if not involved:
             return operation()
-        prior = row['safe']; row['safe'] = False
+        prior = [row['safe'] for row in involved]
+        for row in involved: row['safe'] = False
         try:
             value = operation()
         except BaseException as error:
-            row['safe'] = prior and _cleanup_proven(getattr(error, 'bounded_result', None))
+            proven = _cleanup_proven(getattr(error, 'bounded_result', None))
+            for row, was_safe in zip(involved, prior): row['safe'] = was_safe and proven
             raise
         results = ([value[1]] if type(value) is tuple else
                    [value.get(key) for key in ('execution', 'sectionsExecution') if key in value])
-        row['safe'] = prior and bool(results) and all(_cleanup_proven(r) for r in results)
+        proven = bool(results) and all(_cleanup_proven(r) for r in results)
+        for row, was_safe in zip(involved, prior): row['safe'] = was_safe and proven
         return value
 
     def close(self):
@@ -336,9 +345,9 @@ class WorkerLeaves:
                 except OSError: pass
 
 
-def _leaf_call(path, operation):
+def _leaf_call(path, operation, mounted=()):
     scope = _LEAF_SCOPE.get()
-    return scope.call(path, operation) if scope is not None else operation()
+    return scope.call(path, operation, mounted) if scope is not None else operation()
 
 
 def new_worker_leaf(label):
