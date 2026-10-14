@@ -347,6 +347,8 @@ object OracleSchemas {
         "function-recovery-oracle",
         "function-recovery-score",
         "gcc/build-record",
+        "gcc/source-build-ownership-action-receipt-v1",
+        "gcc/source-build-ownership-profile-v1",
         "gcc/compiler-engines",
         "gcc/compiler-engine-plan-evidence",
         "gcc/oracle-manifest",

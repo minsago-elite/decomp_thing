@@ -1,0 +1,114 @@
+{
+  "authority": {
+    "approved": false,
+    "closureComplete": false,
+    "collectorAuthenticated": false,
+    "exactPairReproduced": false,
+    "modelBound": false,
+    "nominalIdentityComplete": false,
+    "ownershipComplete": false,
+    "productionVerified": false,
+    "releaseEligible": false,
+    "runtimeAuthenticated": false,
+    "scored": false,
+    "sealed": false,
+    "sourceAuthenticated": false
+  },
+  "mandatoryGates": [
+    "signed-source-archive",
+    "toolchain-runtime-and-reproduction-bridge",
+    "collector-kernel-and-completion",
+    "exact-rich-stripped-pair",
+    "complete-action-file-object-link-closure",
+    "physical-cu-declaration-use-ownership",
+    "independent-kotlin-replay-twice",
+    "hidden-source-oracle-isolation",
+    "independent-semantic-authority-review",
+    "required-ci-and-independent-review"
+  ],
+  "metadataPins": {
+    "artifactManifest": {
+      "bytes": 60269,
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "buildRecord": {
+      "bytes": 3910,
+      "path": "oracle/gcc/16.2.0/build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+    },
+    "recipe": {
+      "bytes": 3345,
+      "path": "oracle/gcc/16.2.0/build-toolchain.Dockerfile",
+      "sha256": "8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543"
+    },
+    "reproductionLock": {
+      "bytes": 1568,
+      "path": "oracle/gcc/16.2.0/toolchain-reproduction.json",
+      "sha256": "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+    },
+    "sourceLock": {
+      "bytes": 3953,
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    }
+  },
+  "profileId": "gcc-driver-16.2.0-source-build-ownership-proposal-v1",
+  "qualification": {
+    "actualCapturedBuilds": 1,
+    "extraBuilds": "concrete-remaining-risk-only",
+    "independentEvidenceReplays": 2
+  },
+  "resourceCeilings": {
+    "maximumArgvWords": 16384,
+    "maximumBuildCpuSeconds": 28800,
+    "maximumBuildRssBytes": 8589934592,
+    "maximumBuildScratchBytes": 34359738368,
+    "maximumBuildWallSeconds": 7200,
+    "maximumCanonicalBytes": 2147483648,
+    "maximumCanonicalNodes": 64000000,
+    "maximumCanonicalRows": 5000000,
+    "maximumCaptureEvents": 100000000,
+    "maximumDeclarationUseRows": 1000000,
+    "maximumEnvironmentEntries": 4096,
+    "maximumExecs": 200000,
+    "maximumExpandedSourceBytes": 4294967296,
+    "maximumFileVersionBytes": 17179869184,
+    "maximumLiveDescendants": 256,
+    "maximumMetadataBytes": 131072,
+    "maximumPathBytes": 4096,
+    "maximumPhysicalDies": 1000000,
+    "maximumProfileBytes": 65536,
+    "maximumRawEventBytes": 17179869184,
+    "maximumRecordBytes": 8388608,
+    "maximumRecordNodes": 100000,
+    "maximumResponseDepth": 16,
+    "maximumScopeDepth": 128,
+    "maximumShards": 256,
+    "maximumSourceMembers": 500000,
+    "maximumTotalMetadataBytes": 262144,
+    "maximumTypedReferences": 2000000,
+    "maximumVerifierHeapBytes": 1073741824,
+    "maximumVerifierRssBytes": 8589934592,
+    "maximumVerifierScratchBytes": 17179869184,
+    "maximumVerifierWallSeconds": 3600,
+    "maximumVerifierWork": 100000000
+  },
+  "runtimePolicy": {
+    "bridge": "reviewed-runtime-reproduction-and-exact-pair-proof-required",
+    "exactPairRequired": true,
+    "originReference": "historical-image-id-not-pull-uri",
+    "proposedReproducedImageId": "sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511",
+    "recordedOriginImageId": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+  },
+  "schema": "gcc-source-build-ownership-profile-v1",
+  "schemaVersion": 1,
+  "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+  "status": "proposed-offline-only",
+  "units": {
+    "nominalIdentity": "separate-reviewed-language-authority-required",
+    "owner": "source-tu-build-root-role-target-effective-command-variant-linked-object",
+    "physicalCu": "physical-witness-not-owner",
+    "sourceOnly": "retained-nonowner"
+  }
+}
