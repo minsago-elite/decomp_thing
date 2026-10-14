@@ -126,7 +126,7 @@ static int trace_fork_syscall(uint64_t nr) {
 #endif
     return 0;
 }
-static int trace_pipe_read_fd(pid_t child, uint64_t address) {
+static int trace_pipe_fd(pid_t child, uint64_t address, unsigned index) {
     int pair[2];
     unsigned char *bytes = (unsigned char *)pair;
     for (size_t copied = 0; copied < sizeof pair;) {
@@ -140,7 +140,35 @@ static int trace_pipe_read_fd(pid_t child, uint64_t address) {
         memcpy(bytes + copied, &word, amount);
         copied += amount;
     }
-    return pair[0];
+    if (index > 1 || pair[0] < 3 || pair[1] < 3 || pair[0] == pair[1] ||
+        pair[0] >= 128 || pair[1] >= 128)
+        return -1;
+    return pair[index];
+}
+static int trace_signal_mask(pid_t child, uint64_t *mask) {
+    return ptrace(PTRACE_GETSIGMASK, child, (void *)sizeof *mask, mask) ? -1 : 0;
+}
+static int trace_mask_at(pid_t child, uint64_t address, uint64_t *mask) {
+    unsigned char *bytes = (unsigned char *)mask;
+    for (size_t copied = 0; copied < sizeof *mask;) {
+        errno = 0;
+        long word = ptrace(PTRACE_PEEKDATA, child, (void *)(uintptr_t)(address + copied), NULL);
+        if (word == -1 && errno)
+            return -1;
+        size_t amount = sizeof *mask - copied;
+        if (amount > sizeof word)
+            amount = sizeof word;
+        memcpy(bytes + copied, &word, amount);
+        copied += amount;
+    }
+    return 0;
+}
+static int trace_cancellation_blocked(pid_t child) {
+    uint64_t mask;
+    if (trace_signal_mask(child, &mask))
+        return -1;
+    uint64_t cancellation = (UINT64_C(1) << (SIGTERM - 1)) | (UINT64_C(1) << (SIGINT - 1));
+    return (mask & cancellation) == cancellation ? 1 : !(mask & cancellation) ? 0 : -1;
 }
 static void trace_close_pidfds(int *owned, size_t count) {
     for (size_t i = 0; i < count; i++)
@@ -191,11 +219,22 @@ static void trace_abort(pid_t child, int *owned, size_t count) {
 static int trace_guardian(pid_t child, int *status, int mode) {
     int owned[16];
     size_t owned_count = 0;
-    unsigned fork_count = 0;
-    int held = 0, exec_read_fd = -1;
+    unsigned fork_count = 0, plain_pipes = 0, gate_release_writes = 0;
+    int held = 0, exec_read_fd = -1, gate_write_fd = -1, interrupt_forwarded = 0;
+    int critical_mask_entered = 0, mask_restored = 0;
+    pid_t direct_child_pid = -1;
+    int startup_pidfd_attempted = 0, startup_pidfd_observed = 0, startup_pidfd_call = 0;
+    int mask_block_call = 0, mask_restore_call = 0, own_mask_active = 0;
+    uint64_t entry_previous_mask = 0, own_previous_mask = 0;
+    const uint64_t cancellation_mask = (UINT64_C(1) << (SIGTERM - 1)) |
+                                       (UINT64_C(1) << (SIGINT - 1));
     uint64_t syscall_nr = 0, syscall_args[6] = {0};
     int syscall_pending = 0;
-    const char *point = mode == 1 ? "state-mkdir" : "exec-read";
+    int interrupt_signal = mode >= 3 ? ((mode <= 5 || (mode >= 9 && mode <= 10)) ? SIGTERM : SIGINT) : 0;
+    int target = mode >= 9 ? (mode % 2 ? 4 : 5) :
+                 mode >= 3 ? (mode - 3) % 3 + 1 : (mode == 1 ? 1 : 3);
+    const char *point = target == 1 ? "state-mkdir" : target == 2 ? "child-pidfd" :
+                        target == 3 ? "exec-read" : target == 4 ? "pending" : "post-admission";
     long long began = monotonic_ms();
     if (began < 0)
         goto fail;
@@ -216,19 +255,23 @@ static int trace_guardian(pid_t child, int *status, int mode) {
             goto fail;
         if (WIFEXITED(*status) || WIFSIGNALED(*status)) {
             trace_close_pidfds(owned, owned_count);
-            if (!held)
+            if (!held || (interrupt_signal && !interrupt_forwarded))
                 return -1;
-            char message[128];
-            int n = snprintf(message, sizeof message,
-                             "TRACE_SUMMARY point=%s held=1 forkCloneCount=%u\n", point,
-                             fork_count);
+            char message[256];
+            int n = interrupt_signal
+                ? snprintf(message, sizeof message,
+                           "TRACE_SUMMARY point=%s held=1 signal=%d forwarded=1 forkCloneCount=%u gateReleaseWrites=%u criticalMaskEntered=%d maskRestored=%d\n",
+                           point, interrupt_signal, fork_count, gate_release_writes,
+                           critical_mask_entered, mask_restored)
+                : snprintf(message, sizeof message,
+                           "TRACE_SUMMARY point=%s held=1 forkCloneCount=%u\n", point, fork_count);
             allwrite(2, message, (size_t)n);
             return 0;
         }
         if (!WIFSTOPPED(*status))
             goto fail;
         int sig = WSTOPSIG(*status), forward = sig;
-        int delay = 0;
+        int delay = 0, forward_interrupt = 0;
         if (sig == (SIGTRAP | 0x80)) {
             struct ptrace_syscall_info info;
             if (trace_syscall_info(child, &info))
@@ -238,29 +281,93 @@ static int trace_guardian(pid_t child, int *status, int mode) {
                 syscall_pending = 1;
                 syscall_nr = info.entry.nr;
                 memcpy(syscall_args, info.entry.args, sizeof syscall_args);
+                startup_pidfd_call = mask_block_call = mask_restore_call = 0;
+                if (!startup_pidfd_attempted && direct_child_pid > 0 &&
+                    syscall_nr == SYS_pidfd_open && syscall_args[0] == (uint64_t)direct_child_pid &&
+                    syscall_args[1] == 0) {
+                    startup_pidfd_attempted = startup_pidfd_call = 1;
+                }
+                /* libc fork() also masks signals. Only the guardian's exact
+                 * post-pidfd cancellation mask can identify this interval. */
+                if (startup_pidfd_observed && syscall_nr == SYS_rt_sigprocmask &&
+                    syscall_args[1] && syscall_args[3] == sizeof(uint64_t)) {
+                    uint64_t requested;
+                    if (trace_mask_at(child, syscall_args[1], &requested))
+                        goto fail;
+                    if (syscall_args[0] == SIG_BLOCK && requested == cancellation_mask && syscall_args[2]) {
+                        if (own_mask_active || trace_signal_mask(child, &entry_previous_mask))
+                            goto fail;
+                        mask_block_call = 1;
+                    } else if (own_mask_active && syscall_args[0] == SIG_SETMASK &&
+                               requested == own_previous_mask) {
+                        mask_restore_call = 1;
+                    }
+                }
                 if (trace_fork_syscall(syscall_nr))
                     fork_count++;
-                if (!held && mode == 1 && syscall_nr == SYS_mkdirat)
+                if (!held && target == 1 && syscall_nr == SYS_mkdirat)
                     delay = 1;
+                if (!held && ((target == 4 && syscall_nr == SYS_rt_sigpending) ||
+                    (target == 5 && syscall_nr == SYS_write &&
+                     syscall_args[0] == (uint64_t)gate_write_fd && syscall_args[2] == 1))) {
+                    if (!own_mask_active || trace_cancellation_blocked(child) != 1)
+                        goto fail;
+                    delay = 1;
+                }
             } else if (info.op == PTRACE_SYSCALL_INFO_EXIT && syscall_pending) {
+                if (!info.exit.is_error && info.exit.rval == 0 && mask_block_call) {
+                    uint64_t saved_previous, actual;
+                    if (trace_mask_at(child, syscall_args[2], &saved_previous) ||
+                        trace_signal_mask(child, &actual) || saved_previous != entry_previous_mask ||
+                        actual != (entry_previous_mask | cancellation_mask))
+                        goto fail;
+                    own_previous_mask = entry_previous_mask;
+                    critical_mask_entered = own_mask_active = 1;
+                }
+                if (!info.exit.is_error && info.exit.rval == 0 && mask_restore_call) {
+                    uint64_t actual;
+                    if (trace_signal_mask(child, &actual) || actual != own_previous_mask)
+                        goto fail;
+                    mask_restored = 1;
+                    own_mask_active = 0;
+                }
+                if (!info.exit.is_error && startup_pidfd_call && info.exit.rval >= 0) {
+                    startup_pidfd_observed = 1;
+                }
                 if (!info.exit.is_error && trace_fork_syscall(syscall_nr) &&
                     info.exit.rval > 0) {
                     if (owned_count == sizeof owned / sizeof *owned)
                         goto fail;
+                    if (direct_child_pid < 0)
+                        direct_child_pid = (pid_t)info.exit.rval;
                     int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)info.exit.rval, 0);
                     if (pidfd < 0)
                         goto fail;
                     owned[owned_count++] = pidfd;
                 }
-                if (!info.exit.is_error && syscall_nr == SYS_pipe2 &&
-                    (syscall_args[1] & O_NONBLOCK) && info.exit.rval == 0) {
-                    if (exec_read_fd >= 0)
-                        goto fail;
-                    exec_read_fd = trace_pipe_read_fd(child, syscall_args[0]);
-                    if (exec_read_fd < 0)
-                        goto fail;
+                if (!info.exit.is_error && syscall_nr == SYS_pipe2 && info.exit.rval == 0) {
+                    if (syscall_args[1] == O_CLOEXEC) {
+                        if (++plain_pipes == 4) {
+                            gate_write_fd = trace_pipe_fd(child, syscall_args[0], 1);
+                            if (gate_write_fd < 0)
+                                goto fail;
+                        }
+                    } else if (syscall_args[1] == (O_CLOEXEC | O_NONBLOCK)) {
+                        if (exec_read_fd >= 0)
+                            goto fail;
+                        exec_read_fd = trace_pipe_fd(child, syscall_args[0], 0);
+                        if (exec_read_fd < 0)
+                            goto fail;
+                    }
                 }
-                if (!held && mode == 2 && syscall_nr == SYS_read &&
+                if (!info.exit.is_error && syscall_nr == SYS_write &&
+                    syscall_args[0] == (uint64_t)gate_write_fd && syscall_args[2] == 1 &&
+                    info.exit.rval == 1)
+                    gate_release_writes++;
+                if (!held && target == 2 && startup_pidfd_call &&
+                    !info.exit.is_error && info.exit.rval >= 0)
+                    delay = 1;
+                if (!held && target == 3 && syscall_nr == SYS_read &&
                     syscall_args[0] == (uint64_t)exec_read_fd && syscall_args[2] == 1 &&
                     !info.exit.is_error && info.exit.rval == 0)
                     delay = 1;
@@ -268,27 +375,51 @@ static int trace_guardian(pid_t child, int *status, int mode) {
             }
         } else if (sig == SIGTRAP && (unsigned)*status >> 16 == PTRACE_EVENT_EXEC) {
             forward = 0;
+        } else if (interrupt_signal && held && !interrupt_forwarded && sig == interrupt_signal) {
+            siginfo_t delivery;
+            if (ptrace(PTRACE_GETSIGINFO, child, NULL, &delivery) ||
+                delivery.si_signo != interrupt_signal || delivery.si_pid != getpid())
+                goto fail;
+            forward_interrupt = 1;
         }
         if (delay) {
-            long long start = monotonic_ms(), current;
-            if (start < 0)
-                goto fail;
-            do {
-                current = monotonic_ms();
-                if (current < 0 || current >= deadline)
+            if (interrupt_signal) {
+                if (kill(child, interrupt_signal))
                     goto fail;
-                if (current - start < 200)
-                    pause_ms((int)(200 - (current - start)));
-            } while (current - start < 200);
-            held = 1;
-            char message[160];
-            int n = snprintf(message, sizeof message,
-                             "TRACE_HOLD point=%s elapsedMillis=%lld forkCloneCount=%u\n",
-                             point, current - start, fork_count);
-            allwrite(2, message, (size_t)n);
+                held = 1;
+                char message[160];
+                int n = snprintf(message, sizeof message,
+                                 "TRACE_INTERRUPT point=%s signal=%d queued=1 forkCloneCount=%u\n",
+                                 point, interrupt_signal, fork_count);
+                allwrite(2, message, (size_t)n);
+            } else {
+                long long start = monotonic_ms(), current;
+                if (start < 0)
+                    goto fail;
+                do {
+                    current = monotonic_ms();
+                    if (current < 0 || current >= deadline)
+                        goto fail;
+                    if (current - start < 200)
+                        pause_ms((int)(200 - (current - start)));
+                } while (current - start < 200);
+                held = 1;
+                char message[160];
+                int n = snprintf(message, sizeof message,
+                                 "TRACE_HOLD point=%s elapsedMillis=%lld forkCloneCount=%u\n",
+                                 point, current - start, fork_count);
+                allwrite(2, message, (size_t)n);
+            }
         }
         if (ptrace(PTRACE_SYSCALL, child, NULL, (void *)(intptr_t)forward))
             goto fail;
+        if (forward_interrupt) {
+            interrupt_forwarded = 1;
+            char message[128];
+            int n = snprintf(message, sizeof message,
+                             "TRACE_SIGNAL point=%s signal=%d forwarded=1\n", point, interrupt_signal);
+            allwrite(2, message, (size_t)n);
+        }
     }
 fail:
     trace_abort(child, owned, owned_count);
@@ -412,6 +543,17 @@ int main(int argc, char **argv) {
         return supervise(argc, argv, 1);
     if (argc >= 2 && !strcmp(argv[1], "supervise-delay-exec-read"))
         return supervise(argc, argv, 2);
+    const char *interrupt_modes[] = {
+        "supervise-interrupt-term-state", "supervise-interrupt-term-pidfd",
+        "supervise-interrupt-term-exec-read", "supervise-interrupt-int-state",
+        "supervise-interrupt-int-pidfd", "supervise-interrupt-int-exec-read",
+        "supervise-interrupt-term-pending", "supervise-interrupt-term-post-admission",
+        "supervise-interrupt-int-pending", "supervise-interrupt-int-post-admission",
+    };
+    if (argc >= 2)
+        for (unsigned i = 0; i < sizeof interrupt_modes / sizeof *interrupt_modes; i++)
+            if (!strcmp(argv[1], interrupt_modes[i]))
+                return supervise(argc, argv, 3 + (int)i);
     const char *mode = argc > 1 ? argv[1] : "success";
     /* Child receives only standard FDs and the explicitly defined, credential-free environment. */
     for (int i = 3; i < 128; i++)

@@ -77,7 +77,7 @@ typedef struct {
     size_t request_used, header_length, content_length;
     bool opened, active, response_headers, cancelled, http_finish, child_eof;
     bool child_reaped, http_rejected;
-    bool setup_accepted, state_owned, auxiliary_close_failure;
+    bool setup_accepted, state_owned, auxiliary_close_failure, startup_mask_restore_failed;
     unsigned version, terminal_cause, descriptor_failures;
     unsigned char setup_identity[96];
     dev_t state_dev;
@@ -293,10 +293,45 @@ static uint64_t launch_deadline(const Guardian *g) {
     return overall < idle ? overall : idle;
 }
 static bool launch_expired(Guardian *g) {
+    if (interrupted) {
+        (void)terminal(g, GUARDIAN_SIGNAL, -1);
+        return true;
+    }
     if (now_ms() < launch_deadline(g))
         return false;
     (void)terminal(g, DEADLINE, -1);
     return true;
+}
+/* Admission is the interrupted/pending check with cancellation signals blocked.
+ * Later arrivals are delivered after restoring the exact previous signal mask. */
+static int release_child_gate(Guardian *g, int fd) {
+    sigset_t cancellation, previous, pending;
+    sigemptyset(&cancellation);
+    sigaddset(&cancellation, SIGTERM);
+    sigaddset(&cancellation, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &cancellation, &previous))
+        return -1;
+    int result = -1;
+    if (launch_expired(g) || sigpending(&pending))
+        goto restore;
+    if (interrupted || sigismember(&pending, SIGTERM) || sigismember(&pending, SIGINT)) {
+        (void)terminal(g, GUARDIAN_SIGNAL, -1);
+        goto restore;
+    }
+    /* This fresh private pipe has no other writer or earlier data. Its sole
+     * one-byte write cannot encounter ordinary pipe backpressure. */
+    if (write(fd, "R", 1) == 1)
+        result = 0;
+restore:
+    if (sigprocmask(SIG_SETMASK, &previous, NULL)) {
+        g->startup_mask_restore_failed = true;
+        return -1;
+    }
+    if (interrupted) {
+        (void)terminal(g, GUARDIAN_SIGNAL, -1);
+        return -1;
+    }
+    return result;
 }
 static int launch(Guardian *g) {
     int exe = -1, codex = -1, pin[2] = {-1, -1}, pout[2] = {-1, -1}, perr[2] = {-1, -1},
@@ -408,11 +443,9 @@ static int launch(Guardian *g) {
         close_auxiliary(g, &exec_gate[1]);
         goto fail;
     }
-    if (launch_expired(g))
-        goto fail;
-    ssize_t released = write(exec_gate[1], "R", 1);
+    int released = release_child_gate(g, exec_gate[1]);
     close_auxiliary(g, &exec_gate[1]);
-    if (released != 1)
+    if (released)
         goto fail;
     close_auxiliary(g, &exe);
     close_auxiliary(g, &pin[0]);
@@ -454,6 +487,8 @@ static int launch(Guardian *g) {
     explicit_bzero(gateway, sizeof gateway);
     return 0;
 fail:
+    if (interrupted)
+        (void)terminal(g, GUARDIAN_SIGNAL, -1);
     close_auxiliary(g, &exe);
     close_auxiliary(g, &codex);
     for (unsigned i = 0; i < 2; i++) {
@@ -886,9 +921,10 @@ static int owned_children(Guardian *g, int sig, unsigned *flags) {
         if (sig) {
             int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
             if (pidfd >= 0) {
-                *flags |= sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT;
                 int rc = (int)syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
                 int saved = errno;
+                if (!rc)
+                    *flags |= sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT;
                 if (close(pidfd))
                     g->auxiliary_close_failure = true;
                 if (rc && saved != ESRCH)
@@ -1025,8 +1061,9 @@ static int cleanup(Guardian *g) {
     if (state_removed)
         flags |= STATE_ROOT_REMOVED;
     bool within_bound = now_ms() <= deadline;
-    bool verified = observed && mask == 0x3f && within_bound && !g->auxiliary_close_failure;
-    if (g->auxiliary_close_failure)
+    bool verified = observed && mask == 0x3f && within_bound && !g->auxiliary_close_failure &&
+                    !g->startup_mask_restore_failed;
+    if (g->auxiliary_close_failure || g->startup_mask_restore_failed)
         g->terminal_cause = UNKNOWN;
     if (g->version == 2 && g->setup_accepted) {
         verified = verified && state_removed && (flags & STATUS_PRESENT);

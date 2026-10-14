@@ -639,6 +639,176 @@ int main(void) {
                                'binarySha256': digest(progress_binary), 'exitCode': p.returncode,
                                'realPipeFlooded': True, 'lastProgressUnchanged': True})
 
+        for interrupt_name, interrupt_signal in (('term', signal.SIGTERM), ('int', signal.SIGINT)):
+            for point, trace_point in (('state', 'state-mkdir'), ('pidfd', 'child-pidfd'),
+                                       ('exec-read', 'exec-read'), ('pending', 'pending'),
+                                       ('post-admission', 'post-admission')):
+                c = Case('review-startup-interrupt-' + interrupt_name + '-' + point,
+                         'idle', version=2, suite='review-regression',
+                         supervisor='supervise-interrupt-' + interrupt_name + '-' + point)
+                c.finish({126, 127})
+                assert c.receipt and c.receipt['cause'] == 2 and not c.acp
+                traces = REVIEW_RESULTS[-1].get('trustedSupervisorTrace', [])
+                summaries = [dict(part.split('=', 1) for part in line.split()[1:])
+                             for line in traces if line.startswith('TRACE_SUMMARY ')]
+                assert len(summaries) == 1, traces
+                summary = summaries[0]
+                assert summary['point'] == trace_point and int(summary['signal']) == interrupt_signal
+                assert int(summary['forwarded']) == 1
+                assert int(summary['forkCloneCount']) == (0 if point == 'state' else 1)
+                assert int(summary['gateReleaseWrites']) == (1 if point in ('exec-read', 'post-admission') else 0)
+                assert int(summary['criticalMaskEntered']) == (0 if point == 'state' else 1)
+                assert int(summary['maskRestored']) == (0 if point == 'state' else 1)
+                assert c.receipt['flags'] & 0x72 == 0x72 and not c.receipt['flags'] & 128
+                if point == 'state':
+                    assert c.guardian == 127 and c.receipt['outcome'] == 0 and not c.receipt['flags'] & 1
+                else:
+                    assert c.guardian == 126 and c.receipt['flags'] & 1
+                    assert (c.receipt['outcome'] == 2 or
+                            (c.receipt['outcome'] == 4 and
+                             os.WTERMSIG(c.receipt['rawWaitStatus']) == signal.SIGPIPE) or
+                            (c.receipt['outcome'] == 1 and
+                             os.WEXITSTATUS(c.receipt['rawWaitStatus']) == 121))
+
+        # This test translation unit includes the unchanged production function.
+        # Its syscall scheduling wrapper forwards REAL kernel results. At the
+        # send boundary it can release and reap the real owned child first, so
+        # ESRCH is observed rather than synthesized. The wrapper is not built
+        # into the guardian and does not qualify a standalone cleanup receipt.
+        signal_source = RUN / 'signal-delivery-control.c'
+        signal_source.write_text(r'''
+#define _GNU_SOURCE
+#include <stdarg.h>
+#include <unistd.h>
+static long scheduled_guardian_syscall(long number, ...);
+#define syscall scheduled_guardian_syscall
+#define main guardian_program_main
+#include "''' + str(SOURCE) + r'''"
+#undef main
+#undef syscall
+static Guardian *controlled_guardian;
+static pid_t controlled_child;
+static int release_fd, exit_before_send, send_calls, observed_return, observed_errno;
+static long scheduled_guardian_syscall(long number, ...) {
+    va_list arguments;
+    va_start(arguments, number);
+    if (number == SYS_pidfd_open) {
+        int pid = va_arg(arguments, int), flags = va_arg(arguments, int);
+        va_end(arguments);
+        if (pid != controlled_child || flags) { errno = EINVAL; return -1; }
+        return syscall(number, pid, flags);
+    }
+    if (number == SYS_pidfd_send_signal) {
+        int fd = va_arg(arguments, int), sig = va_arg(arguments, int);
+        void *info = va_arg(arguments, void *);
+        int flags = va_arg(arguments, int);
+        va_end(arguments);
+        if (exit_before_send) {
+            siginfo_t status;
+            if (write(release_fd, "R", 1) != 1 ||
+                waitid(P_PID, (id_t)controlled_child, &status, WEXITED | WNOWAIT) ||
+                status.si_pid != controlled_child || reap_owned(controlled_guardian) != 1) {
+                errno = EIO; return -1;
+            }
+        }
+        long result = syscall(number, fd, sig, info, flags);
+        int saved = errno;
+        send_calls++;
+        observed_return = (int)result;
+        observed_errno = result < 0 ? saved : 0;
+        errno = saved;
+        return result;
+    }
+    va_end(arguments);
+    errno = ENOSYS;
+    return -1;
+}
+static int control(int sig, int before) {
+    int pipes[2];
+    if (pipe2(pipes, O_CLOEXEC)) return 10;
+    pid_t child = fork();
+    if (child < 0) { close(pipes[0]); close(pipes[1]); return 11; }
+    if (!child) {
+        close(pipes[1]);
+        char release;
+        ssize_t received = read(pipes[0], &release, 1);
+        _exit(received == 1 && release == 'R' ? 0 : 91);
+    }
+    close(pipes[0]);
+    Guardian guardian = {.childpid = child, .terminal_cause = UNKNOWN};
+    controlled_child = child; controlled_guardian = &guardian;
+    release_fd = pipes[1]; exit_before_send = before; send_calls = 0;
+    observed_return = -2; observed_errno = -1;
+    unsigned flags = 0;
+    int result = 12;
+    int snapshot_count = owned_children(&guardian, sig, &flags);
+    if (snapshot_count != 1 || send_calls != 1 || guardian.auxiliary_close_failure) goto done;
+    if (!before) {
+        siginfo_t status;
+        if (waitid(P_PID, (id_t)child, &status, WEXITED | WNOWAIT) ||
+            status.si_pid != child || reap_owned(&guardian) != 1) goto done;
+    }
+    if (!guardian.child_reaped || owned_children(&guardian, 0, &flags) != 0 ||
+        reap_owned(&guardian) != 1) goto done;
+    printf("SIGNAL_DELIVERY signal=%d phase=%s sendReturn=%d sendErrno=%d flags=%u waitStatus=%u childReaped=1 finalEchild=1\n",
+           sig, before ? "exited-before-send" : "delivered", observed_return,
+           observed_errno, flags, (unsigned)guardian.child_status);
+    if (before ? (observed_return != -1 || observed_errno != ESRCH || flags != 0 ||
+                  !WIFEXITED(guardian.child_status) || WEXITSTATUS(guardian.child_status) != 0)
+               : (observed_return != 0 || observed_errno != 0 ||
+                  flags != (sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT) ||
+                  !WIFSIGNALED(guardian.child_status) || WTERMSIG(guardian.child_status) != sig)) goto done;
+    result = 0;
+done:
+    if (!guardian.child_reaped) { (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0); }
+    close(pipes[1]);
+    return result;
+}
+int main(int argc, char **argv) {
+    if (argc != 2) return 1;
+    int sig = !strcmp(argv[1], "term") ? SIGTERM : !strcmp(argv[1], "kill") ? SIGKILL : 0;
+    if (!sig) return 2;
+    struct sigaction action = {.sa_handler = SIG_DFL};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGCHLD, &action, NULL) || sigaction(SIGTERM, &action, NULL)) return 3;
+    int result = control(sig, 0);
+    return result ? result : control(sig, 1);
+}
+''')
+        signal_binary = RUN / 'signal-delivery-control'
+        BUILD.append(compile_one(signal_source, signal_binary))
+        for signal_name, delivered_signal in (('term', signal.SIGTERM), ('kill', signal.SIGKILL)):
+            p = subprocess.Popen([str(signal_binary), signal_name], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, env=ENV, start_new_session=True)
+            try:
+                stdout, stderr = p.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL)
+                stdout, stderr = p.communicate(timeout=3)
+                raise AssertionError('Signal delivery control exceeded its deadline')
+            finally:
+                if p.returncode is None:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait(timeout=3)
+                p.stdout.close(); p.stderr.close()
+            output = RUN / ('signal-delivery-' + signal_name + '.stdout.log')
+            error = RUN / ('signal-delivery-' + signal_name + '.stderr.log')
+            output.write_bytes(stdout); error.write_bytes(stderr)
+            assert p.returncode == 0 and not stderr, (signal_name, p.returncode, stdout, stderr)
+            observations = [dict(part.split('=', 1) for part in line.split()[1:])
+                            for line in stdout.decode('ascii').splitlines()]
+            assert len(observations) == 2
+            for observation, phase in zip(observations, ('delivered', 'exited-before-send')):
+                assert observation['phase'] == phase and int(observation['signal']) == delivered_signal
+                assert observation['childReaped'] == observation['finalEchild'] == '1'
+            REVIEW_RESULTS.append({'name': 'review-signal-delivery-' + signal_name,
+                                   'sourceSha256': digest(signal_source),
+                                   'binarySha256': digest(signal_binary), 'exitCode': p.returncode,
+                                   'stdoutSha256': digest(output), 'stderrSha256': digest(error),
+                                   'actualKernelSignalObservations': observations,
+                                   'testOnlySchedulingWrapperCallsRealKernel': True,
+                                   'standaloneCleanupReceiptQualified': False})
+
         if args.compare_prior_guardian:
             for point, supervisor in (('state-mkdir', 'supervise-delay-state'),
                                       ('exec-read', 'supervise-delay-exec-read')):
@@ -680,6 +850,10 @@ finally:
         'hostMachine': os.uname().machine,
         'startupDelayMechanism': ('trusted supervisor PTRACE_SYSCALL/GET_SYSCALL_INFO scheduling hold; native ABI only'
                                   if args.include_v2 else None),
+        'startupInterruptMechanism': ('trusted supervisor actual TERM/INT at syscall barriers; actual gate-write and signal-mask observations'
+                                      if args.include_v2 else None),
+        'signalDeliveryRaceMechanism': ('test-only scheduling wrapper reaps a real owned child before forwarding real pidfd_send_signal; no synthesized syscall result'
+                                       if args.include_v2 else None),
         'sourceSha256': INPUT_HASHES[SOURCE],
         'runnerSha256': INPUT_HASHES[pathlib.Path(__file__).resolve()],
         'fixtureSha256': INPUT_HASHES[FIXTURE],
@@ -703,7 +877,7 @@ finally:
         },
         'completed': (failure_type is None and not cleanup_failures and len(RESULTS) == 42
                       and (not args.include_v2 or len(V2_RESULTS) == 21)
-                      and (not args.include_v2 or len(REVIEW_RESULTS) == 6)
+                      and (not args.include_v2 or len(REVIEW_RESULTS) == 18)
                       and (not args.compare_prior_guardian or len(PRIOR_RESULTS) == 2)
                       and inputs_unchanged and tools_unchanged and binaries_unchanged),
         'expectedControlCount': 42,
@@ -714,7 +888,7 @@ finally:
         'v2ExpectedControlCount': 21 if args.include_v2 else 0,
         'v2Passed': len(V2_RESULTS),
         'v2Results': V2_RESULTS,
-        'reviewRegressionExpectedCount': 6 if args.include_v2 else 0,
+        'reviewRegressionExpectedCount': 18 if args.include_v2 else 0,
         'reviewRegressionPassed': len(REVIEW_RESULTS),
         'reviewRegressionResults': REVIEW_RESULTS,
         'priorRegressionResults': PRIOR_RESULTS,
