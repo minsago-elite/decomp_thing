@@ -2433,6 +2433,67 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertFalse(args.rootfs.exists())
             self.assertFalse(args.output.exists())
 
+    def test_rootfs_tar_output_accepts_relative_parent_and_rejects_escape(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(base)
+                output = Path("run1")
+                output.mkdir()
+                source = base / "work/rootfs.tar"
+                source.parent.mkdir()
+                source.write_bytes(b"verified rootfs tar")
+                destination = output / "rootfs.tar"
+                provision.publish_rootfs_tar(source, output, destination)
+                self.assertFalse(source.exists())
+                self.assertEqual(destination.read_bytes(), b"verified rootfs tar")
+
+                source = base / "work/rootfs-absolute.tar"
+                source.write_bytes(b"absolute spelling")
+                absolute_output = output.resolve(strict=True)
+                absolute_destination = absolute_output / "rootfs-absolute.tar"
+                provision.publish_rootfs_tar(source, absolute_output, absolute_destination)
+                self.assertFalse(source.exists())
+                self.assertEqual(absolute_destination.read_bytes(), b"absolute spelling")
+
+                alias = base / "output-alias"
+                alias.symlink_to(output, target_is_directory=True)
+                source = base / "work/rootfs-alias.tar"
+                source.write_bytes(b"directory alias spelling")
+                provision.publish_rootfs_tar(source, output, alias / "rootfs-alias.tar")
+                self.assertFalse(source.exists())
+                self.assertEqual((output / "rootfs-alias.tar").read_bytes(), b"directory alias spelling")
+
+                existing = output / "existing.tar"
+                existing.write_bytes(b"existing destination")
+                source = base / "work/rootfs-existing.tar"
+                source.write_bytes(b"must remain before existing refusal")
+                with self.assertRaisesRegex(provision.ProvisionError, "must not already exist"):
+                    provision.publish_rootfs_tar(source, output, existing)
+                self.assertEqual(source.read_bytes(), b"must remain before existing refusal")
+                self.assertEqual(existing.read_bytes(), b"existing destination")
+
+                target = output / "symlink-target.tar"
+                target.write_bytes(b"symlink target")
+                destination_link = output / "symlink-destination.tar"
+                destination_link.symlink_to(target.name)
+                source = base / "work/rootfs-symlink.tar"
+                source.write_bytes(b"must remain before symlink refusal")
+                with self.assertRaisesRegex(provision.ProvisionError, "must not already exist"):
+                    provision.publish_rootfs_tar(source, output, destination_link)
+                self.assertEqual(source.read_bytes(), b"must remain before symlink refusal")
+                self.assertEqual(target.read_bytes(), b"symlink target")
+
+                source = base / "work/rootfs-escape.tar"
+                source.write_bytes(b"must remain on refusal")
+                (base / "outside").mkdir()
+                with self.assertRaisesRegex(provision.ProvisionError, "canonical run output directory"):
+                    provision.publish_rootfs_tar(source, output, base / "outside/rootfs.tar")
+                self.assertEqual(source.read_bytes(), b"must remain on refusal")
+            finally:
+                os.chdir(previous_cwd)
+
     def test_provisioning_rejects_workdir_equal_or_beneath_rootfs_before_all_mutations(self):
         with self.temporary_directory() as temp:
             base = Path(temp)

@@ -3555,6 +3555,20 @@ def remove_optional_source_caches(acquisition: Path) -> None:
         os.close(acquisition_fd)
 
 
+def publish_rootfs_tar(rootfs_tar_path: Path, output: Path, destination: Path) -> None:
+    """Move the verified tar only to the canonical output directory."""
+    if destination.exists() or destination.is_symlink():
+        raise ProvisionError("verified rootfs tar output path must not already exist")
+    output_parent = output.resolve(strict=True)
+    try:
+        destination_parent = destination.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ProvisionError("verified rootfs tar output parent could not be resolved") from error
+    if destination_parent != output_parent:
+        raise ProvisionError("verified rootfs tar output must be inside the canonical run output directory")
+    os.replace(rootfs_tar_path, output_parent / destination.name)
+
+
 def provision_rootfs(args: argparse.Namespace) -> int:
     try:
         canonical_rootfs = args.rootfs.resolve()
@@ -3725,13 +3739,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     atomic_write(record_path, canonical_json(record))
     atomic_write(args.output / "probe-report.json", canonical_json(probe_checked))
     if args.rootfs_tar_output is not None:
-        if args.rootfs_tar_output.exists() or args.rootfs_tar_output.is_symlink():
-            raise ProvisionError("verified rootfs tar output path must not already exist")
-        output_parent = args.output.resolve(strict=True)
-        if (args.rootfs_tar_output.parent != output_parent or
-                args.rootfs_tar_output.parent.resolve(strict=True) != output_parent):
-            raise ProvisionError("verified rootfs tar output must be inside the canonical run output directory")
-        os.replace(rootfs_tar_path, args.rootfs_tar_output)
+        publish_rootfs_tar(rootfs_tar_path, args.output, args.rootfs_tar_output)
     else:
         rootfs_tar_path.unlink()
     if not args.keep_rootfs:
