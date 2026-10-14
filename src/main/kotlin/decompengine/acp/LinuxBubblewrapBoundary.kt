@@ -1945,14 +1945,18 @@ private fun manifestRootPhysicalLocation(
     if (named == named.root || (!identity.isDirectory && !identity.isRegularFile)) {
         // Preserve original root-only and other-kind behavior, including its symlink refusal.
         withHostPhysicalPath(named, cancellationCheck) { reopened, missing ->
-            if (missing.toString().isNotEmpty()) throw IOException("runtime manifest root disappeared")
+            if (missing.toString().isNotEmpty()) throw IOException("private-control descriptor pathname changed during inspection")
             requireSame(reopened)
         }
     } else {
         var current = LinuxFilesystemSyscalls.openRoot(requireNotNull(named.root))
         try {
-            val constrained = LinuxFilesystemSyscalls.openConstrainedPathAt(current,
-                named.root.relativize(named).toString())
+            val constrained = try {
+                LinuxFilesystemSyscalls.openConstrainedPathAt(current, named.root.relativize(named).toString())
+            } catch (failure: LinuxSyscallException) {
+                if (failure.errno != LinuxFilesystemSyscalls.ENOENT) throw failure
+                throw IOException("private-control descriptor pathname changed during inspection", failure)
+            }
             if (constrained != null) {
                 constrained.use { requireSame(it) }
             } else {
@@ -1961,7 +1965,7 @@ private fun manifestRootPhysicalLocation(
                 for ((index, component) in components.withIndex()) {
                     cancellationCheck()
                     val next = LinuxFilesystemSyscalls.openPathAtOrNull(current.fd, component.toString())
-                        ?: throw IOException("runtime manifest root disappeared")
+                        ?: throw IOException("private-control descriptor pathname changed during inspection")
                     if (next.identity.isSymbolicLink || (!next.identity.isDirectory && index != components.lastIndex)) {
                         next.close()
                         throw IOException("private-control protection encountered a noncanonical host path")
