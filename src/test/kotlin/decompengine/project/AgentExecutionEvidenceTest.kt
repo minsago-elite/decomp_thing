@@ -119,7 +119,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `full and compact provider v3 receipts strictly retain nonrelease fixture commitments`() {
+    fun `full and compact provider v4 receipts strictly retain nonrelease fixture commitments`() {
         val request = legacyReceiptDataRequest()
         val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance())
         val canary = "CANARY-token-account-capability-provider-body-environment"
@@ -129,7 +129,7 @@ class AgentExecutionEvidenceTest {
         val full = receiptDocument(request, receipt)
         val compact = receiptDocument(request, receipt, 1)
         for (document in listOf(full, compact)) {
-            assertEquals(3, document.schemaVersion)
+            assertEquals(4, document.schemaVersion)
             assertFalse(document.releaseComplete)
             assertFalse(canary in document.json)
             val verified = verifyDataReceipt(document.json)
@@ -154,7 +154,60 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `provider v3 receipt requires its top level session when transport is session bound`() {
+    fun `provider v4 omits issued identities and rejects their reintroduction in full and compact receipts`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()))
+        for (maximum in listOf(64 * 1024 * 1024, 1)) {
+            val root = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
+            val transport = root.getValue("providerTransport").jsonObject
+            for (field in listOf("policySha256", "authoritySha256")) {
+                assertFalse(field in transport)
+                for (prefix in listOf(emptyList(), listOf("providerTransport"),
+                    listOf("providerTransport", "descriptors"), listOf("providerTransport", "requests", "0"))) {
+                    for (value in listOf(JsonPrimitive("b".repeat(64)), JsonNull,
+                        JsonPrimitive("CANARY-unissued-identity"))) {
+                        val changed = mutateReceiptField(root, prefix + field, value)
+                        val failure = assertFailsWith<IllegalArgumentException> { verifyDataReceipt(changed.toString()) }
+                        assertFalse("CANARY-unissued-identity" in failure.toString())
+                    }
+                }
+            }
+            assertFalse(verifyDataReceipt(root.toString()).releaseComplete)
+        }
+    }
+
+    @Test
+    fun `historical provider v3 bytes stay unqualified and are not rewritten as omitted identities`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()))
+        for (maximum in listOf(64 * 1024 * 1024, 1)) {
+            val root = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
+            // Authored historical parser data, not a newly issued policy or network authority.
+            val legacy = JsonObject(root + mapOf(
+                "schemaVersion" to JsonPrimitive(3),
+                "provider" to JsonObject(root.getValue("provider").jsonObject + ("evidenceSchemaVersion" to JsonPrimitive(3))),
+                "providerTransport" to JsonObject(root.getValue("providerTransport").jsonObject + mapOf(
+                    "policySha256" to JsonPrimitive("a".repeat(64)),
+                    "authoritySha256" to JsonPrimitive("b".repeat(64)),
+                )),
+            )).toString().toByteArray()
+            val before = legacy.copyOf()
+            val failure = assertFailsWith<IllegalArgumentException> {
+                verifyAcpExecutionReceiptDocument(legacy, "acp-provider-data-fixture", "fixtureId", "stable")
+            }
+            assertTrue(failure.message.orEmpty().startsWith("historical schema-v3 provider receipts are unqualified"))
+            assertContentEquals(before, legacy)
+        }
+    }
+
+    @Test
+    fun `provider v4 receipt requires its top level session when transport is session bound`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(
             AgentExecutionRequestBinding.capture(request),
@@ -203,7 +256,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `provider v3 context usage retains finite scientific cost observations as nonauthority`() {
+    fun `provider v4 context usage retains finite scientific cost observations as nonauthority`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -225,7 +278,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `rich provider v3 envelope roundtrips all event and audit variants without releasing peer text`() {
+    fun `rich provider v4 envelope roundtrips all event and audit variants without releasing peer text`() {
         val request = legacyReceiptDataRequest()
         val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance(), richProjection = true)
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
@@ -260,7 +313,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `reject forged provider v3 qualification cleanup limits commitments and field mixtures`() {
+    fun `reject forged provider v4 qualification cleanup limits commitments and field mixtures`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -269,7 +322,7 @@ class AgentExecutionEvidenceTest {
         val root = Json.parseToJsonElement(receiptDocument(request, receipt).json).jsonObject
         val other = JsonPrimitive("b".repeat(64))
         val mutations = listOf(
-            listOf("schemaVersion") to JsonPrimitive(4),
+            listOf("schemaVersion") to JsonPrimitive(5),
             listOf("schemaVersion") to JsonPrimitive(2),
             listOf("provider", "evidenceSchemaVersion") to JsonPrimitive(2),
             listOf("lifecycle", "releaseComplete") to JsonPrimitive(true),
@@ -1407,7 +1460,7 @@ internal fun providerDataFixtureInvocationForTest(
         true, false, AcpProviderChildExitKind.SIGTERM, null, 15, cleanupVerified, cleanupVerified,
         if (cleanupVerified) 0 else null, cleanupVerified, cleanupVerified, cleanupVerified)
     val transport = AcpProviderInvocationEvidenceSnapshot(AcpProviderExecutionAuthority.CREDENTIAL_FREE_LOOPBACK_TLS_V1,
-        sha, sha, profile.descriptorSha256, hash(profile.model), AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1,
+        profile.descriptorSha256, hash(profile.model), AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1,
         profile.reasoning, AcpProviderExecutionDescriptorEvidence(requireNotNull(provenance.configurationSha256),
             providerExecutionEvidenceIssuerSha256(requireNotNull(provenance.configurationSha256), profile.descriptorSha256),
             providerExecutionEvidenceConsumerSha256(requestDigest, invocationDigest), sha, sha, sha, sha, sha, sha, sha, sha),

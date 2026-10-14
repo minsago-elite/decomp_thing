@@ -1,5 +1,7 @@
 package decompengine.acp
 
+import java.io.RandomAccessFile
+
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentExecutionException
@@ -608,7 +610,29 @@ class LinuxBubblewrapBoundaryTest {
                 LinuxBubblewrapBoundaryTest::class.java.name, "private-control-bind-probe", base.toString(),
             ).redirectErrorStream(true).redirectOutput(base.resolve("native-probe.log").toFile()).start()
             try {
-                assertTrue(process.waitFor(45, TimeUnit.SECONDS), "private-control bind probe timed out")
+                val completed = process.waitFor(45, TimeUnit.SECONDS)
+                if (!completed) {
+                    val descendants = process.descendants().use { it.toList() }
+                    descendants.asReversed().forEach { it.destroyForcibly() }
+                    process.destroyForcibly()
+                    val rootStopped = process.waitFor(5, TimeUnit.SECONDS)
+                    val log = base.resolve("native-probe.log")
+                    val tail = RandomAccessFile(log.toFile(), "r").use { file ->
+                        file.seek((file.length() - 8192).coerceAtLeast(0))
+                        ByteArray((file.length() - file.filePointer).toInt()).also(file::readFully)
+                    }.toString(Charsets.UTF_8).lineSequence()
+                        .filter { it.startsWith("private-control-bind-probe:") }
+                        .map { it.replace(Regex("/[^ \t]+"), "<path>").replace(Regex("[^A-Za-z0-9 ._:,=()<>-]"), "?").take(256) }
+                        .toList().takeLast(16).joinToString("\n").takeLast(4096)
+                    val evidence = Path.of(System.getProperty("user.dir"), "build/private-control-timeouts")
+                    Files.createDirectories(evidence)
+                    val retained = evidence.resolve("probe-${UUID.randomUUID()}.txt")
+                    val descendantsStopped = descendants.none { it.isAlive }
+                    Files.writeString(retained, "timeoutSeconds=45 rootStopped=$rootStopped descendantsStopped=$descendantsStopped " +
+                        "observedDescendants=${descendants.size}\n$tail\n")
+                    assertTrue(rootStopped && descendantsStopped, "private-control bind probe timeout cleanup unproved; evidence=$retained")
+                    error("private-control bind probe timed out; bounded phase tail and termination proof retained at $retained")
+                }
                 val output = Files.readString(base.resolve("native-probe.log"))
                 assertEquals(0, process.exitValue(), output)
                 assertTrue(output.contains("private-control-bind-probe: all native controls passed"), output)
@@ -800,6 +824,47 @@ class LinuxBubblewrapBoundaryTest {
         after.entries.forEach { (fd, value) -> row("after fd=$fd $value") }
         output.append("fdDiagnosticRenderTruncated=$clipped")
         return output.toString()
+    }
+
+    /** Diagnostic only: never changes descriptor-count equality or admission/cleanup decisions. */
+    private fun privateControlDescriptorSnapshot(): Map<Int, String> = try {
+        val directory = Path.of("/proc/self/fd")
+        // Close the inventory stream before resolving identities, excluding its transient descriptors.
+        val names = Files.list(directory).use { entries -> entries.limit(257).map { it.fileName.toString() }.toList() }
+        check(names.size <= 256) { "descriptor diagnostic capacity" }
+        names.mapNotNull { name ->
+            val fd = name.toIntOrNull() ?: return@mapNotNull null
+            val path = directory.resolve(name)
+            try {
+                val target = Files.readSymbolicLink(path).toString().take(256)
+                    .replace(Regex("[^A-Za-z0-9 /._:()=,-]"), "?")
+                val identity = Files.readAttributes(path, "unix:dev,ino,mode")
+                fd to "dev=${identity["dev"]},ino=${identity["ino"]},mode=${identity["mode"]},target=$target"
+            } catch (_: java.nio.file.NoSuchFileException) { null }
+            catch (_: IOException) { fd to "IDENTITY_UNAVAILABLE" }
+        }.toMap()
+    } catch (_: Exception) { mapOf(-1 to "SNAPSHOT_UNAVAILABLE") }
+
+    private fun privateControlDescriptorDiff(before: Map<Int, String>, after: Map<Int, String>): String {
+        val changed = (before.keys + after.keys).sorted().filter { before[it] != after[it] }
+        fun bounded(value: String?) = value.orEmpty().take(320).replace(Regex("[^A-Za-z0-9 /._:()=,?-]"), "?")
+        return "changed=${changed.size} shown=${minOf(changed.size, 8)} " + changed.take(8).joinToString(";") {
+            "fd=$it before=(${bounded(before[it])}) after=(${bounded(after[it])})"
+        }
+    }
+
+    @Test
+    fun `private control descriptor diagnostics are bounded and preserve changed identities`() {
+        val before = mapOf(5 to "dev=1,ino=2,target=control", 6 to "stable")
+        val after = mapOf(5 to "dev=1,ino=3,target=control", 6 to "stable", 7 to "socket")
+        val diff = privateControlDescriptorDiff(before, after)
+        assertTrue(diff.contains("changed=2 shown=2"))
+        assertTrue(diff.contains("ino=2") && diff.contains("ino=3") && diff.contains("fd=7"))
+        assertFalse(diff.contains("fd=6"))
+        val oversized = (0..255).associateWith { "x".repeat(1000) + "\n" }
+        val bounded = privateControlDescriptorDiff(emptyMap(), oversized)
+        assertTrue(bounded.startsWith("changed=256 shown=8")); assertTrue(bounded.length < 6000)
+        assertFalse(bounded.contains('\n'))
     }
 
     private fun runPrivateControlBindProbe(base: Path) {
@@ -1182,7 +1247,8 @@ class LinuxBubblewrapBoundaryTest {
                 }
             } finally {
                 invokeBoundaryPrivate("cleanupLaunchResources", arrayOf(List::class.java,
-                    Class.forName("decompengine.acp.SandboxEnvironmentFile"), List::class.java), emptyList<Any>(), null, retained)
+                    Class.forName("decompengine.acp.SandboxEnvironmentFile"), List::class.java, Function0::class.java),
+                    emptyList<Any>(), null, retained, {})
             }
             withTemporaryParent(staging.path.toString()) {
                 val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))

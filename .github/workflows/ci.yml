@@ -138,7 +138,7 @@ jobs:
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify JVM web contracts and distribution contents
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -172,6 +172,11 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
 
   kotlin-suite:
     name: kotlin-${{ matrix.shard }}
@@ -247,7 +252,7 @@ jobs:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
-        run: scripts/ci.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/ci.sh
       - name: Retain Kotlin partition reports
         run: |
           mv build/test-results/test build/test-results/full-suite
@@ -283,6 +288,11 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated
@@ -335,14 +345,17 @@ jobs:
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
-      - name: Verify installed direct-API Ghidra without an external installation
+      - name: Verify direct-API Ghidra and offline bundle contents in one owned context
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
         run: |
           unset GHIDRA_HOME
-          ./gradlew --no-daemon test \
+          python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- bash -euc '
+            "$@"
+            ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+          ' -- ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
@@ -352,8 +365,6 @@ jobs:
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
-      - name: Verify ZIP and TAR bundle contents and native executable modes
-        run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -361,6 +372,11 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
 
   archival-ghidra:
     runs-on: ubuntu-24.04
@@ -398,7 +414,7 @@ jobs:
       - name: Run strict Clang and sanitizer compatibility checks
         env:
           DECOMP_TEST_CLANG: /usr/bin/clang-18
-        run: scripts/validate-clang.sh
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- scripts/validate-clang.sh
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -406,4 +422,9 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
             build/source-identity-fixture-evidence

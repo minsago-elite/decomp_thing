@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.ci.ownedJvmChild
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -387,7 +388,7 @@ class LlvmBehaviorNativeSandboxPolicyV2OperationJournalTest {
             fixture.checksum.toString(),
             fixture.source.toString(),
             fixture.buildRecord.toString(),
-        ).redirectErrorStream(true).start()
+        ).redirectErrorStream(true).ownedJvmChild().start()
         val output = process.inputStream.bufferedReader()
         val reader = Executors.newSingleThreadExecutor()
         try {

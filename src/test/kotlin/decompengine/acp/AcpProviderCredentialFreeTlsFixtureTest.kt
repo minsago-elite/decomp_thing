@@ -177,12 +177,16 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         val fixture = TlsFixture(Mode.UNKNOWN_HEADER)
         val owner = Any(); val policy = issueFixture(owner, fixture)
         val broker = startAndOpen(fixture, policy, owner)
+        var primaryFailure: Throwable? = null
         try {
             assertEquals(AcpProviderTerminalKind.MALFORMED_RESPONSE, beginAndFail(broker).kind)
             assertEquals(1, fixture.received.get())
             assertEquals(1, fixture.accepted.get())
             assertEquals(0L, broker.snapshot().responseBytes)
-        } finally { closeVerified(broker, fixture) }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally { closeVerified(broker, fixture, primaryFailure, Mode.UNKNOWN_HEADER) }
     }
 
     @Test
@@ -190,12 +194,16 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         val fixture = TlsFixture(Mode.WRONG_AUTHORIZATION)
         val owner = Any(); val policy = issueFixture(owner, fixture)
         val broker = startAndOpen(fixture, policy, owner)
+        var primaryFailure: Throwable? = null
         try {
             assertEquals(AcpProviderTerminalKind.AUTHENTICATION, beginAndFail(broker).kind)
             assertEquals(1, fixture.received.get())
             assertEquals(0, fixture.accepted.get())
             assertEquals(0L, broker.snapshot().responseBytes)
-        } finally { closeVerified(broker, fixture) }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally { closeVerified(broker, fixture, primaryFailure, Mode.WRONG_AUTHORIZATION) }
     }
 
     @Test
@@ -251,7 +259,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             val beforeThreads = ownedClientThreads()
             val directFailure = assertFailsWith<InvocationTargetException> {
                 constructor.newInstance(policy, AgentExecutionRequestBinding.capture(request), AgentCancellation.NONE,
-                    AcpProviderCredentialMaterial.cachedChatGpt("synthetic", "fixture_account"), Duration.ofSeconds(2), 32, null, fake, null)
+                    AcpProviderCredentialMaterial.cachedChatGpt("synthetic", "fixture_account"), Duration.ofSeconds(2), 32, null, fake, System.nanoTime(), null)
             }
             assertTrue(directFailure.cause is IllegalArgumentException)
             assertTrue((ownedClientThreads() - beforeThreads).isEmpty())
@@ -399,30 +407,36 @@ class AcpProviderCredentialFreeTlsFixtureTest {
 
     @Test
     fun `actual refused connection cannot fall back or connect again to a second address`() {
-        val refusedPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
-        val fallback = RawTlsFixture(RawMode.RESET)
-        val owner = Any(); val policy = issueFixture(owner, refusedPort)
-        val broker = open(policy, owner)
-        val capture = CaptureReceiver()
-        try {
-            fallback.start()
-            val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
-            assertTrue(capture.terminal.await(2, TimeUnit.SECONDS))
-            assertFalse(capture.completed)
-            val method = requestOwner.javaClass.getDeclaredMethod("connectOnce", Socket::class.java, InetSocketAddress::class.java).also { it.isAccessible = true }
-            Socket(Proxy.NO_PROXY).use { second ->
-                val failure = assertFailsWith<InvocationTargetException> {
-                    method.invoke(requestOwner, second, InetSocketAddress(InetAddress.getByName("127.0.0.2"), fallback.port))
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { reservation ->
+            val refusedPort = reservation.localPort
+            val fallback = RawTlsFixture(RawMode.RESET)
+            val owner = Any(); val policy = issueFixture(owner, refusedPort)
+            val broker = open(policy, owner)
+            val capture = CaptureReceiver()
+            try {
+                // Keep the refused endpoint owned until the fallback listener has bound.
+                // Otherwise its ephemeral bind may reuse the just-released target port.
+                assertNotEquals(refusedPort, fallback.port, "refused target and fallback listener must be distinct")
+                reservation.close()
+                fallback.start()
+                val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+                assertTrue(capture.terminal.await(2, TimeUnit.SECONDS))
+                assertFalse(capture.completed)
+                val method = requestOwner.javaClass.getDeclaredMethod("connectOnce", Socket::class.java, InetSocketAddress::class.java).also { it.isAccessible = true }
+                Socket(Proxy.NO_PROXY).use { second ->
+                    val failure = assertFailsWith<InvocationTargetException> {
+                        method.invoke(requestOwner, second, InetSocketAddress(InetAddress.getByName("127.0.0.2"), fallback.port))
+                    }
+                    assertTrue(failure.cause is IOException)
+                    assertEquals("provider connection attempt refused", failure.cause!!.message)
+                    assertNull(failure.cause!!.cause)
+                    assertFalse(second.isConnected)
+                    assertEquals(-1, second.localPort, "second connect is refused before socket bind or network IO")
                 }
-                assertTrue(failure.cause is IOException)
-                assertEquals("provider connection attempt refused", failure.cause!!.message)
-                assertNull(failure.cause!!.cause)
-                assertFalse(second.isConnected)
-                assertEquals(-1, second.localPort, "second connect is refused before socket bind or network IO")
-            }
-            assertEquals(0, fallback.connections.get())
-            assertEquals(0, capture.bytes.size())
-        } finally { closeRawVerified(broker, fallback) }
+                assertEquals(0, fallback.connections.get())
+                assertEquals(0, capture.bytes.size())
+            } finally { closeRawVerified(broker, fallback) }
+        }
     }
 
     @Test
@@ -433,6 +447,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             val owner = Any(); val policy = issueFixture(owner, fixture.port)
             val broker = open(policy, owner)
             val capture = CaptureReceiver()
+            var primaryFailure: Throwable? = null
             try {
                 fixture.start()
                 backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
@@ -447,7 +462,10 @@ class AcpProviderCredentialFreeTlsFixtureTest {
                     assertEquals(0, capture.bytes.size(), mode.name)
                 }
                 assertFalse(capture.bytes.toString(Charsets.UTF_8).contains("unreleased_error"), mode.name)
-            } finally { closeRawVerified(broker, fixture) }
+            } catch (failure: Throwable) {
+                primaryFailure = failure
+                throw failure
+            } finally { closeRawVerified(broker, fixture, primaryFailure, mode) }
         }
     }
 
@@ -458,6 +476,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             val owner = Any(); val policy = issueFixture(owner, fixture.port)
             val broker = open(policy, owner)
             val capture = CaptureReceiver(automaticDemand = mode != RawMode.STALL_DEMAND)
+            var primaryFailure: Throwable? = null
             try {
                 fixture.start()
                 val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
@@ -466,10 +485,13 @@ class AcpProviderCredentialFreeTlsFixtureTest {
                 awaitClientWait(mode)
                 val started = System.nanoTime()
                 requestOwner.cancel()
-                closeRawVerified(broker, fixture)
+                closeRawVerified(broker, fixture, scenario = mode)
                 assertTrue(System.nanoTime() - started < policy.bounds.cleanupTimeout.toNanos(), mode.name)
                 assertFalse(capture.completed, mode.name)
-            } finally { closeRawVerified(broker, fixture) }
+            } catch (failure: Throwable) {
+                primaryFailure = failure
+                throw failure
+            } finally { closeRawVerified(broker, fixture, primaryFailure, mode) }
         }
     }
 
@@ -477,14 +499,16 @@ class AcpProviderCredentialFreeTlsFixtureTest {
     fun `unjoined owned work produces bounded unverified cleanup instead of a terminal future claim`() {
         val fixture = RawTlsFixture(RawMode.RESET)
         val owner = Any(); val policy = issueFixture(owner, fixture.port)
+        val initialClientThreads = ownedClientThreads()
         val broker = open(policy, owner)
         val transport = backend(broker)
         val executor = transport.javaClass.getDeclaredField("executor").also { it.isAccessible = true }.get(transport) as ThreadPoolExecutor
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        executor.submit {
+        val worker = executor.submit {
             entered.countDown()
             while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { }
         }
+        var primaryFailure: Throwable? = null
         try {
             assertTrue(entered.await(1, TimeUnit.SECONDS))
             val started = System.nanoTime()
@@ -495,9 +519,31 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             assertFalse(snapshot.executorTerminated)
             assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
             assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
         } finally {
+            // Test-owned recovery releases resources without upgrading the missed broker proof.
+            val deadline = System.nanoTime() + policy.bounds.cleanupTimeout.toNanos()
             release.countDown()
-            closeRawVerified(broker, fixture)
+            try {
+                try {
+                    val lifecycle = AcpProviderBroker::class.java.getDeclaredField("lifecycle").also { it.isAccessible = true }
+                        .get(broker) as java.util.concurrent.ScheduledThreadPoolExecutor
+                    lifecycle.shutdownNow()
+                    worker.get((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+                    assertTrue(transport.closeWithin(Duration.ofNanos((deadline - System.nanoTime()).coerceAtLeast(0))))
+                    assertBackendCleanup(broker)
+                    assertTrue(lifecycle.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS))
+                    assertTrue(lifecycle.isTerminated)
+                    assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                    assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+                } finally { fixture.closeVerified(deadline) }
+                assertTrue((ownedClientThreads() - initialClientThreads).isEmpty(), "test-owned client threads remained")
+                assertTrue(System.nanoTime() <= deadline, "negative fixture recovery grace expired")
+            } catch (cleanupFailure: Throwable) {
+                if (primaryFailure != null) primaryFailure.addSuppressed(cleanupFailure) else throw cleanupFailure
+            }
         }
     }
 
@@ -524,10 +570,14 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         AcpProviderBroker::class.java.getDeclaredField("backend").also { it.isAccessible = true }.get(broker) as AcpProviderBrokerTestBackend
     private fun fixtureCredentials(policy: AcpProviderTransportPolicy.CredentialFreeFixture): AcpProviderCredentialMaterial =
         AcpProviderCredentialMaterial.cachedChatGpt(policy.syntheticAuthorization(), "credential_free_fixture_v1")
-    private fun closeRawVerified(broker: AcpProviderBroker, fixture: RawTlsFixture) {
-        val deadline = System.nanoTime() + broker.policy.bounds.cleanupTimeout.toNanos()
-        try { broker.close(); assertBackendCleanup(broker) } finally { fixture.closeVerified(deadline) }
-        assertTrue(System.nanoTime() <= deadline, "shared raw transport/server cleanup grace expired")
+    private fun closeRawVerified(broker: AcpProviderBroker, fixture: RawTlsFixture,
+                                 primaryFailure: Throwable? = null, scenario: RawMode? = null) {
+        val started = System.nanoTime()
+        val deadline = started + broker.policy.bounds.cleanupTimeout.toNanos()
+        observeFixtureCleanup(broker, started, deadline, scenario?.name, primaryFailure,
+            closeFixture = { fixture.closeVerified(deadline) }) {
+            assertTrue(System.nanoTime() <= deadline, "shared raw transport/server cleanup grace expired")
+        }
     }
 
     private class CaptureReceiver(private val automaticDemand: Boolean = true) : AcpProviderBackendReceiver {
@@ -670,12 +720,120 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         val exchange = broker.beginRequest(1, capability(broker), body())
         return assertFailsWith { exchange.awaitHeaders(); exchange.nextChunk() }
     }
-    private fun closeVerified(broker: AcpProviderBroker, fixture: TlsFixture) {
-        val cleanupDeadline = System.nanoTime() + broker.policy.bounds.cleanupTimeout.toNanos()
-        try { broker.close(); assertBackendCleanup(broker) } finally { fixture.closeVerified(cleanupDeadline) }
-        assertTrue(System.nanoTime() <= cleanupDeadline, "shared broker/server cleanup grace expired")
-        assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+    private fun closeVerified(broker: AcpProviderBroker, fixture: TlsFixture,
+                              primaryFailure: Throwable? = null, scenario: Mode? = null) {
+        val started = System.nanoTime()
+        val cleanupDeadline = started + broker.policy.bounds.cleanupTimeout.toNanos()
+        observeFixtureCleanup(broker, started, cleanupDeadline, scenario?.name, primaryFailure,
+            closeFixture = { fixture.closeVerified(cleanupDeadline) }) {
+            assertTrue(System.nanoTime() <= cleanupDeadline, "shared broker/server cleanup grace expired")
+            assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+        }
     }
+
+    private enum class CleanupObservationPhase { BROKER_CLOSE, BACKEND_ASSERTIONS, FIXTURE_CLOSE, SHARED_GRACE_ASSERTIONS }
+    private class CleanupDiagnostic(message: String) : RuntimeException(message, null, false, false)
+
+    /** Failure observations only: no extra close, wait, cancellation, or grace is introduced. */
+    private fun observeFixtureCleanup(broker: AcpProviderBroker, started: Long, deadline: Long,
+                                      scenario: String?, primaryFailure: Throwable?, closeFixture: () -> Unit,
+                                      completionChecks: () -> Unit) {
+        var cleanupFailure: Throwable? = null
+        fun retain(failure: Throwable, phase: CleanupObservationPhase) {
+            attachCleanupDiagnostic(failure, broker, started, deadline, scenario, phase)
+            val previous = cleanupFailure
+            if (previous == null) cleanupFailure = failure
+            else if (previous !== failure) previous.addSuppressed(failure)
+        }
+        var phase = CleanupObservationPhase.BROKER_CLOSE
+        try {
+            broker.close()
+            phase = CleanupObservationPhase.BACKEND_ASSERTIONS
+            assertBackendCleanup(broker)
+        } catch (failure: Throwable) {
+            retain(failure, phase)
+        } finally {
+            try { closeFixture() }
+            catch (failure: Throwable) { retain(failure, CleanupObservationPhase.FIXTURE_CLOSE) }
+        }
+        if (cleanupFailure == null) {
+            try { completionChecks() }
+            catch (failure: Throwable) { retain(failure, CleanupObservationPhase.SHARED_GRACE_ASSERTIONS) }
+        }
+        val failure = cleanupFailure ?: return
+        if (primaryFailure == null) throw failure
+        if (primaryFailure !== failure) primaryFailure.addSuppressed(failure)
+    }
+
+    private fun cleanupField(owner: Any, name: String): Any? =
+        owner.javaClass.getDeclaredField(name).also { it.isAccessible = true }.get(owner)
+
+    private fun cleanupObservation(read: () -> String): String =
+        try { read() } catch (_: Throwable) { "UNAVAILABLE" }
+
+    private fun cleanupExecutorObservation(value: Any?): String {
+        val executor = value as ThreadPoolExecutor
+        return "shutdown=${executor.isShutdown},terminated=${executor.isTerminated}"
+    }
+
+    private fun cleanupOwnerObservation(owner: Any): String {
+        check(owner.javaClass.name == "decompengine.acp.ProviderHttpAttempt")
+        fun flag(name: String) = (cleanupField(owner, name) as AtomicBoolean).get()
+        fun reference(name: String) = (cleanupField(owner, name) as java.util.concurrent.atomic.AtomicReference<*>).get()
+        val future = cleanupField(owner, "future") as java.util.concurrent.Future<*>?
+        val execution = (cleanupField(owner, "execution") as AtomicInteger).get()
+        val rejected = cleanupField(owner, "rejected") as Boolean
+        return "cleanupFailed=${flag("cleanupFailed")},cancelled=${flag("cancelled")},execution=$execution," +
+            "futurePresent=${future != null},futureDone=${future?.isDone == true},futureCancelled=${future?.isCancelled == true}," +
+            "futureTerminal=${rejected || future?.isDone == true},rawPresent=${reference("raw") != null}," +
+            "tlsPresent=${reference("tls") != null},connectionPresent=${reference("connection") != null},closedness=UNOBSERVED"
+    }
+
+    private fun attachCleanupDiagnostic(failure: Throwable, broker: AcpProviderBroker, started: Long, deadline: Long,
+                                         scenario: String?, phase: CleanupObservationPhase) {
+        // Only fixed labels, enums, booleans and numbers are rendered. Never inspect a wire,
+        // authority, receiver, body, header, parser, exception message, or thread stack.
+        try {
+            val observedAt = System.nanoTime()
+            val label = scenario?.takeIf { it.length <= 32 && it.all { c -> c in 'A'..'Z' || c == '_' } } ?: "UNSPECIFIED"
+            val disposition = cleanupObservation { (cleanupField(broker, "cleanup") as AcpProviderBrokerCleanup).name }
+            val lifecycle = cleanupObservation { cleanupExecutorObservation(cleanupField(broker, "lifecycle")) }
+            val backend = cleanupField(broker, "backend")
+            val backendState = cleanupObservation {
+                check(backend != null && backend.javaClass.name == "decompengine.acp.CoreAcpProviderBackend")
+                "closed=${(cleanupField(backend, "closed") as AtomicBoolean).get()}," +
+                    cleanupExecutorObservation(cleanupField(backend, "executor"))
+            }
+            val ownerStates = cleanupObservation {
+                check(backend != null && backend.javaClass.name == "decompengine.acp.CoreAcpProviderBackend")
+                // Inspect the list only once backend admission is closed and its workers are
+                // terminated. Active socket/connection getters and executor queue locks are
+                // deliberately avoided; a present reference does not claim that it is open.
+                if (!(cleanupField(backend, "closed") as AtomicBoolean).get() ||
+                    !(cleanupField(backend, "executor") as ThreadPoolExecutor).isTerminated) {
+                    return@cleanupObservation "UNAVAILABLE_BACKEND_NOT_TERMINATED"
+                }
+                val owners = cleanupField(backend, "owners") as List<*>
+                synchronized(owners) {
+                    val count = owners.size
+                    val rows = ArrayList<String>(minOf(count, 4))
+                    for (index in 0 until minOf(count, 4)) {
+                        rows += cleanupObservation { cleanupOwnerObservation(checkNotNull(owners[index])) }
+                    }
+                    "count=$count,truncated=${count > 4},retired=${cleanupField(backend, "retiredOwners") as Int},rows=[${rows.joinToString(";")}]"
+                }
+            }
+            val message = "TLS_CLEANUP_AFTER_FAILURE scenario=$label phase=${phase.name} cleanup=$disposition " +
+                "elapsedNanos=${(observedAt - started).coerceAtLeast(0)} budgetNanos=${(deadline - started).coerceAtLeast(0)} " +
+                "deadlineExpired=${observedAt > deadline} interrupted=${Thread.currentThread().isInterrupted} " +
+                "lifecycle=[$lifecycle] backend=[$backendState] owners=[$ownerStates]"
+            failure.addSuppressed(CleanupDiagnostic(message.take(2048)))
+        } catch (_: Throwable) {
+            // A diagnostic reflection/formatting failure cannot replace the original failure.
+            failure.addSuppressed(CleanupDiagnostic("TLS_CLEANUP_AFTER_FAILURE diagnostics=UNAVAILABLE"))
+        }
+    }
+
     private fun assertBackendCleanup(broker: AcpProviderBroker) {
         val cleanup = assertNotNull(broker.concreteBackendCleanupSnapshot())
         assertTrue(cleanup.transportTerminated)

@@ -41,7 +41,7 @@ internal class AcpProviderResponseStream(
     private val forbiddenPatterns = FORBIDDEN_RENDERED_MARKERS.map { ProviderSecretPattern(it.toByteArray(Charsets.UTF_8)) }
     private val deltaMatcher: ProviderSemanticMatcher
     private val logicalDeltaMatchers = LinkedHashMap<String, ProviderSemanticMatcher>()
-    private val event = ByteArrayOutputStream(minOf(bounds.maximumChunkBytes, 8192))
+    private val event = ErasableProviderEventBuffer(minOf(bounds.maximumChunkBytes, 8192))
     private val pending = ArrayDeque<ByteArray>()
     private var pendingBytes = 0L
     private var observedBytes = 0L
@@ -85,6 +85,7 @@ internal class AcpProviderResponseStream(
         }
         observedBytes += bytes.size
         val released = ArrayList<ByteArray>()
+        try {
         for (byte in bytes) {
             if (completed) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
             if (rawMatcher.accept(byte)) reject(AcpProviderTerminalKind.SECRET_EXPOSURE)
@@ -101,6 +102,11 @@ internal class AcpProviderResponseStream(
             priorByte = unsigned
         }
         return released
+        } catch (failure: Exception) {
+            released.forEach { it.fill(0) }
+            abort((failure as? AcpProviderStreamFailure)?.kind ?: AcpProviderTerminalKind.MALFORMED_RESPONSE)
+            throw failure
+        }
     }
 
     @Synchronized
@@ -116,7 +122,7 @@ internal class AcpProviderResponseStream(
     /** Called only after the upstream owner has supplied actual EOF and finish has succeeded. */
     @Synchronized
     fun drainFinished(): List<ByteArray> {
-        if (!finished || drained || failure != null) throw AcpProviderStreamFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE)
+        if (!finished || drained || failure != null) reject(AcpProviderTerminalKind.MALFORMED_RESPONSE)
         drained = true
         val result = pending.map(ByteArray::copyOf)
         pending.forEach { it.fill(0) }
@@ -128,7 +134,7 @@ internal class AcpProviderResponseStream(
     private fun completeEvent(released: MutableList<ByteArray>) {
         if (++events > MAXIMUM_EVENTS) reject(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
         val raw = event.toByteArray()
-        event.reset()
+        event.erase()
         val text = try {
             raw.decodeToString(throwOnInvalidSequence = true)
         } catch (_: Exception) {
@@ -359,18 +365,26 @@ internal class AcpProviderResponseStream(
     }
 
     private fun reject(kind: AcpProviderTerminalKind): Nothing {
-        failure = kind
-        pending.forEach { it.fill(0) }
-        pending.clear()
-        pendingBytes = 0L
-        event.reset()
-        eraseSecrets()
+        abort(kind)
         throw AcpProviderStreamFailure(kind)
     }
 
+    /** External owner failures must erase the same quarantine as parser-originated rejection. */
+    @Synchronized
+    fun abort(kind: AcpProviderTerminalKind) {
+        if (failure == null) failure = kind
+        pending.forEach { it.fill(0) }
+        pending.clear()
+        pendingBytes = 0L
+        event.erase()
+        eraseSecrets()
+    }
+
     private fun eraseSecrets() {
-        secretPatterns.forEach { it.bytes.fill(0) }
+        rawMatcher.clear(); emittedMatcher.clear(); deltaMatcher.clear()
+        logicalDeltaMatchers.values.forEach { it.clear() }
         logicalDeltaMatchers.clear()
+        secretPatterns.forEach { it.bytes.fill(0); it.prefixes.fill(0) }
     }
 
     companion object {
@@ -415,6 +429,7 @@ private class ProviderSemanticMatcher(secrets: List<ProviderSecretPattern>, forb
     }
 
     fun hasPrefix(): Boolean = credentials.hasPrefix() || markup.hasPrefix()
+    fun clear() { credentials.clear(); markup.clear() }
 }
 
 /** Knuth–Morris–Pratt state is finite even for overlapping, adversarial credential prefixes. */
@@ -446,6 +461,12 @@ private class ProviderSecretMatcher(private val patterns: List<ProviderSecretPat
     }
 
     fun hasPrefix(): Boolean = positions.any { it != 0 }
+    fun clear() { positions.fill(0) }
 }
 
 private fun stringValue(value: JsonElement?): String? = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+/** reset() alone leaves the previous event bytes in ByteArrayOutputStream's retained backing array. */
+private class ErasableProviderEventBuffer(capacity: Int) : ByteArrayOutputStream(capacity) {
+    fun erase() { buf.fill(0); reset() }
+}

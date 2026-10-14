@@ -19,13 +19,31 @@ import kotlin.test.assertTrue
 
 class AcpProviderExecutionEvidenceV3Test {
     @Test
+    fun `completed request requires real response bytes`() {
+        assertFailsWith<IllegalArgumentException> { request().copy(responseBytes = 0) }
+    }
+
+    @Test
+    fun `denial excludes upstream only failures`() {
+        for (kind in listOf(AcpProviderExecutionTerminal.COMPLETED, AcpProviderExecutionTerminal.AUTHENTICATION,
+            AcpProviderExecutionTerminal.AUTHORIZATION, AcpProviderExecutionTerminal.MALFORMED_RESPONSE)) {
+            assertFailsWith<IllegalArgumentException> { AcpProviderExecutionDenialEvidence(1, kind) }
+        }
+        for (kind in AcpProviderExecutionTerminal.entries.filter { it !in listOf(
+            AcpProviderExecutionTerminal.COMPLETED, AcpProviderExecutionTerminal.AUTHENTICATION,
+            AcpProviderExecutionTerminal.AUTHORIZATION, AcpProviderExecutionTerminal.MALFORMED_RESPONSE) }) {
+            assertEquals(kind, AcpProviderExecutionDenialEvidence(1, kind).terminal)
+        }
+    }
+
+    @Test
     fun `provider binding advances only invocation schema and cannot be replayed`() {
         val invocation = invocation()
         val transport = snapshot()
         val permit = ownedPermit(invocation)
         assertSame(invocation, invocation.bindProviderExecutionEvidence(permit, transport))
         assertEquals("acp", invocation.providerId)
-        assertEquals(3, invocation.schemaVersion)
+        assertEquals(4, invocation.schemaVersion)
         assertSame(transport, invocation.providerTransportEvidence)
         assertNull(invocation.completeExecutionEvidence)
         assertFalse(transport.releaseComplete)
@@ -292,7 +310,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val invocation = invocation(phase = AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             cleanup = AcpExecutionCleanupDisposition.NOT_REQUIRED)
         invocation.bindProviderExecutionEvidence(ownedPermit(invocation), evidence)
-        assertEquals(3, invocation.schemaVersion)
+        assertEquals(4, invocation.schemaVersion)
         assertFalse(evidence.cleanup.admissionSticky)
     }
 
@@ -424,7 +442,7 @@ class AcpProviderExecutionEvidenceV3Test {
         remainingMillis: Long = PROFILE.bounds.overallTimeout.toMillis(),
         cleanup: AcpProviderExecutionCleanupEvidence = cleanup(),
         resourceEvidence: AcpProviderExecutionResourceEvidence = resources(),
-    ) = AcpProviderInvocationEvidenceSnapshot(authority, HASH, HASH, profileDigest, modelDigest,
+    ) = AcpProviderInvocationEvidenceSnapshot(authority, profileDigest, modelDigest,
         AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1, PROFILE.reasoning,
         AcpProviderExecutionDescriptorEvidence(CONFIGURATION, issuerDigest, consumerDigest,
             HASH, HASH, HASH, HASH, HASH, HASH, HASH, HASH), INVOCATION, requestDigest, session, turn,

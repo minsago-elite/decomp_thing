@@ -11,6 +11,9 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.Properties
+import java.util.UUID
+import java.nio.charset.StandardCharsets
+import java.nio.file.StandardOpenOption
 import java.util.zip.ZipFile
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
@@ -176,6 +179,51 @@ tasks.processTestResources {
     from(providerDnsLoopbackReferenceDigest) { into("acp-provider-dns-native") }
 }
 tasks.withType<Test>().configureEach {
+    // CI-only explicit executable is configured before javaLauncher is ever realized.
+    val fixtureHome = providers.gradleProperty("ciAcpFixtureJdkHome").orNull
+    if (fixtureHome != null) {
+        val selected = Path.of(fixtureHome).toAbsolutePath().normalize()
+        val ownedBuild = layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+        require(selected.startsWith(ownedBuild) && selected.toRealPath() == selected)
+        val receiptPath = Path.of(providers.gradleProperty("ciAcpFixtureJdkReceipt").get())
+        require(receiptPath.parent == selected.parent && receiptPath.toRealPath() == receiptPath)
+        val fixture = Properties().also { values -> Files.newInputStream(receiptPath).use(values::load) }
+        require(fixture.getProperty("home") == selected.toString() && fixture.getProperty("java") == selected.resolve("bin/java").toString())
+        val state = selected.parent
+        val scratch = Path.of(providers.gradleProperty("ciAcpFixtureJvmScratch").get())
+        val repository = rootProject.layout.projectDirectory.asFile.toPath().toRealPath()
+        require(state.fileName.toString().matches(Regex("ci-jdk-[0-9a-f-]{36}")) &&
+            state.parent.fileName.toString() == "build" && state.parent.parent == repository)
+        require(scratch == repository && listOf("TMPDIR", "TMP", "TEMP").all { System.getenv(it) == repository.toString() }) {
+            "CI Test scratch must equal the admitted canonical repository root"
+        }
+        require(scratch.isAbsolute && scratch.toRealPath() == scratch &&
+            scratch.toString().toByteArray(StandardCharsets.UTF_8).size +
+            ("/pinned-docker-runtime-" + "9".repeat(20) + "/runtime/docker.sock").length <= 107)
+        val scratchAttrs = Files.readAttributes(scratch, "unix:uid,mode", LinkOption.NOFOLLOW_LINKS)
+        require(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS) &&
+            scratchAttrs.getValue("uid").toString() == fixture.getProperty("uid") &&
+            (scratchAttrs.getValue("mode") as Number).toInt() and 0x12 == 0)
+        executable = selected.resolve("bin/java").toString()
+        systemProperty("decompengine.ci.fixture.receipt", receiptPath.toString())
+        systemProperty("decompengine.ci.fixture.task", path)
+        jvmArgs("-XX:-UsePerfData", "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=$scratch",
+            "-Djna.tmpdir=$scratch", "-Duser.home=${state.resolve("home")}",
+            "-Djava.util.prefs.userRoot=${state.resolve("preferences")}", "-Djava.util.prefs.systemRoot=${state.resolve("preferences")}")
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("owned fixture requires actual Test JVM identity evidence") { false }
+        doFirst {
+            val launcher = javaLauncher.get()
+            require(launcher.executablePath.asFile.toPath().toRealPath() == selected.resolve("bin/java") &&
+                launcher.metadata.installationPath.asFile.toPath().toRealPath() == selected)
+            val attrs = Files.readAttributes(selected.resolve("bin/java"), "unix:dev,ino,uid,mode,nlink", LinkOption.NOFOLLOW_LINKS)
+            require((attrs.getValue("mode") as Number).toInt() and 0xfff == 0x1ed && (attrs.getValue("nlink") as Number).toLong() == 1L)
+            listOf("dev", "ino", "uid").forEach { key -> require(attrs.getValue(key).toString() == fixture.getProperty(key)) }
+            val selection = state.resolve("selections/selection-${UUID.randomUUID()}.properties")
+            Files.writeString(selection, "task=$path\nhome=$selected\njava=${selected.resolve("bin/java")}\n", StandardCharsets.US_ASCII,
+                StandardOpenOption.CREATE_NEW)
+        }
+    }
     val nativeDnsRequired = providers.environmentVariable("DECOMP_REQUIRE_NATIVE_PROVIDER_DNS").orElse("")
     val liveAcpRequired = providers.environmentVariable("DECOMP_REQUIRE_LIVE_ACP_CONTRACT").orElse("")
     inputs.property("requiredNativeProviderDns", nativeDnsRequired)
@@ -1936,6 +1984,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
+    testImplementation("org.junit.platform:junit-platform-launcher:1.10.1")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("io.airlift:aircompressor:2.0.3")
 }
@@ -2243,4 +2292,25 @@ tasks.named("check") {
     dependsOn(verifyAcpProviderDnsDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
+}
+
+
+// The dependency resolution and compiled class outputs are trusted gate inputs, not receipt claims.
+// This task never depends on test execution, so testClasses does not form a task cycle.
+tasks.register<Exec>("verifyProviderDnsNativeQualification") {
+    group = "verification"
+    dependsOn("testClasses")
+    doFirst {
+        val artifacts = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+            it.moduleVersion.id.group == "org.jetbrains.kotlin" && it.moduleVersion.id.name == "kotlin-stdlib"
+        }
+        require(artifacts.size == 1 && artifacts.single().moduleVersion.id.version == "2.4.0") {
+            "Native DNS gate requires the exact resolved org.jetbrains.kotlin:kotlin-stdlib:2.4.0 artifact"
+        }
+        val stdlib = artifacts.single().file.toPath().toAbsolutePath().normalize()
+        require(Files.isRegularFile(stdlib, LinkOption.NOFOLLOW_LINKS) && stdlib.toRealPath() == stdlib)
+        val runId = providers.environmentVariable("DECOMP_ACP_CONTRACT_RUN_ID").get()
+        require(runId.matches(Regex("[A-Za-z0-9-]{1,80}")))
+        commandLine("python3", "-B", "scripts/verify-acp-provider-dns.py", runId, stdlib.toString())
+    }
 }

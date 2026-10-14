@@ -295,6 +295,43 @@ class AcpProviderGuardianBoundaryTest {
         }
 
     @Test
+    fun `guardian revocation excludes blocked inbound and outbound tracker commits`() =
+        withLiveFixture("idle") { _, _, _, running ->
+            val initialize = """{"jsonrpc":"2.0","id":"init-race","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}"""
+            val initialized = """{"jsonrpc":"2.0","id":"init-race","result":{"protocolVersion":1,"agentCapabilities":{}}}"""
+            running.outbound(initialize)
+            running.inbound(initialized)
+            running.outbound("""{"jsonrpc":"2.0","id":"new-race","method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}""")
+            // Both frames would mutate tracker state; the response would also bind a session.
+            val frames = listOf(
+                { running.inbound("""{"jsonrpc":"2.0","id":"new-race","result":{"sessionId":"late-session"}}""") },
+                { running.outbound("""{"jsonrpc":"2.0","id":"late-request","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}""") },
+            )
+            val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+            val threads = frames.map { frame -> Thread({
+                try { frame(); failures.add(AssertionError("revoked frame admitted")) }
+                catch (failure: Throwable) { failures.add(failure) }
+            }, "guardian-admission-race") }
+            val before = running.admissionState()
+            synchronized(running.admissionMonitor()) {
+                threads.forEach(Thread::start)
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (threads.any { it.state != Thread.State.BLOCKED } && System.nanoTime() < deadline) Thread.onSpinWait()
+                threads.forEach { assertEquals(Thread.State.BLOCKED, it.state) }
+                running.markClosing()
+                assertEquals(before, running.admissionState())
+            }
+            threads.forEach { it.join(2000); assertFalse(it.isAlive) }
+            assertEquals(2, failures.size)
+            failures.forEach {
+                assertTrue(it is AcpProtocolFailure)
+                assertEquals("guardian ACP admission is revoked", it.message)
+            }
+            assertEquals(before, running.admissionState(), "revocation must preserve pending IDs and unbound session")
+            assertNull(running.boundSession())
+        }
+
+    @Test
     fun `guardian pure frame guards preserve accounting enforce session and redact refused input before cleanup`() =
         withLiveFixture("idle") { fixture, _, sandboxed, running ->
             val input = running.stdout()
@@ -596,6 +633,15 @@ class AcpProviderGuardianBoundaryTest {
                 .apply { isAccessible = true }.invoke(instance, *arguments)
         } catch (failure: InvocationTargetException) { throw failure.targetException }
         private fun field(name: String): Any? = type.getDeclaredField(name).apply { isAccessible = true }.get(instance)
+        fun admissionMonitor(): Any = requireNotNull(field("guardianAdmission"))
+        fun admissionState(): List<Any?> {
+            val tracker = requireNotNull(field("requestIds"))
+            fun trackerField(name: String) = tracker.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(tracker)
+            val pending = (trackerField("pendingOutboundIds") as Set<*>).toSet()
+            val creation = (trackerField("pendingSessionCreationId") as java.util.concurrent.atomic.AtomicReference<*>).get()
+            val activity = field("activity") as ProtocolActivity
+            return listOf(pending, creation, boundSession(), failure(), outputCount(), activity.lastActivityNanos.get())
+        }
         fun inbound(frame: String) { call("validateGuardianInboundFrame", frame) }
         fun outbound(frame: String) { call("validateGuardianOutboundFrame", frame) }
         fun markClosing() { call("markGuardianClosing") }

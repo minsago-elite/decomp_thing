@@ -1,0 +1,17 @@
+# Additive completed pure18 verification and read-only capsule audit
+
+Root executed approved setup002 once. Actual retained receipt PASS; compiler9.346227s exit0, pure18 runner0.722557s exit0. Both captures/waits complete; cleanup verified with no intervention; inputs verified and unchanged. Exact three-class/eighteen-method selectors from commands.json are copied into verification.json. The actual log records18 found/started/successful,0 skipped/aborted/failed and fixed PROVIDER495_PURE18_PASS. No rerun, JVM, native control/helper, DNS, namespace, proc, signals, target, provider, auth/model, network, Git/remote or Actions action by this audit.
+
+## Proven corrected observer selection
+
+Bounded Python constant-pool inspection reads the actual fresh compiler output and the pinned DNS class provider from the exact runtime classpath. Native code source is fresh execution/classes; DNS code source is prior verified provider-tls-sticky-cleanup-correction/main, not a claim about a fresh whole-project main build. Exact current selector semantics produce32 class entries/276454bytes. All four required observer roots are selected and reached from Control/file initialization. NativeObserverBudget$1 is the actual generated nested class and is selected too. All same-package CONSTANT_Class and typed/generic-descriptor references from this corrected observer subgraph are present. Fresh output pins cover20 class files plus one Kotlin module. Parser checks class-file magic, bounded CP slots/tag widths/index targets and this_class identity; it never loads or executes a class.
+
+## Full selected capsule closure is NOT certified
+
+All selected classes were inspected, including host-only methods and signatures. AcpProviderDnsRuntimeContext references absent BoundaryProviderDnsRuntimeContext (not reached by the class-level child/file graph). DispatchTicket/ProviderDnsControlLease/ProviderDnsPinnedResources expose15 absent classes on that conservative class-level graph, including LinuxBubblewrapBoundary, closure and descriptor types. verification.json retains every exact edge and the missing frontier. These production boundary dependencies are outside the observer correction; presence of constant-pool references alone does not prove their methods execute in the credential-free reflective constructor path, and it does not prove runtime linkage succeeds without them. No arbitrary production closure was added. Full dependency-complete capsule/runtime qualification remains unproven.
+
+No control.jar was emitted by this audit, so32 is the exact selected class set rather than an independently constructed archive receipt. Reflective class-name strings, external JDK/Kotlin/JUnit dependencies, resource/JAR packaging, native execution and production acceptance are outside this proof. Actual native/Actions qualification remains root custody.
+
+## Bounds and binding
+
+Per-file class cap1MiB; selected entries256; selected class bytes16MiB; package enumeration10000 with sentinel; fresh traversal256 paths with sentinel; CP slots65535 per class. Receipt/config/log reads bounded4MiB/4MiB/1MiB. No unbounded directory-to-list before these caps. Current three source files, setup/controller/runner, actual receipt/logs, exact selectors, selected class provider origins/dependency graph and every fresh output digest are pinned transitively. Original source66db/setup001/setup002 remain unchanged.

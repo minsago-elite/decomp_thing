@@ -106,7 +106,9 @@ private fun nativeDnsCase(caseName: String) {
     Files.setPosixFilePermissions(root, nativePermissions)
     val receipt = root.resolve("$caseName.json")
     val tree = root.resolve("$caseName-$runId")
-    check(!Files.exists(receipt, NOFOLLOW_LINKS) && !Files.exists(tree, NOFOLLOW_LINKS)) {
+    val retained = root.resolve("$caseName-$runId-closure")
+    check(!Files.exists(receipt, NOFOLLOW_LINKS) && !Files.exists(tree, NOFOLLOW_LINKS) &&
+        !Files.exists(retained, NOFOLLOW_LINKS)) {
         "native DNS output already exists; a fresh run must refuse stale evidence"
     }
     Files.createDirectory(tree, PosixFilePermissions.asFileAttribute(nativePermissions))
@@ -132,6 +134,12 @@ private fun nativeDnsCase(caseName: String) {
     var process: Process? = null
     var outerNamespace: Pair<NativeNamespace, NativeNamespace>? = null
     var verified = false
+    var primaryFailure: Throwable? = null
+    var cleanupFailure: Throwable? = null
+    var childOutcome = "NOT_STARTED"
+    nativeVisibilitySink = root.resolve("$caseName-$runId-visibility.properties")
+    nativeVisibilityAccumulator.reset()
+    val observerLease = nativeObserverBudgetOwner.acquire(NativeObserverBudget(endMillis))
     try {
         Files.createDirectory(input.resolve("jdk"))
         val control = snapshotNativeControl(input)
@@ -158,7 +166,8 @@ private fun nativeDnsCase(caseName: String) {
         val probeResult = nativeWait(probe, endMillis)
         nativeRequireCapability(probeResult.first == 0, { "native DNS user/network namespace setup is unavailable" }, required)
         process = ProcessBuilder(command).directory(output.toFile()).apply { environment().clear(); redirectErrorStream(true) }.start()
-        val result = nativeWait(process, endMillis)
+        childOutcome = "WAIT_INCOMPLETE"
+        val result = nativeWait(process, endMillis, observe = { code, bytes -> childOutcome = nativeFixedChildOutcome(code, bytes) })
         output.resolve("namespace.properties").takeIf { Files.isRegularFile(it, NOFOLLOW_LINKS) }?.let {
             val p = nativeProperties(nativeRead(it, MAXIMUM_CONTROL_FILE))
             outerNamespace = NativeNamespace(p.getProperty("netDev").toLong(), p.getProperty("netIno").toLong()) to
@@ -190,8 +199,20 @@ private fun nativeDnsCase(caseName: String) {
         check(nativeShaFile(java) == facts["javaExecutableSha256"] && nativeShaFile(bwrap.toRealPath()) == facts["bwrapSha256"])
         check(nativeShaFile(envExecutable) == facts["envExecutableSha256"])
         check(nativeOrderedDigest(control.map { it.fileName.toString() + ":" + nativeShaFile(it) }) == facts["controlRuntimeClosureSha256"])
+        Files.createDirectory(retained, PosixFilePermissions.asFileAttribute(nativePermissions))
+        control.forEach { artifact ->
+            val limit = if (artifact.fileName.toString() == "control.jar") 16 * 1024 * 1024 else 8 * 1024 * 1024
+            Files.write(retained.resolve(artifact.fileName), nativeRead(artifact, limit), CREATE_NEW)
+        }
+        check(nativeOrderedDigest(control.map { artifact ->
+            artifact.fileName.toString() + ":" + nativeShaFile(retained.resolve(artifact.fileName))
+        }) == facts["controlRuntimeClosureSha256"])
         verified = true
+    } catch (failure: Throwable) {
+        primaryFailure = failure
+        throw failure
     } finally {
+        try {
         var rootReaped = false
         try { process?.let { nativeStop(it, endMillis) }; rootReaped = true }
         finally {
@@ -203,9 +224,9 @@ private fun nativeDnsCase(caseName: String) {
                 }
                 outerNamespace?.let { (net, user) ->
                     check(net != parentNet && user != parentUser)
-                    val retained = nativeNamespaceMembers(net, "net") + nativeNamespaceMembers(user, "user")
+                    val retained = nativeNamespaceMembers(net, "net", "HOST_CLEANUP") + nativeNamespaceMembers(user, "user", "HOST_CLEANUP")
                     retained.forEach { pid -> ProcessHandle.of(pid).ifPresent { it.destroyForcibly() } }
-                    nativeAwait(endMillis) { nativeNamespaceMembers(net, "net").isEmpty() && nativeNamespaceMembers(user, "user").isEmpty() }
+                    nativeAwait(endMillis) { nativeNamespaceMembers(net, "net", "HOST_CLEANUP").isEmpty() && nativeNamespaceMembers(user, "user", "HOST_CLEANUP").isEmpty() }
                     check(!nativeRetainsNamespace(net, "net") && !nativeRetainsNamespace(user, "user"))
                 }
             } finally {
@@ -224,6 +245,22 @@ private fun nativeDnsCase(caseName: String) {
                 nativeWriteReceipt(receipt, facts)
             }
         }
+        } catch (failure: Throwable) {
+            cleanupFailure = failure
+            nativeKeepPrimaryFailure(primaryFailure, failure)
+        } finally {
+            if (primaryFailure != null || cleanupFailure != null) {
+                val text = "case=$caseName\nrunId=$runId\nchildOutcome=$childOutcome\n" +
+                    "primaryFailure=${nativeFailureCategory(primaryFailure)}\ncleanupFailure=${nativeFailureCategory(cleanupFailure)}\n" +
+                    nativeObserverFailureFields(primaryFailure, "primary") + nativeObserverFailureFields(cleanupFailure, "cleanup") +
+                    "testSourceSha256=${facts["testSourceSha256"]}\nhelperSourceSha256=${facts["helperSourceSha256"]}\nworkerJarSha256=$expectedWorker\n"
+                try { Files.writeString(root.resolve("$caseName-$runId-failure.properties"), text, CREATE_NEW) }
+                catch (diagnostic: Throwable) { (primaryFailure ?: cleanupFailure)?.addSuppressed(diagnostic) }
+            }
+            nativeVisibilitySink = null
+            try { observerLease.close() }
+            catch (failure: Throwable) { nativeKeepPrimaryFailure(primaryFailure ?: cleanupFailure, failure) }
+        }
     }
 }
 
@@ -232,18 +269,31 @@ object AcpProviderNativeDnsControl {
     private var stage = "STARTUP"
     @JvmStatic
     fun main(args: Array<String>) {
+        var observerLease: AutoCloseable? = null
+        var failed = false
         try {
-            check(args.isNotEmpty())
+            nativeVisibilitySink = Path.of("/fixture-output/native-visibility.properties")
+            check(args.size >= 3)
+            observerLease = nativeObserverBudgetOwner.acquire(NativeObserverBudget(args[2].toLong()))
             when (args[0]) {
                 "outer" -> runOuter(args)
                 "inner" -> runInner(args)
                 else -> error("fixed control mode required")
             }
-        } catch (_: Throwable) {
-            // Fixed stage facts aid fixture diagnosis without exposing exceptions or packets.
+        } catch (failure: Throwable) {
+            // Fixed bounded failure facts survive cleanup without exposing exceptions or packets.
+            val role = args.firstOrNull().takeIf { it in setOf("outer", "inner") } ?: "control"
+            val cleanup = failure.suppressed.take(6).joinToString(",") { nativeFailureCategory(it) }
+            val text = "stage=$stage\nprimaryFailure=${nativeFailureCategory(failure)}\ncleanupFailures=$cleanup\n" + nativeObserverFailureFields(failure, "primary")
+            try { Files.writeString(Path.of("/fixture-output/native-$role-failure.properties"), text, CREATE_NEW) }
+            catch (diagnostic: Throwable) { failure.addSuppressed(diagnostic) }
             print("NATIVE_DNS_CONTROL_FAILED_$stage\n")
-            exitProcess(1)
+            failed = true
+        } finally {
+            nativeVisibilitySink = null
+            observerLease?.close()
         }
+        if (failed) exitProcess(1)
     }
 
     private fun runOuter(args: Array<String>) {
@@ -251,6 +301,7 @@ object AcpProviderNativeDnsControl {
         stage = "OUTER_ENVIRONMENT"
         check(System.getenv().isEmpty())
         val endMillis = args[2].toLong()
+        nativeVisibilityAccumulator.reset()
         check(nativeCapabilities("CapEff") == OUTER_CAPABILITIES)
         stage = "OUTER_NAMESPACES"
         val output = Path.of("/fixture-output")
@@ -286,6 +337,7 @@ object AcpProviderNativeDnsControl {
         val socket = DatagramSocket(null)
         var inner: Process? = null
         var blackhole: Thread? = null
+        var primary: Throwable? = null
         try {
             stage = "BLACKHOLE_BIND"
             socket.reuseAddress = false
@@ -318,26 +370,37 @@ object AcpProviderNativeDnsControl {
                 else -> "INNER_FIXED_LAUNCH_FAILURE"
             }
             check(result.first == 0 && result.second.contentEquals(INNER_MARKER.toByteArray(Charsets.US_ASCII)))
-            stage = "OUTER_CLEANUP"
+            stage = "OUTER_QUERY_STATE"
             check(!failed.get() && count.get() in 1..64)
+            stage = "OUTER_INNER_PROOF_READ"
             val proof = nativeProperties(nativeRead(output.resolve("inner.properties"), MAXIMUM_CONTROL_FILE))
             proof.setProperty("queryCount", count.get().toString())
             proof.setProperty("queryType", type.get().toString())
             // The blackhole is closed/joined before the final proof becomes visible.
             stop.set(true)
             socket.close()
+            stage = "OUTER_BLACKHOLE_JOIN"
             nativeJoin(blackhole, endMillis)
             proof.setProperty("blackholeJoined", "true")
-            check(nativeNamespaceMembers(net, "net").all { it == ProcessHandle.current().pid() })
+            stage = "OUTER_NAMESPACE_SCAN"
+            val members = nativeNamespaceMembers(net, "net", "OUTER_CLEANUP")
+            stage = "OUTER_NAMESPACE_MEMBERSHIP"
+            check(members.all { it == ProcessHandle.current().pid() })
             proof.setProperty("noActiveDescendants", "true")
+            stage = "OUTER_PROOF_WRITE"
             nativeWriteProperties(output.resolve("proof.properties"), proof.stringPropertyNames().associateWith(proof::getProperty))
             print(OUTER_MARKER)
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
         } finally {
             try {
-                stop.set(true)
-                socket.close()
-                blackhole?.let { nativeJoin(it, endMillis) }
-            } finally { inner?.let { nativeStop(it, endMillis) } }
+                try {
+                    stop.set(true)
+                    socket.close()
+                    blackhole?.let { nativeJoin(it, endMillis) }
+                } finally { inner?.let { nativeStop(it, endMillis) } }
+            } catch (cleanup: Throwable) { nativeKeepPrimaryFailure(primary, cleanup) }
         }
     }
 
@@ -363,6 +426,7 @@ object AcpProviderNativeDnsControl {
         val owner = AcpProviderDnsProcess::class.java.getDeclaredConstructor(artifactClass, Long::class.javaPrimitiveType)
             .also { it.isAccessible = true }.newInstance(artifact, requestDeadline)
         var admitted = false
+        var primary: Throwable? = null
         try {
             stage = "NATIVE_QUERY"
             owner.javaClass.getDeclaredMethod("start").also { it.isAccessible = true }.invoke(owner)
@@ -405,7 +469,13 @@ object AcpProviderNativeDnsControl {
                 "innerNoNewPrivileges" to "true", "workerNoNewPrivileges" to "true",
             ))
             print(INNER_MARKER)
-        } finally { check(owner.closeBefore(nativeCleanupDeadline(endMillis))) }
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally {
+            try { check(owner.closeBefore(nativeCleanupDeadline(endMillis))) }
+            catch (cleanup: Throwable) { nativeKeepPrimaryFailure(primary, cleanup) }
+        }
     }
 }
 
@@ -416,26 +486,202 @@ private fun nativeNamespace(kind: String, pid: String = "self"): NativeNamespace
     return NativeNamespace((Files.getAttribute(path, "unix:dev") as Number).toLong(), (Files.getAttribute(path, "unix:ino") as Number).toLong())
 }
 
-private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String): Set<Long> = Files.list(Path.of("/proc")).use { stream ->
-    stream.filter { it.fileName.toString().matches(Regex("[0-9]+")) }.map { path ->
-        try { if (nativeNamespace(kind, path.fileName.toString()) == namespace) path.fileName.toString().toLong() else null }
-        catch (_: java.nio.file.NoSuchFileException) { null }
-        catch (_: java.nio.file.AccessDeniedException) {
-            // A process belonging to our host uid must remain observable; do not turn a
-            // permission failure for an owned child into proof that it disappeared.
-            val ownUid = (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong()
-            val uid = try {
-                Files.readAllLines(path.resolve("status")).single { it.startsWith("Uid:") }
-                    .substringAfter(':').trim().split(Regex("\\s+")).map(String::toLong)
-            } catch (_: java.nio.file.NoSuchFileException) { emptyList() }
-            check(ownUid !in uid)
-            null // Unrelated host users have no authority in this newly created private namespace.
-        }
-    }.filter { it != null }.map { it!! }.toList().toSet()
+internal data class NativeNamespaceCredentials(val uid: List<Long>, val gid: List<Long>)
+
+internal fun parseNativeNamespaceCredentials(text: String, pid: Long): NativeNamespaceCredentials {
+    check(text.length <= 65536 && pid > 0)
+    val selected = linkedMapOf<String, String>()
+    text.lineSequence().forEach { line ->
+        val key = line.substringBefore(':')
+        if (key in setOf("Pid", "Uid", "Gid")) check(selected.put(key, line.substringAfter(':').trim()) == null)
+    }
+    check(selected["Pid"] == pid.toString()) { "native observer PID identity is unavailable" }
+    fun tuple(key: String): List<Long> {
+        val parts = checkNotNull(selected[key]).split(Regex("\\s+"))
+        check(parts.size == 4 && parts.all { it.matches(Regex("[0-9]{1,10}")) })
+        return parts.map { it.toLong().also { id -> check(id in 0..4294967295L) } }
+    }
+    return NativeNamespaceCredentials(tuple("Uid"), tuple("Gid"))
 }
 
-private fun nativeRetainsNamespace(namespace: NativeNamespace, kind: String): Boolean = Files.list(Path.of("/proc/self/fd")).use { stream ->
-    stream.anyMatch { path -> runCatching { Files.readSymbolicLink(path).toString() == "$kind:[${namespace.inode}]" }.getOrDefault(false) }
+internal fun nativeDeniedVisibilityRequiresFailure(caller: NativeNamespaceCredentials, target: NativeNamespaceCredentials?): Boolean =
+    target == null || caller.uid.any { it in target.uid } || caller.gid.any { it in target.gid }
+
+internal class NativeObserverFailure(val category: String, val observedPid: Long? = null,
+    val namespaceKind: String? = null, val observerPhase: String? = null) : IllegalStateException(category) {
+    init {
+        require(category in setOf("OBSERVER_DEADLINE", "SCAN_WORK_LIMIT", "PROC_BYTE_LIMIT", "DIAGNOSTIC_CAPACITY", "POSSIBLE_OWNED_VISIBILITY"))
+        require(observedPid == null || observedPid in 1..4294967295L)
+        require(namespaceKind == null || namespaceKind in setOf("net", "user"))
+        require(observerPhase == null || observerPhase in setOf("HOST_CLEANUP", "OUTER_CLEANUP"))
+    }
+}
+
+/** Shared across polling scans; exhaustion refuses proof instead of returning partial membership. */
+internal class NativeObserverBudget(val endMillis: Long, private val now: () -> Long = System::currentTimeMillis,
+    private val maximumScans: Int = 128, private val maximumPidsPerScan: Int = 4096,
+    private val maximumPids: Int = 16384, private val maximumWork: Int = 32768,
+    private val maximumBytes: Int = 32 * 1024 * 1024) {
+    private var scans = 0; private var scanPids = 0; private var pids = 0; private var work = 0; private var bytes = 0
+    fun checkpoint() { if (now() >= endMillis) throw NativeObserverFailure("OBSERVER_DEADLINE") }
+    fun beginScan() { checkpoint(); if (scans >= maximumScans) throw NativeObserverFailure("SCAN_WORK_LIMIT"); scans++; scanPids = 0 }
+    fun operation() { checkpoint(); if (work >= maximumWork) throw NativeObserverFailure("SCAN_WORK_LIMIT"); work++ }
+    fun pid() { checkpoint(); if (scanPids >= maximumPidsPerScan || pids >= maximumPids) throw NativeObserverFailure("SCAN_WORK_LIMIT"); scanPids++; pids++ }
+    fun readLimit(): Int { operation(); if (bytes >= maximumBytes) throw NativeObserverFailure("PROC_BYTE_LIMIT"); return minOf(65536, maximumBytes - bytes) + 1 }
+    fun readCompleted(count: Int) { checkpoint(); if (count < 0 || count > maximumBytes - bytes) throw NativeObserverFailure("PROC_BYTE_LIMIT"); bytes += count }
+}
+
+/** Fixed detail storage; overflow counts observations, never distinct identities or absence. */
+internal class NativeVisibilityAccumulator(private val rows: MutableList<String> = mutableListOf()) {
+    var overflowObservations = 0; private set
+    private var digest = ByteArray(32)
+    var scanComplete = false
+    fun reset() { rows.clear(); overflowObservations = 0; digest = ByteArray(32); scanComplete = false }
+    fun record(record: String, provenForeign: Boolean) {
+        check(record.length <= 768 && record.all { it.code in 32..126 })
+        if (record in rows) return
+        if (rows.size < 16) rows += record
+        else {
+            if (!provenForeign) throw NativeObserverFailure("DIAGNOSTIC_CAPACITY")
+            check(overflowObservations < 16384) { "native observer diagnostic count exhausted" }
+            val bytes = record.toByteArray(Charsets.US_ASCII)
+            digest = MessageDigest.getInstance("SHA-256").run {
+                update(digest); update(ByteBuffer.allocate(4).putInt(bytes.size).array()); digest(bytes)
+            }
+            overflowObservations++
+        }
+    }
+    fun render(): ByteArray {
+        val summary = "retainedRowCount=${rows.size}\ndistinctCredentialOverflowObservations=$overflowObservations\n" +
+            "observationDigest=${digest.joinToString("") { "%02x".format(it) }}\nscanComplete=$scanComplete\n"
+        return (rows.joinToString("\n", postfix = if (rows.isEmpty()) "" else "\n") + summary)
+            .toByteArray(Charsets.US_ASCII).also { check(it.size <= 16 * 1024) }
+    }
+}
+
+internal fun nativeStableDeniedCredentials(before: Long?, after: Long?, target: NativeNamespaceCredentials?): NativeNamespaceCredentials? =
+    target.takeIf { before != null && before >= 0 && before == after }
+
+private var nativeVisibilitySink: Path? = null
+private val nativeVisibilityRecords = mutableListOf<String>()
+private val nativeVisibilityAccumulator = NativeVisibilityAccumulator(nativeVisibilityRecords)
+/** Exact-owner scoped fixture state; closing a lease cannot extend or replace its absolute end. */
+internal class NativeObserverBudgetOwner {
+    var current: NativeObserverBudget? = null; private set
+    fun acquire(budget: NativeObserverBudget): AutoCloseable {
+        check(current == null) { "native observer budget already owned" }
+        current = budget
+        var closed = false
+        return AutoCloseable {
+            if (!closed) {
+                check(current === budget) { "native observer budget owner changed" }
+                current = null
+                closed = true
+            }
+        }
+    }
+}
+private val nativeObserverBudgetOwner = NativeObserverBudgetOwner()
+private fun nativeProcText(path: Path, budget: NativeObserverBudget? = null): String {
+    val limit = budget?.readLimit() ?: 65537
+    return Files.newInputStream(path).use { input ->
+        input.readNBytes(limit).also { budget?.readCompleted(it.size); check(it.size <= 65536) }.toString(Charsets.US_ASCII)
+    }
+}
+private fun nativeCredentialIdentity(pid: Long, budget: NativeObserverBudget? = null): NativeNamespaceCredentials =
+    parseNativeNamespaceCredentials(nativeProcText(Path.of("/proc", pid.toString(), "status"), budget), pid)
+private fun nativeStartTime(pid: Long, budget: NativeObserverBudget? = null): Long {
+    val value = nativeProcText(Path.of("/proc", pid.toString(), "stat"), budget)
+    val afterName = value.lastIndexOf(')')
+    check(afterName > 0 && value.substringBefore(' ') == pid.toString())
+    return value.substring(afterName + 1).trim().split(Regex("\\s+"))[19].toLong().also { check(it >= 0) }
+}
+private fun nativeRecordDenied(pid: Long, kind: String, phase: String, caller: NativeNamespaceCredentials,
+    target: NativeNamespaceCredentials?, startTime: Long?, outcome: String) {
+    check(kind in setOf("net", "user") && phase in setOf("HOST_CLEANUP", "OUTER_CLEANUP"))
+    nativeObserverBudgetOwner.current?.operation()
+    val procOwner = runCatching { (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() }.getOrNull()
+    val record = "pid=$pid kind=$kind phase=$phase callerPid=${ProcessHandle.current().pid()} outcome=$outcome startTime=${startTime ?: "UNAVAILABLE"} " +
+        "callerUid=${caller.uid.joinToString(",")} callerGid=${caller.gid.joinToString(",")} procSelfOwner=${procOwner ?: "UNAVAILABLE"} " +
+        "targetUid=${target?.uid?.joinToString(",") ?: "UNAVAILABLE"} targetGid=${target?.gid?.joinToString(",") ?: "UNAVAILABLE"}"
+    val foreign = outcome == "DISTINCT_CREDENTIALS" && startTime != null && target != null &&
+        !nativeDeniedVisibilityRequiresFailure(caller, target)
+    nativeVisibilityAccumulator.record(record, foreign)
+    nativePersistVisibility()
+}
+
+private fun nativePersistVisibility() {
+    val bytes = nativeVisibilityAccumulator.render()
+    nativeVisibilitySink?.let {
+        check(!Files.exists(it, NOFOLLOW_LINKS) || Files.isRegularFile(it, NOFOLLOW_LINKS))
+        Files.newOutputStream(it, NOFOLLOW_LINKS, java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE).use { output -> output.write(bytes) }
+    }
+}
+
+private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String, phase: String): Set<Long> {
+    val budget = checkNotNull(nativeObserverBudgetOwner.current)
+    nativeVisibilityAccumulator.scanComplete = false
+    var primary: Throwable? = null
+    try {
+        budget.beginScan()
+        val caller = nativeCredentialIdentity(ProcessHandle.current().pid(), budget)
+        val members = linkedSetOf<Long>()
+        budget.operation()
+        Files.list(Path.of("/proc")).use { stream ->
+            val iterator = stream.iterator()
+            while (true) {
+                budget.operation(); if (!iterator.hasNext()) break
+                budget.operation(); val path = iterator.next()
+                val name = path.fileName.toString()
+                if (!name.matches(Regex("[0-9]{1,10}"))) continue
+                budget.pid(); val pid = name.toLong()
+                try {
+                    budget.operation()
+                    if (nativeNamespace(kind, name) == namespace) members += pid
+                } catch (_: java.nio.file.NoSuchFileException) { /* exited before observation */ }
+                catch (_: java.nio.file.AccessDeniedException) {
+                    var target: NativeNamespaceCredentials? = null
+                    var start: Long? = null
+                    try {
+                        start = nativeStartTime(pid, budget)
+                        target = nativeCredentialIdentity(pid, budget)
+                        target = nativeStableDeniedCredentials(start, nativeStartTime(pid, budget), target)
+                    } catch (failure: NativeObserverFailure) { throw NativeObserverFailure(failure.category, pid, kind, phase) }
+                    catch (_: Exception) { target = null }
+                    val mustFail = nativeDeniedVisibilityRequiresFailure(caller, target)
+                    if (mustFail) {
+                        val primary = NativeObserverFailure("POSSIBLE_OWNED_VISIBILITY", pid, kind, phase)
+                        try { nativeRecordDenied(pid, kind, phase, caller, target, start, "OBSERVER_UNAVAILABLE") }
+                        catch (diagnostic: Throwable) { primary.addSuppressed(diagnostic) }
+                        throw primary
+                    }
+                    nativeRecordDenied(pid, kind, phase, caller, target, start, "DISTINCT_CREDENTIALS")
+                }
+            }
+        }
+        nativeVisibilityAccumulator.scanComplete = true
+        return members
+    } catch (failure: Throwable) { primary = failure; throw failure }
+    finally {
+        try { nativePersistVisibility() }
+        catch (diagnostic: Throwable) { nativeKeepPrimaryFailure(primary, diagnostic) }
+    }
+}
+
+private fun nativeRetainsNamespace(namespace: NativeNamespace, kind: String): Boolean {
+    val budget = checkNotNull(nativeObserverBudgetOwner.current)
+    budget.beginScan(); budget.operation()
+    return Files.list(Path.of("/proc/self/fd")).use { stream ->
+        val iterator = stream.iterator()
+        while (true) {
+            budget.operation(); if (!iterator.hasNext()) break
+            budget.operation(); val path = iterator.next(); budget.pid(); budget.operation()
+            try { if (Files.readSymbolicLink(path).toString() == "$kind:[${namespace.inode}]") return@use true }
+            catch (_: java.nio.file.NoSuchFileException) { /* descriptor closed during inventory */ }
+        }
+        false
+    }
 }
 
 private fun nativeHostLoopbackFlags(): String = Files.readString(Path.of("/sys/class/net/lo/flags")).trim().also {
@@ -487,6 +733,18 @@ private fun nativeJavaCommand(java: Path, classpath: List<Path>, output: Path): 
     classpath.joinToString(":") { "/fixture-input/${it.fileName}" },
 ).also { check(output.fileName.toString() in setOf("output", "fixture-output")) }
 
+// Explicit runtime dependency roots; include every generated nested class of each root.
+internal val nativeObserverCapsuleRoots = setOf("NativeObserverBudget", "NativeObserverBudgetOwner",
+    "NativeVisibilityAccumulator", "NativeObserverFailure")
+internal fun nativeObserverCapsuleClass(name: String): Boolean = name.endsWith(".class") &&
+    nativeObserverCapsuleRoots.any { root -> name == "$root.class" || name.startsWith("$root$") }
+internal fun nativeRequireObserverCapsuleInventory(entries: Set<String>) {
+    check(entries.size <= 256) { "native control capsule inventory capacity" }
+    check(nativeObserverCapsuleRoots.all { "decompengine/acp/$it.class" in entries }) {
+        "native control capsule is missing an observer runtime dependency"
+    }
+}
+
 private fun snapshotNativeControl(input: Path): List<Path> {
     val entries = sortedMapOf<String, ByteArray>()
     listOf(AcpProviderNativeDnsControl::class.java to "AcpProviderNativeDns", AcpProviderDnsProcess::class.java to "AcpProviderDns").forEach { (type, prefix) ->
@@ -495,10 +753,11 @@ private fun snapshotNativeControl(input: Path): List<Path> {
         val packageRoot = root.resolve("decompengine/acp")
         Files.list(packageRoot).use { paths -> paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) &&
             it.fileName.toString().let { name -> name.endsWith(".class") && (name.startsWith(prefix) ||
-                prefix == "AcpProviderNativeDns" && name.startsWith("NativeNamespace") ||
+                prefix == "AcpProviderNativeDns" && (name.startsWith("NativeNamespace") || nativeObserverCapsuleClass(name)) ||
                 prefix == "AcpProviderDns" && name.startsWith("ProviderDns")) }
         }.forEach { path -> entries["decompengine/acp/${path.fileName}"] = nativeRead(path, 1024 * 1024) } }
     }
+    nativeRequireObserverCapsuleInventory(entries.keys)
     entries[DNS_RESOURCE.removePrefix("/")] = nativeResource(DNS_RESOURCE)
     val jar = input.resolve("control.jar")
     JarOutputStream(Files.newOutputStream(jar, CREATE_NEW)).use { output -> entries.forEach { (name, bytes) ->
@@ -540,7 +799,41 @@ private fun nativeDnsQuestion(bytes: ByteArray): Int {
     return word(offset).also { check(it == 1 || it == 28) }
 }
 
-private fun nativeWait(process: Process, endMillis: Long, maximum: Int = MAXIMUM_CONTROL_OUTPUT): Pair<Int, ByteArray> {
+internal fun nativeObserverFailureFields(failure: Throwable?, prefix: String): String {
+    check(prefix in setOf("primary", "cleanup"))
+    val observed = failure as? NativeObserverFailure ?: return ""
+    return "${prefix}ObserverCategory=${observed.category}\n${prefix}ObserverPid=${observed.observedPid ?: "UNAVAILABLE"}\n" +
+        "${prefix}ObserverKind=${observed.namespaceKind ?: "UNAVAILABLE"}\n${prefix}ObserverPhase=${observed.observerPhase ?: "UNAVAILABLE"}\n"
+}
+
+internal fun nativeFailureCategory(failure: Throwable?): String = when (failure) {
+    null -> "NONE"
+    is NativeObserverFailure -> failure.category
+    is NativeNamespaceWaitFailure -> "EXECUTION_TIMEOUT"
+    is java.nio.file.AccessDeniedException -> "ACCESS_DENIED"
+    is java.io.IOException -> "IO_FAILURE"
+    is AssertionError -> "ASSERTION"
+    is IllegalStateException -> "STATE_FAILURE"
+    else -> "OTHER_FAILURE"
+}
+
+internal fun nativeKeepPrimaryFailure(primary: Throwable?, cleanup: Throwable) {
+    if (primary == null) throw cleanup
+    primary.addSuppressed(cleanup)
+}
+
+internal fun nativeFixedChildOutcome(code: Int?, bytes: ByteArray): String {
+    val marker = bytes.toString(Charsets.US_ASCII).trimEnd('\n')
+    return "exit=" + (code ?: "UNAVAILABLE") + ";stage=" + when {
+        code == null -> "WAIT_INCOMPLETE"
+        marker == OUTER_MARKER.trimEnd('\n') -> "OUTER_SUCCESS"
+        marker.matches(Regex("NATIVE_DNS_CONTROL_FAILED_[A-Z_]{1,64}")) -> marker.removePrefix("NATIVE_DNS_CONTROL_FAILED_")
+        else -> "UNRECOGNIZED_OUTPUT"
+    }
+}
+private class NativeNamespaceWaitFailure : IllegalStateException("native execution timeout")
+private fun nativeWait(process: Process, endMillis: Long, maximum: Int = MAXIMUM_CONTROL_OUTPUT,
+    observe: ((Int?, ByteArray) -> Unit)? = null): Pair<Int, ByteArray> {
     val executionEnd = endMillis - 5_000 // Both execution and cleanup ends are fixed before launch.
     val output = ByteArrayOutputStream()
     val overflow = AtomicBoolean()
@@ -553,16 +846,26 @@ private fun nativeWait(process: Process, endMillis: Long, maximum: Int = MAXIMUM
             }
         } catch (_: Throwable) { overflow.set(true) }
     }, "native-dns-fixed-output").also { it.isDaemon = true; it.start() }
+    var primary: Throwable? = null
     try {
         process.outputStream.close()
-        check(process.waitFor(nativeRemainingMillis(executionEnd), TimeUnit.MILLISECONDS))
+        if (!process.waitFor(nativeRemainingMillis(executionEnd), TimeUnit.MILLISECONDS)) throw NativeNamespaceWaitFailure()
         nativeJoin(reader, executionEnd)
         check(!overflow.get())
         check(process.errorStream.readNBytes(MAXIMUM_CONTROL_OUTPUT + 1).isEmpty())
         return process.exitValue() to output.toByteArray()
+    } catch (failure: Throwable) {
+        primary = failure
+        throw failure
     } finally {
-        try { nativeStop(process, endMillis) }
-        finally { nativeJoin(reader, endMillis) }
+        if (!reader.isAlive && !overflow.get()) observe?.invoke(if (process.isAlive) null else process.exitValue(), output.toByteArray())
+        else observe?.invoke(null, byteArrayOf())
+        try {
+            try { nativeStop(process, endMillis) }
+            finally { nativeJoin(reader, endMillis) }
+        } catch (failure: Throwable) {
+            nativeKeepPrimaryFailure(primary, failure)
+        }
     }
 }
 

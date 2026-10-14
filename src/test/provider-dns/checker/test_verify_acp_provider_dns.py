@@ -57,6 +57,28 @@ class CheckerTest(unittest.TestCase):
                           ''.join(k + '=' + v + '\n' for k, v in metadata.items()).encode())
         write('build/provider-dns/native/loopback-reference.sha256', (digest(reference) + '\n').encode())
         write('build/generated/provider-dns-resources/acp-provider-dns/worker.sha256', (digest(worker) + '\n').encode())
+        self.stdlib = write('trusted-gradle-cache/kotlin-stdlib-2.4.0.jar', b'fixed trusted stdlib')
+        self.runtime['stdlib'] = self.stdlib
+        self.class_names = {
+            'decompengine/acp/AcpProviderNativeDnsControl.class': b'current test bytecode',
+            'decompengine/acp/NativeNamespace.class': b'current namespace bytecode',
+            **{'decompengine/acp/' + root + '.class': ('current ' + root).encode() for root in
+               ['NativeObserverBudget', 'NativeObserverBudgetOwner', 'NativeVisibilityAccumulator', 'NativeObserverFailure']},
+            'decompengine/acp/NativeObserverBudget$1.class': b'current generated nested observer bytecode',
+            'decompengine/acp/AcpProviderDnsProcess.class': b'current main bytecode',
+            'decompengine/acp/ProviderDnsWorkerOwner.class': b'current owner bytecode',
+        }
+        for name, data in self.class_names.items():
+            source_set = 'test' if 'Native' in name else 'main'
+            write('build/classes/kotlin/' + source_set + '/' + name, data)
+        self.control_entries = {**self.class_names, 'acp-provider-dns/worker.sha256': (digest(worker) + '\n').encode()}
+        for case in gate.CASES:
+            directory = self.root / ('build/provider-dns-native-qualification/' + case + '-' + self.run + '-closure')
+            directory.mkdir(parents=True)
+            with zipfile.ZipFile(directory / 'control.jar', 'w') as archive:
+                for name, data in self.control_entries.items(): archive.writestr(name, data)
+            (directory / 'kotlin-stdlib.jar').write_bytes(self.stdlib.read_bytes())
+        closure = gate.verify_control_closure(self.root, self.closure_dir(), self.stdlib)
         self.receipt = {key: True for key in gate.FACTS}
         self.receipt.update({'schemaVersion': 1, 'caseName': 'cancel', 'runId': self.run,
                              'innerBoundingMask': '1400', 'workerBoundingMask': '1400',
@@ -68,7 +90,7 @@ class CheckerTest(unittest.TestCase):
                              'loopbackHelperSha256': digest(helper), 'loopbackReferenceSha256': digest(reference),
                              'compilerSha256': digest(tools['compiler']), 'linkerSha256': digest(tools['linker']),
                              'compileArgvSha256': metadata['compileArgvSha256'],
-                             'controlRuntimeClosureSha256': 'a' * 64})
+                             'controlRuntimeClosureSha256': closure})
         for case in gate.CASES:
             receipt = dict(self.receipt, caseName=case)
             write('build/provider-dns-native-qualification/' + case + '.json', json.dumps(receipt).encode())
@@ -76,6 +98,125 @@ class CheckerTest(unittest.TestCase):
                     ''.join('<testcase classname="' + gate.SUITE + '" name="' + name + '()"/>' for name in gate.CASES.values()) +
                     '</testsuite>')
         self.report = write('build/test-results/test/TEST-native.xml', self.xml.encode())
+
+    def closure_dir(self, case='cancel'):
+        return self.root / ('build/provider-dns-native-qualification/' + case + '-' + self.run + '-closure')
+
+    def rewrite_control(self, entries):
+        with zipfile.ZipFile(self.closure_dir() / 'control.jar', 'w') as archive:
+            for name, data in entries: archive.writestr(name, data)
+        self.rehash_closure()
+
+    def rehash_closure(self, case='cancel'):
+        directory = self.closure_dir(case)
+        value = hashlib.sha256('\0'.join(name + ':' + hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                                         for name in ['control.jar', 'kotlin-stdlib.jar']).encode()).hexdigest()
+        path = self.root / ('build/provider-dns-native-qualification/' + case + '.json')
+        if path.exists():
+            receipt = json.loads(path.read_text()); receipt['controlRuntimeClosureSha256'] = value
+            path.write_text(json.dumps(receipt))
+
+    def test_observer_roots_and_actual_zip_nested_inventory_are_source_bound(self):
+        self.assertEqual(('NativeObserverBudget', 'NativeObserverBudgetOwner',
+                          'NativeVisibilityAccumulator', 'NativeObserverFailure'), gate.OBSERVER_CONTROL_ROOTS)
+        expected = gate.compiled_control_entries(self.root)
+        for root in gate.OBSERVER_CONTROL_ROOTS:
+            self.assertIn('decompengine/acp/' + root + '.class', expected)
+            self.assertTrue(gate.observer_control_class(root + '$generated.class'))
+            self.assertFalse(gate.observer_control_class(root + 'Unrelated.class'))
+        self.assertIn('decompengine/acp/NativeObserverBudget$1.class', expected)
+        with zipfile.ZipFile(self.closure_dir() / 'control.jar') as archive:
+            self.assertEqual(set(expected), set(archive.namelist()))
+            for name, data in expected.items(): self.assertEqual(data, archive.read(name))
+        self.assertEqual('PASS', self.verify()['status'])
+
+    def test_observer_archive_omission_and_hash_tamper_rejected_even_after_rehash(self):
+        names = ['decompengine/acp/' + root + '.class' for root in gate.OBSERVER_CONTROL_ROOTS]
+        names.append('decompengine/acp/NativeObserverBudget$1.class')
+        for name in names:
+            with self.subTest(name=name, mutation='omission'):
+                entries = dict(self.control_entries); del entries[name]
+                self.rewrite_control(entries.items())
+                with self.assertRaises(gate.Invalid): self.verify()
+            with self.subTest(name=name, mutation='tamper'):
+                entries = dict(self.control_entries); entries[name] = b'tampered observer bytecode'
+                self.rewrite_control(entries.items())
+                with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_observer_roots_cannot_disappear_from_both_compilation_and_archive(self):
+        for root in gate.OBSERVER_CONTROL_ROOTS:
+            name = 'decompengine/acp/' + root + '.class'
+            path = self.root / ('build/classes/kotlin/test/' + name)
+            with self.subTest(root=root):
+                path.unlink()
+                try:
+                    entries = dict(self.control_entries); del entries[name]
+                    self.rewrite_control(entries.items())
+                    with self.assertRaisesRegex(gate.Invalid, 'missing observer runtime dependency'): self.verify()
+                finally: path.write_bytes(self.class_names[name])
+
+    def test_observer_lookalikes_and_uncompiled_nested_extras_remain_rejected(self):
+        for name in ['NativeObserverBudgetUnrelated.class', 'Unrelated.class', 'NativeDnsObserverDiagnosticTest.class']:
+            self.write('build/classes/kotlin/test/decompengine/acp/' + name, b'extra unrelated compiled class')
+            self.assertNotIn('decompengine/acp/' + name, gate.compiled_control_entries(self.root))
+            entries = dict(self.control_entries); entries['decompengine/acp/' + name] = b'extra unrelated compiled class'
+            self.rewrite_control(entries.items())
+            with self.assertRaises(gate.Invalid): self.verify()
+        entries = dict(self.control_entries); entries['decompengine/acp/NativeObserverBudget$uncompiled.class'] = b'extra nested'
+        self.rewrite_control(entries.items())
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_rehashed_substituted_control_rejected(self):
+        entries = dict(self.control_entries)
+        entries['decompengine/acp/AcpProviderDnsProcess.class'] = b'substitute'
+        self.rewrite_control(entries.items())
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_stale_compiled_control_rejected(self):
+        self.write('build/classes/kotlin/main/decompengine/acp/AcpProviderDnsProcess.class', b'new compiled main')
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_rehashed_wrong_worker_commitment_rejected(self):
+        entries = dict(self.control_entries); entries['acp-provider-dns/worker.sha256'] = b'f' * 64 + b'\n'
+        self.rewrite_control(entries.items())
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_missing_extra_duplicate_control_entries_rejected(self):
+        original = list(self.control_entries.items())
+        for entries in [original[1:], original + [('extra.class', b'extra')], original + [original[0]]]:
+            with self.subTest(entries=len(entries)):
+                self.rewrite_control(entries)
+                with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_oversized_control_entry_rejected(self):
+        entries = dict(self.control_entries); entries['decompengine/acp/AcpProviderDnsProcess.class'] = b'x' * (1024 * 1024 + 1)
+        self.rewrite_control(entries.items())
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_rehashed_substituted_stdlib_rejected(self):
+        (self.closure_dir() / 'kotlin-stdlib.jar').write_bytes(b'substitute stdlib')
+        self.rehash_closure()
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_deadline_closure_independently_checked(self):
+        (self.closure_dir('deadline') / 'kotlin-stdlib.jar').write_bytes(b'substitute deadline stdlib')
+        self.rehash_closure('deadline')
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_substituted_ordered_closure_digest_rejected(self):
+        self.alter('controlRuntimeClosureSha256', 'a' * 64)
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_missing_and_extra_closure_artifact_rejected(self):
+        path = self.closure_dir() / 'extra.jar'; path.write_bytes(b'extra')
+        with self.assertRaises(gate.Invalid): self.verify()
+        path.unlink(); (self.closure_dir() / 'control.jar').unlink()
+        with self.assertRaises(gate.Invalid): self.verify()
+
+    def test_symlink_control_rejected(self):
+        path = self.closure_dir() / 'control.jar'; data = path.read_bytes(); path.unlink()
+        target = self.write('substituted.jar', data); path.symlink_to(target)
+        with self.assertRaises(gate.Invalid): self.verify()
 
     def tearDown(self):
         self.temp.cleanup()

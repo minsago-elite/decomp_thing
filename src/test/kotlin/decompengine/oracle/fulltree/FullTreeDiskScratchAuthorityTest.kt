@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.ci.ownedJvmChild
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
@@ -1184,7 +1185,7 @@ class FullTreeDiskScratchAuthorityTest {
             EXPECTED_MAXIMUM_FILESYSTEM_BYTES.toString(),
             EXPECTED_MAXIMUM_FILESYSTEM_INODES.toString(),
             activeRun.toString(),
-        ).redirectErrorStream(true).start()
+        ).redirectErrorStream(true).ownedJvmChild().start()
         val exited = process.waitFor(30, TimeUnit.SECONDS)
         if (!exited) {
             process.destroyForcibly()

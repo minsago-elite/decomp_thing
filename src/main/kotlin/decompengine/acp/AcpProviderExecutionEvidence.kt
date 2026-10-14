@@ -193,7 +193,7 @@ data class AcpProviderExecutionRequestEvidence(
             (admittedOutputTokens == 0 || admittedOutputTokens == outputTokens)
         ) { "ACP provider request admitted usage is inconsistent" }
         require(terminal != AcpProviderExecutionTerminal.COMPLETED ||
-            (outputTokens != null && admittedOutputTokens == outputTokens)
+            (responseBytes > 0 && outputTokens != null && admittedOutputTokens == outputTokens)
         ) {
             "ACP provider completed request lacks output usage"
         }
@@ -202,18 +202,24 @@ data class AcpProviderExecutionRequestEvidence(
 
 data class AcpProviderExecutionDenialEvidence(val sequence: Long, val terminal: AcpProviderExecutionTerminal) {
     init {
-        require(terminal != AcpProviderExecutionTerminal.COMPLETED) { "ACP provider denial cannot be completed" }
+        require(terminal in setOf(AcpProviderExecutionTerminal.RESOURCE_EXHAUSTED,
+            AcpProviderExecutionTerminal.TIMEOUT, AcpProviderExecutionTerminal.CANCELLED,
+            AcpProviderExecutionTerminal.UNSUPPORTED_OPERATION, AcpProviderExecutionTerminal.UNSUPPORTED_MODEL,
+            AcpProviderExecutionTerminal.MALFORMED_REQUEST, AcpProviderExecutionTerminal.TRANSPORT,
+            AcpProviderExecutionTerminal.REVOKED, AcpProviderExecutionTerminal.SECRET_EXPOSURE)) {
+            "ACP provider denial is not a pre-dispatch terminal"
+        }
     }
 }
 
 /**
- * Immutable schema-v3 transport evidence. This checkpoint archives no provider qualification or
+ * Immutable schema-v4 transport evidence. Live policy/authority identities are not archived:
+ * their issuance cannot be reconstructed independently from these public observations.
+ * This checkpoint archives no provider qualification or
  * billing claim. Even complete fixture cleanup is never a release-complete execution projection.
  */
 class AcpProviderInvocationEvidenceSnapshot(
     val authority: AcpProviderExecutionAuthority,
-    val policySha256: String,
-    val authoritySha256: String,
     val qualificationProfileSha256: String,
     val modelSha256: String,
     val runtimeAdapter: AcpProviderRuntimeAdapter,
@@ -245,7 +251,7 @@ class AcpProviderInvocationEvidenceSnapshot(
     val providerCostCancellationProven: Boolean = false
 
     init {
-        listOf(policySha256, authoritySha256, qualificationProfileSha256, modelSha256, invocationBindingSha256, requestBindingSha256)
+        listOf(qualificationProfileSha256, modelSha256, invocationBindingSha256, requestBindingSha256)
             .forEach(::requireProviderEvidenceDigest)
         sessionSha256?.let(::requireProviderEvidenceDigest)
         turnSha256?.let(::requireProviderEvidenceDigest)

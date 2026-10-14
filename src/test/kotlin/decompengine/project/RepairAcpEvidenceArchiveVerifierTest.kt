@@ -91,15 +91,15 @@ class RepairAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
-    fun `release archive rejects rehashed provider v3 and mixed transport in rejected node`() {
+    fun `release archive rejects rehashed provider v4 and mixed transport in rejected node`() {
         withScratch { scratch ->
             for (mixed in listOf(false, true)) {
-                val fixture = releaseFixture(scratch.resolve(if (mixed) "mixed" else "v3"), refused = false)
+                val fixture = releaseFixture(scratch.resolve(if (mixed) "mixed" else "v4"), refused = false)
                 assertEquals(1, verifyRelease(fixture).acceptedAcpContributions.size)
-                val document = failedReceiptDocument(fixture.project, fixture.rejectedId, providerV3 = true)
-                assertEquals(3, document.schemaVersion)
+                val document = failedReceiptDocument(fixture.project, fixture.rejectedId, providerFixture = true)
+                assertEquals(4, document.schemaVersion)
                 assertFalse(document.releaseComplete)
-                // Actual renderer output must first pass the workflow-independent v3 verifier.
+                // Actual renderer output must first pass the workflow-independent v4 verifier.
                 val verified = verifyAcpExecutionReceiptDocument(document.json.toByteArray(), KIND, TASK_FIELD, fixture.rejectedId)
                 assertEquals("failed-protocol", verified.terminalOutcome)
                 assertFalse(verified.releaseComplete)
@@ -174,11 +174,11 @@ class RepairAcpEvidenceArchiveVerifierTest {
     }
 
     private fun failedReceiptDocument(project: Path, attemptId: String, refused: Boolean = false,
-        providerV3: Boolean = false): AcpExecutionReceiptDocument {
+        providerFixture: Boolean = false): AcpExecutionReceiptDocument {
         val request = AgentExecutionRequest(PROMPT_OBJECTIVE,
             workspaceRoots = listOf(AgentWorkspaceRoot("project", project)), accessPolicy = AgentAccessPolicy(emptyList()))
         val binding = AgentExecutionRequestBinding.capture(request)
-        val invocation = if (providerV3) providerDataFixtureInvocationForTest(request,
+        val invocation = if (providerFixture) providerDataFixtureInvocationForTest(request,
             AcpHarnessProvenance("acp", "provider-fixture", AGENT_EXECUTION_CONTRACT_VERSION,
                 ACP_STABLE_PROTOCOL_VERSION, ACP_KOTLIN_SDK_VERSION, "1".repeat(64), false))
         else AcpInvocationEvidenceSnapshot(null, AcpExecutionLifecyclePhase.REQUEST_BOUND,
@@ -187,7 +187,7 @@ class RepairAcpEvidenceArchiveVerifierTest {
         val outcome = if (refused) AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.REFUSED,
             "synthetic refused invocation", emptyList(), AgentSessionReference("repair-test-acp", "repair-session")))
         else AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "synthetic protocol failure",
-            session = if (providerV3) AgentSessionReference("provider-fixture", "provider-data-session") else null))
+            session = if (providerFixture) AgentSessionReference("provider-fixture", "provider-data-session") else null))
         return requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, sha256(PROMPT.toByteArray()),
             AgentExecutionReceipt(binding, outcome, invocation), BoundedAgentExecutionEventRecorder().receiptSnapshot(),
             KIND, TASK_FIELD, attemptId))

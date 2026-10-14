@@ -132,12 +132,12 @@ class AcpProviderBrokerTest {
                 assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
                 assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
                 assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
-                backend.clean = true; broker.close()
-                assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+                backend.clean = true; assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
                 assertEquals(listOf(record), broker.snapshot().requests)
                 assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
                 assertEquals(1, backend.starts)
-            } finally { backend.clean = true; broker.close() }
+            } finally { backend.clean = true; runCatching { broker.close() } }
         }
     }
 
@@ -675,7 +675,7 @@ class AcpProviderBrokerTest {
         } finally {
             Thread.interrupted()
             backend.interruptCleanup = false
-            broker.close()
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
         }
     }
 
@@ -706,7 +706,7 @@ class AcpProviderBrokerTest {
         } finally {
             Thread.interrupted()
             release.countDown()
-            broker.close()
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
         }
     }
 
@@ -1174,9 +1174,11 @@ class AcpProviderBrokerTest {
         assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
         assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
         assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
+        val attempts = backend.closes
         backend.clean = true
-        broker.close()
-        assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+        assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+        assertEquals(attempts, backend.closes, "cleanup retry received a fresh backend grace")
+        assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
     }
 
     @Test
@@ -1332,13 +1334,13 @@ class AcpProviderBrokerTest {
             assertEquals(listOf(timeoutRecord), broker.snapshot().requests)
             assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
             backend.clean = true
-            broker.close()
-            assertEquals(AcpProviderBrokerCleanup.VERIFIED, broker.snapshot().cleanup)
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+            assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
             assertEquals(listOf(timeoutRecord), broker.snapshot().requests)
             assertKind(AcpProviderTerminalKind.REVOKED) { broker.beginRequest(2, cap, body()) }
             assertKind(AcpProviderTerminalKind.TIMEOUT) { exchange.nextChunk() }
             assertEquals(1, backend.starts)
-        } finally { backend.clean = true; broker.close() }
+        } finally { backend.clean = true; runCatching { broker.close() } }
     }
 
     /** Observe the real periodic owner after aging only its existing activity timestamp. */

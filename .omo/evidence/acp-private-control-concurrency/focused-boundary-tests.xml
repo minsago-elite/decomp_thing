@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.LinuxBubblewrapBoundaryTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-14T05:42:41.005Z" hostname="whatsername" time="37.413">
+  <properties/>
+  <testcase name="manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.563"/>
+  <testcase name="unproved partial control creation poisons all later authority admission without descriptor leaks()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.357"/>
+  <testcase name="private controls reject native bind aliases and late callback exposure without denying disjoint grants()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="33.508"/>
+  <testcase name="live boundary hides host data isolates network and launches concurrently through static helpers()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="2.951"/>
+  <system-out><![CDATA[private-control-bind-probe: identityParityCases=9 nativeStatxCases=9 missingMaskFallback=true invalidFdRefused=true
+private-control-bind-probe: syntheticErrnoFallbackCases=3 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true
+private-control-bind-probe: nestedSameAndCrossFilesystemLeasesDenyBothAdmissionOrders=true
+private-control-bind-probe: nestedControlParentsRefused=5 relocatedLiveInnerPreserved=true exactRemediationProved=true
+private-control-bind-probe: cancelledRootAndRuleAdmissionPreserved=true admissionDescriptorsReleased=true
+private-control-bind-probe: ordinary128fileClosureMilliseconds=186
+private-control-bind-probe: ordinary4096fileClosureMilliseconds=5522
+private-control-bind-probe: scaleEntries=4097 activeControls=3 actualBindMounts=9
+private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true disjointCopyRegistryChurnPassed=true partialCopyCancellationCleaned=true
+private-control-bind-probe: scoped manifest scale, concurrent registry, mount restore, bind rename passed
+private-control-bind-probe: all native controls passed
+statx-policy-probe: nativeEperm=1 fallbackIdentityCases=4 invalidFdRefused=true
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
