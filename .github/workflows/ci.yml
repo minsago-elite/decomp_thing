@@ -307,6 +307,8 @@ jobs:
             build/test-results/v3BoundaryPublicationIsolated
             build/reports/tests/v3BoundaryCensusIsolated
             build/test-results/v3BoundaryCensusIsolated
+            build/reports/tests/gccCompilerEnginePlanningIsolated
+            build/test-results/gccCompilerEnginePlanningIsolated
             build/analysis-native-installed-verification.txt
       - name: Release finite ACP quota fixture
         if: always()
