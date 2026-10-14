@@ -166,7 +166,7 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `replay rejects a schema v5 receipt cross-paired with a schema v2 graph binding`() = withProject { project ->
+    fun `replay rejects a schema v6 receipt cross-paired with a schema v2 graph binding`() = withProject { project ->
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val attempt = attempt(graph)
             graph.persistAndBindAgentInvocation(attempt, receipt(project, attempt.id, providerFixture = true))
@@ -174,7 +174,7 @@ class RepairProviderReceiptRetentionTest {
         }
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         val before = graphPath.readText()
-        val schema = Regex("(\"receiptSchemaVersion\"\\s*:\\s*)5")
+        val schema = Regex("(\"receiptSchemaVersion\"\\s*:\\s*)6")
         assertEquals(1, schema.findAll(before).count())
         graphPath.writeText(schema.replace(before) { "${it.groupValues[1]}2" })
         val failure = assertFailsWith<IllegalArgumentException> {
@@ -186,16 +186,16 @@ class RepairProviderReceiptRetentionTest {
     @Test
     fun `provider v6 binding cannot claim release or promote a retained fixture`() {
         val pending = RepairAgentInvocationBinding("reports/repair-revisions/revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json",
-            "a".repeat(64), 5, "b".repeat(64), "c".repeat(64), "returned-completed", false,
+            "a".repeat(64), 6, "b".repeat(64), "c".repeat(64), "returned-completed", false,
             RepairAgentAssessmentStatus.PENDING)
-        for (version in listOf(3, 4, 5)) {
+        for (version in listOf(3, 4, 5, 6)) {
             val retained = pending.copy(receiptSchemaVersion = version)
             assertFalse(retained.receiptReleaseComplete)
             assertFailsWith<IllegalArgumentException> { retained.copy(receiptReleaseComplete = true) }
             assertFailsWith<IllegalArgumentException> { retained.copy(assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED) }
             assertFailsWith<IllegalArgumentException> { retained.copy(assessmentStatus = RepairAgentAssessmentStatus.PROVISIONAL) }
         }
-        assertFailsWith<IllegalArgumentException> { pending.copy(receiptSchemaVersion = 6) }
+        assertFailsWith<IllegalArgumentException> { pending.copy(receiptSchemaVersion = 7) }
         assertEquals(2, pending.copy(receiptSchemaVersion = 2, receiptReleaseComplete = true,
             assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED).receiptSchemaVersion)
     }
