@@ -16,7 +16,12 @@ internal object AcpProviderDnsElfInspection {
     }
     fun inspect(input: ByteArray): Metadata {
         require(input.size in 64..AcpProviderDnsBuildInputs.MEMBER_BYTES.toInt())
-        val bytes = input.copyOf()
+        return inspectOwned(input.copyOf())
+    }
+
+    /** Caller transfers an exclusively owned bounded buffer; no retained byte reference escapes. */
+    internal fun inspectOwned(bytes: ByteArray): Metadata {
+        require(bytes.size in 64..AcpProviderDnsBuildInputs.MEMBER_BYTES.toInt())
         val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         require(bytes.take(7) == listOf(0x7f.toByte(), 69.toByte(), 76.toByte(), 70.toByte(), 2.toByte(), 1.toByte(), 1.toByte()))
         require(bytes[7].toInt() in setOf(0, 3) && bytes[8] == 0.toByte() && (9..15).all { bytes[it] == 0.toByte() })

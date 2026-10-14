@@ -3,6 +3,7 @@ package decompengine.acp
 import decompengine.builtin.provider.parseProviderObject
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.Collections
 import kotlinx.serialization.json.*
 
 internal class AcpProviderDnsRuntimeUnavailableException : IOException("approved provider DNS runtime profile unavailable")
@@ -24,11 +25,16 @@ internal object AcpProviderDnsRuntimeProfiles {
         "jdk/lib/libjava.so", "jdk/lib/libjimage.so", "jdk/lib/libjli.so", "jdk/lib/libnet.so",
         "jdk/lib/libnio.so", "jdk/lib/libverify.so", "jdk/lib/libzip.so", "jdk/lib/server/libjvm.so",
         "jdk/conf/net.properties", "jdk/conf/security/java.security", "jdk/legal/java.base/LICENSE")
+    internal val requiredElfPaths: Set<String> = Collections.unmodifiableSet(
+        requiredJdkFiles.filter { it == "jdk/bin/java" || it.endsWith(".so") }.toSet())
     private val nativeNames = setOf("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6", "libdl.so.2",
         "libpthread.so.0", "librt.so.1", "libz.so.1", "libstdc++.so.6", "libgcc_s.so.1",
         "libnss_files.so.2", "libnss_dns.so.2", "libresolv.so.2")
     private val loaderArgv = listOf("$ROOT/native/ld-linux-x86-64.so.2", "--inhibit-cache", "--library-path",
         "$ROOT/native:$ROOT/jdk/lib:$ROOT/jdk/lib/server", "$ROOT/jdk/bin/java")
+
+    internal fun isLibraryPath(path: String): Boolean = path.startsWith("native/") ||
+        path.startsWith("jdk/lib/") && path.substringBeforeLast('/') in setOf("jdk/lib", "jdk/lib/server")
 
     // No archive/toolchain/output/native subset or #958 resolver identity has been approved.
     // This gate cannot be opened by a candidate, caller path, adjacent checksum or reflection fixture.
@@ -110,8 +116,8 @@ internal object AcpProviderDnsRuntimeProfiles {
             edge.exact("from", "kind", "name", "target")
             val from = edge.text("from"); val target = edge.text("target"); val kind = edge.text("kind"); val name = edge.text("name")
             require(byPath[from]?.kind == "file" && byPath[target]?.kind == "file")
-            require(target.startsWith("native/") || target in requiredJdkFiles && target.endsWith(".so"))
-            require(from == "jdk/bin/java" || from.startsWith("native/") || from in requiredJdkFiles && from.endsWith(".so"))
+            require(isLibraryPath(target))
+            require(from == "jdk/bin/java" || isLibraryPath(from))
             when (kind) {
                 "PT_INTERP" -> require(from == "jdk/bin/java" && name == "/lib64/ld-linux-x86-64.so.2" && target == "native/ld-linux-x86-64.so.2")
                 "DT_NEEDED", "DLOPEN" -> require(name == target.substringAfterLast('/') && name.matches(Regex("[A-Za-z0-9._+-]+")))
@@ -124,7 +130,7 @@ internal object AcpProviderDnsRuntimeProfiles {
         repeat(entries.size) { edges.filter { it.from in reachable }.forEach { reachable += it.target } }
         require(entries.filter { it.path.startsWith("native/") || it.path in requiredJdkFiles && it.path.endsWith(".so") }
             .all { it.path in reachable })
-        return AcpProviderDnsRuntimeProfileCandidate(profileSha256(bytes), total, entries.toList(), edges.toList())
+        return AcpProviderDnsRuntimeProfileCandidate(profileSha256(bytes), total, entries.toList(), edges.toList(), ceilings.mapValues { limits.number(it.key) })
     }
 }
 
@@ -132,7 +138,9 @@ internal object AcpProviderDnsRuntimeProfiles {
 internal class AcpProviderDnsRuntimeProfileCandidate internal constructor(
     val manifestSha256: String, val regularBytes: Long,
     private val entryRecords: List<AcpProviderDnsRuntimeEntry>, private val dependencyRecords: List<AcpProviderDnsRuntimeEdge>,
+    contentLimits: Map<String, Long>,
 ) {
+    internal val contentLimits: Map<String, Long> = Collections.unmodifiableMap(contentLimits.toMap())
     fun entries(): List<AcpProviderDnsRuntimeEntry> = entryRecords.toList()
     fun edges(): List<AcpProviderDnsRuntimeEdge> = dependencyRecords.toList()
 }

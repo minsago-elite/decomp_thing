@@ -102,6 +102,13 @@ class AcpProviderDnsRuntimeProfileTest {
         assertFails { parse(change(manifest(), "limits", change(manifest().getValue("limits").jsonObject, "edges", JsonPrimitive(257)))) }
     }
 
+    @Test fun `additional read only packaged library can declare complete structural edges`() {
+        val extra = record("jdk/lib/libextra.so")
+        val edge = buildJsonObject { put("from", "jdk/bin/java"); put("kind", "DLOPEN"); put("name", "libextra.so"); put("target", "jdk/lib/libextra.so") }
+        val document = change(withEntries(baseEntries() + extra), "elfEdges", JsonArray(baseEdges() + edge))
+        assertTrue(parse(document).edges().any { it.target == "jdk/lib/libextra.so" })
+    }
+
     @Test fun `resolver serialization is exact defensive and domain bound`() {
         val bytes = "nameserver 192.0.2.53\nnameserver 2001:db8::53\noptions timeout:5 attempts:2\n".toByteArray()
         val original = bytes.copyOf()
