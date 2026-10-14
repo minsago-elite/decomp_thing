@@ -39,10 +39,7 @@ internal object AcpHarnessProvisioning {
             .onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(bytes)).toString()
         val root = BoundedProvisioningJsonParser(text).parse().requireObject("ACP configuration")
-        root.requireExactKeys(ROOT_KEYS, "ACP configuration")
-        require(root.requiredInt("schemaVersion", 1..Int.MAX_VALUE, "ACP configuration") == CONFIG_SCHEMA_VERSION) {
-            "unsupported ACP containment configuration schemaVersion"
-        }
+        requirePublicProviderConfiguration(root)
         val executable = root.requiredObject("agent", "ACP configuration")
             .requiredPath("executable", "ACP agent configuration")
         return ProvisionedAcpSandbox(
@@ -88,11 +85,7 @@ internal object AcpHarnessProvisioning {
         hostEnvironment: Map<String, String>,
     ): AcpProcessConfiguration {
         val root = document.requireObject("ACP configuration")
-        val schemaVersion = root.requiredInt("schemaVersion", 1..Int.MAX_VALUE, "ACP configuration")
-        require(schemaVersion == CONFIG_SCHEMA_VERSION) {
-            "unsupported ACP configuration schemaVersion $schemaVersion; migrate to schemaVersion 2"
-        }
-        root.requireExactKeys(ROOT_KEYS, "ACP configuration")
+        requirePublicProviderConfiguration(root)
         val implementationId = root.requiredString("implementationId", MAXIMUM_IDENTIFIER_BYTES, "ACP configuration")
         require(implementationId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) {
             "ACP implementationId must use portable identifier syntax"
@@ -174,7 +167,25 @@ internal object AcpHarnessProvisioning {
                 "expectedExecutableManifestSha256",
                 "ACP agent configuration",
             ),
+        ).also(AcpHarnessFactory::bindProvisionedDisabledProvider)
+    }
+
+    private fun requirePublicProviderConfiguration(root: ProvisioningJsonObject) {
+        val schemaVersion = root.requiredInt("schemaVersion", 1..Int.MAX_VALUE, "ACP configuration")
+        require(schemaVersion == LEGACY_CONFIG_SCHEMA_VERSION || schemaVersion == CONFIG_SCHEMA_VERSION) {
+            "unsupported ACP configuration schemaVersion $schemaVersion; migrate to schemaVersion 2 or 3"
+        }
+        root.requireExactKeys(
+            if (schemaVersion == LEGACY_CONFIG_SCHEMA_VERSION) ROOT_KEYS else PROVIDER_ROOT_KEYS,
+            "ACP configuration",
         )
+        if (schemaVersion == CONFIG_SCHEMA_VERSION) {
+            val provider = root.requiredObject("providerTransport", "ACP configuration")
+            provider.requireExactKeys(PROVIDER_TRANSPORT_KEYS, "ACP provider transport configuration")
+            require(provider.requiredString("mode", 16, "ACP provider transport configuration") == "disabled") {
+                "ACP public provider transport mode must be exactly disabled"
+            }
+        }
     }
 
     private fun parseSessionPreferences(value: ProvisioningJsonObject): AcpSessionPreferences {
@@ -861,7 +872,8 @@ private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-25
     .digest(bytes)
     .joinToString("") { "%02x".format(it) }
 
-private const val CONFIG_SCHEMA_VERSION = 2
+private const val LEGACY_CONFIG_SCHEMA_VERSION = 2
+private const val CONFIG_SCHEMA_VERSION = 3
 private const val MAXIMUM_ACP_CONFIG_BYTES = 4 * 1024 * 1024
 private const val MAXIMUM_CONFIG_JSON_DEPTH = 16
 private const val MAXIMUM_CONFIG_JSON_NODES = 16_384
@@ -884,6 +896,8 @@ private const val MAXIMUM_TIMEOUT_MILLIS = 60L * 60 * 1000
 private val JSON_WHITESPACE = setOf(' ', '\t', '\r', '\n')
 private const val NON_OWNER_PERMISSION_MASK = 0x3f // 0077
 private val ROOT_KEYS = setOf("schemaVersion", "implementationId", "agent", "session", "sandbox")
+private val PROVIDER_ROOT_KEYS = ROOT_KEYS + "providerTransport"
+private val PROVIDER_TRANSPORT_KEYS = setOf("mode")
 private val SESSION_KEYS = setOf("modelId", "modeId", "configOptions")
 private val SESSION_REQUIRED_KEYS = setOf("configOptions")
 private val SESSION_CONFIG_OPTION_KEYS = setOf("id", "type", "value")

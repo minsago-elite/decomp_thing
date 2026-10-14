@@ -142,6 +142,28 @@ class AcpProcessConfiguration(
     /** Required when [executable] is not recursively root-owned and immutable. */
     val expectedExecutableManifestSha256: String? = null,
 ) {
+    private var providerTransportFrozen: Boolean = false
+    private var providerTransportBound: Boolean = false
+    private var providerTransportSelection: AcpProviderTransportPolicy = AcpProviderTransportPolicy.DISABLED
+
+    /** Reading publishes and freezes the default; only a factory-owned permit can bind beforehand. */
+    val providerTransportPolicy: AcpProviderTransportPolicy
+        get() = synchronized(this) {
+            providerTransportFrozen = true
+            providerTransportSelection
+        }
+
+    internal fun bindProviderTransportPolicy(permit: AcpProviderQualificationPermit) = synchronized(this) {
+        check(!providerTransportFrozen && !providerTransportBound) { "ACP provider configuration is already frozen" }
+        AcpHarnessFactory.consumeProviderQualificationPermit(
+            permit, this, AcpProviderQualificationPurpose.PROCESS_CONFIGURATION,
+        )
+        // No enabled transport is attached in the configuration checkpoint.
+        providerTransportSelection = AcpProviderTransportPolicy.DISABLED
+        providerTransportBound = true
+        providerTransportFrozen = true
+    }
+
     val arguments: List<String> = Collections.unmodifiableList(
         ArrayList(requireBoundedProcessArguments(arguments)),
     )
