@@ -34,6 +34,8 @@ import urllib.request
 import urllib.error
 import zlib
 
+import clang_18_1_3_worker as host_worker
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = ROOT / "oracle/clang/18.1.3/provisioning-contract.json"
@@ -70,6 +72,9 @@ RECIPE_FILES = {
     "aLoaderSmokeSha256": ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
     "aLoaderInitSha256": ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle",
     "workflowSha256": ROOT / ".github/workflows/generic-template-toolchain.yml",
+    "hostWorkerSha256": ROOT / "scripts/oracle/clang_18_1_3_worker.py",
+    "hostPolicySha256": ROOT / "oracle/clang/18.1.3/host-execution-policy.json",
+    "hostEnvironmentRecipeSha256": ROOT / "oracle/clang/18.1.3/immutable-host-environment.json",
 }
 MAX_DOWNLOAD_BYTES = 3 * 1024 * 1024 * 1024
 MAX_SINGLE_DOWNLOAD = 1024 * 1024 * 1024
@@ -2159,6 +2164,7 @@ def command_acquisition_status(args: argparse.Namespace) -> int:
 
 def command_acquire(args: argparse.Namespace) -> int:
     require_acquisition_access()
+    require_immutable_host_execution("provision-rootfs-v1")
     contract = read_contract(args.contract)
     candidate = acquire_candidate(contract, args.output, args.keyring)
     ensure_source_artifact_contract(candidate, contract)
@@ -4113,7 +4119,31 @@ def publish_rootfs_tar(rootfs_tar_path: Path, output: Path, destination: Path,
                 os.close(descriptor)
 
 
+def require_immutable_host_execution(action: str) -> None:
+    try:
+        host_worker.require_production_worker(action)
+    except host_worker.WorkerRefusal as error:
+        raise ProvisionError(str(error)) from error
+    # No approval lookup may enable the old mutable-host implementation.
+    raise ProvisionError("immutable host execution unavailable: artifact transport is unfinished")
+
+
+def command_check_host_execution(args: argparse.Namespace) -> int:
+    require_immutable_host_execution("provision-rootfs-v1")
+    return 0
+
+
 def provision_rootfs(args: argparse.Namespace) -> int:
+    require_immutable_host_execution("provision-rootfs-v1")
+    raise ProvisionError("immutable provisioning worker dispatch is unfinished")
+
+
+def command_package_provenance(args: argparse.Namespace) -> int:
+    require_immutable_host_execution("verify-rootfs-v1")
+    raise ProvisionError("immutable provenance worker dispatch is unfinished")
+
+
+def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     try:
         canonical_rootfs = args.rootfs.resolve()
         canonical_output = args.output.resolve()
@@ -5254,7 +5284,7 @@ def execute_locked_negative_comparator(compiler: Path, fixture: Path, contract: 
     }
 
 
-def command_package_provenance(args: argparse.Namespace) -> int:
+def _package_provenance_unqualified(args: argparse.Namespace) -> int:
     captured: dict[Path, bytes] = {}
     contract = read_contract(args.contract, captured=captured)
     record = read_provenance_report(args.record, "build record", captured=captured)
@@ -5286,6 +5316,8 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp",
         ROOT / "scripts/oracle/provision_clang_18_1_3.py",
         RECIPE_FILES["aLoaderSha256"],
+        RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
+        RECIPE_FILES["hostEnvironmentRecipeSha256"],
         ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
         ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle",
         ROOT / "oracle/clang/18.1.3/test_provisioning.py",
@@ -5375,6 +5407,9 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                         arcname = "fixtures/libtooling-positive.cpp"
                     elif source == ROOT / "scripts/oracle/provision_clang_18_1_3.py":
                         arcname = "provision_clang_18_1_3.py"
+                    elif source in (RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
+                                     RECIPE_FILES["hostEnvironmentRecipeSha256"]):
+                        arcname = "host-execution/" + source.name
                     elif source == RECIPE_FILES["aLoaderSha256"]:
                         arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
                     elif source == ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java":
@@ -5506,6 +5541,8 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--rootfs", type=Path, required=True)
     budget.add_argument("--max-bytes", type=int, required=True)
     budget.set_defaults(run=command_check_rootfs_tar_budget)
+    host_execution = sub.add_parser("check-host-execution", help="require independently approved immutable host execution; qualification remains unavailable")
+    host_execution.set_defaults(run=command_check_host_execution)
     acquire = sub.add_parser("acquire", help="authenticate pinned Snapshot indexes and source artifacts")
     acquire.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     acquire.add_argument("--output", type=Path, required=True)

@@ -662,7 +662,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 self.assertEqual(json.loads(payload), record)  # legacy last-wins interpretation remains valid
                 path.write_bytes(payload)
                 for command in (provision.command_verify_record, provision.command_write_loader_input,
-                                provision.command_verify_image, provision.command_package_provenance):
+                                provision.command_verify_image, provision._package_provenance_unqualified):
                     with self.subTest(command=command.__name__, payload=payload[:80]), \
                             mock.patch.object(provision, "validate_build_record",
                                 side_effect=provision.ProvisionError("fixture reached validation")) as validate:
@@ -909,7 +909,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     mock.patch.object(provision, "rootfs_run", side_effect=rootfs_run), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 with self.assertRaisesRegex(provision.ProvisionError, "stop before package fetch"):
-                    provision.provision_rootfs(args)
+                    provision._provision_rootfs_unqualified(args)
             self.assertEqual(events, ["selected-keyring", "source-list", "apt-update"])
             self.assertEqual((rootfs / Path(provision.APT_KEYRING_IN_ROOT).relative_to("/")).read_bytes(),
                              keyring.read_bytes())
@@ -1520,7 +1520,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     mock.patch.object(provision, "rootfs_run") as apt, \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 with self.assertRaisesRegex(provision.ProvisionError, "package closure"):
-                    provision.provision_rootfs(args)
+                    provision._provision_rootfs_unqualified(args)
                 self.assertEqual(len(bootstrap_commands), 1)
                 self.assertIn("--include=ca-certificates", bootstrap_commands[0])
                 apt.assert_not_called()
@@ -2642,7 +2642,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                         mock.patch.object(provision, "run_checked") as bootstrap, \
                         mock.patch.object(provision.BoundedDownloader, "get") as network:
                     with self.assertRaisesRegex(provision.ProvisionError, "must be disjoint"):
-                        provision.provision_rootfs(args)
+                        provision._provision_rootfs_unqualified(args)
                     for action in (contract, candidate, cleanup, bootstrap, network):
                         action.assert_not_called()
                 self.assertFalse(args.workdir.exists())
@@ -2658,7 +2658,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 keyring=base / "keyring")
             with mock.patch.object(provision, "load_candidate", side_effect=provision.ProvisionError("fixture stop")) as candidate:
                 with self.assertRaisesRegex(provision.ProvisionError, "fixture stop"):
-                    provision.provision_rootfs(args)
+                    provision._provision_rootfs_unqualified(args)
                 candidate.assert_called_once()
             self.assertTrue(args.workdir.is_dir())
             self.assertFalse(args.rootfs.exists())
@@ -2666,7 +2666,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             args.output.symlink_to(base / "missing")
             with mock.patch.object(provision, "load_candidate") as candidate:
                 with self.assertRaisesRegex(provision.ProvisionError, "paths must not exist"):
-                    provision.provision_rootfs(args)
+                    provision._provision_rootfs_unqualified(args)
                 candidate.assert_not_called()
 
     def test_rootfs_directory_creation_pins_identity_and_refuses_same_uid_path_replacement(self):
@@ -2905,7 +2905,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                         mock.patch.object(provision, "run_checked") as bootstrap, \
                         mock.patch.object(provision.BoundedDownloader, "get") as network:
                     with self.assertRaisesRegex(provision.ProvisionError, "must not equal or contain the work directory"):
-                        provision.provision_rootfs(args)
+                        provision._provision_rootfs_unqualified(args)
                     for action in (contract, mkdir, candidate, cleanup, bootstrap, network):
                         action.assert_not_called()
                 self.assertFalse(workdir.exists())
@@ -2921,7 +2921,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 keyring=base / "keyring")
             with mock.patch.object(provision, "load_candidate", side_effect=provision.ProvisionError("fixture stop")) as candidate:
                 with self.assertRaisesRegex(provision.ProvisionError, "fixture stop"):
-                    provision.provision_rootfs(args)
+                    provision._provision_rootfs_unqualified(args)
                 candidate.assert_called_once()
             self.assertTrue(args.workdir.is_dir())
             self.assertFalse(args.rootfs.exists())
@@ -3106,7 +3106,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                         mock.patch.object(provision, "read_contract") as contract, \
                         mock.patch.object(provision, "run_checked") as bootstrap:
                     with self.assertRaisesRegex(provision.ProvisionError, "rootfs must not equal or contain"):
-                        provision.provision_rootfs(args)
+                        provision._provision_rootfs_unqualified(args)
                     mkdir.assert_not_called()
                     contract.assert_not_called()
                     bootstrap.assert_not_called()
@@ -4225,7 +4225,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             selected.write_bytes(provision.canonical_json(self.contract))
             record_path.write_bytes(provision.canonical_json(self.valid_build_record()))
             commands = (provision.command_verify_record, provision.command_write_loader_input,
-                        provision.command_verify_image, provision.command_package_provenance)
+                        provision.command_verify_image, provision._package_provenance_unqualified)
             for command in commands:
                 args = provision.argparse.Namespace(contract=selected, record=record_path)
                 with self.subTest(command=command.__name__), mock.patch.object(
@@ -4344,7 +4344,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                         workdir=base / "work", rootfs=base / f"rootfs-{label}", output=base / label,
                     )
                     with self.subTest(label=label), self.assertRaises(ReachedRunnerBounds):
-                        provision.provision_rootfs(args)
+                        provision._provision_rootfs_unqualified(args)
                     self.assertFalse((root / "source/package-source").exists())
                     self.assertFalse((root / "source/upstream").exists())
                     self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
@@ -4555,7 +4555,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             args.output = root / "not-created" / "nested" / "provenance.tar"
             with mock.patch.object(provision, "load_candidate") as load:
                 with self.assertRaisesRegex(provision.ProvisionError, "overlaps a recursively packaged input tree"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
                 load.assert_not_called()
             self.assertFalse((root / "not-created").exists())
 
@@ -4563,7 +4563,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             with mock.patch.object(provision, "verify_candidate_data",
                                    side_effect=provision.ProvisionError("signature rejected")) as signed:
                 with self.assertRaisesRegex(provision.ProvisionError, "signature rejected"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
                 expected_names = {row["name"] for section in ("packages", "downloadedPackages")
                                   for row in record[section]}
                 signed.assert_called_once_with(root, candidate, self.contract, keyring,
@@ -4646,7 +4646,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                     mock.patch.object(provision, "run_checked", side_effect=local_tar), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 with self.assertRaisesRegex(provision.ProvisionError, "no reviewed unprivileged"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
                 load.assert_called_once()
                 runtime.assert_not_called()
                 network.assert_not_called()
@@ -4732,7 +4732,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 return provision.canonical_json(record["probe"])
             with mock.patch.object(provision, "runtime_dependencies", wraps=actual_discovery), \
                     mock.patch.object(provision, "run_probe_sandboxed", side_effect=inert_sandbox) as sandbox:
-                self.assertEqual(provision.command_package_provenance(args), 0)
+                self.assertEqual(provision._package_provenance_unqualified(args), 0)
                 args.output.unlink()
                 ldd_roots = [call.args[1][1] for call in sandbox.call_args_list if call.args[1][0] == "/usr/bin/ldd"]
                 self.assertEqual(ldd_roots, list(provision.FRONTEND_RUNTIME_ROOTS))
@@ -4747,7 +4747,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 provision.validate_provenance_loader_report(
                     loader, record, provision.sha256_file(args.record), args.rootfs)
                 with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
                 self.assertFalse(args.output.exists())
 
     def test_driver_replay_canonicalizes_raw_version_stdout_like_provisioning(self):
@@ -4774,7 +4774,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             with self.subTest(field=field), self.temporary_directory() as temp, \
                     self.offline_packaging_fixture(Path(temp)) as (args, _):
                 with mock.patch.object(provision, "run_probe_sandboxed", wraps=provision.run_probe_sandboxed) as sandbox:
-                    self.assertEqual(provision.command_package_provenance(args), 0)
+                    self.assertEqual(provision._package_provenance_unqualified(args), 0)
                 self.assertEqual([call.args[1] for call in sandbox.call_args_list[:2]],
                                  [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
                 args.output.unlink()
@@ -4790,12 +4790,12 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 provision.validate_provenance_loader_report(
                     loader, record, provision.sha256_file(args.record), args.rootfs)
                 with self.assertRaisesRegex(provision.ProvisionError, "driver identities"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
                 self.assertFalse(args.output.exists())
 
     def test_packaging_runtime_closure_rejects_rehashed_dependency_omission(self):
         with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
-            self.assertEqual(provision.command_package_provenance(args), 0)
+            self.assertEqual(provision._package_provenance_unqualified(args), 0)
             args.output.unlink()
             record = json.loads(args.record.read_bytes())
             actual_entries = record["runtime"]["entries"]
@@ -4813,7 +4813,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             with mock.patch.object(provision, "runtime_dependencies", return_value=actual_entries) as discover, \
                     mock.patch.object(provision, "run_probe_sandboxed", wraps=provision.run_probe_sandboxed) as probe:
                 with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
             discover.assert_called_once_with(args.rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
             self.assertEqual([call.args[1] for call in probe.call_args_list],
                              [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
@@ -4841,7 +4841,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 return result
 
             with mock.patch.object(provision, "validate_provenance_negative_report", side_effect=validate_then_replace):
-                self.assertEqual(provision.command_package_provenance(args), 0)
+                self.assertEqual(provision._package_provenance_unqualified(args), 0)
             with tarfile.open(args.output) as archive:
                 for name, payload in originals.items():
                     self.assertEqual(archive.extractfile(name).read(), payload, name)
@@ -4863,7 +4863,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
 
             with mock.patch.object(provision, "validate_provenance_negative_report", side_effect=validate_then_replace):
                 with self.assertRaisesRegex(provision.ProvisionError, "changed while packaging"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
             self.assertFalse(args.output.exists())
 
     def test_provenance_stream_detects_in_place_changes_growth_and_truncation(self):
@@ -4911,7 +4911,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             # actual replay must still require the retained native executable.
             with mock.patch.object(provision, "execute_locked_negative_comparator", side_effect=execute):
                 with self.assertRaisesRegex(provision.ProvisionError, "immutable negative comparator"):
-                    provision.command_package_provenance(args)
+                    provision._package_provenance_unqualified(args)
             self.assertFalse(args.output.exists())
 
     def test_packaging_refuses_failed_comparator_execution_and_report_drift(self):
@@ -4924,7 +4924,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                           if kind == "failed-execution" else {"return_value": actual_report})
                 with mock.patch.object(provision, "execute_locked_negative_comparator", **kwargs) as execute:
                     with self.assertRaisesRegex(provision.ProvisionError, "execution failed|actual locked comparator replay"):
-                        provision.command_package_provenance(args)
+                        provision._package_provenance_unqualified(args)
                     execute.assert_called_once_with(args.negative_compiler,
                         ROOT / self.contract["negativeControl"]["fixture"], self.contract,
                         ROOT / self.contract["negativeControl"]["artifactLock"], captured=mock.ANY)
@@ -5139,6 +5139,416 @@ int main(int argc, char **argv) {
             self.assertEqual(report["fixtureSha256"], provision.sha256(fixture_bytes))
             self.assertTrue(report["fixtureAcceptedByClang22"])
             self.assertEqual(report["compiler18GateRejected"], "probe compiler version or target mismatch")
+
+
+class HostWorkerProtocolTests(unittest.TestCase):
+    """Inert approvals/runtime fixtures; none authorize a production environment."""
+    def setUp(self):
+        self.worker = provision.host_worker
+        self.temporary = tempfile.TemporaryDirectory(prefix="clang1813-host-protocol-", dir=ROOT / "build")
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        self.store = self.base / "approved"
+        self.store.mkdir()
+        self.source = self.base / "source.cpp"
+        self.source.write_bytes(b"synthetic approved source; never a production approval\n")
+        self.input_fd = os.open(self.source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.addCleanup(os.close, self.input_fd)
+        self.manifest = {
+            "formatVersion": 1, "action": "provision-rootfs-v1",
+            "inputs": [{"name": "source.cpp", "bytes": self.source.stat().st_size,
+                        "sha256": self.worker.digest(self.source.read_bytes())}],
+            "argv": ["/usr/bin/true"],
+            "environment": {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7"},
+            "limits": {"seconds": 30, "memoryBytes": 64 * 1024**2, "cpus": 1, "pids": 16,
+                       "diskBytes": 1024**2, "outputBytes": 1024},
+        }
+        fixture_digest = lambda label: "sha256:" + self.worker.digest(label.encode())
+        self.lock = {"formatVersion": 1, "manifestDigest": fixture_digest("inert OCI manifest"),
+                     "configDigest": fixture_digest("inert OCI config"), "rootfsDiffIds": [fixture_digest("inert layer")],
+                     "platform": {"os": "linux", "architecture": "amd64"},
+                     "inputRecipeSha256": self.worker.digest(self.worker.canonical(self.manifest)),
+                     "packageManifestSha256": self.worker.digest(b"inert package manifest"),
+                     "runtimeCli": {"path": "/usr/bin/docker", "bytes": 10,
+                                    "sha256": self.worker.digest(b"inert CLI")}}
+        self.lock_sha = self.write_approved(self.lock, ".lock.json")
+        self.write_approved(self.manifest, ".action.json")
+        self.index = {"formatVersion": 1, "actions": {"provision-rootfs-v1": self.lock_sha}}
+        index_sha = self.write_approved(self.index, ".index.json")
+        self.anchor = {"formatVersion": 1, "authorityKeyFingerprint": "A" * 40,
+                       "approvedIndexSha256": index_sha, "launcherSha256": self.worker.digest(b"inert installed launcher")}
+        (self.store / "approval-anchor.json").write_bytes(self.worker.canonical(self.anchor))
+        store_patch = mock.patch.object(self.worker, "APPROVAL_STORE", self.store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+        original_check = self.worker.root_owned
+        def simulated_root(metadata, *, directory=False):
+            fields = list(metadata)
+            fields[stat.ST_UID] = 0
+            return original_check(os.stat_result(fields), directory=directory)
+        owner_patch = mock.patch.object(self.worker, "root_owned", side_effect=simulated_root)
+        owner_patch.start()
+        self.addCleanup(owner_patch.stop)
+        worker = self.worker
+        class InertRuntime:
+            calls = 0
+            snapshots = []
+            def inspect_image(runtime, lock):
+                return json.loads(json.dumps(worker.expected_image(lock)))
+            def execute(runtime, spec, inputs):
+                runtime.calls += 1
+                runtime.snapshots = list(inputs.values())
+                for descriptor in inputs.values():
+                    self.assertEqual(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & worker.SEALS, worker.SEALS)
+                    with self.assertRaises(OSError) as caught:
+                        os.pwrite(descriptor, b"tamper", 0)
+                    self.assertEqual(caught.exception.errno, errno.EPERM)
+                runtime.payloads = {name: worker.read_descriptor(fd, worker.MAX_INPUT) for name, fd in inputs.items()}
+                runtime.spec = spec
+                return {"executionSha256": worker.digest(worker.canonical(spec)), "image": spec["image"],
+                        "exitCode": 0, "stdout": b"inert execution output"}
+        self.backend = InertRuntime()
+
+    def write_approved(self, value, suffix):
+        payload = self.worker.canonical(value)
+        identity = self.worker.digest(payload)
+        (self.store / (identity + suffix)).write_bytes(payload)
+        return identity
+
+    def execute(self, backend=None, lock_sha=None, input_fds=None):
+        return self.worker._execute_approved_protocol(
+            "provision-rootfs-v1", lock_sha or self.lock_sha,
+            {"source.cpp": self.input_fd} if input_fds is None else input_fds,
+            self.backend if backend is None else backend)
+
+    def test_approved_store_and_exact_closure_succeed_with_sealed_input_cleanup(self):
+        result = self.execute()
+        self.assertEqual(result.stdout, b"inert execution output")
+        self.assertEqual(result.lock_sha256, self.lock_sha)
+        self.assertEqual(result.action_sha256, self.lock["inputRecipeSha256"])
+        self.assertEqual(self.backend.calls, 1)
+        for descriptor in self.backend.snapshots:
+            with self.assertRaises(OSError) as caught:
+                os.fstat(descriptor)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_forged_self_consistent_lock_image_and_recipe_cannot_authorize_action(self):
+        forged = json.loads(json.dumps(self.lock))
+        forged["configDigest"] = "sha256:" + self.worker.digest(b"attacker config")
+        forged_sha = self.write_approved(forged, ".lock.json")
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "not independently approved"):
+            self.execute(lock_sha=forged_sha)
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_approved_environment_refuses_attacker_source_and_missing_or_extra_closure(self):
+        self.source.write_bytes(b"attacker supplies its own self-consistent source/recipe")
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "not independently approved|changed length|bounded regular"):
+            self.execute()
+        for inputs in ({}, {"unapproved.cpp": self.input_fd}, {"source.cpp": self.input_fd, "extra": self.input_fd}):
+            with self.subTest(inputs=list(inputs)), self.assertRaisesRegex(self.worker.WorkerRefusal, "complete approved source closure"):
+                self.execute(input_fds=inputs)
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_approved_lock_refuses_modified_action_or_approval_index_before_execution(self):
+        for identity, suffix in ((self.lock["inputRecipeSha256"], ".action.json"),
+                                 (self.anchor["approvedIndexSha256"], ".index.json")):
+            path = self.store / (identity + suffix)
+            original = path.read_bytes()
+            path.write_bytes(original + b" ")
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(self.worker.WorkerRefusal, "metadata digest mismatch"):
+                self.execute()
+            path.write_bytes(original)
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_approval_store_refuses_symlinks_and_caller_writable_metadata(self):
+        anchor = self.store / "approval-anchor.json"
+        original = anchor.read_bytes()
+        anchor.chmod(0o666)
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "root-owned and protected"):
+            self.execute()
+        anchor.chmod(0o644)
+        anchor.unlink()
+        target = self.base / "caller-anchor"
+        target.write_bytes(original)
+        anchor.symlink_to(target)
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "approval store is unavailable"):
+            self.execute()
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_transient_checkout_source_swap_cannot_change_consumed_sealed_bytes(self):
+        original = self.source.read_bytes()
+        execute = self.backend.execute
+        def swap_then_execute(spec, inputs):
+            self.source.write_bytes(b"transient unchecked checkout replacement")
+            try:
+                return execute(spec, inputs)
+            finally:
+                self.source.write_bytes(original)
+        self.backend.execute = swap_then_execute
+        self.execute()
+        self.assertEqual(self.backend.payloads["source.cpp"], original)
+
+    def test_runtime_image_and_post_create_execution_identity_are_independently_checked(self):
+        original_inspect = self.backend.inspect_image
+        self.backend.inspect_image = lambda lock: {**original_inspect(lock), "configDigest": "sha256:" + "f" * 64}
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "actual runtime-selected image"):
+            self.execute()
+        self.assertEqual(self.backend.calls, 0)
+        self.backend.inspect_image = original_inspect
+        execute = self.backend.execute
+        def changed_receipt(spec, inputs):
+            return {**execute(spec, inputs), "executionSha256": "f" * 64}
+        self.backend.execute = changed_receipt
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "execution identity changed"):
+            self.execute()
+
+    def test_failed_backend_closes_real_sealed_descriptors(self):
+        observed = []
+        def failed(spec, inputs):
+            observed.extend(inputs.values())
+            raise self.worker.WorkerRefusal("injected runtime refusal")
+        self.backend.execute = failed
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "runtime refusal"):
+            self.execute()
+        self.assertTrue(observed)
+        for descriptor in observed:
+            with self.assertRaises(OSError) as caught:
+                os.fstat(descriptor)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def daemon_container_fixture(self, spec, source):
+        limits = spec["limits"]
+        return {"Image": spec["image"]["configDigest"],
+                "Config": {"User": "65532:65532", "Entrypoint": ["/usr/bin/env"], "WorkingDir": "/work",
+                           "Env": [f"{k}={v}" for k, v in sorted(self.worker.DockerBackend.container_environment(spec).items())],
+                           "Cmd": ["-i", *[f"{k}={v}" for k, v in sorted(spec["environment"].items())], *spec["argv"]]},
+                "HostConfig": {"ReadonlyRootfs": True, "Privileged": False, "NetworkMode": "none", "CapDrop": ["ALL"],
+                               "SecurityOpt": ["no-new-privileges=true"], "Memory": limits["memoryBytes"],
+                               "MemorySwap": limits["memoryBytes"], "NanoCpus": limits["cpus"] * 1_000_000_000,
+                               "PidsLimit": limits["pids"], "IpcMode": "private",
+                               "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0},
+                                           {"Name": "fsize", "Soft": limits["diskBytes"], "Hard": limits["diskBytes"]}],
+                               "Tmpfs": {"/work": f"rw,noexec,nosuid,nodev,size={limits['diskBytes']},uid=65532,gid=65532,mode=0700"}},
+                "Mounts": [{"Type": "bind", "Source": source, "Destination": "/inputs", "RW": False, "Propagation": "rprivate"}],
+                "State": {"Running": False, "OOMKilled": False, "ExitCode": 0}}
+
+    def test_held_stage_preserves_snapshots_and_refuses_foreign_name_cleanup(self):
+        stage_parent = self.base / "stage-parent"
+        stage_parent.mkdir()
+        parent_fd = os.open(stage_parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, parent_fd)
+        backend = self.worker.DockerBackend(self.lock, parent_fd)
+        with self.worker.sealed_snapshot(self.source.read_bytes()) as source_fd:
+            with self.assertRaisesRegex(self.worker.WorkerRefusal, "foreign cleanup"):
+                with backend.stage_inputs({"nested/source.cpp": source_fd}) as held_path:
+                    self.assertEqual((Path(held_path) / "nested/source.cpp").read_bytes(), self.source.read_bytes())
+                    held_fd = int(Path(held_path).name)
+                    original = Path(os.readlink(held_path))
+                    original.rename(stage_parent / "retained")
+                    original.mkdir()
+                    (original / "foreign-canary").write_bytes(b"must not be removed")
+        self.assertEqual((original / "foreign-canary").read_bytes(), b"must not be removed")
+        self.assertEqual(list((stage_parent / "retained").iterdir()), [])
+        with self.assertRaises(OSError) as caught:
+            os.fstat(held_fd)
+        self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_concrete_backend_checks_daemon_isolation_and_fixed_arguments(self):
+        self.execute()
+        spec = self.backend.spec
+        source = "/proc/123/fd/456"
+        args = self.worker.DockerBackend.create_arguments(spec, source)
+        for required in ("--pull=never", "--read-only", "--network=none", "--cap-drop=ALL", "--user=65532:65532"):
+            self.assertIn(required, args)
+        raw = self.daemon_container_fixture(spec, source)
+        self.worker.DockerBackend.verify_container(raw, spec, source)
+        for field, value in (("ReadonlyRootfs", False), ("Privileged", True), ("NetworkMode", "host"),
+                             ("CapDrop", []), ("SecurityOpt", []), ("PidsLimit", 0), ("Ulimits", []), ("IpcMode", "host")):
+            changed = json.loads(json.dumps(raw))
+            changed["HostConfig"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(self.worker.WorkerRefusal, "daemon-measured container"):
+                self.worker.DockerBackend.verify_container(changed, spec, source)
+        changed = json.loads(json.dumps(raw))
+        changed["Config"]["Env"].append("LD_PRELOAD=/unchecked/injection.so")
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "daemon-measured container"):
+            self.worker.DockerBackend.verify_container(changed, spec, source)
+        changed = json.loads(json.dumps(raw))
+        changed["Mounts"][0]["RW"] = True
+        with self.assertRaises(self.worker.WorkerRefusal):
+            self.worker.DockerBackend.verify_container(changed, spec, source)
+
+    def test_concrete_backend_measures_before_and_after_run_and_cleans_container(self):
+        self.execute()
+        spec = self.backend.spec
+        source = "/proc/123/fd/456"
+        @contextlib.contextmanager
+        def staged(inputs):
+            yield source
+        for malformed in (False, True):
+            backend = self.worker.DockerBackend(self.lock, None)
+            raw = self.daemon_container_fixture(spec, source)
+            def daemon(arguments, **kwargs):
+                if arguments[0] == "create":
+                    name = next(item.removeprefix("--name=") for item in arguments if item.startswith("--name="))
+                    token = next(item.split("=", 2)[2] for item in arguments if item.startswith("--label="))
+                    raw.update(Id="a" * 64, Name="/" + name)
+                    raw["Config"]["Labels"] = {self.worker.ATTEMPT_LABEL: token}
+                    if malformed:
+                        raw["Image"] = "sha256:" + "f" * 64
+                    return b"a" * 64 + b"\n"
+                if arguments[:2] == ["container", "inspect"]:
+                    return self.worker.canonical(raw)
+                return b"inert output" if arguments[0] == "start" else b""
+            with self.subTest(malformed=malformed), mock.patch.object(backend, "stage_inputs", side_effect=staged), \
+                    mock.patch.object(backend, "command", side_effect=daemon) as command:
+                if malformed:
+                    with self.assertRaisesRegex(self.worker.WorkerRefusal, "daemon-measured container"):
+                        backend.execute(spec, {})
+                    self.assertFalse(any(call.args[0][0] == "start" for call in command.call_args_list))
+                else:
+                    self.assertEqual(backend.execute(spec, {})["stdout"], b"inert output")
+            self.assertEqual(command.call_args_list[-1].args[0], ["rm", "--force", "a" * 64])
+            self.assertEqual(backend.pending_attempts, {})
+
+    def test_create_result_loss_reconciles_owned_attempt_without_deleting_collisions(self):
+        self.execute()
+        spec = self.backend.spec
+        source = "/proc/123/fd/456"
+        @contextlib.contextmanager
+        def staged(inputs):
+            yield source
+        for failure in ("timeout", "overflow", "disconnect", "malformed", "collision", "unavailable"):
+            backend = self.worker.DockerBackend(self.lock, None)
+            objects = {}
+            observed = []
+            def daemon(arguments, **kwargs):
+                observed.append(arguments)
+                if arguments[0] == "create":
+                    name = next(item.removeprefix("--name=") for item in arguments if item.startswith("--name="))
+                    token = next(item.split("=", 2)[2] for item in arguments if item.startswith("--label="))
+                    self.assertEqual(backend.pending_attempts, {name: token})
+                    raw = self.daemon_container_fixture(spec, source)
+                    raw.update(Id="b" * 64, Name="/" + name)
+                    raw["Config"]["Labels"] = {self.worker.ATTEMPT_LABEL: "foreign-token" if failure == "collision" else token}
+                    objects[name] = raw  # Daemon committed before CLI reply failed.
+                    if failure == "malformed":
+                        return b"not a container identity"
+                    raise self.worker.WorkerRefusal("create result lost: " + failure)
+                if arguments[:2] == ["container", "inspect"]:
+                    if failure == "unavailable":
+                        raise self.worker.WorkerRefusal("daemon unavailable during reconciliation")
+                    self.assertIn(arguments[2], objects)
+                    return self.worker.canonical(objects[arguments[2]])
+                if arguments[0] == "rm":
+                    self.assertEqual(arguments, ["rm", "--force", "b" * 64])
+                    objects.clear()
+                    return b""
+                self.fail("unexpected runtime operation after failed create: " + repr(arguments))
+            with self.subTest(failure=failure), mock.patch.object(backend, "stage_inputs", side_effect=staged), \
+                    mock.patch.object(backend, "command", side_effect=daemon):
+                with self.assertRaises(self.worker.WorkerRefusal):
+                    backend.execute(spec, {})
+            self.assertTrue(any(args[:2] == ["container", "inspect"] for args in observed))
+            if failure in ("collision", "unavailable"):
+                self.assertFalse(any(args[0] == "rm" for args in observed))
+                self.assertTrue(objects)
+                self.assertTrue(backend.pending_attempts)
+            else:
+                self.assertEqual(objects, {})
+                self.assertEqual(backend.pending_attempts, {})
+
+    def test_concrete_cli_io_enforces_output_and_time_budgets_on_real_process(self):
+        backend = self.worker.DockerBackend(self.lock, None)
+        config = os.open(self.store, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            backend.config_fd = config
+            for code, maximum, seconds, expected in (
+                    ("print('inert')", 1024, 2, b"inert\n"),
+                    ("import os; os.write(1,b'x'*4096)", 16, 2, "output limit"),
+                    ("import time; time.sleep(10)", 1024, 0.05, "wall-time limit")):
+                script = ("#!/usr/bin/python3\n" + code + "\n").encode()
+                with self.worker.sealed_snapshot(script, executable=True) as descriptor:
+                    backend.cli_fd = descriptor
+                    if isinstance(expected, bytes):
+                        self.assertEqual(backend.command(["inert"], maximum=maximum, seconds=seconds), expected)
+                    else:
+                        with self.assertRaisesRegex(self.worker.WorkerRefusal, expected):
+                            backend.command(["inert"], maximum=maximum, seconds=seconds)
+        finally:
+            os.close(config)
+
+    def test_concrete_backend_executes_sealed_approved_cli_after_transient_path_swap(self):
+        script = b"#!/usr/bin/python3\nprint('approved inert CLI bytes')\n"
+        cli_dir, config_dir, socket_dir = self.base / "bin", self.base / "docker", self.base / "socket"
+        for directory in (cli_dir, config_dir, socket_dir):
+            directory.mkdir()
+        cli = cli_dir / "docker"
+        cli.write_bytes(script)
+        cli.chmod(0o755)
+        (config_dir / "config.json").write_bytes(b"{}\n")
+        lock = {**self.lock, "runtimeCli": {"path": "/usr/bin/docker", "bytes": len(script), "sha256": self.worker.digest(script)}}
+        @contextlib.contextmanager
+        def inert_protected(path):
+            mapping = {Path("/usr/bin"): cli_dir, self.store / "docker": config_dir,
+                       self.worker.RUNTIME_SOCKET.parent: socket_dir}
+            descriptor = os.open(mapping[path], os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                yield descriptor
+            finally:
+                os.close(descriptor)
+        original_stat = os.stat
+        def inert_socket_stat(path, *args, **kwargs):
+            if path == self.worker.RUNTIME_SOCKET.name:
+                fields = list(original_stat(socket_dir))
+                fields[stat.ST_MODE] = stat.S_IFSOCK | 0o600
+                fields[stat.ST_UID], fields[stat.ST_GID] = 0, 0
+                return os.stat_result(fields)
+            return original_stat(path, *args, **kwargs)
+        with mock.patch.object(self.worker, "protected_directory", side_effect=inert_protected), \
+                mock.patch.object(os, "geteuid", return_value=0), \
+                mock.patch.object(os, "stat", side_effect=inert_socket_stat):
+            with self.worker.DockerBackend(lock, None) as backend:
+                cli.write_bytes(b"#!/usr/bin/python3\nprint('unchecked replacement')\n")
+                self.assertEqual(backend.command(["inert"]), b"approved inert CLI bytes\n")
+                self.assertEqual(fcntl.fcntl(backend.cli_fd, fcntl.F_GET_SEALS) & self.worker.SEALS, self.worker.SEALS)
+            with self.assertRaisesRegex(self.worker.WorkerRefusal, "runtime CLI differs"):
+                with self.worker.DockerBackend(lock, None):
+                    self.fail("mutated CLI initialized")
+
+    def test_production_gate_has_no_record_env_or_mutable_host_fallback(self):
+        with mock.patch.dict(os.environ, {"CLANG_APPROVED_IMAGE": self.lock["configDigest"], "CLANG_HOST_QUALIFIED": "1"}), \
+                mock.patch.object(self.worker, "APPROVAL_STORE", self.base / "missing"), \
+                mock.patch.object(provision, "run_checked") as command, \
+                mock.patch.object(provision, "_provision_rootfs_unqualified") as provision_old, \
+                mock.patch.object(provision, "_package_provenance_unqualified") as package_old:
+            for public in (provision.provision_rootfs, provision.command_package_provenance, provision.command_check_host_execution):
+                with self.subTest(public=public.__name__), self.assertRaisesRegex(provision.ProvisionError, "immutable host execution unavailable"):
+                    public(provision.argparse.Namespace())
+            command.assert_not_called()
+            provision_old.assert_not_called()
+            package_old.assert_not_called()
+        with mock.patch.object(self.worker, "require_production_worker", return_value=None):
+            with self.assertRaisesRegex(provision.ProvisionError, "artifact transport is unfinished"):
+                provision.require_immutable_host_execution("provision-rootfs-v1")
+        with self.assertRaisesRegex(self.worker.WorkerRefusal, "installed root launcher"):
+            self.worker.execute_installed_action("provision-rootfs-v1", self.lock_sha, {"source.cpp": self.input_fd}, -1)
+
+    def test_host_worker_policy_and_environment_recipe_are_bound_and_workflow_refuses_mutable_install(self):
+        recipe = provision.recipe_identity()
+        for key in ("hostWorkerSha256", "hostPolicySha256", "hostEnvironmentRecipeSha256"):
+            self.assertEqual(recipe[key], self.worker.digest(provision.RECIPE_FILES[key].read_bytes()))
+        policy = json.loads(provision.RECIPE_FILES["hostPolicySha256"].read_bytes())
+        self.assertFalse(policy["qualificationEnabled"])
+        self.assertIsNone(policy["environmentManifestDigest"])
+        workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text()
+        self.assertIn("check-host-execution", workflow)
+        for event, following in (("pull_request:", "  push:"), ("push:", "\npermissions:")):
+            section = workflow.split("  " + event, 1)[1].split(following, 1)[0]
+            self.assertIn("'scripts/oracle/clang_18_1_3_worker.py'", section)
+        self.assertNotIn("debootstrap dpkg-dev gpgv gnupg ubuntu-keyring python3", workflow)
+        args = provision.build_parser().parse_args(["check-host-execution"])
+        self.assertEqual(args.run, provision.command_check_host_execution)
+
 
 
 def run_rootfs_privilege_smoke(privilege: str) -> None:

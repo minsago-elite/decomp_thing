@@ -302,7 +302,7 @@
     },
     "recipe": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256"],
+      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256", "hostWorkerSha256", "hostPolicySha256", "hostEnvironmentRecipeSha256"],
       "properties": {
         "contractSha256": {"$ref": "#/$defs/sha256"},
         "schemaSha256": {"$ref": "#/$defs/sha256"},
@@ -312,7 +312,10 @@
         "aLoaderSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderSmokeSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderInitSha256": {"$ref": "#/$defs/sha256"},
-        "workflowSha256": {"$ref": "#/$defs/sha256"}
+        "workflowSha256": {"$ref": "#/$defs/sha256"},
+        "hostWorkerSha256": {"$ref": "#/$defs/sha256"},
+        "hostPolicySha256": {"$ref": "#/$defs/sha256"},
+        "hostEnvironmentRecipeSha256": {"$ref": "#/$defs/sha256"}
       }
     }
   }

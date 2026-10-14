@@ -19,6 +19,7 @@ on:
       - 'oracle/llvm/22.1.6/oracle-manifest.json'
       - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
+      - 'scripts/oracle/clang_18_1_3_worker.py'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
   push:
     branches: [master]
@@ -29,6 +30,7 @@ on:
       - 'oracle/llvm/22.1.6/oracle-manifest.json'
       - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
+      - 'scripts/oracle/clang_18_1_3_worker.py'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
 
 permissions:
@@ -151,11 +153,8 @@ jobs:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
 
-      - name: Install bounded host acquisition tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            debootstrap dpkg-dev gpgv gnupg ubuntu-keyring python3
+      - name: Require independently approved immutable host execution
+        run: python3 scripts/oracle/provision_clang_18_1_3.py check-host-execution
 
       - name: Authenticate Ubuntu Snapshot source and patch compatibility first
         run: |
