@@ -118,6 +118,19 @@ class owned_worker_leaf:
             raise failure
         return False
 
+
+def _require_helper_target(execution, helper_sha):
+    """Join the controller claim to the executable independently proven by monitor."""
+    binding = execution.get('workerProofBindings') or {}
+    expected = binding.get('expected') or {}
+    pins = execution.get('launchInputPins') or {}
+    if (binding.get('targetSha256') != helper_sha or not any(
+            row.get('sha256') == helper_sha and
+            (row.get('device'),row.get('inode')) == (expected.get('targetDevice'),expected.get('targetInode'))
+            for row in pins.values())):
+        raise ValueError('helper claim differs from monitor-proven executable')
+
+
 def _raw_from_receipt(receipt):
     """Raw helper roots are closed; only this reader may add these two fields."""
     if not isinstance(receipt, dict):
@@ -134,6 +147,7 @@ def _raw_from_receipt(receipt):
         raise ValueError('invalid trusted helper input bindings')
     if not _complete_execution(execution) or execution.get('inputBindings') != bindings:
         raise ValueError('incomplete trusted helper execution')
+    _require_helper_target(execution, bindings['helperSha256'])
     return _validate_raw_helper({key:value for key,value in receipt.items() if key not in trusted_keys})
 
 
@@ -334,6 +348,7 @@ def probe(source, helper, work, environment):
             raise ValueError('probe inputs changed during execution')
         if not _complete_execution(result):
             raise ValueError('incomplete helper execution')
+        _require_helper_target(result, bindings['helperSha256'])
         if result['exitCode'] not in (0,1,2):
             raise ValueError('unexpected helper termination')
         value = _validate_raw_helper(json.loads(result['stdout']))

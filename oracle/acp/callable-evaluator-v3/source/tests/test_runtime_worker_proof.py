@@ -209,6 +209,14 @@ class RuntimeWorkerProof(unittest.TestCase):
             opened.assert_called_once_with('/proc/123/fd/9',gate.os.O_RDONLY|gate.os.O_NONBLOCK|gate.os.O_CLOEXEC)
             duplicate.assert_called_once_with(10,5,inheritable=True);inherit.assert_called_once_with(5,True)
             close.assert_called_once_with(10)
+            # Parent FD lives in controller table, independent of child FD5/64-FD policy.
+            record['descriptor']=4096
+            gate._acquire_library_snapshot(record,1024)
+            self.assertEqual('/proc/123/fd/4096',opened.call_args.args[0])
+            for invalid in (-1,True,1<<31,'4096'):
+                record['descriptor']=invalid
+                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+            record['descriptor']=9
             for wrong in (0,runtime._SEALED_LIBRARY & ~gate.fcntl.F_SEAL_WRITE):
                 seals.return_value=wrong
                 with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)

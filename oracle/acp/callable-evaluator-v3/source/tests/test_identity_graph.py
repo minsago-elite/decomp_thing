@@ -54,14 +54,15 @@ def remap(value, mapping):
     return value
 
 
-def completed_result(stdout=b'', stderr=b'', exit_code=0):
+def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
     import hashlib
-    pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':'0'*64},
+    pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':target_sha},
           '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64}}
     bindings={'protocolVersion':1,'expected':{'attempt':'a'*32,'phase':'runtime','reportDevice':1,
         'reportInode':2,'reaperDevice':3,'reaperInode':4,'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8},
         **{key:'0'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256')},
         'launchPinsSha256':hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()}
+    bindings['targetSha256']=target_sha
     execution={'v':1,'t':'exec','s':1,'a':'a'*32,'p':'runtime','c':3,'ed':7,'ei':8,'od':7,'oi':8,
                'w':(4<<16)|(5<<8)|127,'cf':1,'dp':0,'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
     termination={'v':1,'t':'term','s':2,'a':'a'*32,'p':'runtime','c':3,
@@ -180,7 +181,7 @@ class IdentityGraph(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(gate.__file__).parent) as directory:
             work=Path(directory);source=work/'public.c';source.write_text('int public_test;')
             helper=work/'not-executed';helper.write_text('inert')
-            result=completed_result(json.dumps(graph()).encode())
+            result=completed_result(json.dumps(graph()).encode(),target_sha=gate.digest(helper))
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 self.assertEqual(gate.probe(source,helper,work,{})['schemaVersion'],3)
                 old=graph();old['schemaVersion']=2;result['stdout']=json.dumps(old).encode()
@@ -279,24 +280,24 @@ class IdentityGraph(unittest.TestCase):
             helper=work/'inert-helper';helper.write_text('NOT EXECUTED')
             for mutate in mutations:
                 value=graph();mutate(value)
-                result=completed_result(json.dumps(value).encode())
+                result=completed_result(json.dumps(value).encode(),target_sha=gate.digest(helper))
                 with patch.object(gate,'bounded_run',return_value=result) as runner, patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                     with self.assertRaises(ValueError) as failure:gate.probe(source,helper,work,{})
                     self.assertIs(failure.exception.bounded_result,result)
                     self.assertEqual(runner.call_args.kwargs['phase'],'probe')
             refusal={'schemaVersion':3,'status':'refused','diagnostics':['unsupported-integer-builtin-kind']}
-            result=completed_result(json.dumps(refusal).encode(),exit_code=2)
+            result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=gate.digest(helper))
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 refused=gate.probe(source,helper,work,{})
                 self.assertEqual(refused['status'],'refused');self.assert_unknown(refused)
             fixture={'schemaVersion':3,'fixtureOnly':True,'status':'supported','diagnostic':'','visited':1}
-            result=completed_result(json.dumps(fixture).encode())
+            result=completed_result(json.dumps(fixture).encode(),target_sha=gate.digest(helper))
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 with self.assertRaisesRegex(ValueError,'fixture-only'):gate.probe(source,helper,work,{})
 
     def test_trusted_enrichment_is_explicit_and_cannot_enter_through_raw_gate(self):
         value=graph()
-        bindings={'sourceSha256':'a'*64,'helperSha256':'b'*64,'inputsUnchanged':True}
+        bindings={'sourceSha256':'a'*64,'helperSha256':'0'*64,'inputsUnchanged':True}
         execution=gate.public_result(completed_result())
         execution['inputBindings']=bindings
         value.update(execution=execution,inputBindings=bindings)
@@ -304,6 +305,32 @@ class IdentityGraph(unittest.TestCase):
         self.assertTrue(gate.compare_descriptors(value,copy.deepcopy(value))['accepted'])
         value['unexpectedRoot']=True;self.assert_unknown(value);value.pop('unexpectedRoot')
         value.pop('execution');self.assert_unknown(value)
+
+    def test_helper_claim_rejects_transient_path_swap_even_when_restored(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(dir=Path(gate.__file__).parent) as directory:
+            work=Path(directory);source=work/'input.c';source.write_text('int authored;')
+            helper=work/'helper';original=b'authored original helper';helper.write_bytes(original)
+            def swapped(*args,**kwargs):
+                helper.write_bytes(b'authored substituted helper')
+                actual_sha=gate.digest(helper)
+                result=completed_result(json.dumps(graph()).encode(),target_sha=actual_sha)
+                helper.write_bytes(original)  # pre/post pathname digests agree
+                return result
+            with patch.object(gate,'bounded_run',side_effect=swapped),patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
+                with self.assertRaisesRegex(ValueError,'monitor-proven executable'):gate.probe(source,helper,work,{})
+            value=graph();bindings={'sourceSha256':'a'*64,'helperSha256':'0'*64,'inputsUnchanged':True}
+            execution=gate.public_result(completed_result());execution['inputBindings']=bindings
+            value.update(execution=execution,inputBindings=bindings)
+            gate._raw_from_receipt(value)
+            for mutation in ('claimed-sha','target-pin-inode'):
+                bad=copy.deepcopy(value)
+                if mutation=='claimed-sha':
+                    bad['inputBindings']['helperSha256']='f'*64
+                    bad['execution']['inputBindings']=copy.deepcopy(bad['inputBindings'])
+                else:
+                    bad['execution']['launchInputPins']['/authored/worker']['inode']=99
+                with self.assertRaises(ValueError):gate._raw_from_receipt(bad)
 
     def test_probe_and_exports_need_complete_process_observations(self):
         import tempfile

@@ -61,8 +61,8 @@ def _close_nonstandard(keep):
 
 def _acquire_library_snapshot(record, maximum):
     if (type(record) is not dict or set(record) != {'ownerPid','ownerStart','descriptor','library'} or
-            any(type(record[k]) is not int or record[k] <= 0 for k in ('ownerPid','ownerStart','descriptor')) or
-            record['descriptor'] >= 64):
+            any(type(record[k]) is not int or not 0 < record[k] <= (1 << 63) - 1 for k in ('ownerPid','ownerStart')) or
+            type(record['descriptor']) is not int or not 0 <= record['descriptor'] <= (1 << 31) - 1):
         raise ValueError('invalid held library owner binding')
     library = record['library']
     if (type(library) is not dict or set(library) != {'device','inode','size','sha256','sourcePath'} or
