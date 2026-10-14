@@ -51,6 +51,7 @@ OCI_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 OCI_GZIP_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+OCI_REFERENCE_NAME = "clang-18.1.3-noble-amd64"
 FRONTEND_RUNTIME_ROOTS = (
     "/usr/bin/clang-18",
     "/usr/bin/clang++-18",
@@ -2202,6 +2203,11 @@ def command_probe_report(args: argparse.Namespace) -> int:
     checked = validate_probe_report(report, inventory, contract)
     checked["sourceSha256"] = sha256(args.source.read_bytes())
     checked["binarySha256"] = sha256(args.binary.read_bytes())
+    pinned_fixture = captured_evidence(RECIPE_FILES["fixtureSha256"], None)
+    selected_fixture = captured_evidence(args.fixture, None, maximum_bytes=len(pinned_fixture))
+    if selected_fixture != pinned_fixture:
+        raise ProvisionError("standalone probe fixture differs from the pinned recipe fixture")
+    checked["fixtureSha256"] = sha256(selected_fixture)
     atomic_write(args.output, canonical_json(checked))
     print("verified LibTooling probe report against the pinned 18.1.3 contract")
     return 0
@@ -3111,7 +3117,7 @@ def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environme
         "manifests": [{
             "mediaType": OCI_MANIFEST_MEDIA_TYPE,
             "digest": "sha256:" + manifest_digest, "size": len(manifest_bytes),
-            "annotations": {"org.opencontainers.image.ref.name": "clang-18.1.3-noble-amd64"},
+            "annotations": {"org.opencontainers.image.ref.name": OCI_REFERENCE_NAME},
         }],
     }
     (output / "index.json").write_bytes(canonical_json(index))
@@ -3276,6 +3282,8 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                     descriptors[0].get("mediaType") != OCI_MANIFEST_MEDIA_TYPE):
                 raise ProvisionError("OCI index or manifest descriptor has an invalid media type or shape")
             manifest_desc = descriptors[0]
+            if manifest_desc.get("annotations") != {"org.opencontainers.image.ref.name": OCI_REFERENCE_NAME}:
+                raise ProvisionError("OCI manifest descriptor reference annotation differs from the canonical reference")
             digest = record["image"]["imageDigest"]
             if manifest_desc.get("digest") != digest:
                 raise ProvisionError("OCI index manifest digest differs from the build record")
@@ -5268,6 +5276,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--inventory", type=Path, required=True)
     probe.add_argument("--source", type=Path, required=True)
     probe.add_argument("--binary", type=Path, required=True)
+    probe.add_argument("--fixture", type=Path, default=RECIPE_FILES["fixtureSha256"])
     probe.add_argument("--output", type=Path, required=True)
     probe.set_defaults(run=command_probe_report)
     provision = sub.add_parser("provision-rootfs", help="install and qualify the authenticated candidate in a minimal Noble rootfs")

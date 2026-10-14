@@ -3027,6 +3027,44 @@ class ProvisioningNegativeTests(unittest.TestCase):
         with self.assertRaises(provision.ProvisionError):
             provision.validate_probe_report(report, inventory, self.contract)
 
+    def test_standalone_probe_report_binds_pinned_fixture_and_rejects_missing_or_changed_bytes(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            probe = self.valid_build_record()["probe"]
+            inventory = {**probe, "manualFieldsCount": self.contract["langOptions"]["manualFieldsCount"]}
+            report_path, inventory_path = base / "raw.json", base / "inventory.json"
+            report_path.write_bytes(provision.canonical_json(probe))
+            inventory_path.write_bytes(provision.canonical_json(inventory))
+            source, binary = base / "source.cpp", base / "probe"
+            source.write_bytes(b"inert standalone source")
+            binary.write_bytes(b"inert standalone binary")
+            pinned = provision.RECIPE_FILES["fixtureSha256"].read_bytes()
+            selected = base / "selected.cpp"
+            selected.write_bytes(pinned)
+            for label in ("default", "explicit", "changed", "missing"):
+                with self.subTest(label=label):
+                    output = base / (label + ".json")
+                    argv = ["verify-probe", "--report", str(report_path), "--inventory", str(inventory_path),
+                            "--source", str(source), "--binary", str(binary), "--output", str(output)]
+                    if label != "default":
+                        argv.extend(["--fixture", str(selected)])
+                    if label == "changed":
+                        selected.write_bytes(bytes([pinned[0] ^ 1]) + pinned[1:])
+                    elif label == "missing":
+                        selected.unlink()
+                    args = provision.build_parser().parse_args(argv)
+                    if label in ("changed", "missing"):
+                        with self.assertRaises(provision.ProvisionError):
+                            args.run(args)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(args.run(args), 0)
+                        expected = provision.validate_probe_report(probe, inventory, self.contract)
+                        expected.update(sourceSha256=provision.sha256(source.read_bytes()),
+                                        binarySha256=provision.sha256(binary.read_bytes()),
+                                        fixtureSha256=provision.sha256(pinned))
+                        self.assertEqual(json.loads(output.read_bytes()), expected)
+
     def test_probe_report_rejects_real_22_1_6_identity(self):
         report = {"compilerVersion": "22.1.6", "target": "x86_64-pc-linux-gnu",
                   "callingConventions": self.contract["langOptions"]["callingConventions"],
@@ -3471,6 +3509,46 @@ public:
                             provision.verify_oci_archive(archive_path, record, 1024 * 1024)
                     else:
                         provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
+    def test_oci_reference_annotation_is_exact_even_with_rehashed_outer_archive(self):
+        annotation_key = "org.opencontainers.image.ref.name"
+        annotations = [None, {}, {annotation_key: "attacker-reference"},
+                       {"renamed.annotation": "clang-18.1.3-noble-amd64"},
+                       {annotation_key: "clang-18.1.3-noble-amd64", "extra": "claim"},
+                       [], {annotation_key: "clang-18.1.3-noble-amd64"}]
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            payload = b"inert OCI annotation fixture"
+            rootfs_tar = base / "rootfs.tar"
+            rootfs_tar.write_bytes(payload)
+            for index, annotation in enumerate(annotations):
+                with self.subTest(annotation=annotation):
+                    layout = base / f"layout-{index}"
+                    image = provision.create_oci_layout(rootfs_tar, layout, "fixture", self.contract["environment"])
+                    index_path = layout / "index.json"
+                    data = json.loads(index_path.read_bytes())
+                    self.assertEqual(data["manifests"][0]["annotations"],
+                                     {annotation_key: "clang-18.1.3-noble-amd64"})
+                    if annotation is None:
+                        data["manifests"][0].pop("annotations")
+                    else:
+                        data["manifests"][0]["annotations"] = annotation
+                    index_path.write_bytes(provision.canonical_json(data))
+                    archive_path = base / f"archive-{index}.tar"
+                    with tarfile.open(archive_path, "w") as archive:
+                        for path in sorted(layout.rglob("*")):
+                            if path.is_file():
+                                archive.add(path, arcname=path.relative_to(layout).as_posix())
+                    record = {"profile": {"id": "fixture"}, "environment": self.contract["environment"],
+                              "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)},
+                              "image": image,
+                              "imageArtifact": {"bytes": archive_path.stat().st_size,
+                                                "sha256": provision.sha256_file(archive_path)}}
+                    if annotation == {annotation_key: "clang-18.1.3-noble-amd64"}:
+                        provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+                    else:
+                        with self.assertRaisesRegex(provision.ProvisionError, "reference annotation"):
+                            provision.verify_oci_archive(archive_path, record, 1024 * 1024)
 
     def test_oci_image_verifier_rejects_rehashed_duplicate_json_members(self):
         def duplicate(payload, name, marker=b"{"):
@@ -4423,6 +4501,31 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 mock.patch.object(provision, "execute_locked_negative_comparator", return_value=negative), \
                 mock.patch.object(provision, "run_checked", side_effect=local_tar):
             yield args, candidate
+
+    def test_packaging_runtime_closure_rejects_rehashed_dependency_omission(self):
+        with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
+            self.assertEqual(provision.command_package_provenance(args), 0)
+            args.output.unlink()
+            record = json.loads(args.record.read_bytes())
+            actual_entries = record["runtime"]["entries"]
+            self.assertGreater(len(actual_entries), 1)
+            record["runtime"] = provision.manifest(actual_entries[:-1])
+            args.record.write_bytes(provision.canonical_json(record))
+            loader = ProvisioningNegativeTests.valid_loader_report(
+                self, record, provision.sha256_file(args.record), args.rootfs)
+            args.loader_report.write_bytes(provision.canonical_json(loader))
+            # The shortened record and its loader projection are self-consistent;
+            # only independent dependency discovery exposes the omitted library.
+            provision.validate_build_record(record, self.contract, args.contract)
+            provision.validate_provenance_loader_report(
+                loader, record, provision.sha256_file(args.record), args.rootfs)
+            with mock.patch.object(provision, "runtime_dependencies", return_value=actual_entries) as discover, \
+                    mock.patch.object(provision, "run_probe_sandboxed") as probe:
+                with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
+                    provision.command_package_provenance(args)
+            discover.assert_called_once_with(args.rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
+            probe.assert_not_called()
+            self.assertFalse(args.output.exists())
 
     def test_provenance_archives_captured_metadata_after_validated_path_replacement(self):
         with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, candidate):
