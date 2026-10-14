@@ -18,6 +18,7 @@ import java.util.zip.ZipFile
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
+import java.util.jar.JarOutputStream
 import java.util.jar.Manifest
 import org.gradle.api.tasks.testing.Test
 
@@ -2390,8 +2391,8 @@ val stageProviderDnsHostRuntime = tasks.register("stageProviderDnsHostRuntime") 
         val out = destination.get().asFile.toPath().toAbsolutePath().normalize()
         Files.createDirectories(out); require(out.toRealPath() == out)
         for (name in listOf("host-control.jar", "kotlin-stdlib.jar", "jna.jar", "libjnidispatch.so", "host-runtime.properties")) require(!Files.isSymbolicLink(out.resolve(name)))
-        java.util.jar.JarOutputStream(Files.newOutputStream(out.resolve("host-control.jar"))).use { jar -> entries.forEach { (name, bytes) ->
-            jar.putNextEntry(java.util.jar.JarEntry(name).also { it.time = 0 }); jar.write(bytes); jar.closeEntry()
+        JarOutputStream(Files.newOutputStream(out.resolve("host-control.jar"))).use { jar -> entries.forEach { (name, bytes) ->
+            jar.putNextEntry(JarEntry(name).also { it.time = 0 }); jar.write(bytes); jar.closeEntry()
         } }
         Files.write(out.resolve("kotlin-stdlib.jar"), stdlib); Files.write(out.resolve("jna.jar"), jna); Files.write(out.resolve("libjnidispatch.so"), dispatch)
         val metadata = sortedMapOf("schema" to "2", "kotlinCoordinates" to "org.jetbrains.kotlin:kotlin-stdlib:2.4.0",
