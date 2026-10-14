@@ -2689,6 +2689,403 @@ def package_metadata_for_keys(candidate_root: Path, candidate: dict,
     return result
 
 
+class DebPayloadBudget:
+    """Shared authenticated archive/decoded-entry budgets, never reset per package."""
+    def __init__(self, contract: dict):
+        limits = contract["profile"]["bounds"]
+        self.compressed = limits["maxAcquisitionBytes"]
+        self.decoded = min(8 * 1024 ** 3, limits["maxArtifactBytes"])
+        self.entries = 100_000
+
+
+def _deb_path(name: str, *, root_directory: bool = False) -> str:
+    if name.startswith("./"):
+        name = name[2:]
+    if root_directory and name in ("", "."):
+        return ""
+    name = name.rstrip("/")
+    if (not name or len(name.encode("utf-8")) > 4096 or "\0" in name or
+            name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))):
+        raise ProvisionError("unsafe authenticated package member path")
+    return name
+
+
+def _deb_link(path: str, target: str) -> None:
+    if not target or "\0" in target or len(target.encode("utf-8")) > 4096:
+        raise ProvisionError("unsafe authenticated package symlink")
+    parts = [] if target.startswith("/") else path.split("/")[:-1]
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ProvisionError("authenticated package symlink escapes root")
+            parts.pop()
+        else:
+            parts.append(part)
+
+
+def _deb_decode(name: str, packed: bytes, budget: DebPayloadBudget) -> bytes:
+    if name.endswith(".gz"):
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    elif name.endswith(".xz"):
+        decoder = lzma.LZMADecompressor(memlimit=256 * 1024 * 1024)
+    elif name.endswith(".tar"):
+        if len(packed) > budget.decoded:
+            raise ProvisionError("authenticated package decoded-byte budget exceeded")
+        budget.decoded -= len(packed)
+        return packed
+    else:
+        raise ProvisionError("unsupported authenticated package compression")
+    try:
+        data = decoder.decompress(packed, budget.decoded + 1)
+    except (zlib.error, lzma.LZMAError) as error:
+        raise ProvisionError("malformed authenticated package compression") from error
+    if len(data) > budget.decoded:
+        raise ProvisionError("authenticated package decoded-byte budget exceeded")
+    if not decoder.eof or decoder.unused_data:
+        raise ProvisionError("truncated or trailing authenticated package compression stream")
+    budget.decoded -= len(data)
+    return data
+
+
+def _deb_tar(data: bytes, budget: DebPayloadBudget, capture_names=()) -> dict[str, dict]:
+    """Parse fixed tar headers directly: no extraction, PAX/GNU overrides or special files."""
+    records = {}
+    offset = 0
+    while offset + 512 <= len(data):
+        header = data[offset:offset + 512]
+        if not any(header):
+            if len(data) - offset < 1024 or any(data[offset:]):
+                raise ProvisionError("malformed authenticated package tar terminator")
+            return records
+        if budget.entries == 0:
+            raise ProvisionError("authenticated package entry budget exceeded")
+        budget.entries -= 1
+        try:
+            info = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+        except (tarfile.TarError, UnicodeError, ValueError) as error:
+            raise ProvisionError("malformed authenticated package tar header") from error
+        if (info.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE,
+                              tarfile.SYMTYPE, tarfile.LNKTYPE) or info.sparse or
+                info.mode < 0 or info.mode > 0o7777 or not 0 <= info.uid <= 2 ** 32 - 1 or
+                not 0 <= info.gid <= 2 ** 32 - 1 or info.size < 0):
+            raise ProvisionError("unsupported authenticated package member metadata")
+        end = offset + 512 + info.size
+        next_offset = offset + 512 + ((info.size + 511) // 512) * 512
+        if next_offset > len(data):
+            raise ProvisionError("truncated authenticated package tar member")
+        if info.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) and info.size:
+            raise ProvisionError("nonregular authenticated package member has payload")
+        path = _deb_path(info.name, root_directory=info.isdir())
+        offset, content = next_offset, memoryview(data)[end - info.size:end]
+        if not path:
+            path = "."  # Preserve authenticated root-directory metadata as authority.
+        if path in records:
+            raise ProvisionError("duplicate authenticated package member")
+        row = {"mode": info.mode, "uid": info.uid, "gid": info.gid}
+        if info.isfile():
+            row.update(kind="file", bytes=info.size, sha256=sha256(content))
+            if path in capture_names:
+                if info.size > 1024 * 1024:
+                    raise ProvisionError("authenticated package control metadata bound exceeded")
+                row["content"] = bytes(content)
+        elif info.isdir():
+            row.update(kind="directory")
+        elif info.issym():
+            _deb_link(path, info.linkname)
+            row.update(kind="symlink", target=info.linkname)
+        else:
+            target = _deb_path(info.linkname)
+            original = records.get(target)
+            if original is None or original["kind"] != "file" or any(row[k] != original[k] for k in row):
+                raise ProvisionError("authenticated package hardlink lacks prior exact regular target")
+            row.update(kind="hardlink", target=target, bytes=original["bytes"], sha256=original["sha256"])
+        records[path] = row
+    raise ProvisionError("missing authenticated package tar terminator")
+
+
+def authenticated_deb_manifest(payload: bytes, package: dict, budget: DebPayloadBudget) -> dict:
+    if (type(package.get("bytes")) is not int or package["bytes"] > budget.compressed or
+            len(payload) != package["bytes"] or sha256(payload) != package["sha256"]):
+        raise ProvisionError("retained .deb differs from authenticated signed package identity")
+    budget.compressed -= len(payload)
+    if not payload.startswith(b"!<arch>\n"):
+        raise ProvisionError("invalid authenticated Debian ar magic")
+    offset, members = 8, {}
+    while offset < len(payload):
+        if len(members) == 3 or offset + 60 > len(payload):
+            raise ProvisionError("unsupported authenticated Debian ar member inventory")
+        header = payload[offset:offset + 60]
+        try:
+            name = header[:16].decode("ascii").rstrip().removesuffix("/")
+            size_text = header[48:58].decode("ascii").strip()
+            if header[58:] != b"`\n" or not size_text.isdecimal():
+                raise ValueError()
+            size = int(size_text)
+            for field, base in ((header[16:28], 10), (header[28:34], 10), (header[34:40], 10), (header[40:48], 8)):
+                text = field.decode("ascii").strip()
+                if not text or any(char not in ("01234567" if base == 8 else "0123456789") for char in text):
+                    raise ValueError()
+                int(text, base)
+        except (ValueError, UnicodeError) as error:
+            raise ProvisionError("invalid authenticated Debian ar header") from error
+        allowed = ("debian-binary", "control.tar", "control.tar.gz", "control.tar.xz",
+                   "data.tar", "data.tar.gz", "data.tar.xz")
+        if name not in allowed or name in members or offset + 60 + size > len(payload):
+            raise ProvisionError("unsafe or duplicate authenticated Debian ar member")
+        start = offset + 60
+        members[name] = payload[start:start + size]
+        offset = start + size
+        if size % 2:
+            if payload[offset:offset + 1] != b"\n":
+                raise ProvisionError("invalid authenticated Debian ar padding")
+            offset += 1
+    controls = [name for name in members if name.startswith("control.tar")]
+    archives = [name for name in members if name.startswith("data.tar")]
+    if members.get("debian-binary") != b"2.0\n" or len(controls) != 1 or len(archives) != 1:
+        raise ProvisionError("incomplete authenticated Debian member inventory")
+    control = _deb_tar(_deb_decode(controls[0], members[controls[0]], budget), budget, ("control", "conffiles"))
+    control_data = control.get("control", {}).get("content")
+    if type(control_data) is not bytes:
+        raise ProvisionError("authenticated package lacks regular control metadata")
+    rows = parse_deb822(control_data.decode("utf-8"))
+    if len(rows) != 1 or any(rows[0].get(field) != package[key] for field, key in
+                            (("Package", "name"), ("Version", "version"), ("Architecture", "architecture"))):
+        raise ProvisionError("authenticated Debian control identity differs from signed index")
+    result = _deb_tar(_deb_decode(archives[0], members[archives[0]], budget), budget)
+    if "conffiles" in control:
+        if "content" not in control["conffiles"]:
+            raise ProvisionError("authenticated package conffiles is not regular")
+        conffiles = control["conffiles"]["content"].decode("utf-8").splitlines()
+        seen = set()
+        for name in conffiles:
+            if not name.startswith("/"):
+                raise ProvisionError("unsupported authenticated package conffile declaration")
+            path = _deb_path(name[1:])
+            if path in seen or path not in result or result[path]["kind"] != "file":
+                raise ProvisionError("invalid authenticated package conffile ownership")
+            seen.add(path)
+            result[path]["conffile"] = True
+    return result
+
+
+def retain_signed_package_payloads(rootfs: Path, destination: Path, packages: list[dict], contract: dict) -> None:
+    """Retain bootstrap/downloaded payloads before cache normalization; never fetch missing bytes."""
+    limits = contract["profile"]["bounds"]
+    if not packages or len(packages) > limits["maxPackageCount"]:
+        raise ProvisionError("authenticated package retention count bound")
+    if any(type(row.get("bytes")) is not int or not 0 < row["bytes"] <= limits["maxArtifactBytes"] or
+           not isinstance(row.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None for row in packages):
+        raise ProvisionError("malformed authenticated package retention identity")
+    if sum(row["bytes"] for row in packages) > limits["maxAcquisitionBytes"]:
+        raise ProvisionError("authenticated package retention byte bound before read")
+    expected = {row["sha256"]: row for row in packages}
+    if len(expected) != len(packages):
+        raise ProvisionError("ambiguous authenticated package payload ownership")
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache = rootfs / "var/cache/apt/archives"
+    candidates = []
+    with os.scandir(cache) as entries:
+        for count, entry in enumerate(entries):
+            if count >= limits["maxPackageCount"] + 16:
+                raise ProvisionError("package cache scan exceeds bounded inventory")
+            if entry.name.endswith(".deb"):
+                candidates.append(Path(entry.path))
+    total = 0
+    for source in sorted(candidates):
+        data = read_regular_evidence(source, min(limits["maxArtifactBytes"], limits["maxAcquisitionBytes"] - total))
+        total += len(data)
+        if total > limits["maxAcquisitionBytes"]:
+            raise ProvisionError("authenticated package retention byte bound")
+        digest = sha256(data)
+        row = expected.get(digest)
+        if row is None or len(data) != row["bytes"]:
+            raise ProvisionError("package cache payload differs from signed package closure")
+        target = destination / (digest + ".deb")
+        if target.exists():
+            if read_regular_evidence(target, row["bytes"]) != data:
+                raise ProvisionError("retained authenticated package payload changed")
+        else:
+            with target.open("xb") as stream:
+                stream.write(data)
+            target.chmod(0o400)
+    for digest, row in expected.items():
+        data = read_regular_evidence(destination / (digest + ".deb"), row["bytes"])
+        if len(data) != row["bytes"] or sha256(data) != digest:
+            raise ProvisionError("missing or changed authenticated bootstrap/installed package payload")
+
+
+def verify_installed_package_payloads(rootfs: Path, payload_directory: Path,
+                                      packages: list[dict], contract: dict) -> dict:
+    """Derive authority from signed archives, not rootfs status/md5sums/record hashes.
+
+    Exception registry is deliberately empty. Maintainer/normalization changes to
+    a package-owned path refuse until a package/version/path rule is reviewed.
+    Unowned generated files also refuse: a falsified installed-package database
+    cannot hide an omitted package's files. Only the closed implicit-parent rule
+    below is supported; unrelated generated databases/probe outputs still refuse.
+    """
+    limits = contract["profile"]["bounds"]
+    if not packages or len(packages) > limits["maxPackageCount"]:
+        raise ProvisionError("installed authenticated payload package count bound")
+    budget = DebPayloadBudget(contract)
+    manifest = {}
+    payload_rows = []
+    for package in sorted(packages, key=lambda row: (row["name"], row["version"], row["architecture"])):
+        size = package["bytes"]
+        if type(size) is not int or not 0 < size <= min(limits["maxArtifactBytes"], budget.compressed):
+            raise ProvisionError("authenticated package input byte budget exceeded before read")
+        if not isinstance(package.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", package["sha256"]) is None:
+            raise ProvisionError("malformed authenticated package payload digest")
+        source = payload_directory / (package["sha256"] + ".deb")
+        data = read_regular_evidence(source, size)
+        entries = authenticated_deb_manifest(data, package, budget)
+        owner = [package[key] for key in ("name", "version", "architecture")]
+        payload_rows.append({"package": owner, "bytes": size, "sha256": package["sha256"]})
+        for path, entry in entries.items():
+            old = manifest.get(path)
+            if old is not None:
+                if entry["kind"] != "directory" or old["entry"] != entry:
+                    raise ProvisionError("conflicting authenticated package installed-path ownership: " + path)
+                old["packages"].append(owner)
+            else:
+                manifest[path] = {"entry": entry, "packages": [owner]}
+    # A later package cannot turn a previously admitted parent into a symlink.
+    parents = set()
+    for path in manifest:
+        parent = PurePosixPath(path).parent
+        while str(parent) != ".":
+            if str(parent) in manifest and manifest[str(parent)]["entry"]["kind"] != "directory":
+                raise ProvisionError("authenticated package payload has non-directory ancestor")
+            if str(parent) not in parents:
+                if len(parents) == 100_000:
+                    raise ProvisionError("authenticated package parent inventory bound")
+                parents.add(str(parent))
+            parent = parent.parent
+    # Closed extraction rule, not a generated-path whitelist: only ancestors
+    # of authenticated payload paths may be synthesized. A signed root entry
+    # supplies fixed ownership; the reviewed default directory mode is 0755.
+    # Without that independent root metadata, absent parent entries refuse.
+    for parent in sorted(parents):
+        if parent not in manifest:
+            root_record = manifest.get(".")
+            if root_record is None or root_record["entry"]["kind"] != "directory":
+                raise ProvisionError("implicit package parent lacks authenticated root-directory metadata")
+            owner = root_record["entry"]
+            manifest[parent] = {
+                "entry": {"kind": "directory", "mode": 0o755, "uid": owner["uid"], "gid": owner["gid"]},
+                "packages": list(root_record["packages"]),
+                "derivation": {"rule": "implicit-parent-from-authenticated-root-v1", "sourcePath": "/",
+                               "extendedMetadata": "none"},
+            }
+    canonical_root = rootfs.resolve(strict=True)
+    root_fd = os.open(canonical_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    identities = {}
+    try:
+        def reject_unowned_paths():
+            remaining = 100_000
+
+            def visit(directory_fd, prefix, depth):
+                nonlocal remaining
+                if depth > 128:
+                    raise ProvisionError("installed package tree depth bound")
+                with os.scandir(directory_fd) as children:
+                    for child in children:
+                        if remaining == 0:
+                            raise ProvisionError("installed package tree entry bound")
+                        remaining -= 1
+                        path = prefix + child.name
+                        metadata = child.stat(follow_symlinks=False)
+                        if path not in manifest:
+                            raise ProvisionError("unapproved generated or omitted-package installed path: " + path)
+                        if stat.S_ISDIR(metadata.st_mode):
+                            descriptor = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                                 dir_fd=directory_fd)
+                            try:
+                                opened = os.fstat(descriptor)
+                                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                                    raise ProvisionError("installed package directory identity changed")
+                                visit(descriptor, path + "/", depth + 1)
+                            finally:
+                                os.close(descriptor)
+            visit(root_fd, "", 0)
+
+        reject_unowned_paths()
+        for path in sorted(manifest):
+            expected = manifest[path]["entry"]
+            parent_fd = os.dup(root_fd)
+            try:
+                components = path.split("/")
+                for part in components[:-1]:
+                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                      dir_fd=parent_fd)
+                    os.close(parent_fd)
+                    parent_fd = next_fd
+                name = components[-1]
+                metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                # The supported tar dialect carries no ACL/capability/xattr
+                # authority. Do not silently accept installed security metadata.
+                if os.listxattr(f"/proc/self/fd/{parent_fd}/{name}", follow_symlinks=False):
+                    raise ProvisionError("unsupported installed package extended metadata: " + path)
+                if (stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid) != (
+                        expected["mode"], expected["uid"], expected["gid"]):
+                    raise ProvisionError("installed package mode/owner differs from authenticated payload: " + path)
+                kind = expected["kind"]
+                if kind == "directory":
+                    valid = stat.S_ISDIR(metadata.st_mode)
+                elif kind == "symlink":
+                    valid = stat.S_ISLNK(metadata.st_mode) and os.readlink(name, dir_fd=parent_fd) == expected["target"]
+                else:
+                    valid = stat.S_ISREG(metadata.st_mode) and metadata.st_size == expected["bytes"]
+                    if valid:
+                        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                             dir_fd=parent_fd)
+                        try:
+                            before = os.fstat(descriptor)
+                            if not stat.S_ISREG(before.st_mode) or any(getattr(before, key) != getattr(metadata, key) for key in
+                                    ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")):
+                                raise ProvisionError("installed package file identity changed before read")
+                            digest = hashlib.sha256()
+                            remaining = expected["bytes"]
+                            while remaining:
+                                chunk = os.read(descriptor, min(65536, remaining))
+                                if not chunk:
+                                    break
+                                remaining -= len(chunk)
+                                digest.update(chunk)
+                            after = os.fstat(descriptor)
+                            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                            valid = (not remaining and not os.read(descriptor, 1) and digest.hexdigest() == expected["sha256"] and
+                                     all(getattr(before, key) == getattr(after, key) == getattr(metadata, key) == getattr(current, key) for key in
+                                         ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")))
+                        finally:
+                            os.close(descriptor)
+                if not valid:
+                    raise ProvisionError("installed package file differs from authenticated payload: " + path)
+                identities[path] = (metadata.st_dev, metadata.st_ino, metadata.st_nlink)
+            finally:
+                os.close(parent_fd)
+        hardlinks = {}
+        for path, row in manifest.items():
+            entry = row["entry"]
+            if entry["kind"] == "hardlink":
+                target = entry["target"]
+                if identities[path][:2] != identities[target][:2]:
+                    raise ProvisionError("installed package hardlink identity differs from authenticated payload")
+                hardlinks[target] = hardlinks.get(target, 0) + 1
+        for path, row in manifest.items():
+            if row["entry"]["kind"] == "file" and identities[path][2] != 1 + hardlinks.get(path, 0):
+                raise ProvisionError("installed package has undeclared hardlink aliases")
+        reject_unowned_paths()
+    except OSError as error:
+        raise ProvisionError("installed authenticated package path is missing or unsafe: " + str(error)) from error
+    finally:
+        os.close(root_fd)
+    return {"schemaVersion": 1, "scope": "all-authenticated-installed-package-payload-paths-and-closed-derived-parents; no transformation exceptions",
+            "payloads": payload_rows, "files": [{"path": "/" if path == "." else "/" + path, **manifest[path]} for path in sorted(manifest)]}
+
+
 def installed_package_keys(rootfs: Path, contract: dict) -> set[tuple[str, str, str]]:
     out = rootfs_run(rootfs, ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n"], contract)
     keys = set()
@@ -4211,6 +4608,11 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     bound_call(run_checked, debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
     bootstrap_package_keys = installed_package_keys(profile_root, contract)
     require_bootstrap_ca_certificates(profile_root, bootstrap_package_keys)
+    retained_payloads = args.workdir / ("clang-package-payloads-" + args.label)
+    retained_payloads.mkdir(mode=0o700, exist_ok=False)
+    bootstrap_metadata = package_metadata_for_keys(args.acquisition, candidate, bootstrap_package_keys)
+    bound_call(retain_signed_package_payloads, profile_root, retained_payloads,
+               list(bootstrap_metadata.values()), contract)
     selected_keyring_sha256 = candidate["trustedKeyring"]["sha256"]
     bound_call(install_selected_archive_keyring, profile_root, args.keyring, selected_keyring_sha256)
 
@@ -4247,6 +4649,8 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         if len(data) != expected["bytes"] or sha256(data) != expected["sha256"]:
             raise ProvisionError(f"downloaded .deb hash/length differs from signed Packages metadata: {key[0]}")
         downloaded_rows.append(expected)
+    bound_call(retain_signed_package_payloads, profile_root, retained_payloads,
+               list(metadata.values()), contract)
     downloaded_names = {row["name"] for row in downloaded_rows}
     if not {row["name"] for row in profile["binaryRoots"]}.issubset(downloaded_names):
         raise ProvisionError("APT download-only phase did not acquire every explicitly pinned toolchain root package")
@@ -4260,6 +4664,7 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
     package_total = sum(row["bytes"] for row in package_rows)
     if package_total > profile["bounds"]["maxAcquisitionBytes"]:
         raise ProvisionError("installed package closure exceeds cumulative package-byte budget")
+    bound_call(verify_installed_package_payloads, profile_root, retained_payloads, package_rows, contract)
     c_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang-18", "--version"], contract).strip()
     cxx_version = bound_call(rootfs_run, profile_root, ["/usr/bin/clang++-18", "--version"], contract).strip()
     tools = [
@@ -4321,9 +4726,15 @@ def _provision_rootfs_unqualified(args: argparse.Namespace) -> int:
         deterministic_rootfs_tar, profile_root, rootfs_tar_path, epoch,
         max_bytes=profile["bounds"]["maxArtifactBytes"], held_rootfs_descriptor=True,
     )
+    bound_call(verify_installed_package_payloads, profile_root, retained_payloads, package_rows, contract)
     if rootfs_identity["bytes"] > profile["bounds"]["maxArtifactBytes"]:
         raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
     args.output.mkdir(parents=True, exist_ok=False)
+    output_payloads = args.output / "package-payloads"
+    output_payloads.mkdir(mode=0o700)
+    for package in package_rows:
+        source = retained_payloads / (package["sha256"] + ".deb")
+        copy_verified_source_payload(source, output_payloads / source.name, package["bytes"], package["sha256"])
     oci_path = args.output / "oci-layout"
     image_record = create_oci_layout(rootfs_tar_path, oci_path, profile["id"], contract["environment"])
     oci_archive = args.output / "clang-18.1.3-noble-amd64.oci.tar"
@@ -5346,7 +5757,7 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
         args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report, args.negative_compiler,
         args.contract, args.keyring, *RECIPE_FILES.values(),
     ]
-    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], initial_files)
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs, args.record.parent / "package-payloads"], initial_files)
     candidate = args.acquisition / "acquisition-candidate.json"
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
@@ -5386,6 +5797,10 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
     signed_package_metadata = package_metadata_map(parsed_indexes)
     validate_record_package_metadata(
         record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
+    )
+    payload_directory = args.record.parent / "package-payloads"
+    package_manifest = verify_installed_package_payloads(
+        args.rootfs, payload_directory, record["packages"], contract,
     )
     verify_recorded_driver_identities(args.rootfs, record, contract)
     verify_recorded_runtime_closure(args.rootfs, record, contract)
@@ -5487,6 +5902,15 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
                         ),
                         expected_bytes=len(captured[source]), payload=captured[source],
                     )
+            package_manifest_bytes = canonical_json(package_manifest)
+            _add_provenance_file(archive, args.record, "package-installed-file-manifest.json", epoch,
+                                 expected_sha256=sha256(package_manifest_bytes), payload=package_manifest_bytes)
+            for package in record["packages"]:
+                source = payload_directory / (package["sha256"] + ".deb")
+                _add_provenance_file(archive, source, "package-payloads/" + source.name, epoch,
+                                     expected_sha256=package["sha256"], expected_bytes=package["bytes"])
+            if verify_installed_package_payloads(args.rootfs, payload_directory, record["packages"], contract) != package_manifest:
+                raise ProvisionError("installed package payload manifest changed while packaging")
             current_probe_binary, current_probe_mode = rootfs_regular_file(
                 args.rootfs, PROBE_BINARY_IN_ROOT, executable=True,
             )

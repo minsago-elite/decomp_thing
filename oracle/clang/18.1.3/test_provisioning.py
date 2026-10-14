@@ -91,6 +91,259 @@ class DownloadResponseFixture(io.BytesIO):
         return "https://snapshot.ubuntu.com/object"
 
 
+def authored_deb_payload(package, entries, conffiles=b"", compression=""):
+    """Inert local ar/USTAR bytes; metadata authentication is authored, not a signature claim."""
+    def tar(rows):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+            for info, data in rows:
+                archive.addfile(info, io.BytesIO(data) if info.isfile() else None)
+        return output.getvalue()
+    control = (f"Package: {package['name']}\nVersion: {package['version']}\nArchitecture: {package['architecture']}\n").encode()
+    control_rows = []
+    for name, data in (("control", control), ("conffiles", conffiles)):
+        if name == "conffiles" and not data:
+            continue
+        info = tarfile.TarInfo(name);info.size=len(data);info.mode=0o644
+        control_rows.append((info, data))
+    members = [("debian-binary", b"2.0\n"), ("control.tar" + compression, tar(control_rows)),
+               ("data.tar" + compression, tar(entries))]
+    output = bytearray(b"!<arch>\n")
+    for name, data in members:
+        if name != "debian-binary":
+            if compression == ".gz":data=gzip.compress(data, mtime=0)
+            elif compression == ".xz":data=provision.lzma.compress(data)
+        header=(f"{name+'/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(data):<10}`\n").encode()
+        assert len(header)==60
+        output.extend(header);output.extend(data)
+        if len(data)%2:output.extend(b"\n")
+    return bytes(output)
+
+
+class AuthenticatedDebPayloadTests(unittest.TestCase):
+    def setUp(self):
+        self.contract=provision.read_contract()
+        parent=ROOT/"build/clang-signed-package-payload-correction-002/test-tmp"
+        parent.mkdir(parents=True,exist_ok=True)
+        temporary=tempfile.TemporaryDirectory(dir=parent);self.addCleanup(temporary.cleanup)
+        self.base=Path(temporary.name);self.root=self.base/"rootfs";self.root.mkdir()
+        self.payloads=self.base/"payloads";self.payloads.mkdir()
+        self.package={"name":"authored-clang", "version":"1:18.1.3-1", "architecture":"amd64"}
+
+    def entry(self, name, data=b"", kind=tarfile.REGTYPE, target="", mode=0o644):
+        info=tarfile.TarInfo(name);info.type=kind;info.linkname=target;info.mode=mode
+        info.uid=os.getuid();info.gid=os.getgid();info.size=len(data) if info.isfile() else 0
+        return info,data
+
+    def package_bytes(self, entries, **kwargs):
+        data=authored_deb_payload(self.package,entries,**kwargs)
+        row={**self.package,"bytes":len(data),"sha256":provision.sha256(data)}
+        (self.payloads/(row["sha256"]+".deb")).write_bytes(data)
+        return row,data
+
+    def fixture(self, compression="", *, include_root=True):
+        (self.root/"usr/bin").mkdir(parents=True)
+        (self.root/"usr/lib/llvm-18/include").mkdir(parents=True)
+        (self.root/"etc").mkdir()
+        files={"usr/bin/clang-18":b"authored inert compiler", "usr/lib/llvm-18/include/LangOptions.h":b"authored inert header", "usr/lib/library.so":b"authored inert library", "etc/clang.conf":b"authored conffile"}
+        for name,data in files.items():
+            (self.root/name).write_bytes(data);(self.root/name).chmod(0o755 if name.endswith("clang-18") else 0o644)
+        (self.root/"usr/bin/clang++-18").symlink_to("clang-18")
+        os.link(self.root/"usr/bin/clang-18",self.root/"usr/bin/clang-alias")
+        entries=([self.entry(".",kind=tarfile.DIRTYPE,mode=0o755)] if include_root else [])
+        entries += [self.entry(name,data,mode=0o755 if name.endswith("clang-18") else 0o644) for name,data in files.items()]
+        entries += [self.entry("usr/bin/clang++-18",kind=tarfile.SYMTYPE,target="clang-18",mode=0o777),self.entry("usr/bin/clang-alias",kind=tarfile.LNKTYPE,target="usr/bin/clang-18",mode=0o755)]
+        return self.package_bytes(entries,conffiles=b"/etc/clang.conf\n",compression=compression)
+
+    def test_authentic_payloads_and_all_supported_compressions_pass(self):
+        for compression in ("", ".gz", ".xz"):
+            with self.subTest(compression=compression):
+                # Fresh authored tree per compression, no installation or extraction.
+                if (self.root/"usr").exists():shutil.rmtree(self.root/"usr");shutil.rmtree(self.root/"etc")
+                row,_=self.fixture(compression)
+                result=provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+                self.assertEqual(len(result["files"]),13)
+                self.assertTrue(next(x for x in result["files"] if x["path"]=="/etc/clang.conf")["entry"]["conffile"])
+
+    def test_implicit_parents_have_recorded_signed_root_derivation_and_exact_metadata(self):
+        row,_=self.fixture()
+        manifest=provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        parents=[record for record in manifest["files"] if "derivation" in record]
+        self.assertEqual({record["path"] for record in parents},{"/usr","/usr/bin","/usr/lib","/usr/lib/llvm-18","/usr/lib/llvm-18/include","/etc"})
+        for record in parents:
+            self.assertEqual(record["entry"],{"kind":"directory","mode":0o755,"uid":os.getuid(),"gid":os.getgid()})
+            self.assertEqual(record["derivation"],{"rule":"implicit-parent-from-authenticated-root-v1","sourcePath":"/","extendedMetadata":"none"})
+        parent=self.root/"usr";parent.chmod(0o777)
+        with self.assertRaisesRegex(provision.ProvisionError,"mode/owner"):
+            provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        parent.chmod(0o755)
+        original_stat=provision.os.stat
+        def changed_owner(path,*args,**kwargs):
+            metadata=original_stat(path,*args,**kwargs)
+            if path=="usr" and "dir_fd" in kwargs and kwargs.get("follow_symlinks") is False:
+                from types import SimpleNamespace
+                values={name:getattr(metadata,name) for name in dir(metadata) if name.startswith("st_")}
+                values["st_uid"]+=1
+                return SimpleNamespace(**values)
+            return metadata
+        with mock.patch.object(provision.os,"stat",side_effect=changed_owner):
+            with self.assertRaisesRegex(provision.ProvisionError,"mode/owner"):
+                provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        original_xattrs=provision.os.listxattr
+        def parent_acl(path,*args,**kwargs):
+            return ["system.posix_acl_access"] if str(path).endswith("/usr") else original_xattrs(path,*args,**kwargs)
+        with mock.patch.object(provision.os,"listxattr",side_effect=parent_acl):
+            with self.assertRaisesRegex(provision.ProvisionError,"extended metadata"):
+                provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+
+    def test_missing_parent_authority_and_explicit_parent_conflicts_refuse(self):
+        row,_=self.fixture(include_root=False)
+        with self.assertRaisesRegex(provision.ProvisionError,"lacks authenticated root-directory"):
+            provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        # Existing explicit directory metadata remains authoritative and cannot be
+        # overwritten by a default derivation or a conflicting second package.
+        entries=[self.entry("usr",kind=tarfile.DIRTYPE,mode=0o700),self.entry("usr/owned",b"authored")]
+        row,_=self.package_bytes(entries)
+        root=self.base/"explicit-root";root.mkdir();(root/"usr").mkdir(mode=0o700);(root/"usr/owned").write_bytes(b"authored")
+        manifest=provision.verify_installed_package_payloads(root,self.payloads,[row],self.contract)
+        directory=next(record for record in manifest["files"] if record["path"]=="/usr")
+        self.assertNotIn("derivation",directory);self.assertEqual(directory["entry"]["mode"],0o700)
+        second={**self.package,"name":"authored-other"}
+        data=authored_deb_payload(second,[self.entry("usr",kind=tarfile.DIRTYPE,mode=0o755)])
+        second.update(bytes=len(data),sha256=provision.sha256(data));(self.payloads/(second["sha256"]+".deb")).write_bytes(data)
+        with self.assertRaisesRegex(provision.ProvisionError,"conflicting.*ownership"):
+            provision.verify_installed_package_payloads(root,self.payloads,[row,second],self.contract)
+
+    def test_rehashed_installed_compiler_header_library_conffile_and_link_mutations_refuse(self):
+        row,_=self.fixture()
+        for name in ("usr/bin/clang-18","usr/lib/llvm-18/include/LangOptions.h","usr/lib/library.so","etc/clang.conf"):
+            path=self.root/name;saved=path.read_bytes();path.write_bytes(b"self-consistently rehashed malicious bytes")
+            caller_record={"sha256":provision.sha256_file(path)} # does not supply authority to verifier
+            self.assertIsNotNone(caller_record)
+            with self.assertRaisesRegex(provision.ProvisionError,"differs from authenticated payload"):
+                provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+            path.write_bytes(saved)
+        link=self.root/"usr/bin/clang++-18";link.unlink();link.symlink_to("not-clang")
+        with self.assertRaises(provision.ProvisionError):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+
+    def test_mode_owner_hardlink_and_parent_aliases_refuse(self):
+        row,_=self.fixture()
+        with mock.patch.object(provision.os,"listxattr",return_value=["security.capability"]):
+            with self.assertRaisesRegex(provision.ProvisionError,"extended metadata"):
+                provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        header=self.root/"usr/lib/llvm-18/include/LangOptions.h";header.chmod(0o600)
+        with self.assertRaisesRegex(provision.ProvisionError,"mode/owner"):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        header.chmod(0o644)
+        owner_root=self.base/"owner-root";owner_root.mkdir();(owner_root/"owned").write_bytes(b"authored")
+        info,data=self.entry("owned",b"authored");info.uid+=1
+        owner_row,_=self.package_bytes([(info,data)])
+        with self.assertRaisesRegex(provision.ProvisionError,"mode/owner"):provision.verify_installed_package_payloads(owner_root,self.payloads,[owner_row],self.contract)
+        alias=self.root/"usr/bin/clang-alias";alias.unlink();alias.write_bytes((self.root/"usr/bin/clang-18").read_bytes());alias.chmod(0o755)
+        with self.assertRaisesRegex(provision.ProvisionError,"hardlink"):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        alias.unlink();os.link(self.root/"usr/bin/clang-18",alias)
+        original=self.root/"usr/lib";original.rename(self.root/"usr/retained-lib");original.symlink_to("retained-lib")
+        with self.assertRaises(provision.ProvisionError):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+
+    def test_missing_changed_unbound_and_bootstrap_payloads_refuse(self):
+        row,data=self.fixture();source=self.payloads/(row["sha256"]+".deb")
+        source.write_bytes(data+b"changed")
+        with self.assertRaises(provision.ProvisionError):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        source.write_bytes(data)
+        bootstrap={**row,"name":"authored-bootstrap","sha256":"a"*64}
+        with self.assertRaises(provision.ProvisionError):provision.verify_installed_package_payloads(self.root,self.payloads,[row,bootstrap],self.contract)
+        source.unlink()
+        with self.assertRaises(provision.ProvisionError):provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+
+    def test_unsafe_duplicate_special_and_escaping_or_forward_link_members_refuse(self):
+        cases=[[self.entry("/absolute")],[self.entry("../escape")],[self.entry("duplicate"),self.entry("duplicate")],
+               [self.entry("device",kind=tarfile.CHRTYPE)], [self.entry("pax",b"override",kind=tarfile.XHDTYPE)],
+               [self.entry("link",kind=tarfile.SYMTYPE,target="../../escape")],
+               [self.entry("link",kind=tarfile.LNKTYPE,target="later"),self.entry("later")]]
+        for entries in cases:
+            row,data=self.package_bytes(entries)
+            with self.subTest(entries=entries),self.assertRaises(provision.ProvisionError):
+                provision.authenticated_deb_manifest(data,row,provision.DebPayloadBudget(self.contract))
+
+    def test_budgets_conflicts_conffile_declarations_and_trailing_streams_refuse(self):
+        row,data=self.fixture(".gz")
+        budget=provision.DebPayloadBudget(self.contract);budget.decoded=16
+        with self.assertRaisesRegex(provision.ProvisionError,"decoded-byte"):provision.authenticated_deb_manifest(data,row,budget)
+        budget=provision.DebPayloadBudget(self.contract);budget.entries=0
+        with self.assertRaisesRegex(provision.ProvisionError,"entry budget"):provision.authenticated_deb_manifest(data,row,budget)
+        with self.assertRaisesRegex(provision.ProvisionError,"trailing"):
+            provision._deb_decode("data.tar.gz",gzip.compress(b"x")+gzip.compress(b"y"),provision.DebPayloadBudget(self.contract))
+        row2={**row,"name":"conflicting-package"}
+        row2,data2=self.package_bytes([self.entry("usr/bin/clang-18",b"different")])
+        row2["name"]="conflicting-package" # control identity must also be authenticated
+        data2=authored_deb_payload(row2,[self.entry("usr/bin/clang-18",b"different")]);row2.update(bytes=len(data2),sha256=provision.sha256(data2));(self.payloads/(row2["sha256"]+".deb")).write_bytes(data2)
+        with self.assertRaisesRegex(provision.ProvisionError,"conflicting.*ownership"):
+            provision.verify_installed_package_payloads(self.root,self.payloads,[row,row2],self.contract)
+        bad,packed=self.package_bytes([self.entry("etc/a",b"x")],conffiles=b"/etc/missing\n")
+        with self.assertRaisesRegex(provision.ProvisionError,"conffile"):
+            provision.authenticated_deb_manifest(packed,bad,provision.DebPayloadBudget(self.contract))
+
+    def test_existing_offline_packaging_fixture_constructs_real_authored_payload_closure(self):
+        self.fixture()
+        record={"packages":[dict(self.package),{**self.package,"name":"authored-empty-metapackage"}],"downloadedPackages":[dict(self.package)]}
+        destination=self.base/"fixture-payloads"
+        RecipeAndCandidateBindingTests.authenticated_payloads_for_packaging_fixture(self,self.root,record,destination)
+        self.assertEqual(record["downloadedPackages"][0],record["packages"][0])
+        manifest=provision.verify_installed_package_payloads(self.root,destination,record["packages"],self.contract)
+        self.assertEqual(len(manifest["payloads"]),2)
+        self.assertEqual(next(row for row in manifest["files"] if row["path"]=="/usr/bin/clang-18")["entry"]["kind"],"file")
+
+    def test_generated_or_omitted_package_files_cannot_hide_behind_installed_database(self):
+        row,_=self.fixture();extra=self.root/"etc/ld.so.preload";extra.write_bytes(b"unapproved runtime injection")
+        with self.assertRaisesRegex(provision.ProvisionError,"unapproved generated or omitted-package"):
+            provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+        extra.unlink()
+        partial,_=self.package_bytes([self.entry(".",kind=tarfile.DIRTYPE,mode=0o755),self.entry("etc/clang.conf",b"authored conffile")])
+        with self.assertRaisesRegex(provision.ProvisionError,"unapproved generated or omitted-package"):
+            provision.verify_installed_package_payloads(self.root,self.payloads,[partial],self.contract)
+
+    def test_retention_is_complete_and_cumulative_budget_precedes_payload_io(self):
+        row,data=self.fixture();cache=self.root/"var/cache/apt/archives";cache.mkdir(parents=True)
+        (cache/"authored.deb").write_bytes(data);destination=self.base/"retained"
+        provision.retain_signed_package_payloads(self.root,destination,[row],self.contract)
+        self.assertEqual((destination/(row["sha256"]+".deb")).read_bytes(),data)
+        shutil.rmtree(destination);(cache/"authored.deb").unlink()
+        with self.assertRaises(provision.ProvisionError):provision.retain_signed_package_payloads(self.root,destination,[row],self.contract)
+        contract=json.loads(json.dumps(self.contract));contract["profile"]["bounds"]["maxAcquisitionBytes"]=row["bytes"]-1
+        with mock.patch.object(provision,"read_regular_evidence",side_effect=AssertionError("over-budget payload read")):
+            with self.assertRaisesRegex(provision.ProvisionError,"before read"):
+                provision.retain_signed_package_payloads(self.root,self.base/"over-budget",[row],contract)
+
+    def test_changed_identity_is_rejected_before_reading_replacement_descriptor(self):
+        row,_=self.fixture();source=self.root/"usr/lib/llvm-18/include/LangOptions.h"
+        original_open=os.open;original_read=os.read;replacement={}
+        def opened(path,flags,*args,**kwargs):
+            if path=="LangOptions.h" and "dir_fd" in kwargs and not replacement:
+                source.rename(source.with_name("retained-original-header"));source.write_bytes(b"authored inert header")
+                descriptor=original_open(path,flags,*args,**kwargs);replacement["fd"]=descriptor;return descriptor
+            return original_open(path,flags,*args,**kwargs)
+        def read(descriptor,size):
+            if descriptor==replacement.get("fd"):raise AssertionError("replacement descriptor consumed before identity refusal")
+            return original_read(descriptor,size)
+        with mock.patch.object(provision.os,"open",side_effect=opened),mock.patch.object(provision.os,"read",side_effect=read):
+            with self.assertRaisesRegex(provision.ProvisionError,"identity changed before read"):
+                provision.verify_installed_package_payloads(self.root,self.payloads,[row],self.contract)
+
+    def test_actual_packaging_gate_refuses_missing_signed_payload_before_native_replay(self):
+        row,_=self.fixture()
+        acquisition=self.base/"acquisition";acquisition.mkdir();(acquisition/"downloads").mkdir()
+        for name in ("acquisition-candidate.json","patch-audit.json"):(acquisition/name).write_bytes(b"{}")
+        image=self.base/"image.tar";image.write_bytes(b"inert image placeholder")
+        record={"reproducibility":{"cleanBuilds":2,"matchingRootfsSha256":True,"matchingImageDigest":True},"packages":[row],"downloadedPackages":[]}
+        args=provision.argparse.Namespace(contract=provision.CONTRACT_PATH,record=self.base/"record.json",acquisition=acquisition,rootfs=self.root,oci_archive=image,probe_report=self.base/"probe.json",loader_report=self.base/"loader.json",negative_report=self.base/"negative.json",negative_compiler=self.base/"negative",keyring=self.base/"keyring",output=self.base/"must-not-exist.tar")
+        key=(row["name"],row["version"],row["architecture"])
+        # Authored upstream signed metadata/image gates only; actual new payload gate is not mocked out.
+        with mock.patch.object(provision,"read_provenance_report",return_value=record),mock.patch.object(provision,"validate_build_record"),mock.patch.object(provision,"preflight_provenance_output",return_value=args.output),mock.patch.object(provision,"validate_locked_comparator_manifest",return_value=(None,self.base/"manifest",None,None)),mock.patch.object(provision,"load_candidate",return_value=({},[])),mock.patch.object(provision,"verify_retained_rootfs_and_image"),mock.patch.object(provision,"package_metadata_map",return_value={key:row}),mock.patch.object(provision,"installed_package_keys",return_value={key}),mock.patch.object(provision,"verify_installed_package_payloads",wraps=provision.verify_installed_package_payloads) as gate,mock.patch.object(provision,"verify_recorded_driver_identities",side_effect=AssertionError("must not replay native tools")) as native:
+            with self.assertRaisesRegex(provision.ProvisionError,"regular evidence input"):
+                provision._package_provenance_unqualified(args)
+            gate.assert_called_once();native.assert_not_called()
+        self.assertFalse(args.output.exists())
+
+
 class ProvisioningNegativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -4758,6 +5011,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record["probe"]["fixtureSha256"] = provision.sha256_file(
                 ROOT / self.contract["negativeControl"]["fixture"])
             rootfs, oci_archive = self.retained_rootfs_image_fixture(base, record)
+            self.authenticated_payloads_for_packaging_fixture(rootfs, record, base / "package-payloads")
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             record_sha = provision.sha256_file(record_path)
@@ -4801,6 +5055,31 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             chroot_run.assert_not_called()
             self.assertFalse(args.output.exists())
 
+    def authenticated_payloads_for_packaging_fixture(self, rootfs, record, destination):
+        """Authored signed-index stand-in: archive actual inert fixture bytes, not a real package claim."""
+        destination.mkdir()
+        entries=[];inodes={}
+        for count,path in enumerate(sorted(rootfs.rglob("*"))):
+            if count>=4096:raise AssertionError("authored fixture inventory bound")
+            metadata=path.lstat();name=path.relative_to(rootfs).as_posix();info=tarfile.TarInfo(name)
+            info.mode=stat.S_IMODE(metadata.st_mode);info.uid=metadata.st_uid;info.gid=metadata.st_gid;data=b""
+            if stat.S_ISLNK(metadata.st_mode):info.type=tarfile.SYMTYPE;info.linkname=os.readlink(path)
+            elif stat.S_ISDIR(metadata.st_mode):info.type=tarfile.DIRTYPE
+            elif stat.S_ISREG(metadata.st_mode):
+                identity=(metadata.st_dev,metadata.st_ino)
+                if identity in inodes:info.type=tarfile.LNKTYPE;info.linkname=inodes[identity]
+                else:
+                    inodes[identity]=name;data=path.read_bytes();info.size=len(data)
+            else:raise AssertionError("unsupported authored fixture kind")
+            entries.append((info,data))
+        for index,row in enumerate(record["packages"]):
+            data=authored_deb_payload(row,entries if index==0 else [])
+            row.update(bytes=len(data),sha256=provision.sha256(data))
+            (destination/(row["sha256"]+".deb")).write_bytes(data)
+        expected={(row["name"],row["version"],row["architecture"]):row for row in record["packages"]}
+        for row in record["downloadedPackages"]:
+            row.update(expected[(row["name"],row["version"],row["architecture"])])
+
     @contextlib.contextmanager
     def offline_packaging_fixture(self, base):
         """Inert fixture; signatures, package query, probe and comparator execution are mocked."""
@@ -4814,6 +5093,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             rootfs / "usr/lib/llvm-18/include/clang/Basic/LangOptions.h", self.contract)
         for name in ("generatedFieldNames", "definitionSha256", "headerSha256"):
             record["probe"][name] = inventory[name]
+        self.authenticated_payloads_for_packaging_fixture(rootfs, record, base / "package-payloads")
         record_path = base / "record.json"
         record_path.write_bytes(provision.canonical_json(record))
         negative_control = self.contract["negativeControl"]
