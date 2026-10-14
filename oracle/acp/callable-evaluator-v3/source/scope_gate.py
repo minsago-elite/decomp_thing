@@ -1,5 +1,7 @@
 """Trusted host gate: kernel admission first, protected FD4 second, then fixed bwrap."""
 import json
+import hashlib
+import fcntl
 import os
 from pathlib import Path
 import resource
@@ -56,6 +58,48 @@ def _close_nonstandard(keep):
                     raise ValueError("scope gate policy refusal at check 49")
 
 
+
+def _acquire_library_snapshot(record, maximum):
+    if (type(record) is not dict or set(record) != {'ownerPid','ownerStart','descriptor','library'} or
+            any(type(record[k]) is not int or record[k] <= 0 for k in ('ownerPid','ownerStart','descriptor')) or
+            record['descriptor'] >= 64):
+        raise ValueError('invalid held library owner binding')
+    library = record['library']
+    if (type(library) is not dict or set(library) != {'device','inode','size','sha256','sourcePath'} or
+            any(type(library[k]) is not int or library[k] < 0 for k in ('device','inode','size')) or
+            not 0 < library['size'] <= maximum or type(library['sha256']) is not str or
+            len(library['sha256']) != 64 or any(c not in '0123456789abcdef' for c in library['sha256'])):
+        raise ValueError('invalid sealed library content binding')
+    def owner_alive():
+        value = Path('/proc/' + str(record['ownerPid']) + '/stat').read_text()
+        return int(value[value.rfind(')') + 2:].split()[19]) == record['ownerStart']
+    if not owner_alive(): raise ValueError('snapshot owner lifetime changed')
+    fd = os.open('/proc/' + str(record['ownerPid']) + '/fd/' + str(record['descriptor']), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    transferred = False
+    try:
+        metadata = os.fstat(fd)
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        if (not stat.S_ISREG(metadata.st_mode) or
+                (metadata.st_dev,metadata.st_ino,metadata.st_size) != (library['device'],library['inode'],library['size']) or
+                fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals):
+            raise ValueError('held snapshot identity or seals differ')
+        value = hashlib.sha256(); count = 0
+        deadline = time.monotonic() + _contract()['bounds']['scopeAdmissionSeconds']
+        while count < library['size']:
+            if time.monotonic() >= deadline: raise TimeoutError('snapshot handoff deadline')
+            block = os.read(fd, min(65536, library['size'] - count))
+            if not block: raise ValueError('snapshot handoff truncated')
+            count += len(block); value.update(block)
+        if value.hexdigest() != library['sha256'] or not owner_alive():
+            raise ValueError('snapshot handoff content or owner differs')
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.dup2(fd, 5, inheritable=True)
+        os.set_inheritable(5, True)
+        transferred = True
+    finally:
+        if fd != 5 or not transferred: os.close(fd)
+
+
 def main():
     if not (len(sys.argv) == 2 and sys.flags.isolated and sys.dont_write_bytecode):
         raise ValueError("scope gate policy refusal at check 53")
@@ -69,7 +113,7 @@ def main():
     if not (metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o700):
         raise ValueError("scope gate policy refusal at check 59")
     config = json.loads(_read_at(directory_fd, 'launch.json', 65536))
-    if not (set(config) == {'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode'}):
+    if not (set(config) in ({'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode'}, {'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode', 'librarySnapshot'})):
         raise ValueError("scope gate policy refusal at check 61")
     if not (config['schemaVersion'] == 1 and type(config['schemaVersion']) is int):
         raise ValueError("scope gate policy refusal at check 62")
@@ -143,8 +187,16 @@ def main():
         os.set_inheritable(4, True)  # also required when open returned descriptor4 itself
         if fd != 4:
             os.close(fd)
-        _close_nonstandard({4})
+        if 'librarySnapshot' in config:
+            if command.count('--ro-bind-fd') != 1 or command[command.index('--ro-bind-fd') + 1:command.index('--ro-bind-fd') + 3] != ['5','/library.so']:
+                raise ValueError('snapshot fd mount missing')
+            _acquire_library_snapshot(config['librarySnapshot'], bounds['workerLaunchPinFileBytes'])
+            _close_nonstandard({4,5})
+        else:
+            if '--ro-bind-fd' in command: raise ValueError('unowned snapshot mount')
+            _close_nonstandard({4})
     else:
+        if 'librarySnapshot' in config: raise ValueError('provisioning snapshot forbidden')
         _close_nonstandard(set())
     os.execv(command[0], command)
 

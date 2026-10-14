@@ -82,6 +82,20 @@ def barrier_plan(scans, *, metadata_bytes=4096, proc_entries=256,
     return {'forks': 0, 'reason': 'pending'}
 
 
+
+class SealedRuntimeLibraryProof(unittest.TestCase):
+    def test_exact_sealed_object_attestation_and_old_nonlibrary_records(self):
+        expected=binding(); expected['library']={'device':91,'inode':92,'size':8,'sha256':'c'*64,'sourcePath':'/authored/lib.so'}
+        event=exec_record();event['l']=[91,92,8]
+        self.assertEqual('verified',parse_proof(wire(event,terminal()),expected)['status'])
+        self.assertEqual('verified',parse_proof(wire(exec_record(),terminal()),binding())['status'])
+        for value in (None,[91,93,8],[91,92,7],[True,92,8]):
+            bad=exec_record()
+            if value is not None:bad['l']=value
+            self.assertFalse(parse_proof(wire(bad,terminal()),expected)['workerExecVerified'])
+        self.assertFalse(parse_proof(wire(event,terminal()),binding())['workerExecVerified'])
+
+
 class ProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

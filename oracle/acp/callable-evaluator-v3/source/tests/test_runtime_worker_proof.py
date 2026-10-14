@@ -95,7 +95,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         recipe=runtime._contained_recipe(command,self.work)
         self.assertTrue(any(m['target']==Path('/work/input') and not m['writable'] for m in recipe['mounts']))
 
-    def test_prepare_inserts_only_fixed_monitor_before_root_remount_and_no_fd_forwarding(self):
+    def test_prepare_inserts_fixed_monitor_and_owned_snapshot_mount_before_root_remount(self):
         from evaluate_candidate_v3 import runtime_command
         helper=self.directory/'helper';helper.write_bytes(b'public ELF placeholder')
         library=self.work/'library.so';library.write_bytes(b'public library placeholder')
@@ -106,9 +106,24 @@ class RuntimeWorkerProof(unittest.TestCase):
             binding={'binaryPath':str(helper),'dependencies':[{'path':'/etc/ld.so.cache','sha256':'0'*64}],
                      **{key:'0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
             identity=lambda p,deadline=None:{'path':str(p),'device':7,'inode':8,'mode':0o755,'sha256':'0'*64}
-            with patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value={}):
+            receipt['librarySnapshotFd']=5  # mocked descriptor; never opened/closed by this preparation-only control
+            snapshot={'device':51,'inode':52,'size':3,'sha256':'0'*64,'sourcePath':str(library)}
+            with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value={}):
                 launch=runtime._prepare_launch(runtime_command(helper,library,2),self.work,
-                                               runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False)
+                                               runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':'0'*64})
+                # Portable actual admission-path controls: no ignored/private template input.
+                command_input=runtime_command(helper,library,2)
+                for admission in (None, {'path':str(self.work/'other.so'),'sha256':'0'*64},
+                                  {'path':str(library),'sha256':'malformed'}):
+                    with self.assertRaisesRegex(ValueError,'independently admitted'):
+                        runtime._prepare_launch(command_input,self.work,
+                            runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,
+                            runtime_library=admission)
+                # A well-formed admitted SHA still must equal bytes actually copied/sealed.
+                with self.assertRaisesRegex(ValueError,'snapshot differs from admitted'):
+                    runtime._prepare_launch(command_input,self.work,
+                        runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,
+                        runtime_library={'path':str(library),'sha256':'1'*64})
             self.assertIn('-I',launch['argv']);self.assertIn('-B',launch['argv'])
             self.assertIn('pycache_prefix='+str(receipt['directory']/'python-cache'),launch['argv'])
             command=launch['command']; monitor_at=command.index('/_worker_exec_monitor')
@@ -116,6 +131,10 @@ class RuntimeWorkerProof(unittest.TestCase):
             self.assertLess(monitor_at,root_at)
             self.assertEqual(['/caller','/library.so','2'],command[-3:])
             self.assertEqual(1,command.count('--report-fd'));self.assertNotIn('--preserve-fds',command)
+            fd_at=command.index('--ro-bind-fd')
+            self.assertEqual(['5','/library.so'],command[fd_at+1:fd_at+3])
+            self.assertNotIn('--sync-fd',command)
+            self.assertEqual(snapshot,launch['expected']['library'])
             self.assertFalse(any(str(receipt['directory']) == arg for arg in command))
             self.assertEqual(0,os.fstat(receipt['fd']).st_size)
 
@@ -147,6 +166,73 @@ class RuntimeWorkerProof(unittest.TestCase):
         recipe=runtime._contained_recipe(runtime.contained_command([str(self.input)],self.work,environment=self.env),self.work)
         self.assertEqual(self.input,recipe['target'])
         self.assertTrue(any(m['writable'] for m in recipe['mounts']))
+
+    def test_sealed_runtime_snapshot_survives_path_swap_and_refuses_inplace_mutation(self):
+        import fcntl
+        source=self.work/'library.so';source.write_bytes(b'authored admitted library bytes')
+        expected=runtime.digest(source)
+        receipt={}
+        library,pin=runtime._snapshot_library(source,receipt)
+        self.addCleanup(os.close,receipt['librarySnapshotFd'])
+        original=source.with_suffix('.original');source.rename(original)
+        source.write_bytes(b'replacement bytes')
+        original.write_bytes(b'in-place original mutation')
+        fd=receipt['librarySnapshotFd']
+        self.assertEqual(expected,library['sha256'])
+        self.assertEqual(expected,hashlib.sha256(os.pread(fd,library['size'],0)).hexdigest())
+        self.assertEqual(runtime._SEALED_LIBRARY,fcntl.fcntl(fd,fcntl.F_GET_SEALS)&runtime._SEALED_LIBRARY)
+        with self.assertRaises(OSError):os.pwrite(fd,b'x',0)
+        with self.assertRaises(OSError):os.ftruncate(fd,1)
+        self.assertNotEqual(pin['sha256'],runtime.digest(source))
+        # Change the held source bytes after admission but before copy: hash comparison refuses.
+        source.write_bytes(b'authored admitted library bytes')
+        original_open=runtime.os.open
+        admitted=runtime._pin_files([source])
+        def changed(path,flags,*args,**kwargs):
+            if Path(path)==source:source.write_bytes(b'X'*len(b'authored admitted library bytes'))
+            return original_open(path,flags,*args,**kwargs)
+        failed={}
+        with patch.object(runtime,'_pin_files',return_value=admitted),patch.object(runtime.os,'open',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'snapshot bytes differ'):runtime._snapshot_library(source,failed)
+        if failed.get('librarySnapshotFd') is not None:self.addCleanup(os.close,failed['librarySnapshotFd'])
+
+    def test_gate_snapshot_handoff_checks_seals_content_and_preserves_only_owned_fd(self):
+        spec=importlib.util.spec_from_file_location('snapshot_gate_control',SOURCE/'scope_gate.py')
+        gate=importlib.util.module_from_spec(spec);spec.loader.exec_module(gate)
+        payload=b'authored immutable bytes'
+        library={'device':91,'inode':92,'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest(),'sourcePath':'/authored/library.so'}
+        record={'ownerPid':123,'ownerStart':77,'descriptor':9,'library':library}
+        fields=['0']*20;fields[19]='77'
+        metadata=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_dev=91,st_ino=92,st_size=len(payload))
+        with patch.object(Path,'read_text',return_value='123 (controller) '+' '.join(fields)),patch.object(gate.os,'open',return_value=10) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.fcntl,'fcntl',return_value=runtime._SEALED_LIBRARY) as seals,patch.object(gate.os,'read',return_value=payload) as read,patch.object(gate.os,'lseek'),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate.os,'close') as close:
+            gate._acquire_library_snapshot(record,1024)
+            opened.assert_called_once_with('/proc/123/fd/9',gate.os.O_RDONLY|gate.os.O_NONBLOCK|gate.os.O_CLOEXEC)
+            duplicate.assert_called_once_with(10,5,inheritable=True);inherit.assert_called_once_with(5,True)
+            close.assert_called_once_with(10)
+            for wrong in (0,runtime._SEALED_LIBRARY & ~gate.fcntl.F_SEAL_WRITE):
+                seals.return_value=wrong
+                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+            seals.return_value=runtime._SEALED_LIBRARY
+            read.return_value=b'wrong content'.ljust(len(payload),b'!')
+            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+            record['ownerStart']=78
+            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+
+    def test_runtime_consumer_requires_sealed_namespace_attestation(self):
+        import evaluate_candidate_v3 as consumer
+        from test_process_results import receipt
+        result=consumer.process_observation(receipt())
+        inputs={'caller':{'path':'/synthetic/caller','sha256':'a'*64},
+                'library':{'path':'/synthetic/libcandidate.so','sha256':'c'*64}}
+        self.assertTrue(consumer.observation_complete(result))
+        consumer._bound_runtime_inputs(result,inputs,result['profileSha256'])
+        import copy
+        for field,value in (('sha256','d'*64),('sourcePath','/synthetic/other.so'),('inode',93)):
+            changed=copy.deepcopy(result)
+            changed['workerProofBindings']['expected']['library'][field]=value
+            with self.assertRaises(ValueError):consumer._bound_runtime_inputs(changed,inputs,result['profileSha256'])
+        changed=copy.deepcopy(result);del changed['workerProofBindings']['expected']['library']
+        with self.assertRaises(ValueError):consumer._bound_runtime_inputs(changed,inputs,result['profileSha256'])
 
     def test_recorded_compiler_subset_identity_invocation_and_post_drift(self):
         profile=build_contract.load_profile()
@@ -235,14 +321,17 @@ class RuntimeWorkerProof(unittest.TestCase):
         with patch.object(runtime,'BASE',base),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=executable),patch.object(runtime,'_pin_files',side_effect=producer_pins):
             receipt=runtime._create_worker_receipt();self.addCleanup(os.close,receipt['fd'])
             launch=runtime._prepare_launch(consumer.runtime_command(caller,library,0),self.work,
-                    runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False)
+                    runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':runtime.digest(library)})
+            self.addCleanup(os.close,receipt['librarySnapshotFd'])
             pins=launch['pins'];self.assertIn(library,received)
             self.assertEqual(runtime.digest(library),pins[str(library)]['sha256'])
             inputs={'caller':{'path':str(caller),'sha256':runtime.digest(caller)},'library':{'path':str(library),'sha256':runtime.digest(library)}}
             bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
             process={'profileSha256':bounds['profileSha256'],'launchInputPins':pins,'workerProofBindings':launch['proofBinding']}
-            consumer._bound_runtime_inputs(process,inputs,bounds['profileSha256'],
-                                           admitted_pins=real_pin_reader([caller,library]))
+            # This control isolates actual input-pin admission, not full process proof replay.
+            with patch.object(consumer,'observation_complete',return_value=True):
+                consumer._bound_runtime_inputs(process,inputs,bounds['profileSha256'],
+                                               admitted_pins=real_pin_reader([caller,library]))
             receipt2=runtime._create_worker_receipt();self.addCleanup(os.close,receipt2['fd'])
             command=runtime.contained_command([str(caller),str(source),str(header)],self.work,
                          read_only_files=(caller,source,header),environment=self.env)

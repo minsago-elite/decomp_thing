@@ -239,20 +239,20 @@ def runtime_command(caller, library, scenario):
     return command+['--proc','/proc','--dev','/dev','--remount-ro','/dev','--size',str(load_profile()['bounds']['temporaryFilesystemBytes']),'--tmpfs','/tmp','--dir','/workspace','--ro-bind',str(caller),'/caller','--ro-bind',str(library),'/library.so','--chdir','/workspace','--remount-ro','/',*sum((['--setenv',k,v] for k,v in load_profile()['environment'].items()),[]),'/caller','/library.so',str(scenario)]
 
 
-def run(argv, work, timeout=None, phase='compiler'):
+def run(argv, work, timeout=None, phase='compiler', runtime_library=None):
     # Associate the same cleanup result with every owned mount source, not
     # just the writable cwd. Runtime mounts the link leaf's library read-only.
     mounted = [Path(argv[index + 1]) for index, argument in enumerate(argv[:-1])
                if argument in ('--bind', '--ro-bind', '--bind-try', '--ro-bind-try')]
-    return _leaf_call(work, lambda: _run(argv, work, timeout, phase), mounted)
+    return _leaf_call(work, lambda: _run(argv, work, timeout, phase, runtime_library=runtime_library) if runtime_library is not None else _run(argv, work, timeout, phase), mounted)
 
 
-def _run(argv, work, timeout=None, phase='compiler'):
+def _run(argv, work, timeout=None, phase='compiler', runtime_library=None):
     p = load_profile()
     try:
         if not argv or argv[0] != '/usr/bin/bwrap':
             raise ValueError('worker requires an explicit contained recipe')
-        r=bounded_run(argv,work,environment(work),timeout=timeout if timeout is not None else p['bounds']['compilerSeconds'],output_limit=p['bounds']['outputBytesPerStream'],managed_scope=True,phase=phase)
+        r=bounded_run(argv,work,environment(work),timeout=timeout if timeout is not None else p['bounds']['compilerSeconds'],output_limit=p['bounds']['outputBytesPerStream'],managed_scope=True,phase=phase,**({'runtime_library':runtime_library} if runtime_library is not None else {}))
         complete = (_proof_replays(r) and r["bounds"]["phase"] == phase
                     and r["bounds"]["profileSha256"] == digest(BASE/"contracts/candidate-build-profile.json"))
         return {'status':('passed' if r['exitCode']==0 else 'failed') if complete else 'unknown','execution':public_result(r)},r
@@ -413,6 +413,10 @@ def _bound_runtime_inputs(process, inputs, profile_sha, admitted_pins=None):
             raise ValueError('runtime input file binding missing or changed')
     binding=process.get('workerProofBindings') or {}
     expected=binding.get('expected') or {}
+    library = expected.get('library')
+    if (not isinstance(library, dict) or library.get('sourcePath') != inputs['library']['path'] or
+            library.get('sha256') != inputs['library']['sha256'] or not observation_complete(process)):
+        raise ValueError('runtime library lacks sealed namespace identity attestation')
     caller_pin=pins.get(inputs['caller']['path'],{})
     if (binding.get('targetSha256')!=inputs['caller']['sha256']
             or (caller_pin.get('device'),caller_pin.get('inode'))!=(expected.get('targetDevice'),expected.get('targetInode'))):
@@ -551,7 +555,7 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
         result=None;sha=None
         if admitted:
             runtime_work=new_worker_leaf('runtime')
-            status,result=run(runtime_command(caller,artifacts['link'],obs['id']),runtime_work,timeout=p['bounds']['runtimeSeconds'],phase='runtime')
+            status,result=run(runtime_command(caller,artifacts['link'],obs['id']),runtime_work,timeout=p['bounds']['runtimeSeconds'],phase='runtime',runtime_library=runtime_inputs['library'])
             sha=retain('scenario-'+str(obs['id']),status)
         scenarios.append(scenario_entry(obs,result,admitted,sha))
     summary=summarize(scenarios,admitted)

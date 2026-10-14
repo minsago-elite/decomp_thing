@@ -24,6 +24,11 @@ def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/
     rows=[json.loads(line) for line in raw['workerProofRaw'].splitlines()]
     for row in rows:row.update(p=phase,a=attempt)
     rows[0].update(ed=expected['targetDevice'],ei=expected['targetInode'],od=expected['targetDevice'],oi=expected['targetInode'])
+    if phase == 'runtime':
+        library_path = next((name for name in (input_pins or {}) if name != caller), '/synthetic/libcandidate.so')
+        library_pin = (input_pins or {}).get(library_path, {'sha256':'c'*64})
+        expected['library'] = {'device':91,'inode':92,'size':3,'sha256':library_pin['sha256'],'sourcePath':library_path}
+        rows[0]['l'] = [91,92,3]
     raw['workerProofRaw']=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in rows)
     raw['workerProof']['proofSha256']=hashlib.sha256(raw['workerProofRaw']).hexdigest()
     pins=raw['launchInputPins'];target=pins.pop('/authored/worker');target['sha256']=caller_sha;pins[caller]=target

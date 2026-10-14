@@ -16,7 +16,7 @@ MAX_PROOF_BYTES = 1024
 PHASES = ('compiler', 'probe', 'runtime', 'elf-inspection', 'caller-build',
           'helper-build', 'toolchain-inspection', 'unspecified')
 ERROR_STAGES = ('arguments', 'protection', 'visibility', 'barrier', 'target',
-                'fork', 'trace', 'exec', 'child-fds', 'detach', 'wait', 'channel')
+                'fork', 'trace', 'exec', 'child-fds', 'detach', 'wait', 'channel', 'library')
 EXPECTED_KEYS = ('attempt', 'phase', 'reportDevice', 'reportInode', 'reaperDevice',
                  'reaperInode', 'outerPidNsDevice', 'outerPidNsInode',
                  'targetDevice', 'targetInode')
@@ -43,7 +43,7 @@ def _pairs(pairs):
 
 
 def _expected(value):
-    if type(value) is not dict or set(value) != set(EXPECTED_KEYS):
+    if type(value) is not dict or set(value) not in (set(EXPECTED_KEYS), set(EXPECTED_KEYS) | {'library'}):
         raise ValueError('closed expected proof binding required')
     if (type(value['attempt']) is not str or
             re.fullmatch('[0-9a-f]{32}', value['attempt']) is None or
@@ -51,6 +51,15 @@ def _expected(value):
         raise ValueError('invalid attempt/phase binding')
     if any(not _int(value[k]) for k in EXPECTED_KEYS[2:]):
         raise ValueError('invalid physical identity binding')
+    if 'library' in value:
+        library = value['library']
+        if (value['phase'] != 'runtime' or type(library) is not dict or set(library) != {'device','inode','size','sha256','sourcePath'} or
+                not all(_int(library[k]) for k in ('device','inode','size')) or
+                not 0 < library['size'] <= 16777216 or type(library['sha256']) is not str or
+                re.fullmatch('[0-9a-f]{64}', library['sha256']) is None or
+                type(library['sourcePath']) is not str or not library['sourcePath'].startswith('/') or
+                len(library['sourcePath'].encode()) > 4096 or '\0' in library['sourcePath']):
+            raise ValueError('closed sealed library binding required')
     # A report cannot also be the executable being accepted or the bootstrap.
     report = (value['reportDevice'], value['reportInode'])
     if report in [(value['targetDevice'], value['targetInode']),
@@ -72,7 +81,7 @@ def _record(raw):
         raise ValueError('protocol version')
     kind = value.get('t')
     keys = {'exec': EXEC_KEYS, 'term': TERM_KEYS, 'error': ERROR_KEYS}.get(kind)
-    if keys is None or tuple(value) != keys:
+    if keys is None or tuple(value) not in ((keys, keys + ('l',)) if kind == 'exec' else (keys,)):
         raise ValueError('closed ordered proof record required')
     return value
 
@@ -100,6 +109,13 @@ def _exec(record, expected):
             type(record['cf']) is not int or record['cf'] != 1 or
             type(record['dp']) is not int or record['dp'] != 0):
         raise ValueError('exec event or protection mismatch')
+    library = expected.get('library')
+    if library is None:
+        if 'l' in record: raise ValueError('unexpected library attestation')
+    elif (type(record.get('l')) is not list or len(record['l']) != 3 or
+          not all(_int(v) for v in record['l']) or
+          record['l'] != [library['device'],library['inode'],library['size']]):
+        raise ValueError('sealed runtime library identity mismatch')
     barrier = record['b']
     if (type(barrier) is not list or len(barrier) != 6 or
             not all(_int(v) for v in barrier) or barrier[0] != 1 or

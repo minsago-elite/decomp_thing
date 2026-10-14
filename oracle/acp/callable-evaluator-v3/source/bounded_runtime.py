@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import errno
 import json
 import os
@@ -40,7 +41,7 @@ def _valid_worker_bindings(result: dict) -> bool:
     identities = {'reportDevice','reportInode','reaperDevice','reaperInode','outerPidNsDevice',
                   'outerPidNsInode','targetDevice','targetInode'}
     phases = {'unspecified','compiler','probe','runtime','elf-inspection','caller-build','helper-build','toolchain-inspection'}
-    if (not isinstance(expected, dict) or set(expected) != identities | {'attempt','phase'} or
+    if (not isinstance(expected, dict) or set(expected) not in (identities | {'attempt','phase'}, identities | {'attempt','phase','library'}) or
             not isinstance(expected['attempt'], str) or len(expected['attempt']) != 32 or
             any(c not in '0123456789abcdef' for c in expected['attempt']) or
             not isinstance(expected['phase'], str) or expected['phase'] not in phases or
@@ -816,11 +817,57 @@ def _pin_files(paths, deadline=None) -> dict:
     return result
 
 
-def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
+
+_SEALED_LIBRARY = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+
+
+def _snapshot_library(path, receipt, deadline=None):
+    """Bounded copy into an owned kernel-sealed object, never a mutable path mount."""
+    pin = _pin_files([path], deadline)[str(path)]
+    maximum = load_profile_with_digest()[0]['bounds']['workerLaunchPinFileBytes']
+    source = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = None
+    try:
+        metadata = os.fstat(source)
+        if (not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= maximum or
+                (metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode)) !=
+                (pin['device'], pin['inode'], pin['mode'])):
+            raise ValueError('runtime library source identity changed')
+        descriptor = os.memfd_create('callable-runtime-library', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        receipt['librarySnapshotFd'] = descriptor  # owner closes even when preparation fails
+        count = 0; digest_value = hashlib.sha256()
+        while count < metadata.st_size:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('runtime library snapshot deadline')
+            block = os.read(source, min(65536, metadata.st_size - count))
+            if not block:
+                raise ValueError('runtime library snapshot truncated')
+            digest_value.update(block); count += len(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0: raise ValueError('runtime library snapshot short write')
+                view = view[written:]
+        if digest_value.hexdigest() != pin['sha256']:
+            raise ValueError('runtime library snapshot bytes differ from admitted input')
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, _SEALED_LIBRARY)
+        sealed = os.fstat(descriptor)
+        if (fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & _SEALED_LIBRARY != _SEALED_LIBRARY or
+                sealed.st_size != count):
+            raise ValueError('runtime library snapshot not sealed')
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return {'device':sealed.st_dev, 'inode':sealed.st_ino, 'size':count,
+                'sha256':pin['sha256'], 'sourcePath':str(path)}, pin
+    finally:
+        os.close(source)
+
+
+def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, runtime_library=None):
     outer = Path('/proc/self/ns/pid').stat()
     common = [Path(__file__), BASE / 'scope_gate.py', BASE / 'build_contract.py',
               BASE / 'contracts/candidate-build-profile.json', Path('/usr/bin/python3'), Path('/usr/bin/systemd-run')]
     expected = binding = target = compiler_recording = None
+    library = library_pin = None
     if provisioning:
         command = list(argv)
         common += [Path('/usr/bin/gcc'), BASE / 'worker_exec_monitor.c']
@@ -845,6 +892,23 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
         common += [mount['source'] for mount in recipe['mounts']
                    if mount['source'] != cwd and str(mount['original']) not in system_roots]
         prefix = list(recipe['prefix'])
+        library_mounts = [m for m in recipe['mounts'] if m['target'] == Path('/library.so')]
+        if library_mounts:
+            if len(library_mounts) != 1 or library_mounts[0]['writable'] or bounds['phase'] != 'runtime':
+                raise ValueError('closed runtime library mapping required')
+            mount = library_mounts[0]
+            if (type(runtime_library) is not dict or set(runtime_library) != {'path','sha256'} or
+                    runtime_library['path'] != str(mount['source']) or
+                    type(runtime_library['sha256']) is not str or len(runtime_library['sha256']) != 64 or
+                    any(c not in '0123456789abcdef' for c in runtime_library['sha256'])):
+                raise ValueError('independently admitted runtime library bytes required')
+            library, library_pin = _snapshot_library(mount['source'], receipt, deadline)
+            if library['sha256'] != runtime_library['sha256']:
+                raise ValueError('snapshot differs from admitted runtime library bytes')
+            old = ['--ro-bind', str(mount['original']), '/library.so']
+            positions = [i for i in range(len(prefix)-2) if prefix[i:i+3] == old]
+            if len(positions) != 1: raise ValueError('runtime library mount substitution ambiguous')
+            prefix[positions[0]:positions[0]+3] = ['--ro-bind-fd', '5', '/library.so']
         # Mount before root's optional read-only remount, including old immutable recipes.
         additions = ['--ro-bind', monitor['path'], '/_worker_exec_monitor']
         for path in load_profile_with_digest()[0]['analysisIsolation']['readOnlySystemFiles']:
@@ -857,17 +921,29 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None):
                     'reaperDevice': reaper['device'], 'reaperInode': reaper['inode'],
                     'outerPidNsDevice': outer.st_dev, 'outerPidNsInode': outer.st_ino,
                     'targetDevice': target['device'], 'targetInode': target['inode']}
+        if library is not None:
+            expected['library'] = library
         monitor_argv = ['/_worker_exec_monitor', '--attempt', expected['attempt'], '--phase', bounds['phase'],
                         '--report-fd', '4', '--report-device', str(receipt['device']), '--report-inode', str(receipt['inode']),
                         '--reaper-device', str(reaper['device']), '--reaper-inode', str(reaper['inode']),
                         '--outer-pidns-device', str(outer.st_dev), '--outer-pidns-inode', str(outer.st_ino), '--', *recipe['worker']]
+        if library is not None:
+            index = monitor_argv.index('--')
+            monitor_argv[index:index] = ['--library-device', str(library['device']), '--library-inode', str(library['inode']), '--library-size', str(library['size'])]
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
     pins = _pin_files(common, deadline)
     _check_compiler_input_pins(compiler_recording, pins)
+    if library is not None and pins.get(library['sourcePath']) != library_pin:
+        raise ValueError('runtime library input changed during preparation')
     config = {'schemaVersion': 1, 'directoryDevice': receipt['directoryDevice'],
               'directoryInode': receipt['directoryInode'], 'mode': 'monitor-provisioning' if provisioning else 'worker',
               'argv': command, 'report': None if provisioning else {'device': receipt['device'], 'inode': receipt['inode']},
               'outerPidNsDevice': outer.st_dev, 'outerPidNsInode': outer.st_ino}
+    if library is not None:
+        owner = process_identity(os.getpid())
+        if owner is None: raise ValueError('snapshot owner lifetime unavailable')
+        config['librarySnapshot'] = {'ownerPid':os.getpid(), 'ownerStart':owner['start'],
+                                     'descriptor':receipt['librarySnapshotFd'], 'library':library}
     if len(json.dumps(config).encode()) > 65536:
         raise ValueError('fixed launch configuration exceeds gate byte bound')
     write_json(receipt['directory'] / 'launch.json', config)
@@ -1036,14 +1112,14 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
 
 def bounded_run(argv: list[str], cwd: Path, environment: dict[str, str], stdin: bytes = b'',
                 timeout: float | None = None, output_limit: int | None = None,
-                managed_scope: bool = False, phase: str = 'unspecified') -> dict:
+                managed_scope: bool = False, phase: str = 'unspecified', runtime_library=None) -> dict:
     """Every worker requires contained admission/proof; launcher exit never substitutes."""
     bounds = execution_bounds(timeout, output_limit, managed_scope, phase)
     if type(stdin) is not bytes or len(stdin) > bounds['supervisor']['stdinBytes']:
         raise ValueError('bounded subprocess stdin exceeds profile')
     if managed_scope is not True:
         raise ValueError('unscoped worker execution is forbidden')
-    return _run_scoped(argv, cwd, environment, stdin, bounds, provisioning=False)
+    return _run_scoped(argv, cwd, environment, stdin, bounds, provisioning=False, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
 
 
 def provision_worker_monitor(output: Path) -> dict:
@@ -1060,7 +1136,7 @@ def provision_worker_monitor(output: Path) -> dict:
     return _run_scoped(argv, cwd, environment, b'', execution_bounds(managed_scope=True, phase='helper-build'), provisioning=True)
 
 
-def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning):
+def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_library=None):
     began = time.monotonic()
     supervisor = bounds['supervisor']; timeout = bounds['wallSeconds']; output_limit = bounds['outputBytesPerStream']
     result = {key: False for key in ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified', 'scopeAdmitted',
@@ -1082,7 +1158,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning):
             # No report descriptor/channel exists for this fixed trusted compiler exception.
             os.close(receipt['fd']); receipt['fd'] = None
             receipt['path'].unlink()
-        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=began + timeout)
+        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=began + timeout, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
         result.update(workerProofBindings=launch['proofBinding'], launchInputPins=launch['pins'])
         host_environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C',
                             'HOME': str(receipt['directory']), 'TMPDIR': str(receipt['directory']),
@@ -1242,6 +1318,13 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning):
                 result['exitCode'] = result['launcherExitCode']
         else:
             _finish_worker_proof(result, receipt, launch, bounds, deadline=time.monotonic() + max(0, timeout - phase_elapsed))
+        if receipt is not None and receipt.get('librarySnapshotFd') is not None:
+            try:
+                os.close(receipt['librarySnapshotFd'])
+            except Exception:
+                result.update(infrastructureFailure=True, infrastructureReason='library-snapshot-close-failed', exitCode=None)
+            finally:
+                receipt['librarySnapshotFd'] = None
         if receipt is not None and receipt['fd'] is not None:
             try:
                 os.close(receipt['fd'])

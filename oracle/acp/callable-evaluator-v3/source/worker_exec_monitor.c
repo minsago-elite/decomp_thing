@@ -42,6 +42,9 @@ struct config {
     const char *attempt, *phase;
     struct identity report, reaper, outer_pidns;
     char **worker;
+    bool library;
+    struct identity library_id;
+    uint64_t library_size;
 };
 struct barrier { uint64_t start; struct identity pidns; unsigned scans, fds; };
 static struct config cfg;
@@ -88,11 +91,20 @@ static int arguments(int argc, char **argv) {
     if (argc < 21) return -1;
     for (unsigned i=0;i<9;++i) if (strcmp(argv[1+2*i],flags[i])) return -1;
     if (strlen(argv[2]) != 32 || strspn(argv[2],"0123456789abcdef") != 32 ||
-        !phase_ok(argv[4]) || strcmp(argv[6],"4") || strcmp(argv[19],"--") ||
-        argv[20][0] != '/' || !argv[20][1]) return -1;
+        !phase_ok(argv[4]) || strcmp(argv[6],"4")) return -1;
     uint64_t ids[6];
     for (unsigned i=0;i<6;++i) if (number(argv[8+2*i],&ids[i]) < 0) return -1;
-    cfg.attempt=argv[2]; cfg.phase=argv[4]; cfg.worker=argv+20;
+    cfg.attempt=argv[2]; cfg.phase=argv[4];
+    unsigned end=19;
+    if (!strcmp(argv[19],"--library-device")) {
+        if (argc < 27 || strcmp(argv[21],"--library-inode") || strcmp(argv[23],"--library-size") ||
+            number(argv[20],&cfg.library_id.dev)<0 || number(argv[22],&cfg.library_id.ino)<0 ||
+            number(argv[24],&cfg.library_size)<0 || !cfg.library_size || cfg.library_size>16777216 ||
+            strcmp(cfg.phase,"runtime")) return -1;
+        cfg.library=true; end=25;
+    }
+    if (strcmp(argv[end],"--") || argv[end+1][0]!='/' || !argv[end+1][1]) return -1;
+    cfg.worker=argv+end+1;
     cfg.report=(struct identity){ids[0],ids[1]};
     cfg.reaper=(struct identity){ids[2],ids[3]};
     cfg.outer_pidns=(struct identity){ids[4],ids[5]};
@@ -396,12 +408,29 @@ static int error_record(const char *where,int error) {
         records+1,cfg.attempt,cfg.phase,where,e);
     return write_record(b,n);
 }
+/* Bind the namespace object to controller-held immutable content, not its old pathname. */
+static int library_identity(void) {
+    if (!cfg.library) return 0;
+    int fd=open("/library.so",O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if (fd<0) return -1;
+    struct stat st;
+    int seals=F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL;
+    int observed=fcntl(fd,F_GET_SEALS);
+    int error=0;
+    if (fstat(fd,&st)<0 || !S_ISREG(st.st_mode) || !same(identity(&st),cfg.library_id) ||
+        st.st_size<0 || (uint64_t)st.st_size!=cfg.library_size || observed<0 || (observed&seals)!=seals)
+        error=ESTALE;
+    if (close(fd)<0 && !error) error=errno;
+    if (error) { errno=error; return -1; }
+    return 0;
+}
 static int exec_record(pid_t child,int status,struct identity target,struct barrier barrier) {
-    char b[RECORD_LIMIT+1];
-    int n=snprintf(b,sizeof(b),"{\"v\":1,\"t\":\"exec\",\"s\":1,\"a\":\"%s\",\"p\":\"%s\",\"c\":%ld,\"ed\":%" PRIu64 ",\"ei\":%" PRIu64 ",\"od\":%" PRIu64 ",\"oi\":%" PRIu64 ",\"w\":%u,\"cf\":1,\"dp\":0,\"rd\":%" PRIu64 ",\"ri\":%" PRIu64 ",\"b\":[1,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%u,%u]}\n",
+    char b[RECORD_LIMIT+1],library[100]="";
+    if (cfg.library) (void)snprintf(library,sizeof(library),",\"l\":[%" PRIu64 ",%" PRIu64 ",%" PRIu64 "]",cfg.library_id.dev,cfg.library_id.ino,cfg.library_size);
+    int n=snprintf(b,sizeof(b),"{\"v\":1,\"t\":\"exec\",\"s\":1,\"a\":\"%s\",\"p\":\"%s\",\"c\":%ld,\"ed\":%" PRIu64 ",\"ei\":%" PRIu64 ",\"od\":%" PRIu64 ",\"oi\":%" PRIu64 ",\"w\":%u,\"cf\":1,\"dp\":0,\"rd\":%" PRIu64 ",\"ri\":%" PRIu64 ",\"b\":[1,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%u,%u]%s}\n",
         cfg.attempt,cfg.phase,(long)child,target.dev,target.ino,target.dev,target.ino,
         (unsigned)status,cfg.reaper.dev,cfg.reaper.ino,barrier.start,barrier.pidns.dev,
-        barrier.pidns.ino,barrier.scans,barrier.fds);
+        barrier.pidns.ino,barrier.scans,barrier.fds,library);
     return write_record(b,n);
 }
 static int term_record(pid_t child,int status) {
@@ -462,6 +491,9 @@ int main(int argc,char **argv) {
     struct barrier barrier={0};
     struct identity target;
     int target_fd=-1,status=0;
+    stage="library";
+    if (library_identity()<0) goto fail;
+    stage="barrier";
     if (barrier_wait(&barrier)<0) goto fail;
     stage="target";
     target_fd=open(cfg.worker[0],O_RDONLY|O_CLOEXEC);
