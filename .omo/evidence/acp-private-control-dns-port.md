@@ -352,4 +352,3 @@ DNS XML includes real late publication kill/reap/quarantine, stalled resolver de
 Recomputed production/test file hashes after successful run match the source/test freeze above. No additional blocking composition finding remains. CLEAR is limited to this exact composed port and focused evidence; final hosted contract/Task 6, automatic reviews, native DNS qualification and broader #238 acceptance remain pending as separately tracked gates. No provider/authentication behavior was newly exercised by this review.
 
 Composed freeze manifest `build/acp-private-control-dns-port/composed-freeze.json` SHA256 `bf62900939ab66b433926b954f8f4b09e6ced02d4d5948ec0d65aa7bc3118cfa` was read and independently checked against all 17 listed current file hashes; all match. This binds the review to the composed freeze and retained XML, while preserving the explicit distinction from prior standalone hashes.
-
