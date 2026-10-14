@@ -43,7 +43,8 @@ class RepairProviderReceiptRetentionTest {
                 output: BoundedRepairOutput, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionReceipt {
                 calls++
                 return AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
-                    AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixture protocol failure")),
+                    AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixture protocol failure",
+                        session = AgentSessionReference("provider-fixture", "provider-data-session"))),
                     providerDataFixtureInvocationForTest(request, AcpHarnessProvenance("acp", "provider-fixture",
                         AGENT_EXECUTION_CONTRACT_VERSION, ACP_STABLE_PROTOCOL_VERSION, ACP_KOTLIN_SDK_VERSION,
                         "1".repeat(64), false)))
@@ -232,7 +233,8 @@ class RepairProviderReceiptRetentionTest {
             null, AcpExecutionEvidenceCompleteness(true, true, true), null)
         return requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, sha256(PROMPT.toByteArray()),
             AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
-                AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixture protocol failure")), invocation),
+                AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixture protocol failure",
+                    session = if (providerV3) AgentSessionReference("provider-fixture", "provider-data-session") else null)), invocation),
             BoundedAgentExecutionEventRecorder().receiptSnapshot(), TRACE_REPAIR_ACP_RECEIPT_KIND,
             TRACE_REPAIR_ACP_TASK_FIELD, attemptId))
     }
