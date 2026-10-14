@@ -707,6 +707,101 @@ class LinuxBubblewrapBoundaryTest {
         }
     }
 
+    private data class ProbeFdSnapshot(
+        val entries: Map<Int, String>,
+        val collectorTargetFds: List<Int>,
+        val truncated: Boolean,
+        val scan: String,
+    )
+
+    /** Metadata only; proc-fd-directory targets do not establish collector ownership. */
+    private fun probeFdSnapshot(): ProbeFdSnapshot {
+        val entries = sortedMapOf<Int, String>()
+        val collectorTargets = mutableListOf<Int>()
+        var truncated = false
+        var scan = "observed"
+        fun unknown(failure: Throwable): String = when (failure) {
+            is java.nio.file.NoSuchFileException -> "vanished"
+            is java.nio.file.AccessDeniedException -> "denied"
+            else -> "other"
+        }
+        try {
+            val root = Path.of("/proc/self/fd")
+            val collectorTarget = root.toRealPath()
+            Files.list(root).use { paths ->
+                val iterator = paths.iterator()
+                var visited = 0
+                while (visited < 128 && iterator.hasNext()) {
+                    val path = iterator.next()
+                    visited++
+                    val fd = path.fileName.toString().toIntOrNull()
+                    if (fd == null) { scan = "unknown-name"; continue }
+                    entries[fd] = try {
+                        val target = Files.readSymbolicLink(path)
+                        val text = target.toString()
+                        if (target == collectorTarget) {
+                            collectorTargets += fd
+                            "kind=collector-target ownership=UNATTRIBUTED identity=unknown"
+                        } else if (text.length > 4096) {
+                            "unknown=oversized-target"
+                        } else {
+                            val first = Files.readAttributes(path, "unix:dev,ino,mode")
+                            val secondTarget = Files.readSymbolicLink(path)
+                            val second = Files.readAttributes(path, "unix:dev,ino,mode")
+                            if (target != secondTarget || first != second) {
+                                "unknown=changed-during-snapshot"
+                            } else {
+                                val device = (first["dev"] as? Number)?.toLong()
+                                val inode = (first["ino"] as? Number)?.toLong()
+                                val mode = (first["mode"] as? Number)?.toInt()
+                                val kind = when {
+                                    text.startsWith("anon_inode:") -> "anon_inode"
+                                    text.startsWith("socket:[") -> "socket"
+                                    text.startsWith("pipe:[") -> "pipe"
+                                    mode == null -> "unknown"
+                                    mode and 0xf000 == 0x8000 -> "regular"
+                                    mode and 0xf000 == 0x4000 -> "directory"
+                                    else -> "other"
+                                }
+                                val hash = MessageDigest.getInstance("SHA-256")
+                                    .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+                                "kind=$kind dev=$device ino=$inode mode=$mode targetSha256=$hash"
+                            }
+                        }
+                    } catch (failure: Exception) { "unknown=" + unknown(failure) }
+                }
+                truncated = iterator.hasNext()
+            }
+        } catch (failure: Exception) { scan = "unknown-" + unknown(failure) }
+        return ProbeFdSnapshot(entries, collectorTargets.sorted(), truncated, scan)
+    }
+
+    private fun probeFdDelta(before: ProbeFdSnapshot, after: ProbeFdSnapshot): String {
+        // ASCII-only metadata. Bound rendering before append; retain deltas before full snapshots.
+        val output = StringBuilder(16 * 1024)
+        var clipped = false
+        fun row(value: String) {
+            if (output.length + value.length + 1 <= 16 * 1024 - 64) output.append(value).append('\n')
+            else clipped = true
+        }
+        row("fdSnapshots metadataOnly=true maxEntries=128 unknownIsNotClosed=true countsAndSnapshotsAreSeparateObservations=true")
+        row("before scan=${before.scan} truncated=${before.truncated} collectorTargetFdsUNATTRIBUTED=${before.collectorTargetFds}")
+        row("after scan=${after.scan} truncated=${after.truncated} collectorTargetFdsUNATTRIBUTED=${after.collectorTargetFds}")
+        (before.entries.keys + after.entries.keys).sorted().forEach { fd ->
+            val old = before.entries[fd]
+            val current = after.entries[fd]
+            if (old != current) {
+                val oldState = old ?: "not-observed"
+                val newState = current ?: "not-observed"
+                row("delta fd=$fd before=$oldState after=$newState")
+            }
+        }
+        before.entries.forEach { (fd, value) -> row("before fd=$fd $value") }
+        after.entries.forEach { (fd, value) -> row("after fd=$fd $value") }
+        output.append("fdDiagnosticRenderTruncated=$clipped")
+        return output.toString()
+    }
+
     private fun runPrivateControlBindProbe(base: Path) {
         fun command(vararg argv: String) {
             val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
@@ -892,6 +987,7 @@ class LinuxBubblewrapBoundaryTest {
             val childAlias = alias(privateChild, "alias-child")
             val fileAlias = alias(canary, "alias-file")
             val beforeNestedAdmission = openDescriptorCount()
+            val beforeNestedDescriptors = probeFdSnapshot()
             for (temporaryParent in listOf(firstPath, privateChild, rootAlias, childAlias)) {
                 val beforeEntries = Files.list(firstPath).use { it.map { entry -> entry.fileName.toString() }.toList().toSet() }
                 withTemporaryParent(temporaryParent.toString()) {
@@ -923,7 +1019,12 @@ class LinuxBubblewrapBoundaryTest {
                 command("umount", mountedPrivateParent.toString())
                 Files.delete(mountedPrivateParent)
             }
-            assertEquals(beforeNestedAdmission, openDescriptorCount(), "rejected nested controls must release parent descriptors")
+            val afterNestedAdmission = openDescriptorCount()
+            val afterNestedDescriptors = probeFdSnapshot()
+            assertEquals(beforeNestedAdmission, afterNestedAdmission,
+                "rejected nested controls must release parent descriptors" +
+                    if (beforeNestedAdmission != afterNestedAdmission) "\n" +
+                        probeFdDelta(beforeNestedDescriptors, afterNestedDescriptors) else "")
             val cleanupOuter = newControl()
             val cleanupInner = newControl()
             val cleanupOuterPath = controlPath(cleanupOuter)
