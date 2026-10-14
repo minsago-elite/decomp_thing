@@ -296,7 +296,7 @@ object OracleSchemas {
         "separate-non-authoritative-validator",
     )
     private val SHA256 = Regex("[0-9a-f]{64}")
-    private val SCHEMA_NAME = Regex("[a-z0-9]+(?:[/-][a-z0-9]+)*")
+    private val SCHEMA_NAME = Regex("[a-z0-9]+(?:[./-][a-z0-9]+)*")
     private val SUPPORTED_NAMES: Set<String> = Collections.unmodifiableSet(sortedSetOf(
         "behavior-corpus",
         "behavior-corpus-report",

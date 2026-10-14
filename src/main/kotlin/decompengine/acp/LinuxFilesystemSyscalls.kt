@@ -161,6 +161,57 @@ internal object LinuxFilesystemSyscalls {
         "open workspace root",
     )
 
+    /** Null means unsupported ABI/kernel only; pathname and permission failures never select fallback. */
+    internal fun openConstrainedPathAt(parent: LinuxDescriptor, relative: String): LinuxDescriptor? {
+        if (!supportsConstrainedPathAbi(System.getProperty("os.name", ""),
+                System.getProperty("os.arch", ""), Native.POINTER_SIZE, NativeLong.SIZE)) return null
+        if (relative.isEmpty() || relative.startsWith('/') ||
+            relative.split('/').any { it.isEmpty() || it == "." || it == ".." }) {
+            throw IOException("constrained root lookup requires a canonical relative path")
+        }
+        return parent.whileOpen { parentFd ->
+            Memory(24).use { how ->
+                how.clear()
+                how.setLong(0, (O_PATH or O_NOFOLLOW or O_CLOEXEC).toLong())
+                how.setLong(8, 0L)
+                how.setLong(16, 0x0eL) // BENEATH | NO_SYMLINKS | NO_MAGICLINKS
+                val raw = boundedConstrainedPathAttempt {
+                    val result = libc.syscall(NativeLong(437), NativeLong(parentFd.toLong()), relative,
+                        how, NativeLong(24)).toLong()
+                    // No native operation may intervene before errno capture.
+                    result to if (result < 0) Native.getLastError() else 0
+                } ?: return@use null
+                if (raw > Int.MAX_VALUE) throw IOException("openat2 returned an invalid descriptor")
+                val fd = raw.toInt()
+                // Own the returned FD before identity inspection or any other throwing operation.
+                try {
+                    LinuxDescriptor(fd, identity(fd))
+                } catch (failure: Throwable) {
+                    close(fd)
+                    throw failure
+                }
+            }
+        }
+    }
+
+    internal fun supportsConstrainedPathAbi(os: String, architecture: String, pointerBytes: Int,
+        nativeLongBytes: Int): Boolean = os == "Linux" && architecture in SUPPORTED_ARCHITECTURES &&
+        pointerBytes == 8 && nativeLongBytes == 8
+
+    /** Fixed shared retry budget; enclosing scope retains its existing callback/checkpoint positions. */
+    internal fun boundedConstrainedPathAttempt(attempt: () -> Pair<Long, Int>): Long? {
+        repeat(8) {
+            val (result, error) = attempt()
+            if (result >= 0) return result
+            when (error) {
+                ENOSYS -> return null
+                EINTR, EWOULDBLOCK -> Unit // EAGAIN is the same Linux errno as EWOULDBLOCK.
+                else -> throw LinuxSyscallException("authenticate runtime root with openat2", error)
+            }
+        }
+        throw IOException("constrained runtime root lookup exhausted its retry budget")
+    }
+
     /** Reads hard filesystem byte/inode capacities through an already-pinned directory. */
     fun filesystemCapacity(directory: LinuxDescriptor): LinuxFilesystemCapacity =
         directory.whileOpen { descriptor ->
@@ -386,19 +437,20 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
+                    cancellationCheck()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                    }
+                    if (count == 0L) return total
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    output.write(buffer.getByteArray(0, count.toInt()))
+                    cancellationCheck()
                 }
-                if (count == 0L) return total
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                output.write(buffer.getByteArray(0, count.toInt()))
-                cancellationCheck()
             }
         }
     }
@@ -412,34 +464,35 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
-                }
-                if (count == 0L) {
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
                     cancellationCheck()
-                    call("synchronize private runtime file") { libc.fsync(destination.fd) }
-                    cancellationCheck()
-                    return total
-                }
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                var offset = 0L
-                while (offset < count) {
-                    val written = retryOnInterrupted("write private runtime file") {
-                        libc.write(
-                            destination.fd,
-                            buffer.share(offset),
-                            NativeLong(count - offset),
-                        ).toLong()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
                     }
-                    if (written <= 0L) throw syscallFailure("write private runtime file")
-                    offset += written
-                    cancellationCheck()
+                    if (count == 0L) {
+                        cancellationCheck()
+                        call("synchronize private runtime file") { libc.fsync(destination.fd) }
+                        cancellationCheck()
+                        return total
+                    }
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    var offset = 0L
+                    while (offset < count) {
+                        val written = retryOnInterrupted("write private runtime file") {
+                            libc.write(
+                                destination.fd,
+                                buffer.share(offset),
+                                NativeLong(count - offset),
+                            ).toLong()
+                        }
+                        if (written <= 0L) throw syscallFailure("write private runtime file")
+                        offset += written
+                        cancellationCheck()
+                    }
                 }
             }
         }
@@ -967,6 +1020,7 @@ internal object LinuxFilesystemSyscalls {
     }
 
     private interface LibC : Library {
+        fun syscall(number: NativeLong, directoryFd: NativeLong, path: String, how: Pointer, size: NativeLong): NativeLong
         fun openat(directoryFd: Int, path: String, flags: Int, mode: Int): Int
         fun close(fd: Int): Int
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong

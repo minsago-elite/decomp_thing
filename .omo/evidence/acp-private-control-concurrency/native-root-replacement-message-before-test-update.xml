@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.LinuxBubblewrapBoundaryTest" tests="4" skipped="0" failures="1" errors="0" timestamp="2026-10-14T05:41:00.002Z" hostname="whatsername" time="20.55">
+  <properties/>
+  <testcase name="manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.816"/>
+  <testcase name="unproved partial control creation poisons all later authority admission without descriptor leaks()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="0.586"/>
+  <testcase name="private controls reject native bind aliases and late callback exposure without denying disjoint grants()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="16.982">
+    <failure message="org.opentest4j.AssertionFailedError: private-control-bind-probe: identityParityCases=9 nativeStatxCases=9 missingMaskFallback=true invalidFdRefused=true&#10;private-control-bind-probe: syntheticErrnoFallbackCases=3 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true&#10;private-control-bind-probe: nestedSameAndCrossFilesystemLeasesDenyBothAdmissionOrders=true&#10;private-control-bind-probe: nestedControlParentsRefused=5 relocatedLiveInnerPreserved=true exactRemediationProved=true&#10;private-control-bind-probe: cancelledRootAndRuleAdmissionPreserved=true admissionDescriptorsReleased=true&#10;private-control-bind-probe: ordinary128fileClosureMilliseconds=210&#10;private-control-bind-probe: ordinary4096fileClosureMilliseconds=5048&#10;private-control-bind-probe: scaleEntries=4097 activeControls=3 actualBindMounts=9&#10;private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true disjointCopyRegistryChurnPassed=true partialCopyCancellationCleaned=true&#10;Exception in thread &quot;main&quot; org.opentest4j.AssertionFailedError: java.io.IOException: private-control descriptor pathname changed during inspection&#10;&#9;at org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:38)&#10;&#9;at org.junit.jupiter.api.Assertions.fail(Assertions.java:138)&#10;&#9;at kotlin.test.junit5.JUnit5Asserter.fail(JUnitSupport.kt:56)&#10;&#9;at kotlin.test.Asserter.assertTrue(Assertions.kt:767)&#10;&#9;at kotlin.test.junit5.JUnit5Asserter.assertTrue(JUnitSupport.kt:30)&#10;&#9;at kotlin.test.Asserter.assertTrue(Assertions.kt:777)&#10;&#9;at kotlin.test.junit5.JUnit5Asserter.assertTrue(JUnitSupport.kt:30)&#10;&#9;at kotlin.test.AssertionsKt__AssertionsKt.assertTrue(Assertions.kt:44)&#10;&#9;at kotlin.test.AssertionsKt.assertTrue(Unknown Source)&#10;&#9;at decompengine.acp.LinuxBubblewrapBoundaryTest.runPrivateControlBindProbe(LinuxBubblewrapBoundaryTest.kt:1262)&#10;&#9;at decompengine.acp.LinuxBubblewrapBoundaryTest.access$runPrivateControlBindProbe(LinuxBubblewrapBoundaryTest.kt:42)&#10;&#9;at decompengine.acp.LinuxBubblewrapBoundaryTest$Companion.main(LinuxBubblewrapBoundaryTest.kt:2603)&#10;&#9;at decompengine.acp.LinuxBubblewrapBoundaryTest.main(LinuxBubblewrapBoundaryTest.kt)&#10; ==&gt; expected: &lt;0&gt; but was: &lt;1&gt;" type="org.opentest4j.AssertionFailedError">org.opentest4j.AssertionFailedError: private-control-bind-probe: identityParityCases=9 nativeStatxCases=9 missingMaskFallback=true invalidFdRefused=true
+private-control-bind-probe: syntheticErrnoFallbackCases=3 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true
+private-control-bind-probe: nestedSameAndCrossFilesystemLeasesDenyBothAdmissionOrders=true
+private-control-bind-probe: nestedControlParentsRefused=5 relocatedLiveInnerPreserved=true exactRemediationProved=true
+private-control-bind-probe: cancelledRootAndRuleAdmissionPreserved=true admissionDescriptorsReleased=true
+private-control-bind-probe: ordinary128fileClosureMilliseconds=210
+private-control-bind-probe: ordinary4096fileClosureMilliseconds=5048
+private-control-bind-probe: scaleEntries=4097 activeControls=3 actualBindMounts=9
+private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true disjointCopyRegistryChurnPassed=true partialCopyCancellationCleaned=true
+Exception in thread &quot;main&quot; org.opentest4j.AssertionFailedError: java.io.IOException: private-control descriptor pathname changed during inspection
+	at org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:38)
+	at org.junit.jupiter.api.Assertions.fail(Assertions.java:138)
+	at kotlin.test.junit5.JUnit5Asserter.fail(JUnitSupport.kt:56)
+	at kotlin.test.Asserter.assertTrue(Assertions.kt:767)
+	at kotlin.test.junit5.JUnit5Asserter.assertTrue(JUnitSupport.kt:30)
+	at kotlin.test.Asserter.assertTrue(Assertions.kt:777)
+	at kotlin.test.junit5.JUnit5Asserter.assertTrue(JUnitSupport.kt:30)
+	at kotlin.test.AssertionsKt__AssertionsKt.assertTrue(Assertions.kt:44)
+	at kotlin.test.AssertionsKt.assertTrue(Unknown Source)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.runPrivateControlBindProbe(LinuxBubblewrapBoundaryTest.kt:1262)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.access$runPrivateControlBindProbe(LinuxBubblewrapBoundaryTest.kt:42)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest$Companion.main(LinuxBubblewrapBoundaryTest.kt:2603)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.main(LinuxBubblewrapBoundaryTest.kt)
+ ==&gt; expected: &lt;0&gt; but was: &lt;1&gt;
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at org.junit.jupiter.api.AssertionFailureBuilder.buildAndThrow(AssertionFailureBuilder.java:132)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:182)
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:1156)
+	at kotlin.test.junit5.JUnit5Asserter.assertEquals(JUnitSupport.kt:32)
+	at kotlin.test.AssertionsKt__AssertionsKt.assertEquals(Assertions.kt:63)
+	at kotlin.test.AssertionsKt.assertEquals(Unknown Source)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.private_controls_reject_native_bind_aliases_and_late_callback_exposure_without_denying_disjoint_grants$lambda$0(LinuxBubblewrapBoundaryTest.kt:604)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.withRepositoryTemporaryDirectory(LinuxBubblewrapBoundaryTest.kt:2580)
+	at decompengine.acp.LinuxBubblewrapBoundaryTest.private controls reject native bind aliases and late callback exposure without denying disjoint grants(LinuxBubblewrapBoundaryTest.kt:592)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+</failure>
+  </testcase>
+  <testcase name="live boundary hides host data isolates network and launches concurrently through static helpers()" classname="decompengine.acp.LinuxBubblewrapBoundaryTest" time="2.079"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
