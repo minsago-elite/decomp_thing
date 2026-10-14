@@ -34,6 +34,86 @@ application {
     applicationName = "llm_bin_patch"
 }
 
+// Provider DNS has its own credential-free JVM and no application/dependency classpath.
+val providerDnsClasses = layout.buildDirectory.dir("provider-dns/classes")
+val providerDnsFixtureClasses = layout.buildDirectory.dir("provider-dns/fixture-classes")
+val providerDnsProtocolClasses = layout.buildDirectory.dir("provider-dns/protocol-classes")
+val providerDnsResources = layout.buildDirectory.dir("generated/provider-dns-resources")
+val compileProviderDnsWorker = tasks.register<JavaCompile>("compileProviderDnsWorker") {
+    source("src/providerDns/java")
+    classpath = files()
+    destinationDirectory.set(providerDnsClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsWorkerJar = tasks.register<Jar>("providerDnsWorkerJar") {
+    dependsOn(compileProviderDnsWorker)
+    archiveFileName.set("decomp-acp-provider-dns.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsClasses)
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+val generateProviderDnsCommitment = tasks.register("generateProviderDnsCommitment") {
+    dependsOn(providerDnsWorkerJar)
+    inputs.file(providerDnsWorkerJar.flatMap { it.archiveFile })
+    outputs.dir(providerDnsResources)
+    doLast {
+        val jar = providerDnsWorkerJar.get().archiveFile.get().asFile
+        require(jar.length() in 1..65536) { "provider DNS worker exceeds its artifact bound" }
+        JarFile(jar).use { archive ->
+            require(archive.entries().asSequence().filterNot { it.isDirectory }.map { it.name }.toSet() ==
+                setOf("META-INF/MANIFEST.MF", "decompengine/acp/ProviderDnsWorker.class")) {
+                "provider DNS worker contains an unexpected runtime classpath entry"
+            }
+            require(archive.manifest.mainAttributes.keys.map { it.toString() }.toSet() == setOf("Manifest-Version"))
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(jar.readBytes()).joinToString("") { "%02x".format(it) }
+        val target = providerDnsResources.get().file("acp-provider-dns/worker.sha256").asFile
+        target.parentFile.mkdirs()
+        target.writeText("$digest\n", Charsets.US_ASCII)
+    }
+}
+sourceSets.main { resources.srcDir(providerDnsResources) }
+tasks.processResources { dependsOn(generateProviderDnsCommitment) }
+
+val compileProviderDnsFixture = tasks.register<JavaCompile>("compileProviderDnsFixture") {
+    source("src/test/provider-dns/java")
+    classpath = files()
+    destinationDirectory.set(providerDnsFixtureClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsFixtureJar = tasks.register<Jar>("providerDnsFixtureJar") {
+    dependsOn(compileProviderDnsWorker, compileProviderDnsFixture)
+    archiveFileName.set("provider-dns-component-fixture.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsClasses, providerDnsFixtureClasses, "src/test/provider-dns/resources")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+val compileProviderDnsProtocolFixture = tasks.register<JavaCompile>("compileProviderDnsProtocolFixture") {
+    source("src/test/provider-dns/protocol")
+    classpath = files()
+    destinationDirectory.set(providerDnsProtocolClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsProtocolFixtureJar = tasks.register<Jar>("providerDnsProtocolFixtureJar") {
+    dependsOn(compileProviderDnsProtocolFixture)
+    archiveFileName.set("provider-dns-protocol-fixture.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsProtocolClasses)
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(providerDnsWorkerJar, providerDnsFixtureJar, providerDnsProtocolFixtureJar)
+    systemProperty("decompengine.acp.providerDns.workerJar", providerDnsWorkerJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.fixtureJar", providerDnsFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.protocolJar", providerDnsProtocolFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+}
+
 val frontendDirectory = layout.projectDirectory.dir("frontend")
 val frontendOutput = layout.buildDirectory.dir("frontend/dist")
 val frontendAssetManifest = layout.buildDirectory.file("frontend/asset-manifest.json")
@@ -1524,6 +1604,10 @@ val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHel
 distributions {
     main {
         contents {
+            from(providerDnsWorkerJar) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
             from(frontendDirectory.file("THIRD_PARTY_NOTICES.txt")) {
                 into("docs")
                 rename { "frontend-THIRD_PARTY_NOTICES.txt" }
@@ -1980,6 +2064,23 @@ val verifyAcpProviderGuardianDistribution = tasks.register("verifyAcpProviderGua
     }
 }
 
+val verifyAcpProviderDnsDistribution = tasks.register("verifyAcpProviderDnsDistribution") {
+    group = "verification"
+    description = "Verifies the isolated provider DNS worker and application-bound commitment in installDist"
+    dependsOn(tasks.named("installDist"), generateProviderDnsCommitment)
+    doLast {
+        val installed = layout.buildDirectory.file("install/llm_bin_patch/libexec/decomp-acp-provider-dns.jar").get().asFile.toPath()
+        require(Files.isRegularFile(installed, LinkOption.NOFOLLOW_LINKS) &&
+            (Files.getAttribute(installed, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1a4)
+        require(Files.readAllBytes(installed).contentEquals(providerDnsWorkerJar.get().archiveFile.get().asFile.readBytes()))
+        val appJar = tasks.jar.get().archiveFile.get().asFile
+        JarFile(appJar).use { archive ->
+            val commitment = archive.getInputStream(archive.getJarEntry("acp-provider-dns/worker.sha256")).use { it.readNBytes(66) }
+            require(commitment.contentEquals(providerDnsResources.get().file("acp-provider-dns/worker.sha256").asFile.readBytes()))
+        }
+    }
+}
+
 val verifyLlvmBehaviorHelperDistribution = tasks.register("verifyLlvmBehaviorHelperDistribution") {
     group = "verification"
     description = "Verifies that installDist preserves the static LLVM behavior helper and digest"
@@ -2060,6 +2161,7 @@ tasks.named("check") {
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyAcpProviderGuardianDistribution)
+    dependsOn(verifyAcpProviderDnsDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
 }
