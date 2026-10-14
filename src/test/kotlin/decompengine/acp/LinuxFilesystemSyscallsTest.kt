@@ -134,6 +134,84 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `constrained root lookup admits only the reviewed native LP64 ABIs`() {
+        for (architecture in listOf("amd64", "x86_64", "aarch64")) {
+            assertTrue(LinuxFilesystemSyscalls.supportsConstrainedPathAbi("Linux", architecture, 8, 8))
+            assertFalse(LinuxFilesystemSyscalls.supportsConstrainedPathAbi("Linux", architecture, 4, 4))
+            assertFalse(LinuxFilesystemSyscalls.supportsConstrainedPathAbi("Linux", architecture, 8, 4))
+        }
+        assertFalse(LinuxFilesystemSyscalls.supportsConstrainedPathAbi("Linux", "x32", 8, 8))
+        assertFalse(LinuxFilesystemSyscalls.supportsConstrainedPathAbi("Windows", "amd64", 8, 8))
+    }
+
+    @Test
+    fun `constrained lookup retries share eight attempts and only ENOSYS selects fallback`() {
+        var attempts = 0
+        assertEquals(19L, LinuxFilesystemSyscalls.boundedConstrainedPathAttempt {
+            attempts++
+            if (attempts == 8) 19L to 0 else -1L to if (attempts % 2 == 0) 4 else 11
+        })
+        assertEquals(8, attempts)
+        attempts = 0
+        assertFailsWith<IOException> {
+            LinuxFilesystemSyscalls.boundedConstrainedPathAttempt {
+                attempts++
+                -1L to if (attempts % 2 == 0) 4 else 11
+            }
+        }
+        assertEquals(8, attempts)
+        for (error in listOf(1, 2, 13, 18, 20, 22, 40, 7)) {
+            attempts = 0
+            val failure = assertFailsWith<LinuxSyscallException> {
+                LinuxFilesystemSyscalls.boundedConstrainedPathAttempt { attempts++; -1L to error }
+            }
+            assertEquals(error, failure.errno)
+            assertEquals(1, attempts)
+        }
+        attempts = 0
+        assertNull(LinuxFilesystemSyscalls.boundedConstrainedPathAttempt { attempts++; -1L to 38 })
+        assertEquals(1, attempts)
+    }
+
+    @Test
+    fun `constrained root lookup preserves regular directory and final symlink descriptor kinds`() {
+        // These native controls are deliberately not a fallback-as-pass: the required supported lane
+        // must actually exercise openat2. Separate pure controls establish ENOSYS/ABI refusal behavior.
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "constrained-root-").normalize()
+        try {
+            Files.createDirectory(path.resolve("directory"))
+            Files.writeString(path.resolve("regular"), "owned")
+            Files.createSymbolicLink(path.resolve("link"), Path.of("regular"))
+            Files.createSymbolicLink(path.resolve("ancestor"), Path.of("directory"))
+            LinuxFilesystemSyscalls.openRoot(path).use { anchor ->
+                for (name in listOf("regular", "directory", "link")) {
+                    val opened = LinuxFilesystemSyscalls.openConstrainedPathAt(anchor, name)
+                        ?: throw IOException("required constrained-lookup lane is unsupported")
+                    opened.use {
+                        val expected = LinuxFilesystemSyscalls.openPathAtOrNull(anchor.fd, name)!!
+                        expected.use { original ->
+                            assertEquals(original.identity.key, it.identity.key)
+                            assertEquals(original.identity.mountId, it.identity.mountId)
+                            assertEquals(name == "link", it.identity.isSymbolicLink)
+                        }
+                    }
+                }
+                // Kernel NO_SYMLINKS rejects an intermediate symlink; final O_PATH symlinks are
+                // returned and must be rejected by the root-location identity/type guard.
+                assertFailsWith<LinuxSyscallException> {
+                    LinuxFilesystemSyscalls.openConstrainedPathAt(anchor, "ancestor/missing")
+                }
+                assertFailsWith<LinuxSyscallException> {
+                    LinuxFilesystemSyscalls.openConstrainedPathAt(anchor, "missing")
+                }
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
     private fun withLinuxDirectory(prefix: String, action: (Path, LinuxDescriptor) -> Unit) {
         val path = createTempDirectory(prefix).toAbsolutePath().normalize()
         try {
