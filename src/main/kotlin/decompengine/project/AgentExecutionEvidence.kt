@@ -229,7 +229,7 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
 ) {
     val requestSha256: String get() = request.requestSha256
     private val providerTransport = acp.providerTransportEvidence
-    private val receiptSchemaVersion: Int = if (providerTransport == null) 2 else 3
+    private val receiptSchemaVersion: Int = if (providerTransport == null) 2 else 4
     private val eventChanges: List<AgentFileChange> =
         events.events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
     val terminalOutcome: String = when (outcome) {
@@ -404,7 +404,7 @@ internal class AcpExecutionReceiptDocument private constructor(
     // avoids reparsing an otherwise potentially large artifact just to retain its version.
     val schemaVersion: Int = when {
         json.startsWith("{\n  \"schemaVersion\": 2,") -> 2
-        json.startsWith("{\n  \"schemaVersion\": 3,") -> 3
+        json.startsWith("{\n  \"schemaVersion\": 4,") -> 4
         else -> error("ACP receipt renderer produced an unsupported schema")
     }
     val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
@@ -466,9 +466,12 @@ internal fun verifyAcpExecutionReceiptDocument(
     require(bytes.size <= MAXIMUM_ARCHIVED_EVIDENCE_BYTES) { "ACP receipt exceeds its artifact cap" }
     val root = OracleJson.parse(bytes, ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
     val schemaVersion = root.receiptInt("schemaVersion")
-    require(schemaVersion in 2..3) { "ACP receipt schema is unsupported" }
+    require(schemaVersion != 3) {
+        "historical schema-v3 provider receipts are unqualified; policy and authority identities were not independently bound"
+    }
+    require(schemaVersion == 2 || schemaVersion == 4) { "ACP receipt schema is unsupported" }
     val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField +
-        if (schemaVersion == 3) setOf("providerTransport") else emptySet()
+        if (schemaVersion == 4) setOf("providerTransport") else emptySet()
     require(root.keys == expectedRootFields) { "ACP receipt has missing, extra, or duplicate binding fields" }
     require(root.receiptString("kind") == evidenceKind) { "ACP receipt kind is cross-paired" }
     require(root.receiptString(taskIdentityField) == taskId) { "ACP receipt task identity is cross-paired" }
@@ -526,7 +529,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         }
         else -> throw IllegalArgumentException("ACP receipt outcome type is invalid")
     }
-    if (schemaVersion == 3) {
+    if (schemaVersion == 4) {
         require(!releaseComplete) { "provider fixture receipt cannot claim release completeness" }
         verifyProviderTransportReceipt(root, request)
     }
@@ -2290,7 +2293,7 @@ private const val MAXIMUM_ARCHIVED_OUTCOME_ISSUES = 4_096
 private const val MAXIMUM_ARCHIVED_OUTCOME_MESSAGE_BYTES = 64 * 1024
 private const val MAXIMUM_ARCHIVED_OUTCOME_ENTITY_IDS = 32_768
 
-/** One explicit projection shared by full and compact v3 receipts; no raw provider values. */
+/** One closed projection shared by full and compact v4 receipts; no live issuance identities. */
 private fun StringBuilder.appendReceiptProviderTransport(evidence: AcpProviderInvocationEvidenceSnapshot) {
     append("\n  \"providerTransport\": ")
     append(String(OracleJson.canonicalBytes(providerTransportJson(evidence), PROVIDER_TRANSPORT_JSON_LIMITS), StandardCharsets.UTF_8))
@@ -2298,8 +2301,7 @@ private fun StringBuilder.appendReceiptProviderTransport(evidence: AcpProviderIn
 }
 
 private fun providerTransportJson(value: AcpProviderInvocationEvidenceSnapshot): JsonObject = providerObject(
-    "authority" to value.authority, "policySha256" to value.policySha256,
-    "authoritySha256" to value.authoritySha256, "qualificationProfileSha256" to value.qualificationProfileSha256,
+    "authority" to value.authority, "qualificationProfileSha256" to value.qualificationProfileSha256,
     "modelSha256" to value.modelSha256, "runtimeAdapter" to value.runtimeAdapter, "reasoning" to value.reasoning,
     "descriptors" to value.descriptors.let { d -> providerObject(
         "factoryConfigurationSha256" to d.factoryConfigurationSha256,
@@ -2416,8 +2418,7 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvid
     val denial = value.transportNullableObject("admissionDenial")?.let {
         AcpProviderExecutionDenialEvidence(it.transportLong("sequence"), it.transportEnum("terminal"))
     }
-    val evidence = AcpProviderInvocationEvidenceSnapshot(value.transportEnum("authority"), value.transportString("policySha256"),
-        value.transportString("authoritySha256"), value.transportString("qualificationProfileSha256"),
+    val evidence = AcpProviderInvocationEvidenceSnapshot(value.transportEnum("authority"), value.transportString("qualificationProfileSha256"),
         value.transportString("modelSha256"), value.transportEnum("runtimeAdapter"), value.transportEnum("reasoning"),
         descriptors, value.transportString("invocationBindingSha256"), value.transportString("requestBindingSha256"),
         value.transportNullableString("sessionSha256"), value.transportNullableString("turnSha256"), bounds,
@@ -2431,7 +2432,7 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvid
 }
 
 private fun verifyProviderTransportReceipt(root: JsonObject, request: JsonObject) {
-    require(root.transportInt("schemaVersion") == 3 && root.transportObject("provider").transportInt("evidenceSchemaVersion") == 3) {
+    require(root.transportInt("schemaVersion") == 4 && root.transportObject("provider").transportInt("evidenceSchemaVersion") == 4) {
         "provider receipt versions differ"
     }
     verifyProviderReceiptLegacyShapes(root)

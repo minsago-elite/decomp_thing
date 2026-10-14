@@ -29,7 +29,7 @@ import kotlinx.serialization.json.jsonPrimitive
 /** Data fixtures exercise normal graph publication; they never launch or qualify a provider. */
 class RepairProviderReceiptRetentionTest {
     @Test
-    fun `normal repair loop durably rejects a provider v3 failure before any candidate is installed`() = withProject { project ->
+    fun `normal repair loop durably rejects a provider v4 failure before any candidate is installed`() = withProject { project ->
         val original = project.resolve("fixture.original").also { it.writeBytes(byteArrayOf(1, 2, 3)) }
         val before = project.resolve("src/modules/alpha.c").readBytes()
         var calls = 0
@@ -69,7 +69,7 @@ class RepairProviderReceiptRetentionTest {
         val iteration = history.all().single()
         assertFalse(iteration.succeeded)
         val binding = assertNotNull(iteration.agentInvocation)
-        assertEquals(3, binding.receiptSchemaVersion)
+        assertEquals(4, binding.receiptSchemaVersion)
         assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
         assertEquals("failed-protocol", binding.terminalOutcome)
         assertFalse(binding.receiptReleaseComplete)
@@ -85,19 +85,19 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `normal graph publication retains binds rejects and replays provider v3 without an orphan`() = withProject { project ->
+    fun `normal graph publication retains binds rejects and replays provider v4 without an orphan`() = withProject { project ->
         lateinit var binding: RepairAgentInvocationBinding
         lateinit var document: AcpExecutionReceiptDocument
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val attempt = attempt(graph)
-            document = receipt(project, attempt.id, providerV3 = true)
+            document = receipt(project, attempt.id, providerFixture = true)
             binding = try {
                 graph.persistAndBindAgentInvocation(attempt, document)
             } catch (failure: Exception) {
                 val raw = project.resolve("reports/repair-revisions/${attempt.id}.acp-receipt.json")
-                throw AssertionError("schema-v3 publication failed; immutable receipt exists=${Files.exists(raw)}", failure)
+                throw AssertionError("schema-v4 publication failed; immutable receipt exists=${Files.exists(raw)}", failure)
             }
-            assertEquals(3, binding.receiptSchemaVersion)
+            assertEquals(4, binding.receiptSchemaVersion)
             assertEquals(RepairAgentAssessmentStatus.PENDING, binding.assessmentStatus)
             assertFalse(binding.receiptReleaseComplete)
             assertEquals(document.sha256, binding.receiptSha256)
@@ -111,7 +111,7 @@ class RepairProviderReceiptRetentionTest {
         val raw = project.resolve(binding.receiptPath).readBytes()
         assertContentEquals(document.json.toByteArray(), raw)
         assertEquals(binding.receiptSha256, sha256(raw))
-        assertEquals("3", Json.parseToJsonElement(raw.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("4", Json.parseToJsonElement(raw.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.content)
         val verified = verifyAcpExecutionReceiptDocument(raw, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD,
             Path.of(binding.receiptPath).fileName.toString().removeSuffix(".acp-receipt.json"))
         assertFalse(verified.releaseComplete)
@@ -126,7 +126,7 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `durable unbound provider v3 recovers as rejected with its actual version`() = withProject { project ->
+    fun `durable unbound provider v4 recovers as rejected with its actual version`() = withProject { project ->
         var armed = false
         val graph = ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile,
             faultInjector = ModuleRevisionFaultInjector { point ->
@@ -136,7 +136,7 @@ class RepairProviderReceiptRetentionTest {
                 }
             })
         val attempt = attempt(graph)
-        val document = receipt(project, attempt.id, providerV3 = true)
+        val document = receipt(project, attempt.id, providerFixture = true)
         armed = true
         val failure = assertFailsWith<RepairAgentEvidencePersistenceException> {
             graph.persistAndBindAgentInvocation(attempt, document)
@@ -155,7 +155,7 @@ class RepairProviderReceiptRetentionTest {
             assertTrue(node.recoveredAfterCrash)
             assertEquals(ModuleRevisionStatus.REJECTED, node.status)
             val binding = assertNotNull(node.repairMetadata?.agentInvocation)
-            assertEquals(3, binding.receiptSchemaVersion)
+            assertEquals(4, binding.receiptSchemaVersion)
             assertEquals(document.sha256, binding.receiptSha256)
             assertEquals(document.requestSha256, binding.requestSha256)
             assertEquals(document.resultChangesSha256, binding.resultChangesSha256)
@@ -166,15 +166,15 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `replay rejects a schema v3 receipt cross-paired with a schema v2 graph binding`() = withProject { project ->
+    fun `replay rejects a schema v4 receipt cross-paired with a schema v2 graph binding`() = withProject { project ->
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val attempt = attempt(graph)
-            graph.persistAndBindAgentInvocation(attempt, receipt(project, attempt.id, providerV3 = true))
+            graph.persistAndBindAgentInvocation(attempt, receipt(project, attempt.id, providerFixture = true))
             graph.reject(attempt, RepairEvidence("agent-failure", "fixture protocol failure"))
         }
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         val before = graphPath.readText()
-        val schema = Regex("(\"receiptSchemaVersion\"\\s*:\\s*)3")
+        val schema = Regex("(\"receiptSchemaVersion\"\\s*:\\s*)4")
         assertEquals(1, schema.findAll(before).count())
         graphPath.writeText(schema.replace(before) { "${it.groupValues[1]}2" })
         val failure = assertFailsWith<IllegalArgumentException> {
@@ -184,14 +184,18 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `provider v3 binding cannot claim release or promote a retained fixture`() {
+    fun `provider v4 binding cannot claim release or promote a retained fixture`() {
         val pending = RepairAgentInvocationBinding("reports/repair-revisions/revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json",
-            "a".repeat(64), 3, "b".repeat(64), "c".repeat(64), "returned-completed", false,
+            "a".repeat(64), 4, "b".repeat(64), "c".repeat(64), "returned-completed", false,
             RepairAgentAssessmentStatus.PENDING)
-        assertFailsWith<IllegalArgumentException> { pending.copy(receiptReleaseComplete = true) }
-        assertFailsWith<IllegalArgumentException> { pending.copy(assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED) }
-        assertFailsWith<IllegalArgumentException> { pending.copy(assessmentStatus = RepairAgentAssessmentStatus.PROVISIONAL) }
-        assertFailsWith<IllegalArgumentException> { pending.copy(receiptSchemaVersion = 4) }
+        for (version in listOf(3, 4)) {
+            val retained = pending.copy(receiptSchemaVersion = version)
+            assertFalse(retained.receiptReleaseComplete)
+            assertFailsWith<IllegalArgumentException> { retained.copy(receiptReleaseComplete = true) }
+            assertFailsWith<IllegalArgumentException> { retained.copy(assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED) }
+            assertFailsWith<IllegalArgumentException> { retained.copy(assessmentStatus = RepairAgentAssessmentStatus.PROVISIONAL) }
+        }
+        assertFailsWith<IllegalArgumentException> { pending.copy(receiptSchemaVersion = 5) }
         assertEquals(2, pending.copy(receiptSchemaVersion = 2, receiptReleaseComplete = true,
             assessmentStatus = RepairAgentAssessmentStatus.ACCEPTED).receiptSchemaVersion)
     }
@@ -202,7 +206,7 @@ class RepairProviderReceiptRetentionTest {
         lateinit var document: AcpExecutionReceiptDocument
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
             val attempt = attempt(graph)
-            document = receipt(project, attempt.id, providerV3 = false)
+            document = receipt(project, attempt.id, providerFixture = false)
             assertEquals(2, document.schemaVersion)
             graph.persistAndBindAgentInvocation(attempt, document)
             binding = assertNotNull(graph.reject(attempt, RepairEvidence("agent-failure", "fixture protocol failure"))
@@ -222,10 +226,10 @@ class RepairProviderReceiptRetentionTest {
             null, emptyList(), null, corpus.sha256))
     }
 
-    internal fun receipt(project: Path, attemptId: String, providerV3: Boolean): AcpExecutionReceiptDocument {
+    internal fun receipt(project: Path, attemptId: String, providerFixture: Boolean): AcpExecutionReceiptDocument {
         val request = AgentExecutionRequest("repair one module", workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
             accessPolicy = AgentAccessPolicy(emptyList()))
-        val invocation = if (providerV3) providerDataFixtureInvocationForTest(request,
+        val invocation = if (providerFixture) providerDataFixtureInvocationForTest(request,
             AcpHarnessProvenance("acp", "provider-fixture", AGENT_EXECUTION_CONTRACT_VERSION,
                 ACP_STABLE_PROTOCOL_VERSION, ACP_KOTLIN_SDK_VERSION, "1".repeat(64), false))
         else AcpInvocationEvidenceSnapshot(null, AcpExecutionLifecyclePhase.REQUEST_BOUND,
@@ -234,7 +238,7 @@ class RepairProviderReceiptRetentionTest {
         return requireNotNull(AcpExecutionReceiptDocument.captureOrNull(request, sha256(PROMPT.toByteArray()),
             AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
                 AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixture protocol failure",
-                    session = if (providerV3) AgentSessionReference("provider-fixture", "provider-data-session") else null)), invocation),
+                    session = if (providerFixture) AgentSessionReference("provider-fixture", "provider-data-session") else null)), invocation),
             BoundedAgentExecutionEventRecorder().receiptSnapshot(), TRACE_REPAIR_ACP_RECEIPT_KIND,
             TRACE_REPAIR_ACP_TASK_FIELD, attemptId))
     }

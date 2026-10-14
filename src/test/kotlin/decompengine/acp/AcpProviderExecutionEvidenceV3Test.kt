@@ -43,7 +43,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val permit = ownedPermit(invocation)
         assertSame(invocation, invocation.bindProviderExecutionEvidence(permit, transport))
         assertEquals("acp", invocation.providerId)
-        assertEquals(3, invocation.schemaVersion)
+        assertEquals(4, invocation.schemaVersion)
         assertSame(transport, invocation.providerTransportEvidence)
         assertNull(invocation.completeExecutionEvidence)
         assertFalse(transport.releaseComplete)
@@ -310,7 +310,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val invocation = invocation(phase = AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             cleanup = AcpExecutionCleanupDisposition.NOT_REQUIRED)
         invocation.bindProviderExecutionEvidence(ownedPermit(invocation), evidence)
-        assertEquals(3, invocation.schemaVersion)
+        assertEquals(4, invocation.schemaVersion)
         assertFalse(evidence.cleanup.admissionSticky)
     }
 
@@ -442,7 +442,7 @@ class AcpProviderExecutionEvidenceV3Test {
         remainingMillis: Long = PROFILE.bounds.overallTimeout.toMillis(),
         cleanup: AcpProviderExecutionCleanupEvidence = cleanup(),
         resourceEvidence: AcpProviderExecutionResourceEvidence = resources(),
-    ) = AcpProviderInvocationEvidenceSnapshot(authority, HASH, HASH, profileDigest, modelDigest,
+    ) = AcpProviderInvocationEvidenceSnapshot(authority, profileDigest, modelDigest,
         AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1, PROFILE.reasoning,
         AcpProviderExecutionDescriptorEvidence(CONFIGURATION, issuerDigest, consumerDigest,
             HASH, HASH, HASH, HASH, HASH, HASH, HASH, HASH), INVOCATION, requestDigest, session, turn,

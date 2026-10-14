@@ -213,13 +213,13 @@ data class AcpProviderExecutionDenialEvidence(val sequence: Long, val terminal: 
 }
 
 /**
- * Immutable schema-v3 transport evidence. This checkpoint archives no provider qualification or
+ * Immutable schema-v4 transport evidence. Live policy/authority identities are not archived:
+ * their issuance cannot be reconstructed independently from these public observations.
+ * This checkpoint archives no provider qualification or
  * billing claim. Even complete fixture cleanup is never a release-complete execution projection.
  */
 class AcpProviderInvocationEvidenceSnapshot(
     val authority: AcpProviderExecutionAuthority,
-    val policySha256: String,
-    val authoritySha256: String,
     val qualificationProfileSha256: String,
     val modelSha256: String,
     val runtimeAdapter: AcpProviderRuntimeAdapter,
@@ -251,7 +251,7 @@ class AcpProviderInvocationEvidenceSnapshot(
     val providerCostCancellationProven: Boolean = false
 
     init {
-        listOf(policySha256, authoritySha256, qualificationProfileSha256, modelSha256, invocationBindingSha256, requestBindingSha256)
+        listOf(qualificationProfileSha256, modelSha256, invocationBindingSha256, requestBindingSha256)
             .forEach(::requireProviderEvidenceDigest)
         sessionSha256?.let(::requireProviderEvidenceDigest)
         turnSha256?.let(::requireProviderEvidenceDigest)

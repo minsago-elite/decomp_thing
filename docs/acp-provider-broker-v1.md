@@ -119,9 +119,29 @@ successful completion first. Provider usage is observed data, not an independent
 
 ## Qualification boundaries
 
+### Archived fixture receipts
+
+Provider invocation evidence and full/compact receipts use schema 4. Their closed
+`providerTransport` projection omits `policySha256` and `authoritySha256`: the ephemeral fixture
+listener and live issuer identity cannot be authenticated independently from archived receipt
+bytes. It contains no placeholder or replacement digest for those claims. The operational policy
+descriptor, channel comparison, private authority registry and pinned TLS trust remain unchanged.
+
+Schema 4 retains the fixed qualification profile, model, factory/owner, invocation/request,
+session/turn, resource, budget, usage and cleanup commitments. Fixture evidence remains nonrelease;
+it cannot claim adapter qualification, protected provider authority or remote cost cancellation.
+Unknown fields, including either omitted digest, are rejected rather than discarded.
+
+Historical schema-3 receipt bytes are not rewritten or upgraded. The strict receipt verifier
+explicitly rejects them as unqualified; a repair graph requiring their contents also refuses
+replay until separately supported nonqualifying legacy inspection exists. Historical graph-binding
+metadata can retain version 3 only as pending/rejected nonrelease evidence. New schema-4 bindings
+have the same restriction. Schema-2 provider-absent receipt bytes remain unchanged, and release
+archives continue to require their existing schema-2 evidence; schema 4 adds no release path.
+
 Credential-free controls exercise the building block through an internal deterministic backend;
 they do not qualify the concrete JDK network backend or TLS. The guardian and SDK are not wired
-by this checkpoint. Existing containment arguments, native gate descriptors, receipt schemas,
+by this checkpoint. Existing containment arguments, native gate descriptors,
 Actions configuration, and production authentication are unchanged.
 
 The pinned bridge's gateway configuration is supported by its source, but actual ChatGPT backend
