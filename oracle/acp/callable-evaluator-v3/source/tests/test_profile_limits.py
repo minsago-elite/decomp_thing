@@ -148,9 +148,21 @@ class ProfileLimits(unittest.TestCase):
         p = contract.load_profile()
         self.assertEqual(set(p['bounds']),{key for row in p['limitAudit'] for key in row['keys']} |
             {'memoryBytes','swapBytes','tasks','coreBytes','cpuSeconds','virtualAddressSpaceBytes','openFiles','fileSizeBytes'})
-        gate = ast.parse((SOURCE/'scope_gate.py').read_text())
-        gate_keys = {n.slice.value for n in ast.walk(gate) if isinstance(n,ast.Subscript) and isinstance(n.value,ast.Name) and n.value.id == 'bounds' and isinstance(n.slice,ast.Constant)}
-        self.assertTrue({'scopeAdmissionSeconds','scopeAdmissionPollSeconds'} <= gate_keys)
+        # Poll interval remains an immutable disclosed compatibility field; the
+        # authenticated signal wait now enforces the absolute admission deadline.
+        self.assertEqual(5,p['bounds']['scopeAdmissionSeconds'])
+        self.assertEqual(0.01,p['bounds']['scopeAdmissionPollSeconds'])
+        gate=types.ModuleType('_profile_admission_signal_control')
+        gate.__file__=str(SOURCE/'scope_gate.py')
+        exec(compile((SOURCE/'scope_gate.py').read_bytes(),gate.__file__,'exec'),gate.__dict__)
+        deadline=p['bounds']['scopeAdmissionSeconds']
+        pending=types.SimpleNamespace(si_signo=gate.signal.SIGUSR1,si_code=0,si_errno=0,si_pid=1,si_uid=2)
+        with patch.object(gate,'_live_controller'),patch.object(gate.time,'monotonic',side_effect=[0,1,deadline]),patch.object(gate.signal,'sigtimedwait',return_value=pending) as wait:
+            with self.assertRaises(TimeoutError):gate._wait_release((1,9,2),6,deadline)
+            wait.assert_called_once_with({gate.signal.SIGUSR1},deadline-1)
+        with patch.object(gate.time,'monotonic',return_value=deadline),patch.object(gate.signal,'sigtimedwait',return_value=pending) as wait:
+            with self.assertRaises(TimeoutError):gate._wait_release((1,9,2),6,deadline)
+            wait.assert_not_called()
         helper = ast.parse((SOURCE/'toolchain-001/build_helper.py').read_text())
         calls = [n for n in ast.walk(helper) if isinstance(n,ast.Call) and
                  ((isinstance(n.func,ast.Name) and n.func.id=='bounded_run') or
@@ -222,15 +234,26 @@ class ProfileLimits(unittest.TestCase):
             return {'argv':['mock-no-execution'],'unit':'mock.scope','expected':expected,'pins':pins,
                     'configSha256':config_sha,'proofBinding':None if provisioning else binding}
         stack.enter_context(patch.object(runtime,'_prepare_launch',side_effect=prepare))
+        # This simulator already mocks kernel acquisition. Explicitly isolate
+        # authenticated release here; actual sender/scope helpers have separate controls.
+        self.last_scope_evidence=None
+        def acquired_scope():
+            scope={'finalAbsenceVerified':False}
+            self.last_scope_evidence=scope
+            return scope
+        def release(scope,launch,deadline):
+            self.assertIs(scope,self.last_scope_evidence)
+            self.assertIsInstance(deadline,(int,float))
+            self.assertGreater(deadline,0)
+        release_mock=stack.enter_context(patch.object(runtime,'_release_scope',side_effect=release))
+        self.last_release=release_mock
         def admit(receipt,launch,bounds):
             if not admission:
                 return None
             runtime.write_json(receipt['directory']/'gate.json',{'pid':123,'start':9})
-            admission_path=receipt['directory']/'admit'
-            admission_path.write_bytes(b'1\n');admission_path.chmod(0o600)
             if provisioning:
                 self.assertIsNone(receipt['fd']); self.assertFalse(receipt['path'].exists())
-                return {'finalAbsenceVerified':False}
+                return acquired_scope()
             e = {'v':1,'t':'exec','s':1,'a':launch['expected']['attempt'],'p':'runtime','c':3,
                  'ed':7,'ei':8,'od':7,'oi':8,'w':parser.EXEC_WAIT_STATUS,'cf':1,'dp':0,
                  'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
@@ -243,13 +266,20 @@ class ProfileLimits(unittest.TestCase):
             os.pwrite(receipt['fd'],raw,0)
             if proof_kind == 'replaced':
                 receipt['path'].unlink(); receipt['path'].write_bytes(raw); receipt['path'].chmod(0o600)
-            return {'finalAbsenceVerified':False}
+            return acquired_scope()
         stack.enter_context(patch.object(runtime,'_admit_scope',side_effect=admit))
-        if provisioning:
-            return runtime._run_scoped(['mock-fixed-provisioner'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},b'',
-                                       runtime.execution_bounds(output_limit=limit,managed_scope=True,phase='runtime'),provisioning=True)
-        return runtime.bounded_run(['mock-only'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},
-                                   phase='runtime',output_limit=limit,managed_scope=True)
+        try:
+            if provisioning:
+                return runtime._run_scoped(['mock-fixed-provisioner'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},b'',
+                                           runtime.execution_bounds(output_limit=limit,managed_scope=True,phase='runtime'),provisioning=True)
+            return runtime.bounded_run(['mock-only'],work,{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'},
+                                       phase='runtime',output_limit=limit,managed_scope=True)
+        finally:
+            if self.last_scope_evidence is None:
+                release_mock.assert_not_called()
+            else:
+                release_mock.assert_called_once()
+                self.assertIs(self.last_scope_evidence,release_mock.call_args.args[0])
 
     def test_mock_complete_proof_separates_worker_from_launcher_and_public_bytes(self):
         result = self.simulate()
@@ -287,7 +317,7 @@ class ProfileLimits(unittest.TestCase):
     def test_mock_missing_receipt_entry_still_refuses_without_changing_worker_facts(self):
         reclaim=runtime._reclaim_worker_receipt
         def missing(receipt,result,**kwargs):
-            (receipt['directory']/'admit').unlink()
+            (receipt['directory']/'gate.json').unlink()
             return reclaim(receipt,result,**kwargs)
         with patch.object(runtime,'_reclaim_worker_receipt',side_effect=missing):
             with self.assertRaisesRegex(ValueError,'owned receipt directory reclamation failed') as caught:
@@ -299,6 +329,24 @@ class ProfileLimits(unittest.TestCase):
         self.assertTrue(self.last_receipt['directory'].is_dir())
         self.assertTrue(result['cleanupVerified']);self.assertTrue(result['workerTerminationVerified'])
         self.assertTrue(result['workerProofRaw']);self.assertTrue(result['infrastructureFailure'])
+
+    def test_unexpected_legacy_admit_marker_retains_worker_and_provisioning_receipts(self):
+        reclaim=runtime._reclaim_worker_receipt
+        def injected(receipt,result,**kwargs):
+            marker=receipt['directory']/'admit';marker.write_bytes(b'1\n');marker.chmod(0o600)
+            return reclaim(receipt,result,**kwargs)
+        for provisioning in (False,True):
+            with self.subTest(provisioning=provisioning),patch.object(runtime,'_reclaim_worker_receipt',side_effect=injected):
+                with self.assertRaisesRegex(ValueError,'owned receipt directory reclamation failed') as caught:
+                    self.simulate(provisioning=provisioning)
+            result=caught.exception.bounded_result
+            self.assertEqual('refused',result['_receiptCleanup']['status'])
+            self.assertEqual([],result['_receiptCleanup']['removedEntries'])
+            self.assertIn('unexpected receipt entry',result['_receiptCleanup']['secondaryError'])
+            self.assertTrue(self.last_receipt['directory'].is_dir())
+            self.assertEqual(b'1\n',(self.last_receipt['directory']/'admit').read_bytes())
+            self.assertTrue(result['cleanupVerified']);self.assertTrue(result['finalAbsenceVerified'])
+            self.assertEqual(not provisioning,result['workerTerminationVerified'])
 
     def test_wrapper_status_without_both_proofs_never_becomes_worker_exit(self):
         for wrapper in (0,1,137):

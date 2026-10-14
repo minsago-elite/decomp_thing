@@ -519,7 +519,7 @@ def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
             owned_directory(os.fstat(directory_fd), directory_expected)
             owned_directory(os.stat(directory.name, dir_fd=root_fd, follow_symlinks=False), directory_expected)
         directories_unchanged()
-        expected = {'launch.json', 'gate.json', 'admit', 'python-cache'}
+        expected = {'launch.json', 'gate.json', 'python-cache'}
         if not provisioning:
             expected.add('worker-proof.jsonl')
         names = set()
@@ -862,6 +862,102 @@ def _snapshot_library(path, receipt, deadline=None):
         os.close(source)
 
 
+
+def _committed_config(config):
+    raw = (json.dumps(config, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
+    if not 0 < len(raw) <= 65536:
+        raise ValueError('fixed launch configuration exceeds gate byte bound')
+    return raw, hashlib.sha256(raw).hexdigest()
+
+
+def _publish_config(path, raw):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(raw)
+        while view:
+            count = os.write(descriptor, view)
+            if count <= 0: raise ValueError('launch config short write')
+            view = view[count:]
+    finally:
+        os.close(descriptor)
+
+
+def _lineage_identity(pid):
+    with Path('/proc/' + str(pid) + '/stat').open('rb') as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096: raise ValueError('lineage metadata byte bound')
+    fields = raw[raw.rfind(b')') + 2:].split()
+    return {'pid':pid, 'start':int(fields[19]), 'ppid':int(fields[1])}
+
+
+def _acquire_gate_pidfd(gate, launch):
+    root = launch.get('launcherIdentity')
+    if not root: raise ValueError('owned launcher identity unavailable')
+    def chain():
+        rows=[];pid=gate['pid'];seen=set()
+        for _ in range(load_profile_with_digest()[0]['bounds']['workerProcEntries']):
+            if pid in seen or pid <= 0: raise ValueError('gate lineage is not owned')
+            seen.add(pid);row=_lineage_identity(pid);rows.append(row)
+            if pid == root['pid']:
+                if row['start'] != root['start']: raise ValueError('launcher lifetime changed')
+                if rows[0]['start'] != gate['start']: raise ValueError('gate lifetime changed')
+                return rows
+            pid=row['ppid']
+        raise ValueError('gate lineage traversal bound')
+    before=chain()
+    descriptor=os.pidfd_open(gate['pid'])
+    try:
+        if chain()!=before or process_identity(root['pid'])!=root:
+            raise ValueError('gate/launcher lineage changed during acquisition')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+
+def _revalidate_scope(evidence, deadline):
+    """Final observation of the held acquired cgroup and the exact gate member."""
+    def timely():
+        if time.monotonic()>=deadline:raise TimeoutError('scope revalidation deadline')
+    timely()
+    metadata=os.fstat(evidence['_directoryFd'])
+    expected=(evidence['device'],evidence['inode'])
+    if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev,metadata.st_ino)!=expected:
+        raise ValueError('held scope identity changed before release')
+    with Path('/proc/'+str(evidence['gateIdentity']['pid'])+'/cgroup').open('rb') as stream:
+        membership=stream.read(4097)
+    if len(membership)>4096 or membership.decode().strip()!=evidence['_membership']:
+        raise ValueError('gate membership changed before release')
+    current=Path(evidence['cgroup']).stat()
+    if (current.st_dev,current.st_ino)!=expected:
+        raise ValueError('scope pathname identity changed before release')
+    for name,wanted in evidence['kernelLimits'].items():
+        timely()
+        fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=evidence['_directoryFd'])
+        try:
+            raw=os.read(fd,65)
+            if len(raw)>64 or raw.decode().strip()!=wanted:
+                raise ValueError('held scope limit changed before release')
+        finally:os.close(fd)
+    with Path('/proc/'+str(evidence['gateIdentity']['pid'])+'/cgroup').open('rb') as stream:
+        membership=stream.read(4097)
+    if len(membership)>4096 or membership.decode().strip()!=evidence['_membership']:
+        raise ValueError('gate membership changed during final scope limits')
+    timely()
+
+
+def _release_scope(evidence, launch, deadline):
+    if time.monotonic() >= deadline: raise TimeoutError('scope release deadline')
+    gate = process_identity(evidence['gateIdentity']['pid'])
+    if (process_identity(launch['launcherIdentity']['pid']) != launch['launcherIdentity'] or
+            gate is None or gate['start'] != evidence['gateIdentity']['start']):
+        raise ValueError('owned scope lifetime changed before release')
+    _revalidate_scope(evidence,deadline)
+    signal.pidfd_send_signal(evidence['_gatePidfd'], signal.SIGUSR1, None, 0)
+    if time.monotonic() >= deadline: raise TimeoutError('scope release returned after deadline')
+
+
 def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, runtime_library=None):
     outer = Path('/proc/self/ns/pid').stat()
     common = [Path(__file__), BASE / 'scope_gate.py', BASE / 'build_contract.py',
@@ -935,29 +1031,32 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
     _check_compiler_input_pins(compiler_recording, pins)
     if library is not None and pins.get(library['sourcePath']) != library_pin:
         raise ValueError('runtime library input changed during preparation')
+    unit = 'decomp-acp-efficacy-' + receipt['directory'].name + '.scope'
     config = {'schemaVersion': 1, 'directoryDevice': receipt['directoryDevice'],
               'directoryInode': receipt['directoryInode'], 'mode': 'monitor-provisioning' if provisioning else 'worker',
               'argv': command, 'report': None if provisioning else {'device': receipt['device'], 'inode': receipt['inode']},
-              'outerPidNsDevice': outer.st_dev, 'outerPidNsInode': outer.st_ino}
+              'outerPidNsDevice': outer.st_dev, 'outerPidNsInode': outer.st_ino,
+              'scope':{'unit':unit,'limits':{'pids.max':str(bounds['cgroup']['tasks']),
+                       'memory.max':str(bounds['cgroup']['memoryBytes']),
+                       'memory.swap.max':str(bounds['cgroup']['swapBytes'])}}}
     if library is not None:
         owner = process_identity(os.getpid())
         if owner is None: raise ValueError('snapshot owner lifetime unavailable')
         config['librarySnapshot'] = {'ownerPid':os.getpid(), 'ownerStart':owner['start'],
                                      'descriptor':receipt['librarySnapshotFd'], 'library':library}
-    if len(json.dumps(config).encode()) > 65536:
-        raise ValueError('fixed launch configuration exceeds gate byte bound')
-    write_json(receipt['directory'] / 'launch.json', config)
+    raw_config, config_sha = _committed_config(config)
+    _publish_config(receipt['directory'] / 'launch.json', raw_config)
     cache = private_directory(receipt['directory'] / 'python-cache')
     cache_metadata = cache.lstat()
     receipt.update(cacheDevice=cache_metadata.st_dev, cacheInode=cache_metadata.st_ino)
-    unit = 'decomp-acp-efficacy-' + receipt['directory'].name + '.scope'
     launcher = ['/usr/bin/systemd-run', '--user', '--scope', '--quiet', '--collect', '--no-ask-password',
                 '--unit=' + unit, '--property=TasksMax=' + str(bounds['cgroup']['tasks']),
                 '--property=MemoryMax=' + str(bounds['cgroup']['memoryBytes']),
                 '--property=MemorySwapMax=' + str(bounds['cgroup']['swapBytes']),
                 '/usr/bin/python3', '-I', '-B', '-X', 'pycache_prefix=' + str(cache),
-                str(BASE / 'scope_gate.py'), str(receipt['directory'])]
-    config_sha = digest(receipt['directory'] / 'launch.json')
+                str(BASE / 'scope_gate.py'), str(receipt['directory']), '--config-sha256', config_sha,
+                '--controller', str(os.getpid()), str(process_identity(os.getpid())['start']), str(os.getuid()),
+                '--phase-deadline', repr(deadline if deadline is not None else time.monotonic() + bounds['wallSeconds'])]
     proof_binding = None if provisioning else {
         'protocolVersion':1, 'expected':expected, 'launchConfigSha256':config_sha,
         'environmentPinSha256':binding['environmentPinSha256'], 'monitorBinarySha256':binding['binarySha256'],
@@ -1015,12 +1114,16 @@ def _admit_scope(receipt, launch, bounds):
     if not stat.S_ISDIR(metadata.st_mode):
         os.close(directory_fd)
         raise ValueError('scope descriptor is not a cgroup directory')
-    evidence = {'unit': launch['unit'], 'cgroup': str(cgroup), 'device': metadata.st_dev,
-                'inode': metadata.st_ino, '_directoryFd': directory_fd, 'gateIdentity': gate, 'kernelLimits': values,
-                'systemdRunSha256': launch['pins'][str(Path('/usr/bin/systemd-run').resolve())]['sha256'],
-                'scopeGateSha256': launch['pins'][str(BASE / 'scope_gate.py')]['sha256']}
-    # Write once only after all actual kernel limit/identity checks succeeded.
     try:
+        gate_pidfd = _acquire_gate_pidfd(gate, launch)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    try:
+        evidence = {'unit': launch['unit'], 'cgroup': str(cgroup), 'device': metadata.st_dev,
+                    'inode': metadata.st_ino, '_directoryFd': directory_fd, '_gatePidfd':gate_pidfd, '_membership':cgroup_record, 'gateIdentity': gate, 'kernelLimits': values,
+                    'systemdRunSha256': launch['pins'][str(Path('/usr/bin/systemd-run').resolve())]['sha256'],
+                    'scopeGateSha256': launch['pins'][str(BASE / 'scope_gate.py')]['sha256']}
         # Reread limits via the acquired directory, so pathname substitution cannot authenticate it.
         acquired = {}
         for name in ('pids.max','memory.max','memory.swap.max'):
@@ -1041,15 +1144,9 @@ def _admit_scope(receipt, launch, bounds):
             raise ValueError('scope gate identity changed during acquisition')
         if Path(f"/proc/{gate['pid']}/cgroup").read_text().strip() != cgroup_record:
             raise ValueError('scope gate membership changed during acquisition')
-        descriptor = os.open(receipt['directory'] / 'admit.tmp', os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_WRONLY, 0o600)
-        try:
-            if os.write(descriptor, b'1\n') != 2:
-                raise ValueError('scope admission write incomplete')
-        finally:
-            os.close(descriptor)
-        os.replace(receipt['directory'] / 'admit.tmp', receipt['directory'] / 'admit')
         return evidence
     except BaseException:
+        os.close(gate_pidfd)
         os.close(directory_fd)
         raise
 
@@ -1176,6 +1273,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         launcher_pidfd = os.pidfd_open(process.pid)
         root = process_identity(process.pid)
         root_start = root['start'] if root else None
+        launch['launcherIdentity'] = root
         result['launcherPidIdentityVerified'] = root is not None
         selector = selectors.DefaultSelector()
         process.stdin.write(stdin); process.stdin.close()
@@ -1189,6 +1287,9 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             if scope_evidence is None:
                 scope_evidence = _admit_scope(receipt, launch, bounds)
                 if scope_evidence is not None:
+                    result.update(scopeVerified=True, kernelScope={k:v for k,v in scope_evidence.items() if not k.startswith('_')})
+                    # State owns cgroup/gate handles before any authenticated release attempt.
+                    _release_scope(scope_evidence, launch, began + timeout)
                     result.update(scopeVerified=True, scopeAdmitted=True, kernelScope={k:v for k,v in scope_evidence.items() if not k.startswith('_')})
             for key, _ in selector.select(min(remaining, supervisor['selectorPollSeconds'])):
                 block = os.read(key.fileobj.fileno(), supervisor['captureReadBytes'])
@@ -1290,7 +1391,8 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                     result.update(cleanupVerified=False, infrastructureFailure=True, infrastructureReason='capture-close-failed')
         result.update(stdout=bytes(captured['stdout']), stderr=bytes(captured['stderr']),
                       elapsedSeconds=round(time.monotonic() - began, 6))
-        for descriptor in (launcher_pidfd, scope_evidence.get('_directoryFd') if scope_evidence is not None else None):
+        for descriptor in (launcher_pidfd, scope_evidence.get('_directoryFd') if scope_evidence is not None else None,
+                           scope_evidence.get('_gatePidfd') if scope_evidence is not None else None):
             if descriptor is not None:
                 try:
                     os.close(descriptor)

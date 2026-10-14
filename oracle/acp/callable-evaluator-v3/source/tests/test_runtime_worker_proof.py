@@ -2,6 +2,7 @@
 import ast
 from contextlib import ExitStack
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -409,6 +410,130 @@ class RuntimeWorkerProof(unittest.TestCase):
         public=next(node for node in signature.body if isinstance(node,ast.FunctionDef) and node.name=='bounded_run')
         self.assertNotIn('provisioning',[arg.arg for arg in public.args.args+public.args.kwonlyargs])
 
+    def config_gate(self):
+        gate=types.ModuleType('_auth_config_gate_control');gate.__file__=str(SOURCE/'scope_gate.py')
+        exec(compile((SOURCE/'scope_gate.py').read_bytes(),gate.__file__,'exec'),gate.__dict__)
+        return gate
+
+    def test_config_memory_commitment_and_actual_single_buffer_reader(self):
+        gate=self.config_gate();config={'argv':['/usr/bin/bwrap','authored'],'schemaVersion':1}
+        raw,sha=runtime._committed_config(config)
+        file=self.work/'launch.json';runtime._publish_config(file,raw)
+        self.assertEqual(sha,hashlib.sha256(raw).hexdigest())
+        directory=os.open(self.work,os.O_RDONLY|os.O_DIRECTORY);self.addCleanup(os.close,directory)
+        self.assertEqual(config,gate._authenticated_config(directory,sha))
+        file.write_bytes(raw.replace(b'authored',b'attacker'))
+        with self.assertRaisesRegex(ValueError,'commitment'):gate._authenticated_config(directory,sha)
+        file.write_bytes(raw)
+        self.assertEqual(config,gate._authenticated_config(directory,sha))
+        for invalid in (b'{"a":1,"a":2}',b'{} trailing',b'x'*65537):
+            file.write_bytes(invalid)
+            with self.assertRaises(ValueError):gate._authenticated_config(directory,hashlib.sha256(invalid).hexdigest())
+        file.write_bytes(raw)
+        real_read=gate.os.read
+        with patch.object(gate.os,'read',side_effect=lambda fd,n:real_read(fd,min(n,2))):
+            self.assertEqual(config,gate._authenticated_config(directory,sha))
+
+    def test_signal_release_sender_and_original_absolute_clock(self):
+        gate=self.config_gate();valid=dict(si_signo=gate.signal.SIGUSR1,si_code=0,si_errno=0,si_pid=12,si_uid=34)
+        with patch.object(gate,'_live_controller') as live,patch.object(gate.time,'monotonic',return_value=1),patch.object(gate.signal,'sigtimedwait',return_value=types.SimpleNamespace(**valid)) as wait:
+            gate._wait_release((12,99,34),6,10);self.assertEqual(2,live.call_count)
+            for key,value in (('si_code',-1),('si_code',-6),('si_pid',13),('si_uid',35),('si_errno',1),('si_signo',gate.signal.SIGUSR2)):
+                wait.return_value=types.SimpleNamespace(**{**valid,key:value})
+                with self.assertRaises(ValueError):gate._wait_release((12,99,34),6,10)
+            wait.return_value=None
+            with self.assertRaises(ValueError):gate._wait_release((12,99,34),6,10)
+            wait.reset_mock();wait.return_value=types.SimpleNamespace(**valid)
+            with patch.object(gate.time,'monotonic',return_value=10):
+                with self.assertRaises(TimeoutError):gate._wait_release((12,99,34),6,10)
+            wait.assert_not_called()  # even a pending valid signal cannot renew an expired clock
+            with patch.object(gate.time,'monotonic',side_effect=[1,2,10]):
+                with self.assertRaises(TimeoutError):gate._wait_release((12,99,34),6,10)
+
+    def test_gate_initial_signal_policy_and_controlled_exit_restore_mask_and_close(self):
+        gate=self.config_gate();argv=['scope_gate.py','/authored','--config-sha256','a'*64,'--controller','12','99','34','--phase-deadline','10']
+        with patch.object(gate.sys,'argv',argv),patch.object(gate.time,'monotonic',return_value=1),patch.object(gate,'_contract',return_value=build_contract.load_profile()),patch.object(gate.signal,'getsignal',return_value=gate.signal.SIG_DFL),patch.object(gate.signal,'pthread_sigmask',return_value=set()) as mask,patch.object(gate,'_controller_identity'),patch.object(gate,'_live_controller'),patch.object(gate.os,'pidfd_open',return_value=6),patch.object(gate.os,'close') as close,patch.object(gate,'_main',side_effect=ValueError('authored refusal')),patch.object(gate.os,'execv') as execute:
+            with self.assertRaisesRegex(ValueError,'authored refusal'):gate.main()
+            close.assert_called_once_with(6);self.assertEqual((gate.signal.SIG_SETMASK,set()),mask.call_args.args);execute.assert_not_called()
+            with patch.object(gate.signal,'getsignal',return_value=gate.signal.SIG_IGN):
+                with self.assertRaisesRegex(ValueError,'inherited'):gate.main()
+            with patch.object(gate.signal,'pthread_sigmask',return_value={gate.signal.SIGUSR1}):
+                with self.assertRaisesRegex(ValueError,'inherited'):gate.main()
+            with patch.object(gate.os,'close',side_effect=OSError('close refused')):
+                with self.assertRaises(OSError):gate.main()
+                self.assertEqual(gate.signal.SIG_SETMASK,mask.call_args.args[0])
+
+    def test_gate_lineage_and_scope_release_use_exact_owned_lifetimes(self):
+        root={'pid':10,'start':100};launch={'launcherIdentity':root}
+        rows={12:{'pid':12,'start':120,'ppid':10},10:{'pid':10,'start':100,'ppid':1}}
+        with patch.object(runtime,'_lineage_identity',side_effect=lambda pid:dict(rows[pid])),patch.object(runtime,'process_identity',return_value=root),patch.object(runtime.os,'pidfd_open',return_value=55) as opened,patch.object(runtime.os,'close'):
+            self.assertEqual(55,runtime._acquire_gate_pidfd({'pid':12,'start':120},launch))
+            rows[12]['ppid']=12
+            with self.assertRaises(ValueError):runtime._acquire_gate_pidfd({'pid':12,'start':120},launch)
+        evidence={'_gatePidfd':55,'_directoryFd':56,'gateIdentity':{'pid':12,'start':120}}
+        def identity(pid):return root if pid==10 else {'pid':12,'start':120}
+        with patch.object(runtime,'process_identity',side_effect=identity),patch.object(runtime,'_revalidate_scope'),patch.object(runtime.time,'monotonic',return_value=1),patch.object(runtime.signal,'pidfd_send_signal') as send:
+            runtime._release_scope(evidence,launch,10);send.assert_called_once_with(55,runtime.signal.SIGUSR1,None,0)
+            send.side_effect=OSError('authored send failure')
+            with self.assertRaises(OSError):runtime._release_scope(evidence,launch,10)
+            self.assertEqual(56,evidence['_directoryFd']);self.assertEqual(55,evidence['_gatePidfd'])
+            send.reset_mock()
+            with patch.object(runtime.time,'monotonic',return_value=10):
+                with self.assertRaises(TimeoutError):runtime._release_scope(evidence,launch,10)
+            send.assert_not_called()
+
+    def test_controller_final_scope_observation_refuses_each_drift_before_send(self):
+        wanted={'pids.max':'32','memory.max':'536870912','memory.swap.max':'0'}
+        evidence={'_directoryFd':56,'_gatePidfd':57,'device':91,'inode':92,
+                  'cgroup':'/sys/fs/cgroup/owned.scope','_membership':'0::/owned.scope',
+                  'gateIdentity':{'pid':12,'start':120},'kernelLimits':wanted}
+        root={'pid':10,'start':100};launch={'launcherIdentity':root}
+        good=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_dev=91,st_ino=92)
+        bad=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_dev=91,st_ino=99)
+        for mutation in (None,'membership','held-inode','path-inode','limit'):
+            values=dict(wanted)
+            if mutation=='limit':values['memory.max']='999'
+            descriptors={name:100+i for i,name in enumerate(wanted)}
+            def opened(path,*a,**k):return descriptors[str(path)]
+            def read(fd,n):return values[next(name for name,value in descriptors.items() if value==fd)].encode()
+            member=b'0::/foreign.scope' if mutation=='membership' else b'0::/owned.scope'
+            with patch.object(runtime,'process_identity',side_effect=lambda pid:root if pid==10 else {'pid':12,'start':120}),patch.object(runtime.time,'monotonic',return_value=1),patch.object(runtime.os,'fstat',return_value=bad if mutation=='held-inode' else good),patch.object(Path,'stat',return_value=bad if mutation=='path-inode' else good),patch.object(Path,'open',side_effect=lambda *a,**k:io.BytesIO(member)),patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'read',side_effect=read),patch.object(runtime.os,'close'),patch.object(runtime.signal,'pidfd_send_signal') as send:
+                if mutation is None:
+                    runtime._release_scope(evidence,launch,10)
+                    send.assert_called_once_with(57,runtime.signal.SIGUSR1,None,0)
+                else:
+                    with self.assertRaises(ValueError):runtime._release_scope(evidence,launch,10)
+                    send.assert_not_called()
+
+    def test_gate_holds_scope_before_hello_and_rechecks_scope_after_grant(self):
+        gate=self.config_gate();bounds=build_contract.load_profile()['bounds']
+        wanted={'pids.max':str(bounds['tasks']),'memory.max':str(bounds['memoryBytes']),
+                'memory.swap.max':str(bounds['swapBytes'])}
+        expected={'unit':'owned.scope','limits':wanted}
+        good=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_dev=91,st_ino=92)
+        bad=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_dev=91,st_ino=99)
+        for mutation in (None,'pre-membership','membership','held-inode','path-inode','limit'):
+            state={'membership':'0::/foreign.scope' if mutation=='pre-membership' else '0::/owned.scope',
+                   'held':good,'path':good,'values':dict(wanted)}
+            descriptors={name:100+i for i,name in enumerate(wanted)}
+            def opened(path,*a,**k):return descriptors.get(str(path),11)
+            def read(fd,n):return state['values'][next(name for name,value in descriptors.items() if value==fd)].encode()
+            with patch.object(gate,'_scope_membership',side_effect=lambda:state['membership']),patch.object(gate.time,'monotonic',return_value=1),patch.object(Path,'resolve',lambda p,*a,**k:p),patch.object(Path,'stat',side_effect=lambda *a,**k:state['path']),patch.object(gate.os,'fstat',side_effect=lambda fd:state['held']),patch.object(gate.os,'open',side_effect=opened),patch.object(gate.os,'read',side_effect=read),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'close'):
+                if mutation=='pre-membership':
+                    with self.assertRaises(ValueError):gate._acquire_scope(expected,bounds,'owned.scope',10)
+                    duplicate.assert_not_called();continue
+                scope=gate._acquire_scope(expected,bounds,'owned.scope',10)
+                self.assertEqual(7,scope['fd']);self.assertEqual((91,92),(scope['device'],scope['inode']))
+                if mutation=='membership':state['membership']='0::/foreign.scope'
+                elif mutation=='held-inode':state['held']=bad
+                elif mutation=='path-inode':state['path']=bad
+                elif mutation=='limit':state['values']['memory.max']='999'
+                if mutation is None:gate._check_scope(scope,10)
+                else:
+                    with self.assertRaises(ValueError):gate._check_scope(scope,10)
+                with patch.object(gate.time,'monotonic',return_value=10):
+                    with self.assertRaises(TimeoutError):gate._check_scope(scope,10)
+
     def test_gate_opens_report_only_after_admission_and_explicitly_hands_fd4(self):
         gate=types.ModuleType('_pure_optimized_scope_gate')
         gate.__file__=str(SOURCE/'scope_gate.py')
@@ -417,7 +542,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         events=[]
         config={'schemaVersion':1,'directoryDevice':10,'directoryInode':11,'mode':'worker',
                 'argv':['/usr/bin/bwrap','mock-only'],'report':{'device':20,'inode':21},
-                'outerPidNsDevice':30,'outerPidNsInode':31}
+                'outerPidNsDevice':30,'outerPidNsInode':31,'scope':{'unit':'decomp-acp-efficacy-'+directory.name+'.scope','limits':{}}}
         dir_stat=types.SimpleNamespace(st_uid=os.getuid(),st_mode=stat.S_IFDIR|0o700,st_dev=10,st_ino=11)
         report_stat=types.SimpleNamespace(st_uid=os.getuid(),st_mode=stat.S_IFREG|0o600,st_dev=20,st_ino=21,st_size=0,st_nlink=1)
         def read_at(fd,name,maximum):
@@ -428,15 +553,43 @@ class RuntimeWorkerProof(unittest.TestCase):
         def proc_text(path,*args,**kwargs):
             if str(path)=='/proc/self/status':return '\n'.join(key+': 00000000' for key in ('CapInh','CapPrm','CapEff','CapAmb'))
             return '12 (gate) S '+ ' '.join(['1']*19)+' 123 0'
-        with patch.object(gate.sys,'argv',['scope_gate.py',str(directory)]),patch.object(gate.sys,'flags',types.SimpleNamespace(isolated=True)),patch.object(gate.sys,'dont_write_bytecode',True),patch.object(gate.sys,'pycache_prefix',str(directory/'python-cache')),patch.object(gate,'_contract',return_value=build_contract.load_profile()),patch.object(gate,'_read_at',side_effect=read_at),patch.object(gate.os,'open',side_effect=opened),patch.object(gate.os,'fstat',side_effect=[dir_stat,report_stat]),patch.object(gate.os,'close'),patch.object(gate.os,'write',side_effect=lambda fd,raw:len(raw)),patch.object(gate.os,'rename'),patch.object(gate.os,'getpid',return_value=12),patch.object(gate.resource,'getrlimit',return_value=(64,64)),patch.object(Path,'read_text',proc_text),patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=30,st_ino=31)),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate,'_close_nonstandard') as close,patch.object(gate.os,'execv',side_effect=RuntimeError('mocked exec blocked')) as execute:
-            with self.assertRaisesRegex(RuntimeError,'mocked exec blocked'):gate.main()
+        with ExitStack() as gate_effects:
+            gate_effects.enter_context(patch.object(gate.sys,'argv',['scope_gate.py',str(directory),'--config-sha256','0'*64,'--controller','1','2','3','--phase-deadline','999999999999']))
+            gate_effects.enter_context(patch.object(gate.sys,'flags',types.SimpleNamespace(isolated=True)))
+            gate_effects.enter_context(patch.object(gate.sys,'dont_write_bytecode',True))
+            gate_effects.enter_context(patch.object(gate.sys,'pycache_prefix',str(directory/'python-cache')))
+            gate_effects.enter_context(patch.object(gate,'_contract',return_value=build_contract.load_profile()))
+            gate_effects.enter_context(patch.object(gate,'_authenticated_config',return_value=config))
+            gate_effects.enter_context(patch.object(gate,'_acquire_scope',return_value={'fd':7}))
+            gate_effects.enter_context(patch.object(gate,'_check_scope',side_effect=lambda *a:events.append(('checked-held-scope',))))
+            gate_effects.enter_context(patch.object(gate,'_wait_release',side_effect=lambda *a:events.append(('authenticated-release',))))
+            gate_effects.enter_context(patch.object(gate.os,'open',side_effect=opened))
+            gate_effects.enter_context(patch.object(gate.os,'fstat',side_effect=[dir_stat,report_stat]))
+            gate_effects.enter_context(patch.object(gate.os,'close'))
+            gate_effects.enter_context(patch.object(gate.os,'write',side_effect=lambda fd,raw:len(raw)))
+            gate_effects.enter_context(patch.object(gate.os,'rename'))
+            gate_effects.enter_context(patch.object(gate.os,'getpid',return_value=12))
+            gate_effects.enter_context(patch.object(gate.resource,'getrlimit',return_value=(64,64)))
+            gate_effects.enter_context(patch.object(Path,'read_text',proc_text))
+            gate_effects.enter_context(patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=30,st_ino=31)))
+            duplicate = gate_effects.enter_context(patch.object(gate.os,'dup2'))
+            inherit = gate_effects.enter_context(patch.object(gate.os,'set_inheritable'))
+            close = gate_effects.enter_context(patch.object(gate,'_close_nonstandard'))
+            execute = gate_effects.enter_context(patch.object(gate.os,'execv',side_effect=RuntimeError('mocked exec blocked')))
+            self.assertEqual(config['argv'],gate._main('0'*64,(1,2,3),6,float('inf')))
+            before_reports=sum(event[:2]==('open','worker-proof.jsonl') for event in events)
+            with patch.object(gate.os,'fstat',return_value=dir_stat),patch.object(gate,'_check_scope',side_effect=ValueError('held scope drift after grant')):
+                with self.assertRaisesRegex(ValueError,'scope drift'):gate._main('0'*64,(1,2,3),6,float('inf'))
+            self.assertEqual(before_reports,sum(event[:2]==('open','worker-proof.jsonl') for event in events))
         report=next(i for i,event in enumerate(events) if event[:2]==('open','worker-proof.jsonl'))
-        admitted=events.index(('read','admit'))
+        admitted=events.index(('authenticated-release',))
         self.assertGreater(report,admitted)
+        checked=events.index(('checked-held-scope',))
+        self.assertLess(admitted,checked);self.assertLess(checked,report)
         flags=events[report][2]
         self.assertTrue(flags & os.O_NOFOLLOW);self.assertTrue(flags & os.O_APPEND)
         duplicate.assert_called_once_with(11,4,inheritable=True);inherit.assert_called_once_with(4,True)
-        close.assert_called_once_with({4});execute.assert_called_once_with('/usr/bin/bwrap',config['argv'])
+        close.assert_called_once_with({4,6,10,7});execute.assert_not_called()
 
     def test_optimized_admission_refuses_each_kernel_identity_limit_and_short_write(self):
         # Compile the actual function with assertions removed, without starting
@@ -452,7 +605,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         unit='authored.scope';gate={'pid':12,'start':123};child={'pid':12,'start':123}
         launch={'unit':unit,'pins':{str(Path('/usr/bin/systemd-run')):{'sha256':'0'*64},
                                   str(runtime.BASE/'scope_gate.py'):{'sha256':'0'*64}}}
-        cases=(None,'start','record','unit','pids.max','memory.max','memory.swap.max','acquired','membership','short-write')
+        cases=(None,'start','record','unit','pids.max','memory.max','memory.swap.max','acquired','membership','gate-pidfd')
         for mutation in cases:
             with self.subTest(mutation=mutation):
                 values=dict(wanted)
@@ -472,16 +625,17 @@ class RuntimeWorkerProof(unittest.TestCase):
                     name=next(k for k,v in descriptors.items() if v==fd)
                     return ('999' if mutation=='acquired' and name=='memory.max' else values[name]).encode()
                 with patch.dict(namespace,{'_read_private_json':lambda p:dict(gate),
-                                           'process_identity':lambda pid:dict(child,start=999) if mutation=='start' else dict(child)}), \
+                                           'process_identity':lambda pid:dict(child,start=999) if mutation=='start' else dict(child),
+                                           '_acquire_gate_pidfd':Mock(side_effect=ValueError('gate acquisition') if mutation=='gate-pidfd' else None,return_value=89)}), \
                         patch.object(Path,'exists',return_value=True),patch.object(Path,'resolve',lambda p,*a,**k:p), \
                         patch.object(Path,'read_text',text),patch.object(Path,'stat',return_value=metadata), \
                         patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'fstat',return_value=metadata), \
                         patch.object(runtime.os,'read',side_effect=read),patch.object(runtime.os,'close'), \
-                        patch.object(runtime.os,'write',return_value=1 if mutation=='short-write' else 2) as write, \
+                        patch.object(runtime.os,'write') as write, \
                         patch.object(runtime.os,'replace') as publish:
                     if mutation is None:
                         self.assertEqual(unit,admit({'directory':self.work},launch,bounds)['unit'])
-                        write.assert_called_once();publish.assert_called_once()
+                        write.assert_not_called();publish.assert_not_called()
                     else:
                         with self.assertRaises(ValueError):admit({'directory':self.work},launch,bounds)
                         publish.assert_not_called()
@@ -521,7 +675,7 @@ class RuntimeWorkerProof(unittest.TestCase):
             self.addCleanup(lambda:os.close(receipt['fd']) if receipt['fd'] is not None else None)
             cache=runtime.private_directory(receipt['directory']/'python-cache');metadata=cache.lstat()
             receipt.update(cacheDevice=metadata.st_dev,cacheInode=metadata.st_ino)
-            for name in ('launch.json','gate.json','admit'):runtime.write_json(receipt['directory']/name,{})
+            for name in ('launch.json','gate.json'):runtime.write_json(receipt['directory']/name,{})
             result=completed_result(stdout=b'preserved behavior',stderr=b'preserved diagnostics')
             expected=result['workerProofBindings']['expected']
             expected.update(attempt=receipt['directory'].name,reportDevice=receipt['device'],reportInode=receipt['inode'])
@@ -594,7 +748,7 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_runner_consumes_proof_and_closes_report_before_reclaim_with_failure_retention(self):
         # Actual runner/final-proof/reclaim functions, authored bytes and mocked
         # process/kernel interfaces. Never asks the OS to create a child or scope.
-        for mutation in (None,'absence','report-close','delete','capture','prelaunch'):
+        for mutation in (None,'absence','report-close','delete','capture','prelaunch','release'):
             with self.subTest(mutation=mutation):
                 base,receipt,authored=self.receipt_fixture(close=False)
                 report_fd=receipt['fd'];events=[];real_close=os.close;real_read=os.read
@@ -623,7 +777,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                 def closed(fd):
                     events.append(('close',fd))
                     if fd==report_fd and mutation=='report-close':raise OSError('authored report close refusal')
-                    if fd not in (111,112):real_close(fd)
+                    if fd not in (111,112,113):real_close(fd)
                 def reclaim(*args,**kwargs):
                     self.assertIsNone(receipt['fd'])
                     self.assertIn(('close',report_fd),events)
@@ -635,7 +789,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                 def prepare(*args,**kwargs):
                     if mutation=='prelaunch':raise ValueError('original prelaunch refusal')
                     return launch
-                scope={'_directoryFd':112,'unit':'authored.scope'}
+                scope={'_directoryFd':112,'_gatePidfd':113,'unit':'authored.scope'}
                 with ExitStack() as effects:
                     for effect in (
                         patch.object(runtime,'BASE',base),patch.object(runtime,'_work_directory',return_value=self.work),
@@ -643,7 +797,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                         patch.object(runtime,'_prepare_launch',side_effect=prepare),patch.object(runtime.subprocess,'Popen',return_value=process),
                         patch.object(runtime.os,'pidfd_open',return_value=111),patch.object(runtime,'process_identity',return_value={'start':1}),
                         patch.object(runtime.selectors,'DefaultSelector',side_effect=Selector),patch.object(runtime.os,'set_blocking'),
-                        patch.object(runtime,'_admit_scope',return_value=scope),patch.object(runtime,'_kill_owned_scope'),
+                        patch.object(runtime,'_admit_scope',return_value=scope),patch.object(runtime,'_release_scope',side_effect=OSError('original release') if mutation=='release' else None),patch.object(runtime,'_kill_owned_scope',side_effect=lambda acquired:events.append(('kill-acquired',acquired))),
                         patch.object(runtime,'_kill_launcher'),patch.object(runtime,'scope_processes',return_value=[]),
                         patch.object(runtime,'owned_processes',side_effect=ValueError('authored absence refusal') if mutation=='absence' else lambda *a:[]),
                         patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime.os,'close',side_effect=closed),
@@ -655,11 +809,18 @@ class RuntimeWorkerProof(unittest.TestCase):
                             runtime.execution_bounds(managed_scope=True,phase='runtime'),provisioning=False)
                     except (ValueError,OSError) as error:
                         result=error.bounded_result
-                        if mutation in ('capture','prelaunch'):
+                        if mutation in ('capture','prelaunch','release'):
                             self.assertIn('original '+mutation,str(error))
                         elif mutation=='delete':
                             self.assertEqual('owned receipt directory reclamation failed',str(error))
                         elif mutation not in ('absence','report-close'):raise
+                if mutation=='release':
+                    self.assertIn(('kill-acquired',scope),events)
+                    self.assertIn(('close',112),events);self.assertIn(('close',113),events)
+                    self.assertTrue(result['cleanupVerified']);self.assertTrue(result['finalAbsenceVerified'])
+                    self.assertTrue(result['kernelScope']['finalAbsenceVerified'])
+                    self.assertTrue(result['scopeVerified']);self.assertFalse(result['scopeAdmitted'])
+                    self.assertEqual('OSError',result['failureClass'])
                 if mutation is None:
                     self.assertEqual('removed',result['_receiptCleanup']['status'])
                     self.assertFalse(receipt['directory'].exists());self.assertTrue(runtime.worker_execution_complete(result))
