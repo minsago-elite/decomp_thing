@@ -10,12 +10,214 @@ import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.Flow
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.*
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class AcpProviderBrokerTest {
+    @Test
+    fun `throwing cancellation callback revokes a stalled exchange without consumer progress`() {
+        val failCallback = AtomicBoolean(false)
+        val backend = FixtureBackend()
+        val broker = open(backend, cancellation = AgentCancellation {
+            if (failCallback.get()) throw IllegalStateException(TEST_TOKEN)
+            false
+        })
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val exchange = broker.beginRequest(1, capability(broker), body())
+            backend.headers(); backend.subscribe()
+            failCallback.set(true)
+            await { broker.snapshot().revoked }
+            assertTrue(backend.cancelled)
+            val failure = assertFailsWith<AcpProviderBrokerFailure> { exchange.nextChunk() }
+            assertEquals(AcpProviderTerminalKind.TRANSPORT, failure.kind)
+            assertNull(failure.cause)
+            assertFalse(failure.toString().contains(TEST_TOKEN))
+            assertEquals(AcpProviderTerminalKind.TRANSPORT, broker.snapshot().requests.single().terminal)
+            assertEquals(1, backend.starts)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `quoted output token limit is refused before backend dispatch`() {
+        val backend = FixtureBackend()
+        val broker = open(backend)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val malformed = body().decodeToString().dropLast(1) + ",\"max_output_tokens\":\"5\"}"
+            assertKind(AcpProviderTerminalKind.UNSUPPORTED_OPERATION) { broker.beginRequest(1, cap, malformed.toByteArray()) }
+            assertEquals(0, backend.starts)
+            assertTrue(broker.snapshot().requests.isEmpty())
+            assertEquals(AcpProviderTerminalKind.UNSUPPORTED_OPERATION, broker.snapshot().admissionDenial!!.terminal)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `interrupted backend cleanup preserves cancellation and unverified cleanup`() {
+        val backend = FixtureBackend(interruptCleanup = true)
+        val broker = open(backend)
+        try {
+            assertFalse(Thread.currentThread().isInterrupted)
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+            assertTrue(broker.snapshot().revoked)
+        } finally {
+            Thread.interrupted()
+            backend.interruptCleanup = false
+            broker.close()
+        }
+    }
+
+    @Test
+    fun `interrupted lifecycle cleanup preserves cancellation and unverified cleanup`() {
+        val broker = open(FixtureBackend())
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // Keep the real owner alive through shutdownNow so awaitTermination, rather than only
+        // backend cleanup, must observe the caller's interrupt. No production injection seam.
+        val lifecycle = AcpProviderBroker::class.java.getDeclaredField("lifecycle").let {
+            it.isAccessible = true
+            it.get(broker) as ScheduledThreadPoolExecutor
+        }
+        lifecycle.execute {
+            started.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (release.count > 0 && System.nanoTime() < deadline) {
+                try { release.await(10, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
+            }
+        }
+        try {
+            assertTrue(started.await(1, TimeUnit.SECONDS))
+            Thread.currentThread().interrupt()
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+        } finally {
+            Thread.interrupted()
+            release.countDown()
+            broker.close()
+        }
+    }
+
+    @Test
+    fun `exactly exhausted input token budget refuses the next request before dispatch`() {
+        val backend = FixtureBackend()
+        val broker = open(backend, inputTokens = 1)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val first = broker.beginRequest(1, cap, body())
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            assertNotNull(first.nextChunk()); assertNull(first.nextChunk())
+            assertEquals(1, broker.snapshot().requests.single().inputTokens)
+            assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { broker.beginRequest(2, cap, body()) }
+            assertEquals(1, backend.starts)
+            assertEquals(AcpProviderTerminalKind.RESOURCE_EXHAUSTED, broker.snapshot().admissionDenial!!.terminal)
+            assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `completed final chunk freezes evidence before a later cancellation close or callback`() {
+        for (scenario in 0..3) {
+            val backend = FixtureBackend()
+            val cancelled = AgentCancellationSource()
+            val broker = open(backend, cancellation = cancelled.cancellation)
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val exchange = broker.beginRequest(1, capability(broker), body())
+                backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+                assertNotNull(exchange.nextChunk())
+                assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                when (scenario) {
+                    0 -> { cancelled.cancel(); await { broker.snapshot().revoked } }
+                    1 -> broker.close()
+                    2 -> exchange.cancel()
+                    else -> backend.receiver!!.failed()
+                }
+                assertNull(exchange.nextChunk())
+                assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                assertEquals(1, broker.snapshot().requests.size)
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `validated completion with undelivered chunks remains cancellable`() {
+        val backend = FixtureBackend()
+        val broker = open(backend)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val exchange = broker.beginRequest(1, capability(broker), body())
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            exchange.cancel()
+            assertKind(AcpProviderTerminalKind.CANCELLED) { exchange.nextChunk() }
+            assertEquals(AcpProviderTerminalKind.CANCELLED, broker.snapshot().requests.single().terminal)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `released completed exchange cannot revoke the next request through stale callbacks`() {
+        val backend = FixtureBackend()
+        val broker = open(backend, inputTokens = 2)
+        try {
+            broker.bindSession("actual-session", "turn-1")
+            val cap = capability(broker)
+            val first = broker.beginRequest(1, cap, body())
+            val firstReceiver = backend.receiver!!
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            assertNotNull(first.nextChunk())
+            val second = broker.beginRequest(2, cap, body())
+            firstReceiver.failed()
+            first.cancel()
+            assertFalse(broker.snapshot().revoked)
+            assertFalse(backend.cancelled)
+            assertNull(first.nextChunk())
+            backend.headers(); backend.subscribe(); backend.emit(completed(1)); backend.complete()
+            assertNotNull(second.nextChunk())
+            assertEquals(listOf(AcpProviderTerminalKind.COMPLETED, AcpProviderTerminalKind.COMPLETED), broker.snapshot().requests.map { it.terminal })
+            assertKind(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { broker.beginRequest(3, cap, body()) }
+            assertEquals(2, backend.starts)
+        } finally { broker.close() }
+    }
+
+    @Test
+    fun `multi chunk completion freezes only after its final EOF validated chunk is delivered`() {
+        for (cancelBeforeLast in listOf(true, false)) {
+            val backend = FixtureBackend()
+            val broker = open(backend, policy = policy(AcpProviderTransportBounds(maximumChunkBytes = 256, maximumQueuedChunks = 2)))
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val exchange = broker.beginRequest(1, capability(broker), body())
+                backend.headers(); backend.subscribe()
+                // The suffix is a credential prefix, so this entire delta stays quarantined
+                // until actual upstream EOF disproves continuation of the synthetic secret.
+                backend.emit(delta("x".repeat(70) + "s")); backend.emit(completed(3)); backend.complete()
+                assertEquals(256, exchange.nextChunk()!!.size)
+                assertTrue(broker.snapshot().requests.isEmpty(), "one undelivered chunk cannot be recorded as delivered completion")
+                if (cancelBeforeLast) {
+                    exchange.cancel()
+                    assertKind(AcpProviderTerminalKind.CANCELLED) { exchange.nextChunk() }
+                    assertEquals(AcpProviderTerminalKind.CANCELLED, broker.snapshot().requests.single().terminal)
+                } else {
+                    val last = exchange.nextChunk()!!
+                    assertTrue(last.size in 1..255)
+                    assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                    broker.close()
+                    assertNull(exchange.nextChunk())
+                    assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                }
+            } finally { broker.close() }
+        }
+    }
+
     @Test
     fun `disabled policy missing credentials and excessive enclosing duration create no backend request`() {
         val backend = FixtureBackend()
@@ -313,11 +515,12 @@ class AcpProviderBrokerTest {
         credentials: AcpProviderCredentialMaterial? = AcpProviderCredentialMaterial.cachedChatGpt(TEST_TOKEN, "fixture_account"),
         remaining: Duration = Duration.ofSeconds(2),
         outputTokens: Long? = null,
+        inputTokens: Long? = null,
         cancellation: AgentCancellation = AgentCancellation.NONE,
     ): AcpProviderBroker = AcpProviderBroker.openForTesting(
         policy,
         AgentExecutionRequest("credential-free broker control", listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
-            accessPolicy = AgentAccessPolicy(emptyList()), limits = AgentExecutionLimits(wallClockTimeout = Duration.ofSeconds(10), maxOutputTokens = outputTokens), cancellation = cancellation),
+            accessPolicy = AgentAccessPolicy(emptyList()), limits = AgentExecutionLimits(wallClockTimeout = Duration.ofSeconds(10), maxOutputTokens = outputTokens, maxInputTokens = inputTokens), cancellation = cancellation),
         remaining, credentials, backend,
     )
 
@@ -339,7 +542,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assertTrue(condition(), "bounded lifecycle control did not finish")
     }
 
-    private class FixtureBackend(var clean: Boolean = true) : AcpProviderBrokerTestBackend {
+    private class FixtureBackend(var clean: Boolean = true, var interruptCleanup: Boolean = false) : AcpProviderBrokerTestBackend {
         var starts = 0
         var closes = 0
         @Volatile var cancelled = false
@@ -350,7 +553,11 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             starts++; this.receiver = receiver; lastRequest = request; cancelled = false; demand = 0
             return object : AcpProviderBackendRequestOwner { override fun cancel() { cancelled = true } }
         }
-        override fun closeWithin(timeout: Duration): Boolean { closes++; return clean }
+        override fun closeWithin(timeout: Duration): Boolean {
+            closes++
+            if (interruptCleanup) throw InterruptedException("synthetic cleanup interruption")
+            return clean
+        }
         fun headers() = receiver!!.headers(200, mapOf("content-type" to listOf("text/event-stream")))
         fun subscribe() = receiver!!.subscribe(object : Flow.Subscription {
             override fun request(n: Long) { demand += n }

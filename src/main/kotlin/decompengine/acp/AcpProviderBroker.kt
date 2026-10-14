@@ -234,6 +234,9 @@ internal class AcpProviderBroker private constructor(
             val turn = turnSha256 ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.REVOKED)
             val tokenRemaining = maximumInvocationOutputTokens - observedOutputTokens.toInt()
             if (tokenRemaining <= 0) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
+            if (maximumInvocationInputTokens?.let { observedInputTokens >= it } == true) {
+                throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
+            }
             if (body.isEmpty() || body.size > policy.bounds.maximumRequestBytes) {
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
             }
@@ -295,6 +298,9 @@ internal class AcpProviderBroker private constructor(
             val backendClean = backend.closeWithin(policy.bounds.cleanupTimeout)
             val left = (policy.bounds.cleanupTimeout.toNanos() - (System.nanoTime() - cleanupStarted)).coerceAtLeast(0)
             backendClean && lifecycle.awaitTermination(left, TimeUnit.NANOSECONDS) && lifecycle.isTerminated
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
         } catch (_: Exception) { false }
         lock.withLock { cleanup = if (clean) AcpProviderBrokerCleanup.VERIFIED else AcpProviderBrokerCleanup.UNVERIFIED }
         if (!clean) throw AcpProviderBrokerCleanupFailure()
@@ -302,7 +308,15 @@ internal class AcpProviderBroker private constructor(
 
     private fun checkActive() {
         if (revoked) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.REVOKED)
-        if (cancellation.isCancellationRequested()) {
+        val cancellationRequested = try { cancellation.isCancellationRequested() }
+        catch (failure: Exception) {
+            // A faulty owner callback cannot silently stop the periodic lifecycle task or expose
+            // its exception (which may contain host material) to the response consumer.
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
+            revoke(AcpProviderTerminalKind.TRANSPORT)
+            throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+        }
+        if (cancellationRequested) {
             revoked = true
             capability.fill(0)
             active?.finishFailure(AcpProviderTerminalKind.CANCELLED)
@@ -346,7 +360,7 @@ internal class AcpProviderBroker private constructor(
             objectValue["tools"]?.let { tools ->
                 require(tools.jsonArray.all { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull == "function" })
             }
-            objectValue["max_output_tokens"]?.let { require(it.jsonPrimitive.int in 1..tokenRemaining) }
+            objectValue["max_output_tokens"]?.let { require(!it.jsonPrimitive.isString && it.jsonPrimitive.int in 1..tokenRemaining) }
             objectValue["service_tier"]?.let { require(it.jsonPrimitive.isString && it.jsonPrimitive.content == "auto") }
             objectValue["text"]?.let { text ->
                 require(text.jsonObject.keys.all { it in setOf("verbosity", "format") })
@@ -399,6 +413,7 @@ internal class AcpProviderBroker private constructor(
 
         /** Backpressure is acknowledged only after a bounded queued chunk is taken by the owner. */
         fun nextChunk(): ByteArray? = lock.withLock {
+            if (recorded && terminal == AcpProviderTerminalKind.COMPLETED) return null
             while (queue.isEmpty()) {
                 checkExchange()
                 if (terminal == AcpProviderTerminalKind.COMPLETED) { recordAndRelease(); return null }
@@ -407,11 +422,15 @@ internal class AcpProviderBroker private constructor(
             }
             checkExchange()
             val chunk = queue.removeFirst()
-            if (queue.isEmpty()) requestMore()
+            if (queue.isEmpty()) {
+                // EOF has been validated and the final bytes have now reached the consumer.
+                // Freeze success here; the consumer need not make a redundant EOF read.
+                if (terminal == AcpProviderTerminalKind.COMPLETED) recordAndRelease() else requestMore()
+            }
             chunk
         }
 
-        fun cancel() = lock.withLock { revoke(AcpProviderTerminalKind.CANCELLED) }
+        fun cancel() = lock.withLock { if (!recorded) revoke(AcpProviderTerminalKind.CANCELLED) }
 
         override fun headers(status: Int, headers: Map<String, List<String>>) = lock.withLock {
             if (!callbackActive()) return
@@ -503,6 +522,7 @@ internal class AcpProviderBroker private constructor(
                 observedInputTokens += finished.inputTokens ?: 0
                 if (!enqueueEvents(parser.drainFinished())) return
                 terminal = AcpProviderTerminalKind.COMPLETED
+                if (queue.isEmpty()) recordAndRelease()
                 changed.signalAll()
             } catch (failure: AcpProviderStreamFailure) { finishFailure(failure.kind) }
             catch (_: Exception) { finishFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) }
@@ -511,7 +531,7 @@ internal class AcpProviderBroker private constructor(
         override fun failed() = lock.withLock { finishFailure(AcpProviderTerminalKind.TRANSPORT) }
 
         internal fun finishFailure(kind: AcpProviderTerminalKind) {
-            if (terminal != null && terminal != AcpProviderTerminalKind.COMPLETED) return
+            if (recorded || terminal != null && terminal != AcpProviderTerminalKind.COMPLETED) return
             terminal = kind
             revoked = true
             capability.fill(0)
