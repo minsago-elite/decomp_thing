@@ -119,9 +119,18 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `full and compact provider v5 receipts strictly retain nonrelease fixture commitments`() {
+    fun `full and compact provider v6 receipts strictly retain nonrelease fixture commitments`() {
         val request = legacyReceiptDataRequest()
         val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance())
+        val live = requireNotNull(invocation.providerTransportEvidence)
+        assertEquals(64, live.invocationBindingSha256.length)
+        assertEquals(64, live.descriptors.qualificationConsumerSha256.length)
+        assertTrue(live.requests.isNotEmpty())
+        live.requests.forEach {
+            assertEquals(64, it.admittedBodySha256.length)
+            assertEquals(64, it.wireBodySha256.length)
+            assertEquals(64, it.responseSha256.length)
+        }
         val canary = "CANARY-token-account-capability-provider-body-environment"
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.REFUSED, canary,
@@ -129,7 +138,7 @@ class AgentExecutionEvidenceTest {
         val full = receiptDocument(request, receipt)
         val compact = receiptDocument(request, receipt, 1)
         for (document in listOf(full, compact)) {
-            assertEquals(5, document.schemaVersion)
+            assertEquals(6, document.schemaVersion)
             assertFalse(document.releaseComplete)
             assertFalse(canary in document.json)
             val verified = verifyDataReceipt(document.json)
@@ -154,7 +163,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `provider v5 omits unproved issuance and launch identities and rejects reintroduction in full and compact receipts`() {
+    fun `provider v6 omits unproved issuance and launch identities and rejects reintroduction in full and compact receipts`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -164,9 +173,9 @@ class AgentExecutionEvidenceTest {
             val root = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
             val transport = root.getValue("providerTransport").jsonObject
             val descriptors = transport.getValue("descriptors").jsonObject
-            assertEquals(setOf("factoryConfigurationSha256", "qualificationIssuerSha256",
-                "qualificationConsumerSha256"), descriptors.keys)
-            for (field in listOf("policySha256", "authoritySha256") + historicalProviderLaunchDescriptorFields) {
+            assertEquals(setOf("factoryConfigurationSha256", "qualificationIssuerSha256"), descriptors.keys)
+            for (field in listOf("policySha256", "authoritySha256", "invocationBindingSha256", "qualificationConsumerSha256",
+                "admittedBodySha256", "wireBodySha256", "responseSha256", "turnSha256") + historicalProviderLaunchDescriptorFields) {
                 assertFalse(field in transport)
                 assertFalse(field in descriptors)
                 for (prefix in listOf(emptyList(), listOf("providerTransport"),
@@ -184,7 +193,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `historical provider v3 and v4 bytes stay unqualified without rewriting their descriptor shape`() {
+    fun `historical provider v3 v4 and v5 bytes stay unqualified without rewriting their descriptor shape`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -196,11 +205,21 @@ class AgentExecutionEvidenceTest {
             val owners = transport.getValue("descriptors").jsonObject
             // Authored historical parser data with the original eleven-field descriptor shape;
             // neither its canonical digests nor this test constitute an observed launch closure.
-            val historicalDescriptors = JsonObject(owners + historicalProviderLaunchDescriptorFields.associateWith {
+            val historicalOwners = owners + ("qualificationConsumerSha256" to JsonPrimitive("b".repeat(64)))
+            val historicalDescriptors = JsonObject(historicalOwners + historicalProviderLaunchDescriptorFields.associateWith {
                 JsonPrimitive("b".repeat(64))
             })
-            for (version in listOf(3, 4)) {
-                val historicalTransport = transport + ("descriptors" to historicalDescriptors) +
+            for (version in listOf(3, 4, 5)) {
+                val historicalRows = transport.getValue("requests").jsonArray.map { element ->
+                    JsonObject(element.jsonObject + listOf("admittedBodySha256", "wireBodySha256", "responseSha256", "turnSha256")
+                        .associateWith { JsonPrimitive("b".repeat(64)) })
+                }
+                val historicalTransport = transport + mapOf(
+                    "descriptors" to if (version == 5) JsonObject(historicalOwners) else historicalDescriptors,
+                    "invocationBindingSha256" to JsonPrimitive("b".repeat(64)),
+                    "turnSha256" to JsonPrimitive("b".repeat(64)),
+                    "requests" to JsonArray(historicalRows),
+                ) +
                     if (version == 3) mapOf(
                         "policySha256" to JsonPrimitive("a".repeat(64)),
                         "authoritySha256" to JsonPrimitive("b".repeat(64)),
@@ -219,9 +238,9 @@ class AgentExecutionEvidenceTest {
                 assertContentEquals(before, legacy)
                 // A version-only change cannot promote the old shape into the formal projection.
                 val mixed = JsonObject(Json.parseToJsonElement(legacy.decodeToString()).jsonObject + mapOf(
-                    "schemaVersion" to JsonPrimitive(5),
+                    "schemaVersion" to JsonPrimitive(6),
                     "provider" to JsonObject(root.getValue("provider").jsonObject +
-                        ("evidenceSchemaVersion" to JsonPrimitive(5))),
+                        ("evidenceSchemaVersion" to JsonPrimitive(6))),
                 ))
                 assertFailsWith<IllegalArgumentException> { verifyDataReceipt(mixed.toString()) }
             }
@@ -229,7 +248,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `provider v5 receipt requires its top level session when transport is session bound`() {
+    fun `provider v6 receipt requires its top level session when transport is session bound`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(
             AgentExecutionRequestBinding.capture(request),
@@ -278,7 +297,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `provider v5 context usage retains finite scientific cost observations as nonauthority`() {
+    fun `provider v6 context usage retains finite scientific cost observations as nonauthority`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -300,7 +319,7 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `rich provider v5 envelope roundtrips all event and audit variants without releasing peer text`() {
+    fun `rich provider v6 envelope roundtrips all event and audit variants without releasing peer text`() {
         val request = legacyReceiptDataRequest()
         val invocation = providerDataFixtureInvocationForTest(request, providerDataProvenance(), richProjection = true)
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
@@ -335,7 +354,49 @@ class AgentExecutionEvidenceTest {
     }
 
     @Test
-    fun `reject forged provider v5 qualification cleanup limits commitments and field mixtures`() {
+    fun `provider v6 denial activity requires ingress process and every cleanup owner`() {
+        val request = legacyReceiptDataRequest()
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
+            AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
+                session = AgentSessionReference("fixture-v1", "provider-data-session"))),
+            providerDataFixtureInvocationForTest(request, providerDataProvenance()))
+        for (maximum in listOf(64 * 1024 * 1024, 1)) {
+            var denied = Json.parseToJsonElement(receiptDocument(request, receipt, maximum).json).jsonObject
+            for ((field, value) in listOf(
+                "requests" to JsonArray(emptyList()), "wireRequestBytes" to JsonPrimitive(0),
+                "responseBytes" to JsonPrimitive(0), "outputTokens" to JsonPrimitive(0), "inputTokens" to JsonNull,
+                "revoked" to JsonPrimitive(true), "admissionDenial" to JsonObject(mapOf(
+                    "sequence" to JsonPrimitive(1), "terminal" to JsonPrimitive("TIMEOUT"))),
+            )) denied = mutateReceiptField(denied, listOf("providerTransport", field), value)
+            assertFalse(verifyDataReceipt(denied.toString()).releaseComplete)
+            for (owner in listOf("router", "broker", "sandbox")) {
+                val changed = mutateReceiptField(denied, listOf("providerTransport", "cleanup", owner), JsonPrimitive("NOT_REQUIRED"))
+                assertFailsWith<IllegalArgumentException> { verifyDataReceipt(changed.toString()) }
+            }
+            val emptyGuardian = JsonObject(mapOf(
+                "disposition" to JsonPrimitive("NOT_REQUIRED"), "teardownCause" to JsonPrimitive("UNOBSERVED"),
+                "childExitKind" to JsonPrimitive("UNOBSERVED"), "childExitStatus" to JsonNull,
+                "childTerminationSignal" to JsonNull, "remainingDescendants" to JsonNull,
+            ) + listOf("sigtermSent", "sigkillSent", "childReaped", "finalEchildObserved",
+                "cgroupRemoved", "privateStateRemoved", "descriptorsClosed").associateWith { JsonPrimitive(false) })
+            assertFailsWith<IllegalArgumentException> { verifyDataReceipt(mutateReceiptField(denied,
+                listOf("providerTransport", "cleanup", "guardian"), emptyGuardian).toString()) }
+            assertFailsWith<IllegalArgumentException> { verifyDataReceipt(mutateReceiptField(denied,
+                listOf("lifecycle", "phaseReached"), JsonPrimitive("session-created")).toString()) }
+            assertFailsWith<IllegalArgumentException> { verifyDataReceipt(mutateReceiptField(denied,
+                listOf("process"), JsonNull).toString()) }
+            var kill = mutateReceiptField(denied, listOf("providerTransport", "cleanup", "guardian", "teardownCause"),
+                JsonPrimitive("BOUNDED_SHUTDOWN"))
+            kill = mutateReceiptField(kill, listOf("providerTransport", "cleanup", "guardian", "sigkillSent"), JsonPrimitive(true))
+            kill = mutateReceiptField(kill, listOf("providerTransport", "cleanup", "guardian", "sigtermSent"), JsonPrimitive(false))
+            assertFailsWith<IllegalArgumentException> { verifyDataReceipt(kill.toString()) }
+            val ordered = mutateReceiptField(kill, listOf("providerTransport", "cleanup", "guardian", "sigtermSent"), JsonPrimitive(true))
+            assertFalse(verifyDataReceipt(ordered.toString()).releaseComplete)
+        }
+    }
+
+    @Test
+    fun `reject forged provider v6 qualification cleanup limits commitments and field mixtures`() {
         val request = legacyReceiptDataRequest()
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding.capture(request),
             AgentExecutionOutcome.Failed(AgentFailure(AgentFailureKind.PROTOCOL, "fixed fixture failure",
@@ -344,7 +405,7 @@ class AgentExecutionEvidenceTest {
         val root = Json.parseToJsonElement(receiptDocument(request, receipt).json).jsonObject
         val other = JsonPrimitive("b".repeat(64))
         val mutations = listOf(
-            listOf("schemaVersion") to JsonPrimitive(6),
+            listOf("schemaVersion") to JsonPrimitive(7),
             listOf("schemaVersion") to JsonPrimitive(2),
             listOf("provider", "evidenceSchemaVersion") to JsonPrimitive(2),
             listOf("lifecycle", "releaseComplete") to JsonPrimitive(true),

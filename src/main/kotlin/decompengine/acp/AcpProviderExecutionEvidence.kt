@@ -41,7 +41,7 @@ data class AcpProviderExecutionDescriptorEvidence(
     }
 }
 
-/** Closed schema-v5 archive owner commitments, independently checked against receipt facts.
+/** Live owner commitments. Historical schema-v5 archived these without an independent consumer witness.
  * Launch closure digests remain unproved archive provenance and are deliberately absent here.
  * The live launch descriptor and historical descriptor metadata above are separate contracts.
  */
@@ -228,7 +228,7 @@ data class AcpProviderExecutionDenialEvidence(val sequence: Long, val terminal: 
 }
 
 /**
- * Immutable schema-v5 transport evidence. Live policy/authority identities are not archived:
+ * Immutable live transport evidence. Archive v6 uses a separate reduced observation projection:
  * their issuance cannot be reconstructed independently from these public observations.
  * Unproved launch-closure digests are also absent from the formal owner projection.
  * This checkpoint archives no provider qualification or
@@ -362,3 +362,179 @@ internal fun providerExecutionEvidenceConsumerSha256(requestSha256: String, invo
 private fun providerExecutionEvidenceSha256(value: String): String =
     MessageDigest.getInstance("SHA-256").digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
+
+/** Schema-v6 archive observations. Omitted live bindings and payload hashes have no independent archive witness.
+ * Validation establishes bounded coherence only, never authenticated execution provenance. */
+internal data class AcpProviderArchivedOwnerEvidence(
+    val factoryConfigurationSha256: String,
+    val qualificationIssuerSha256: String,
+) {
+    init { listOf(factoryConfigurationSha256, qualificationIssuerSha256).forEach(::requireProviderEvidenceDigest) }
+}
+
+internal data class AcpProviderArchivedRequestEvidence(
+    val sequence: Long,
+    val sessionSha256: String,
+    val wireRequestBytes: Int,
+    val responseBytes: Long,
+    val inputTokens: Int?,
+    val outputTokens: Int?,
+    /** Usage admitted into the invocation budget; reported usage may exist on a denied terminal. */
+    val admittedOutputTokens: Int,
+    val terminal: AcpProviderExecutionTerminal,
+) {
+    init {
+        require(sequence in 1..64) { "ACP provider request sequence is invalid" }
+        listOf(sessionSha256)
+            .forEach(::requireProviderEvidenceDigest)
+        require(wireRequestBytes in 1..(MAXIMUM_PROVIDER_FRAME_PAYLOAD_BYTES - PROVIDER_INVOCATION_CAPABILITY_BYTES) &&
+            responseBytes in 0..(64 * 1024 * 1024L)
+        ) { "ACP provider request byte observation is invalid" }
+        require(inputTokens == null || inputTokens in 0..Int.MAX_VALUE) {
+            "ACP provider request input usage is invalid"
+        }
+        require(outputTokens == null || outputTokens in 0..65_536) {
+            "ACP provider request output usage is invalid"
+        }
+        require(admittedOutputTokens in 0..65_536 &&
+            (admittedOutputTokens == 0 || admittedOutputTokens == outputTokens)
+        ) { "ACP provider request admitted usage is inconsistent" }
+        require(terminal != AcpProviderExecutionTerminal.COMPLETED ||
+            (responseBytes > 0 && outputTokens != null && admittedOutputTokens == outputTokens)
+        ) {
+            "ACP provider completed request lacks output usage"
+        }
+    }
+}
+
+internal class AcpProviderArchivedInvocationEvidence(
+    val authority: AcpProviderExecutionAuthority,
+    val qualificationProfileSha256: String,
+    val modelSha256: String,
+    val runtimeAdapter: AcpProviderRuntimeAdapter,
+    val reasoning: AcpProviderReasoning,
+    val descriptors: AcpProviderArchivedOwnerEvidence,
+    val requestBindingSha256: String,
+    val sessionSha256: String?,
+    val bounds: AcpProviderTransportBounds,
+    val maximumInvocationOutputTokens: Int,
+    val maximumInvocationInputTokens: Long?,
+    val remainingOverallTimeoutMillis: Long,
+    val resources: AcpProviderExecutionResourceEvidence,
+    val wireRequestBytes: Long,
+    val responseBytes: Long,
+    val outputTokens: Long,
+    val inputTokens: Long?,
+    val revoked: Boolean,
+    val admissionDenial: AcpProviderExecutionDenialEvidence?,
+    requests: Collection<AcpProviderArchivedRequestEvidence>,
+    val cleanup: AcpProviderExecutionCleanupEvidence,
+) {
+    val requests: List<AcpProviderArchivedRequestEvidence> =
+        immutableProviderArchivedRequestEvidence(requests, bounds.maximumRequests)
+    val credentialFreeFixture: Boolean = authority == AcpProviderExecutionAuthority.CREDENTIAL_FREE_LOOPBACK_TLS_V1
+    val releaseComplete: Boolean = false
+    val adapterQualified: Boolean = false
+    val providerCostCancellationProven: Boolean = false
+
+    init {
+        listOf(qualificationProfileSha256, modelSha256, requestBindingSha256)
+            .forEach(::requireProviderEvidenceDigest)
+        sessionSha256?.let(::requireProviderEvidenceDigest)
+        require(maximumInvocationOutputTokens in 1..bounds.maximumOutputTokens &&
+            (maximumInvocationInputTokens == null || maximumInvocationInputTokens > 0) &&
+            remainingOverallTimeoutMillis in 1..bounds.overallTimeout.toMillis()
+        ) { "ACP provider invocation budget is invalid" }
+        require(this.requests.size <= bounds.maximumRequests) { "ACP provider evidence exceeds request bound" }
+        require(this.requests.isEmpty() || sessionSha256 != null) { "ACP provider requests lack session binding" }
+        require(this.requests.dropLast(1).all { it.terminal == AcpProviderExecutionTerminal.COMPLETED }) {
+            "ACP provider request follows revoked authority"
+        }
+        this.requests.forEachIndexed { index, request ->
+            require(request.sequence == index + 1L && request.sessionSha256 == sessionSha256
+            ) { "ACP provider request binding or ordering differs" }
+            require(request.wireRequestBytes <= bounds.maximumRequestBytes &&
+                request.responseBytes <= bounds.maximumResponseBytes &&
+                (request.outputTokens == null || request.outputTokens <= bounds.maximumOutputTokens)
+            ) { "ACP provider request observations exceed policy bounds" }
+        }
+        require(wireRequestBytes == this.requests.sumOf { it.wireRequestBytes.toLong() } &&
+            wireRequestBytes in 0..bounds.maximumRequestBytes.toLong() &&
+            responseBytes == this.requests.sumOf { it.responseBytes } &&
+            responseBytes in 0..bounds.maximumResponseBytes.toLong() &&
+            outputTokens == this.requests.sumOf { it.admittedOutputTokens.toLong() } &&
+            outputTokens in 0..maximumInvocationOutputTokens.toLong()
+        ) { "ACP provider aggregate byte or output usage differs" }
+        require(if (this.requests.isEmpty() || this.requests.any { it.inputTokens == null }) inputTokens == null
+            else inputTokens == this.requests.sumOf { requireNotNull(it.inputTokens).toLong() }
+        ) { "ACP provider aggregate input usage differs" }
+        require(maximumInvocationInputTokens == null || inputTokens == null ||
+            inputTokens <= maximumInvocationInputTokens
+        ) { "ACP provider input usage exceeds invocation budget" }
+        require(maximumInvocationInputTokens == null ||
+            this.requests.none { it.terminal == AcpProviderExecutionTerminal.COMPLETED && it.inputTokens == null }
+        ) { "ACP provider completed request lacks input usage under invocation cap" }
+        admissionDenial?.let {
+            require(revoked) { "ACP provider denial did not revoke authority" }
+        }
+        require(!cleanup.guardian.sigkillSent || cleanup.guardian.sigtermSent) {
+            "ACP provider archive KILL lacks preceding TERM"
+        }
+        require(cleanup.disposition == AcpExecutionCleanupDisposition.NOT_REQUIRED || revoked) {
+            "ACP provider terminal cleanup retained model authority"
+        }
+        require((this.requests.isEmpty() && admissionDenial == null) || listOf(cleanup.router, cleanup.broker,
+            cleanup.guardian.disposition, cleanup.sandbox).none { it == AcpExecutionCleanupDisposition.NOT_REQUIRED }
+        ) { "ACP provider exchanges require every process and transport owner" }
+    }
+
+    internal fun requireQualificationProfile(profile: AcpProviderQualificationProfile) {
+        require(credentialFreeFixture && qualificationProfileSha256 == profile.descriptorSha256 &&
+            bounds == profile.bounds && reasoning == profile.reasoning &&
+            modelSha256 == providerExecutionEvidenceSha256(profile.model)
+        ) { "ACP provider evidence differs from its closed qualification profile" }
+        require(descriptors.qualificationIssuerSha256 == providerExecutionEvidenceIssuerSha256(
+            descriptors.factoryConfigurationSha256, profile.descriptorSha256,
+        )) { "ACP provider evidence owner commitments differ" }
+    }
+
+    override fun toString(): String = "AcpProviderArchivedInvocationEvidence(authority=$authority, requests=${requests.size}, cleanup=${cleanup.disposition}, releaseComplete=false)"
+}
+
+private fun immutableProviderArchivedRequestEvidence(
+    values: Collection<AcpProviderArchivedRequestEvidence>,
+    maximumRequests: Int,
+): List<AcpProviderArchivedRequestEvidence> {
+    require(values.size <= maximumRequests) { "ACP provider evidence exceeds request bound" }
+    val copy = ArrayList<AcpProviderArchivedRequestEvidence>()
+    for (value in values) {
+        require(copy.size < maximumRequests) { "ACP provider evidence exceeds request bound" }
+        copy.add(value)
+    }
+    return Collections.unmodifiableList(copy)
+}
+
+internal fun archiveProviderInvocation(value: AcpProviderInvocationEvidenceSnapshot): AcpProviderArchivedInvocationEvidence =
+    AcpProviderArchivedInvocationEvidence(
+    value.authority,
+    value.qualificationProfileSha256,
+    value.modelSha256,
+    value.runtimeAdapter,
+    value.reasoning,
+    AcpProviderArchivedOwnerEvidence(value.descriptors.factoryConfigurationSha256, value.descriptors.qualificationIssuerSha256),
+    value.requestBindingSha256,
+    value.sessionSha256,
+    value.bounds,
+    value.maximumInvocationOutputTokens,
+    value.maximumInvocationInputTokens,
+    value.remainingOverallTimeoutMillis,
+    value.resources,
+    value.wireRequestBytes,
+    value.responseBytes,
+    value.outputTokens,
+    value.inputTokens,
+    value.revoked,
+    value.admissionDenial,
+    value.requests.map { r -> AcpProviderArchivedRequestEvidence(r.sequence, r.sessionSha256, r.wireRequestBytes, r.responseBytes, r.inputTokens, r.outputTokens, r.admittedOutputTokens, r.terminal) },
+    value.cleanup
+)

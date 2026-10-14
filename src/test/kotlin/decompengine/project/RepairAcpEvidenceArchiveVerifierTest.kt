@@ -91,13 +91,13 @@ class RepairAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
-    fun `release archive rejects rehashed provider v5 and mixed transport in rejected node`() {
+    fun `release archive rejects rehashed provider v6 and mixed transport in rejected node`() {
         withScratch { scratch ->
             for (mixed in listOf(false, true)) {
                 val fixture = releaseFixture(scratch.resolve(if (mixed) "mixed" else "v5"), refused = false)
                 assertEquals(1, verifyRelease(fixture).acceptedAcpContributions.size)
                 val document = failedReceiptDocument(fixture.project, fixture.rejectedId, providerFixture = true)
-                assertEquals(5, document.schemaVersion)
+                assertEquals(6, document.schemaVersion)
                 assertFalse(document.releaseComplete)
                 // Actual renderer output must first pass the workflow-independent v5 verifier.
                 val verified = verifyAcpExecutionReceiptDocument(document.json.toByteArray(), KIND, TASK_FIELD, fixture.rejectedId)
