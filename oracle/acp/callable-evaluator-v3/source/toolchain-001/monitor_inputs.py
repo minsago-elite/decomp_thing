@@ -102,7 +102,7 @@ def elf(raw, l):
         span(offset, filesz)
         if typ == 1:
             if filesz > memsz: refuse('load memory extent')
-            loads.append((address, filesz, offset))
+            loads.append((address, filesz, offset, flags))
         elif typ == 2: dynamic.append((offset, address, filesz))
         elif typ == 3:
             text = span(offset, filesz)
@@ -111,7 +111,7 @@ def elf(raw, l):
             except (ValueError, UnicodeError): refuse('interpreter path')
     if not loads or len(dynamic) != 1 or len(interpreters) > 1: refuse('program metadata multiplicity')
     def mapped(address, size):
-        values = [offset + address - base for base, length, offset in loads
+        values = [offset + address - base for base, length, offset, _ in loads
                   if base <= address and address - base <= length and size <= length - (address - base)]
         if len(values) != 1: refuse('ambiguous/unmapped dynamic virtual address')
         return values[0]
@@ -120,6 +120,7 @@ def elf(raw, l):
     tags = {}; terminated = False
     # Only these metadata tags are accepted; search/auxiliary/audit/filter inputs refuse.
     allowed = set(range(0, 15)) | set(range(16, 29)) | {30, 32, 33, 35, 36, 37,
+        0x70000000, 0x70000001, 0x70000003,
         0x6ffffef5, 0x6ffffff0, 0x6ffffff9, 0x6ffffffb, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff}
     for at in range(offset, offset + size, 16):
         tag, value = struct.unpack('<qQ', span(at, 16))
@@ -135,6 +136,20 @@ def elf(raw, l):
     if any(len(values) != 1 for tag, values in tags.items() if tag != 1): refuse('duplicate dynamic metadata')
     if tags.get(30, [0])[0] & ~(2 | 8 | 16) or tags.get(0x6ffffffb, [0])[0] & ~(1 | 8 | 0x08000000):
         refuse('unsupported dynamic selection flags')
+    # Optional x86-64 psABI PLT metadata. Complete trio is our supported-profile
+    # restriction, not a claim of instruction/relocation or native qualification.
+    plt_tags = (0x70000000, 0x70000001, 0x70000003)
+    if any(tag in tags for tag in plt_tags):
+        if not all(tag in tags for tag in plt_tags): refuse('incomplete x86-64 PLT metadata')
+        address, size, entry = (tags[tag][0] for tag in plt_tags)
+        if (not address or not size or not entry or entry & (entry - 1) or
+                size < entry or size % entry or address % entry or
+                size > (1 << 64) - 1 - address):
+            refuse('x86-64 PLT metadata extent/alignment')
+        mapped(address, size)  # Preserve refusal of ambiguous file-backed mappings.
+        matches = [flags for base, length, _, flags in loads
+                   if base <= address and address - base <= length and size <= length - (address - base)]
+        if not matches[0] & 1: refuse('x86-64 PLT requires executable file-backed load')
     length = tags[10][0]
     if not 0 < length <= 1024 * 1024: refuse('dynamic string byte budget')
     strings = span(mapped(tags[5][0], length), length)

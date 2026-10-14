@@ -420,4 +420,31 @@ class LinkInputTests(unittest.TestCase):
   bad=copy.deepcopy(value);bad['status']='native-qualified'
   with self.assertRaises(fastjsonschema.JsonSchemaException):validate(bad)
 
+
+
+class X86PltMetadataTests(unittest.TestCase):
+ def image(self, tags=None, flags=5, filesz=1024, memsz=1024, overlap=False):
+  raw=bytearray(authored_elf(needed=['libfixture.so.1']))
+  rows=[(1,1),(5,0x400300),(10,17)]+(tags if tags is not None else [(0x70000000,0x400380),(0x70000001,64),(0x70000003,16)])+[(0,0)]
+  struct.pack_into('<I',raw,68,flags)
+  struct.pack_into('<QQ',raw,96,filesz,memsz)
+  struct.pack_into('<QQ',raw,152,len(rows)*16,len(rows)*16)
+  for i,row in enumerate(rows):struct.pack_into('<qQ',raw,0x200+i*16,*row)
+  if overlap:
+   struct.pack_into('<H',raw,56,3)
+   struct.pack_into('<IIQQQQQQ',raw,176,1,5,0x380,0x400380,0x400380,64,64,16)
+  return bytes(raw)
+ def test_valid_optional_metadata_preserves_graph_result(self):
+  self.assertEqual(pin.monitor_inputs.elf(self.image(),l),pin.monitor_inputs.elf(authored_elf(needed=['libfixture.so.1']),l))
+ def test_missing_duplicate_and_unknown_tags_refuse(self):
+  good=[(0x70000000,0x400380),(0x70000001,64),(0x70000003,16)]
+  cases=[good[:i]+good[i+1:] for i in range(3)]+[good+[good[i]] for i in range(3)]+[good+[(tag,16)] for tag in (0x70000002,0x70000004,0x70001234)]
+  for rows in cases:
+   with self.subTest(rows=rows),self.assertRaises(l.Refusal):pin.monitor_inputs.elf(self.image(rows),l)
+ def test_extent_alignment_and_mapping_refuse(self):
+  for address,size,entry in [(0,64,16),(0x400380,0,16),(0x400380,64,0),(0x400380,64,3),(0x400380,8,16),(0x400380,65,16),(0x400381,64,16),((1<<64)-16,32,16),(0x400400,64,16),(0x4003f0,32,16)]:
+   with self.subTest(address=address,size=size,entry=entry),self.assertRaises(l.Refusal):pin.monitor_inputs.elf(self.image([(0x70000000,address),(0x70000001,size),(0x70000003,entry)]),l)
+  for kwargs in [{'flags':4},{'filesz':0x380,'memsz':1024},{'overlap':True}]:
+   with self.subTest(kwargs=kwargs),self.assertRaises(l.Refusal):pin.monitor_inputs.elf(self.image(**kwargs),l)
+
 if __name__=='__main__':unittest.main()
