@@ -321,6 +321,20 @@
       "fragment": "gcc/16.2.0",
       "count": 1,
       "reason": "Bundled Ghidra provenance test loads the pinned benchmark compiler-engine profile to authenticate the installed bundled release."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
+      "rule": "generic-layout",
+      "fragment": "objectValue[\"include\"]?.let { require(it.jsonArray.all { item -> item.jsonPrimitive.isString && item.jsonPrimitive.content == \"reasoning.encrypted_content\" }) }",
+      "count": 1,
+      "reason": "Validates the Responses request JSON include field against its single approved encrypted-reasoning value; this exact expression does not select a reconstructed source directory."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/acp/AcpProviderBroker.kt",
+      "rule": "generic-layout",
+      "fragment": "private val REQUEST_KEYS = setOf(\n    \"model\", \"input\", \"tools\", \"tool_choice\", \"parallel_tool_calls\", \"reasoning\", \"store\", \"stream\", \"include\",\n    \"text\", \"metadata\", \"prompt_cache_key\", \"service_tier\", \"safety_identifier\", \"max_output_tokens\", \"truncation\", \"instructions\",\n)",
+      "count": 1,
+      "reason": "Declares the closed Responses request JSON key allowlist, including the standard include field; this exact declaration does not prescribe reconstructed source layout."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
