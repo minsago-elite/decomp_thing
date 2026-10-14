@@ -21,6 +21,7 @@ MODULES = (
     'test_process_results', 'test_schema_migration',
     'test_runtime_worker_proof', 'test_worker_exec_proof',
     'test_worker_proof_consumers', 'test_execution_source_inventory',
+    'test_candidate_leaf_lifecycle',
 )
 
 
