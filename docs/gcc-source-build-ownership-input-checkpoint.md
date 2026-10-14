@@ -32,6 +32,31 @@ The two additive schemas are registered with exact schema-byte hashes in the sha
 
 ## Required production handoff
 
+### Supplied reproduction-description comparison
+
+`GccSourceBuildReproductionEvidenceV1.compare` binds the same five exact metadata
+snapshots to a bounded caller-supplied six-field inspect projection (`Id`,
+`Created`, `Architecture`, `Os`, `Config`, `RootFS`). `RootFS` has exactly `Type`
+and ordered `Layers`; full Docker inspect documents are not silently projected.
+The API performs no Docker, filesystem, acquisition or process operation.
+Malformed/extra/duplicate keys and bounds refuse; well-formed image/platform/
+creation/Config/layer drift returns explicit mismatch labels, never approval.
+Config is an opaque bounded JSON object. Its digest uses the historical compact,
+sorted, ASCII-escaped Python encoding rather than the pretty oracle artifact
+format; unsupported fractional/exponent Config scalars refuse. Limits are
+caller-lowerable at 128 KiB/10,000 nodes/depth32, including bounded canonical
+expansion. Returned lists and Config bytes are immutable snapshots, with no
+serialized result format or new schema/issuer.
+
+Every source/runtime/capture/ownership/approval flag remains false even for a
+matching description. An authenticated live runtime bridge, signed source,
+exact pair, collector closure and independent ownership/isolation evidence are
+still missing. No actual approved `807f` Config preimage is retained in this
+checkpoint: tests use authored Config bytes, preserve the real lock and require
+the resulting `config-digest` mismatch. Independent compact-encoding vectors
+are contract controls, not a full approved-description positive or live image
+qualification. The historical five metadata commitments remain unchanged.
+
 All original requirements remain: authenticated signed source; actual approved runtime and reproduction bridge; qualified lossless process/file-version collector; complete compile/source/generated/header/response/object/archive/link inventory and dispositions; exact pinned-pair reproduction; independently replayed object-to-linked-DWARF/CU/declaration/use ownership; positive source-only/generated/external/split/LTO accounting; distinct nominal/ODR authority; immutable independently verified ownership handoff before #692 scoring; hard operation/aggregate bounds and complete CI/independent review.
 
 Original source, build/debug objects and nominal truth remain trusted-oracle only. This checkpoint adds no route to recovery/ACP prompts/workspaces, candidate compilers, AST probes or runtime callers. Hidden-source canary, macro/include/probe, descriptor/mount/transport leakage controls still need real isolation qualification. Oracle construction/verification may precede model existence; comparisons against recovered facts and scoring wait for a separately frozen model. No population, semantic identity, model binding, seal, score, production verification or release eligibility is supplied by this checkpoint.
