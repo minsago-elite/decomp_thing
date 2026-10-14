@@ -7,7 +7,7 @@ writes one bounded JSON receipt:
 
 ```sh
 python3 scripts/verify-gcc-reconstruction-archive.py \
-  --profile oracle/gcc/16.2.0/compiler-engines.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter12.json \
   --engine cc1 \
   --archive /evidence/cc1-reconstruction.zip \
   --repeat-archive /evidence/cc1-reconstruction-repeat.zip \

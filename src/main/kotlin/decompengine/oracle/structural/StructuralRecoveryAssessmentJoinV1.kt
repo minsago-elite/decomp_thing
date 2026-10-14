@@ -168,7 +168,7 @@ internal object StructuralRecoveryAssessmentJoinV1 {
         }
 
         val model = snapshot.model
-        require(model.schemaVersion == 2) { "structural finding joins require schema-2 extracted models" }
+        require(model.schemaVersion in 2..3) { "structural finding joins require schema-2 or schema-3 extracted models" }
         val modelEntities = modelEntities(model)
         val scoreEntities = scoreReport.getValue("entities").jsonArray
             .map { it.jsonObject }

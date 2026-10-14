@@ -345,6 +345,8 @@ jobs:
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
+            --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
+            --tests decompengine.project.GhidraReferencedBytesExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
             --tests decompengine.project.NativeCallCollectorRealTest \
             --tests decompengine.project.NativeCallObservationsV1Test \

@@ -348,6 +348,7 @@ object OracleSchemas {
         "function-recovery-score",
         "gcc/build-record",
         "gcc/compiler-engines",
+        "gcc/compiler-engines-exporter12",
         "gcc/compiler-engine-plan-evidence",
         "gcc/oracle-manifest",
         "gcc/source-lock",

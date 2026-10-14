@@ -11,13 +11,15 @@ import decompengine.project.RecoveredGlobal
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredType
 import decompengine.project.RecoveryStatus
+import decompengine.project.ReferencedDataByteEvidenceJson
+import kotlinx.serialization.json.*
 import java.util.Collections
 import java.util.LinkedHashSet
 import java.util.Locale
 
 private const val CANONICAL_MODEL_INPUT_SHA256_CODE_POINTS = 64
 
-/** Explicit allocation and syntax bounds for the canonical schema-v1 Ghidra program model. */
+/** Explicit allocation and syntax bounds for the canonical Ghidra program model. */
 internal data class CanonicalProgramModelStreamingLimits(
     val maximumInputBytes: Int = 512 * 1024 * 1024,
     val maximumFunctions: Int = 20_000,
@@ -82,7 +84,7 @@ internal class CanonicalProgramModelSnapshot internal constructor(
 )
 
 /**
- * Parses the exact schema-v1 exporter wire form without constructing a generic JSON tree.
+ * Parses the exact schema 1–3 exporter wire form without constructing a generic JSON tree.
  *
  * The input is copied only after its byte bound is checked. Jackson then enforces strict UTF-8,
  * duplicate-key, token, number, and nesting limits while this parser enforces the closed field
@@ -143,6 +145,9 @@ private class TypedReader(
     private val budget = ModelBudget(limits)
 
     private var schemaVersion = 1
+    private val byteBudget = ReferencedDataByteEvidenceJson.Budget()
+    private var pendingEvidenceWindows = 0L
+    private var pendingEvidenceBytes = 0L
 
     fun readModel(): RecoveredProgramModel {
         requireToken(parser.nextToken(), JsonToken.START_OBJECT, "program model root must be an object")
@@ -151,7 +156,7 @@ private class TypedReader(
         expectField("schemaVersion")
         requireToken(parser.nextToken(), JsonToken.VALUE_NUMBER_INT, "program model schemaVersion must be an integer")
         budget.chargeNode("schemaVersion")
-        if (parser.text !in setOf("1", "2")) modelFail("program model schemaVersion must be 1 or 2")
+        if (parser.text !in setOf("1", "2", "3")) modelFail("program model schemaVersion must be 1, 2 or 3")
         schemaVersion = parser.text.toInt()
 
         expectField("inputSha256")
@@ -263,11 +268,88 @@ private class TypedReader(
             val type = readString("program model global type", limits.maximumTextCodePoints, allowEmpty = true)
             expectField("initializer")
             val initializer = readNullableString("program model global initializer", limits.maximumTextCodePoints)
+            val evidence = if (schemaVersion == 3) {
+                expectField("byteEvidence")
+                pendingEvidenceWindows = 0
+                pendingEvidenceBytes = 0
+                ReferencedDataByteEvidenceJson.parse(readEvidenceValue(0).jsonObject).also(byteBudget::charge)
+            } else null
             val status = readExtractionStatus("program model global status")
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model global has missing or extra fields")
-            result += RecoveredGlobal(id, name, address, type, initializer, status)
+            result += RecoveredGlobal(id, name, address, type, initializer, status, evidence)
         }
         return Collections.unmodifiableList(result)
+    }
+
+    private fun readEvidenceValue(depth: Int, field: String? = null): JsonElement {
+        if (depth > 7) modelFail("byte evidence nesting bound exceeded")
+        budget.chargeNode("byte evidence")
+        return when (parser.nextToken()) {
+            JsonToken.START_OBJECT -> {
+                val fields = linkedMapOf<String, JsonElement>()
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    requireToken(parser.currentToken(), JsonToken.FIELD_NAME, "invalid byte evidence field")
+                    if (fields.size >= 8) modelFail("byte evidence object field bound exceeded")
+                    val name = parser.currentName()
+                    budget.chargeNode("byte evidence field")
+                    budget.chargeString(name, 32, false, "byte evidence field")
+                    if (fields.containsKey(name)) modelFail("duplicate byte evidence field")
+                    fields[name] = readEvidenceValue(depth + 1, name)
+                }
+                JsonObject(fields)
+            }
+            JsonToken.START_ARRAY -> {
+                val values = arrayListOf<JsonElement>()
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    val maximum = when (field) {
+                        "windows" -> ReferencedDataByteEvidenceJson.MAXIMUM_WINDOWS_PER_GLOBAL
+                        "segments" -> ReferencedDataByteEvidenceJson.MAXIMUM_WINDOW_BYTES
+                        else -> modelFail("unexpected byte evidence array")
+                    }
+                    if (values.size >= maximum) modelFail("byte evidence array bound exceeded")
+                    if (field == "windows") {
+                        pendingEvidenceWindows++
+                        if (byteBudget.windows + pendingEvidenceWindows > ReferencedDataByteEvidenceJson.MAXIMUM_MODEL_WINDOWS)
+                            modelFail("referenced byte model window bound exceeded")
+                    }
+                    // The recursive reader advances once, so return the current token through a helper.
+                    values += readEvidenceCurrent(depth + 1)
+                }
+                JsonArray(values)
+            }
+            JsonToken.VALUE_STRING -> JsonPrimitive(readCurrentString("byte evidence string", 512, true))
+            JsonToken.VALUE_NULL -> JsonNull
+            JsonToken.VALUE_NUMBER_INT -> {
+                val value = parser.text.toInt()
+                if (field == "requestedLength") {
+                    if (value !in 1..ReferencedDataByteEvidenceJson.MAXIMUM_WINDOW_BYTES)
+                        modelFail("referenced byte window requested-byte bound exceeded")
+                    pendingEvidenceBytes = Math.addExact(pendingEvidenceBytes, value.toLong())
+                    if (byteBudget.requestedBytes + pendingEvidenceBytes > ReferencedDataByteEvidenceJson.MAXIMUM_MODEL_REQUESTED_BYTES)
+                        modelFail("referenced byte model requested-byte bound exceeded")
+                }
+                JsonPrimitive(value)
+            }
+            else -> modelFail("invalid byte evidence value")
+        }
+    }
+
+    private fun readEvidenceCurrent(depth: Int): JsonElement {
+        // Arrays contain objects only in this closed contract.
+        requireToken(parser.currentToken(), JsonToken.START_OBJECT, "byte evidence array entries must be objects")
+        if (depth > 7) modelFail("byte evidence nesting bound exceeded")
+        budget.chargeNode("byte evidence object")
+        val fields = linkedMapOf<String, JsonElement>()
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            requireToken(parser.currentToken(), JsonToken.FIELD_NAME, "invalid byte evidence field")
+            if (fields.size >= 8) modelFail("byte evidence field bound exceeded")
+            val name = parser.currentName()
+            budget.chargeNode("byte evidence field")
+            budget.chargeString(name, 32, false, "byte evidence field")
+            if (fields.containsKey(name)) modelFail("duplicate byte evidence field")
+            fields[name] = readEvidenceValue(depth + 1, name)
+        }
+        return JsonObject(fields)
     }
 
     private fun readTypes(): List<RecoveredType> {
@@ -351,7 +433,7 @@ private class TypedReader(
     private fun readExtractionStatus(label: String): RecoveryStatus {
         expectField(if (schemaVersion == 1) "status" else "extractionStatus")
         val status = readStatus(label)
-        if (schemaVersion == 2) {
+        if (schemaVersion >= 2) {
             expectField("recoveryAssessment")
             if (readString("recovery assessment", MAXIMUM_STATUS_CODE_POINTS, allowEmpty = false) != "unassessed") {
                 modelFail("an extracted model cannot supply a scored recovery assessment")
@@ -502,7 +584,7 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
             ascii(": ")
             jsonString(function.status.name.lowercase(Locale.ROOT))
-            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
+            if (model.schemaVersion >= 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii(",\n      \"calls\": [")
             stringSet(function.calls)
             ascii("],\n      \"referencedGlobals\": [")
@@ -527,11 +609,15 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(global.type)
             ascii(",\n      \"initializer\": ")
             nullableString(global.initializer)
+            if (model.schemaVersion == 3) {
+                ascii(",\n      \"byteEvidence\": ")
+                ascii(ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence)))
+            }
             ascii(",\n      ")
             jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
             ascii(": ")
             jsonString(global.status.name.lowercase(Locale.ROOT))
-            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
+            if (model.schemaVersion >= 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii("\n    }")
         }
         ascii("\n  ],\n  \"types\": [")
@@ -548,7 +634,7 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
             ascii(": ")
             jsonString(type.status.name.lowercase(Locale.ROOT))
-            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
+            if (model.schemaVersion >= 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii("\n    }")
         }
         ascii("\n  ]\n}\n")

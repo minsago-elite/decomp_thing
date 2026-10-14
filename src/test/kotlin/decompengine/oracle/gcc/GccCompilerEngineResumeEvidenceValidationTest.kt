@@ -576,7 +576,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     fun `descriptor capture preserves report inode admission across legitimate child directory creation`() {
         withDescriptorExportFixture { captured ->
             LinuxFilesystemSyscalls.openDirectoryAt(captured.root.fd, "reports").use { current ->
-                assertTrue(current.identity.linkCount > captured.reportsIdentity.linkCount)
+                // Some supported filesystems retain a constant directory link count.
+                assertTrue(current.identity.linkCount >= captured.reportsIdentity.linkCount)
                 assertEquals(captured.reportsIdentity.key, current.identity.key)
             }
             val result = GccBundledExportCapture.capture(captured.root, captured.reportsIdentity, captured.artifacts)
@@ -682,9 +683,9 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val fixture = oneBatchFixture()
         val current = GccCompilerEngineResumeByteValidator.assessExporterState(fixture.state)
         assertEquals(sha(fixture.state), current.artifactSha256)
-        assertTrue("\"exporterVersion\":11" in fixture.state.decodeToString())
+        assertTrue("\"exporterVersion\":12" in fixture.state.decodeToString())
         val historical = fixture.state.decodeToString()
-            .replace("\"exporterVersion\":11", "\"exporterVersion\":10").toByteArray()
+            .replace("\"exporterVersion\":12", "\"exporterVersion\":11").toByteArray()
         val retained = historical.copyOf()
         val failure = assertFailsWith<GccCompilerEngineResumeEvidenceException> {
             GccCompilerEngineResumeByteValidator.assessExporterState(historical)
@@ -1453,6 +1454,51 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         add(fixture.freshPlan)
     }
 
+    @Test
+    fun `byte evidence model budget spans planning batches`() {
+        val original = twoBatchFixture()
+        val globals = (1..257).map { index ->
+            val id = globalId(index)
+            val text = globalRecord(id, "bytes_$index").decodeToString()
+                .replace("\"requestedLength\":1", "\"requestedLength\":256")
+                .replace("\"length\":1", "\"length\":256")
+                .replace("\"hex\":\"00\"", "\"hex\":\"${"00".repeat(256)}\"")
+            record(id, text.toByteArray())
+        }
+        val exactSpecs = listOf(
+            original.specs[0].copy(globals = globals.take(128)),
+            original.specs[1].copy(globals = globals.drop(128).take(128)),
+        )
+        val exact = buildFixture(exactSpecs)
+        GccCompilerEngineResumeByteValidator.assessCompletedRun(exact.state, exact.progress, exact.batches, exact.model)
+        val extraByte = record(globalId(257), globalRecord(globalId(257), "one_more_byte"))
+        assertRejected(buildFixture(listOf(exactSpecs[0], exactSpecs[1].copy(globals = exactSpecs[1].globals + extraByte))))
+    }
+
+    @Test
+    fun `byte evidence mutation cannot retain stale semantic commitments`() {
+        val original = twoBatchFixture()
+        val first = original.specs.first()
+        val global = first.globals.single()
+        val text = global.bytes.decodeToString()
+        val mutations = listOf(
+            text.replace("\"hex\":\"00\"", "\"hex\":\"01\""),
+            text.replace("0x400100", "0x400101"),
+            text.replace("0x400010", "0x400011"),
+            text.replace("\"operandIndex\":0", "\"operandIndex\":1"),
+            text.replace("pcode_load", "pcode_store"),
+            text.replace("\"requestedLength\":1", "\"requestedLength\":2")
+                .replace("\"length\":1", "\"length\":2").replace("\"hex\":\"00\"", "\"hex\":\"0000\""),
+            text.replace("\"availability\":\"available\"", "\"availability\":\"unavailable\"")
+                .replace("\"hex\":\"00\"", "\"hex\":null").replace("\"reason\":null", "\"reason\":\"unmapped\""),
+        )
+        mutations.forEach { changed ->
+            assertTrue(changed != text)
+            val changedSpecs = listOf(first.copy(globals = listOf(record(global.id, changed.toByteArray())))) + original.specs.drop(1)
+            assertRejected(buildFixture(changedSpecs, semanticShaOverride = original.semantic.sha256))
+        }
+    }
+
     private fun buildFixture(
         specs: List<BatchSpec>,
         inventoryOverride: String? = null,
@@ -1518,7 +1564,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=11\n")
+        append("exporterVersion=12\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1547,7 +1593,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":11,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":12,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +
@@ -1652,6 +1698,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         append("      \"address\": \"${addressForId(id)}\",\n")
         append("      \"type\": ${kotlinx.serialization.json.JsonPrimitive(type)},\n")
         append("      \"initializer\": null,\n")
+        append("      \"byteEvidence\": {\"schemaVersion\":1,\"windows\":[{\"address\":\"0x400100\",\"requestedLength\":1,\"origin\":{\"instructionAddress\":\"0x400010\",\"referenceAddress\":\"0x400100\",\"operandIndex\":0,\"widthBasis\":\"pcode_load\"},\"availability\":\"available\",\"segments\":[{\"offset\":0,\"length\":1,\"availability\":\"available\",\"hex\":\"00\",\"reason\":null}]}],\"omissionReason\":null},\n")
         append("      \"extractionStatus\": \"recovered\",\n")
         append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
@@ -1677,7 +1724,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
 
     private fun model(functions: List<ByteArray>, globals: List<ByteArray>, types: List<ByteArray>): ByteArray =
         buildString {
-            append("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
+            append("{\n  \"schemaVersion\": 3,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
             append(modelRecords(functions))
             append("  ],\n  \"globals\": [\n")
             append(modelRecords(globals))
