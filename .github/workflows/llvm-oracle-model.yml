@@ -13,6 +13,11 @@ on:
         required: true
         default: native-runtime-measurement
         options: [native-runtime-measurement]
+      listener_continuity:
+        description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
@@ -226,6 +231,7 @@ jobs:
       contents: read
     env:
       NATIVE_MEASUREMENT_ROOT: ${{ github.workspace }}/build/nrm-live
+      LISTENER_CONTINUITY: ${{ inputs.listener_continuity && 'true' || 'false' }}
       GRADLE_USER_HOME: ${{ github.workspace }}/build/nrm-live/gradle-home
       DOCKER_CONFIG: ${{ github.workspace }}/build/nrm-live/build-config
       DOCKER_HOST: unix://${{ github.workspace }}/build/nrm-live/r/s
@@ -642,13 +648,19 @@ jobs:
         run: |
           set -euo pipefail
           root="$NATIVE_MEASUREMENT_ROOT"
+          listener_args=()
+          candidate="$root/evidence/native-runtime-measurement-candidate-v2.json"
+          if [[ "$LISTENER_CONTINUITY" == true ]]; then
+            listener_args=(--listener-continuity)
+            candidate="$root/evidence/native-runtime-measurement-candidate-v3.json"
+          fi
           timeout --signal=INT --kill-after=10s 900s java -Xmx1g \
             -cp 'build/install/llm_bin_patch/lib/*:build/classes/kotlin/test:build/classes/java/test' \
             decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2LiveMain \
-              "$root/raw-oci" "$root/tools/docker/docker" "$root/empty-config" "$root/r/s" \
+              "${listener_args[@]}" "$root/raw-oci" "$root/tools/docker/docker" "$root/empty-config" "$root/r/s" \
               "$root/source/llvm-project-22.1.6.src.tar.xz" \
               "$root/source/llvm-project-22.1.6.src.tar.xz.sig" \
-              "$root/evidence/native-runtime-measurement-candidate-v2.json" \
+              "$candidate" \
               > "$root/evidence/installed-measurement.log" 2>&1
       - name: Prove whole-build cleanup and unload the exact owned binary profile
         if: always()
@@ -688,7 +700,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: native-runtime-measurement-candidate-v2
+          name: native-runtime-measurement-candidate-${{ inputs.listener_continuity && 'v3' || 'v2' }}
           retention-days: 14
           if-no-files-found: error
           path: |
