@@ -251,7 +251,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             val beforeThreads = ownedClientThreads()
             val directFailure = assertFailsWith<InvocationTargetException> {
                 constructor.newInstance(policy, AgentExecutionRequestBinding.capture(request), AgentCancellation.NONE,
-                    AcpProviderCredentialMaterial.cachedChatGpt("synthetic", "fixture_account"), Duration.ofSeconds(2), 32, null, fake, null)
+                    AcpProviderCredentialMaterial.cachedChatGpt("synthetic", "fixture_account"), Duration.ofSeconds(2), 32, null, fake, System.nanoTime(), null)
             }
             assertTrue(directFailure.cause is IllegalArgumentException)
             assertTrue((ownedClientThreads() - beforeThreads).isEmpty())

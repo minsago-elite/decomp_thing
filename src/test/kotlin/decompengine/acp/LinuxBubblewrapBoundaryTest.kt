@@ -1,5 +1,7 @@
 package decompengine.acp
 
+import java.io.RandomAccessFile
+
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentExecutionException
@@ -608,7 +610,29 @@ class LinuxBubblewrapBoundaryTest {
                 LinuxBubblewrapBoundaryTest::class.java.name, "private-control-bind-probe", base.toString(),
             ).redirectErrorStream(true).redirectOutput(base.resolve("native-probe.log").toFile()).start()
             try {
-                assertTrue(process.waitFor(45, TimeUnit.SECONDS), "private-control bind probe timed out")
+                val completed = process.waitFor(45, TimeUnit.SECONDS)
+                if (!completed) {
+                    val descendants = process.descendants().use { it.toList() }
+                    descendants.asReversed().forEach { it.destroyForcibly() }
+                    process.destroyForcibly()
+                    val rootStopped = process.waitFor(5, TimeUnit.SECONDS)
+                    val log = base.resolve("native-probe.log")
+                    val tail = RandomAccessFile(log.toFile(), "r").use { file ->
+                        file.seek((file.length() - 8192).coerceAtLeast(0))
+                        ByteArray((file.length() - file.filePointer).toInt()).also(file::readFully)
+                    }.toString(Charsets.UTF_8).lineSequence()
+                        .filter { it.startsWith("private-control-bind-probe:") }
+                        .map { it.replace(Regex("/[^ \t]+"), "<path>").replace(Regex("[^A-Za-z0-9 ._:,=()<>-]"), "?").take(256) }
+                        .toList().takeLast(16).joinToString("\n").takeLast(4096)
+                    val evidence = Path.of(System.getProperty("user.dir"), "build/private-control-timeouts")
+                    Files.createDirectories(evidence)
+                    val retained = evidence.resolve("probe-${UUID.randomUUID()}.txt")
+                    val descendantsStopped = descendants.none { it.isAlive }
+                    Files.writeString(retained, "timeoutSeconds=45 rootStopped=$rootStopped descendantsStopped=$descendantsStopped " +
+                        "observedDescendants=${descendants.size}\n$tail\n")
+                    assertTrue(rootStopped && descendantsStopped, "private-control bind probe timeout cleanup unproved; evidence=$retained")
+                    error("private-control bind probe timed out; bounded phase tail and termination proof retained at $retained")
+                }
                 val output = Files.readString(base.resolve("native-probe.log"))
                 assertEquals(0, process.exitValue(), output)
                 assertTrue(output.contains("private-control-bind-probe: all native controls passed"), output)

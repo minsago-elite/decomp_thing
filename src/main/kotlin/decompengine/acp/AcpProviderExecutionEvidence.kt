@@ -193,7 +193,7 @@ data class AcpProviderExecutionRequestEvidence(
             (admittedOutputTokens == 0 || admittedOutputTokens == outputTokens)
         ) { "ACP provider request admitted usage is inconsistent" }
         require(terminal != AcpProviderExecutionTerminal.COMPLETED ||
-            (outputTokens != null && admittedOutputTokens == outputTokens)
+            (responseBytes > 0 && outputTokens != null && admittedOutputTokens == outputTokens)
         ) {
             "ACP provider completed request lacks output usage"
         }
@@ -202,7 +202,13 @@ data class AcpProviderExecutionRequestEvidence(
 
 data class AcpProviderExecutionDenialEvidence(val sequence: Long, val terminal: AcpProviderExecutionTerminal) {
     init {
-        require(terminal != AcpProviderExecutionTerminal.COMPLETED) { "ACP provider denial cannot be completed" }
+        require(terminal in setOf(AcpProviderExecutionTerminal.RESOURCE_EXHAUSTED,
+            AcpProviderExecutionTerminal.TIMEOUT, AcpProviderExecutionTerminal.CANCELLED,
+            AcpProviderExecutionTerminal.UNSUPPORTED_OPERATION, AcpProviderExecutionTerminal.UNSUPPORTED_MODEL,
+            AcpProviderExecutionTerminal.MALFORMED_REQUEST, AcpProviderExecutionTerminal.TRANSPORT,
+            AcpProviderExecutionTerminal.REVOKED, AcpProviderExecutionTerminal.SECRET_EXPOSURE)) {
+            "ACP provider denial is not a pre-dispatch terminal"
+        }
     }
 }
 

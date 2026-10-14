@@ -6,12 +6,14 @@ if (($# != 0)); then
   echo "usage: scripts/validate-acp-contract.sh" >&2
   exit 64
 fi
+: "${ORG_GRADLE_PROJECT_ciAcpFixtureJdkHome:?invoke through scripts/ci-owned-jdk.py run --}"
+: "${ORG_GRADLE_PROJECT_ciAcpFixtureJdkReceipt:?owned Test JVM receipt is required}"
 : "${DECOMP_TEST_ACP_QUOTA_TMPFS:?provision the dedicated finite ACP quota fixture first}"
 export DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1
 export DECOMP_REQUIRE_NATIVE_PROVIDER_DNS=1
 export DECOMP_ACP_CONTRACT_RUN_ID="$(python3 -B -c 'import uuid; print(uuid.uuid4())')"
 ./gradlew --no-daemon test --tests 'decompengine.acp.*' --tests 'decompengine.agent.*'
-python3 -B scripts/verify-acp-provider-dns.py "$DECOMP_ACP_CONTRACT_RUN_ID"
+./gradlew --no-daemon verifyProviderDnsNativeQualification
 
 python3 -B - <<'PY'
 import hashlib

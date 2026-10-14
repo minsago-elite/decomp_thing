@@ -11,6 +11,7 @@ import stat
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
+from itertools import islice
 
 SUITE = 'decompengine.acp.AcpProviderNativeDnsContractTest'
 CASES = {'cancel': 'native stalled lookup cancellation kills and reaps the resolver child',
@@ -41,7 +42,10 @@ def read(path: Path, maximum: int) -> bytes:
         after = os.fstat(handle.fileno())
     require(len(data) == before.st_size and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
             (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns), 'evidence changed during read')
-    require(path.stat().st_ino == before.st_ino and not path.is_symlink(), 'evidence name changed')
+    named = path.lstat()
+    require((named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns) ==
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) and
+            stat.S_ISREG(named.st_mode), 'evidence name changed')
     return data
 
 def digest(path: Path, maximum=4 * 1024**3) -> str:
@@ -89,6 +93,55 @@ def commitment(path):
     data = read(path, 65)
     require(re.fullmatch(rb'[0-9a-f]{64}\n', data) is not None, 'invalid SHA commitment')
     return data.decode('ascii').strip()
+
+def compiled_control_entries(root: Path) -> dict[str, bytes]:
+    expected = {}
+    for source_set, prefixes in [('test', ('AcpProviderNativeDns', 'NativeNamespace')),
+                                 ('main', ('AcpProviderDns', 'ProviderDns'))]:
+        directory = root / ('build/classes/kotlin/' + source_set + '/decompengine/acp')
+        require(directory.resolve(strict=True) == directory, 'noncanonical compiled control directory')
+        paths = sorted(islice(directory.glob('*.class'), 8193))
+        require(len(paths) <= 8192, 'compiled class inventory oversized')
+        selected = [path for path in paths if path.name.startswith(prefixes)]
+        require(0 < len(selected) <= 128, 'missing/oversized compiled control set')
+        for path in selected:
+            name = 'decompengine/acp/' + path.name
+            require(name not in expected, 'duplicate compiled control class')
+            expected[name] = read(path, 1024 * 1024)
+    resource = 'acp-provider-dns/worker.sha256'
+    expected[resource] = read(root / ('build/generated/provider-dns-resources/' + resource), 65)
+    require(len(expected) <= 256 and sum(map(len, expected.values())) <= 16 * 1024**2,
+            'compiled closure exceeds bound')
+    return expected
+
+
+def verify_control_closure(root: Path, directory: Path, trusted_stdlib: Path) -> str:
+    require(directory.resolve(strict=True) == directory and not directory.is_symlink(), 'noncanonical retained closure')
+    require(sorted(path.name for path in islice(directory.iterdir(), 3)) == ['control.jar', 'kotlin-stdlib.jar'],
+            'retained closure inventory refused')
+    expected = compiled_control_entries(root)
+    control = read(directory / 'control.jar', 16 * 1024**2)
+    import io
+    with zipfile.ZipFile(io.BytesIO(control)) as archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        require(len(names) == len(set(names)) and set(names) == set(expected), 'control jar missing/extra/duplicate entries')
+        require(all(not info.is_dir() and info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) and
+                    not info.flag_bits & 1 and 0 < info.file_size <= 1024 * 1024 for info in infos),
+                'control jar entry type/size refused')
+        require(sum(info.file_size for info in infos) <= 16 * 1024**2, 'control jar expanded size refused')
+        for info in infos:
+            require(archive.read(info) == expected[info.filename], 'control class/resource differs from current compilation')
+    # trusted_stdlib is supplied by the trusted Gradle task's resolved artifact coordinates,
+    # never a receipt, jar entry, adjacent digest or retained manifest.
+    require(trusted_stdlib.resolve(strict=True) == trusted_stdlib and not trusted_stdlib.is_symlink(),
+            'noncanonical resolved stdlib')
+    stdlib = read(directory / 'kotlin-stdlib.jar', 8 * 1024**2)
+    require(stdlib == read(trusted_stdlib, 8 * 1024**2), 'retained stdlib differs from Gradle resolved artifact')
+    ordered = [('control.jar', control), ('kotlin-stdlib.jar', stdlib)]
+    return hashlib.sha256('\0'.join(name + ':' + hashlib.sha256(data).hexdigest()
+                                     for name, data in ordered).encode('utf-8')).hexdigest()
+
 
 def verify(root: Path, run_id: str, runtime: dict[str, Path]) -> dict:
     require(re.fullmatch(r'[A-Za-z0-9-]{1,80}', run_id) is not None, 'invalid run identifier')
@@ -178,6 +231,8 @@ def verify(root: Path, run_id: str, runtime: dict[str, Path]) -> dict:
         require(all(type(receipt[k]) is str and re.fullmatch(r'[0-9a-f]{64}', receipt[k]) for k in HASH_FIELDS),
                 'receipt hash format refused')
         require(all(receipt[k] == value for k, value in expected.items()), 'receipt source/artifact hash mismatch')
+        closure = verify_control_closure(root, qualification / (case + '-' + run_id + '-closure'), runtime['stdlib'])
+        require(receipt['controlRuntimeClosureSha256'] == closure, 'receipt control closure mismatch')
         require(type(receipt['queryCount']) is int and 1 <= receipt['queryCount'] <= 64 and
                 type(receipt['queryType']) is int and receipt['queryType'] in (1, 28) and
                 type(receipt['childPid']) is int and receipt['childPid'] > 0, 'query/child facts refused')
@@ -190,12 +245,13 @@ def verify(root: Path, run_id: str, runtime: dict[str, Path]) -> dict:
             'reference': metadata, 'cases': summaries, 'realProviderQualified': False}
 
 def main():
-    require(len(sys.argv) in (1, 2), 'usage: verify-acp-provider-dns.py [run-id]')
-    run_id = sys.argv[1] if len(sys.argv) == 2 else os.environ.get('DECOMP_ACP_CONTRACT_RUN_ID', '')
+    require(len(sys.argv) == 3, 'invoke the trusted verifyProviderDnsNativeQualification Gradle task')
+    run_id = sys.argv[1]
     require('JAVA_HOME' in os.environ, 'JAVA_HOME is required for runtime binding')
     root = Path(__file__).resolve().parents[1]
     runtime = {'javaHome': Path(os.environ['JAVA_HOME']), 'bwrap': Path('/usr/bin/bwrap'),
-               'env': Path('/usr/bin/env'), 'compiler': Path('/usr/bin/cc'), 'linker': Path('/usr/bin/ld')}
+               'env': Path('/usr/bin/env'), 'compiler': Path('/usr/bin/cc'), 'linker': Path('/usr/bin/ld'),
+               'stdlib': Path(sys.argv[2])}
     summary = verify(root, run_id, runtime)
     output = root / 'build/provider-dns-native-qualification/gate-summary.json'
     pending = output.with_suffix('.json.pending')

@@ -129,6 +129,7 @@ internal class AcpProviderBackendRequest(
     body: ByteArray,
     internal val credentials: AcpProviderCredentialMaterial,
     val timeout: Duration,
+    internal val deadlineNanos: Long = System.nanoTime() + timeout.toNanos(),
 ) {
     private val content = body.copyOf()
     val body: ByteArray get() = content.copyOf()
@@ -166,6 +167,7 @@ internal class AcpProviderBroker private constructor(
     private val maximumInvocationOutputTokens: Int,
     private val maximumInvocationInputTokens: Long?,
     private val backend: AcpProviderBrokerTestBackend,
+    private val startedNanos: Long,
 ) : AutoCloseable {
     // Validate before any lifecycle executor, capability, or backend dispatch can be created.
     // Kotlin's public synthetic marker constructor must not permit a fixture backend substitute.
@@ -176,9 +178,11 @@ internal class AcpProviderBroker private constructor(
     } else Unit
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
-    private val capability = ByteArray(PROVIDER_INVOCATION_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
-    private val startedNanos = System.nanoTime()
     private val allowedNanos = minOf(remaining.toNanos(), policy.bounds.overallTimeout.toNanos())
+    private val deadlineAdmission = if (System.nanoTime() - startedNanos >= allowedNanos) {
+        throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TIMEOUT)
+    } else Unit
+    private val capability = ByteArray(PROVIDER_INVOCATION_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
     private val invocationNonce = ByteArray(32).also(SecureRandom()::nextBytes)
     val invocationBindingSha256: String = brokerDigest(
         policy.descriptorSha256.toByteArray() + requestBinding.requestSha256.toByteArray() + invocationNonce,
@@ -275,10 +279,9 @@ internal class AcpProviderBroker private constructor(
             try {
                 // The concrete backend queues one bounded HTTP/1.1 exchange without blocking this owner.
                 // Test implementations have the same nonblocking contract; no caller callback is public.
-                exchange.owner = backend.start(
-                    AcpProviderBackendRequest(policy.endpoint, wire, credentials, Duration.ofMillis(remainingMillis())), exchange,
-                )
-                if (exchange.terminal != null && exchange.terminal != AcpProviderTerminalKind.COMPLETED) exchange.owner?.cancel()
+                exchange.attachOwner(backend.start(
+                    AcpProviderBackendRequest(policy.endpoint, wire, credentials, Duration.ofMillis(remainingMillis()), startedNanos + allowedNanos), exchange,
+                ))
             } catch (failure: AcpProviderBrokerFailure) {
                 exchange.finishFailure(failure.kind)
             } catch (_: Exception) {
@@ -310,16 +313,24 @@ internal class AcpProviderBroker private constructor(
     internal fun concreteBackendCleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot? =
         (backend as? CoreAcpProviderBackend)?.cleanupSnapshot()
 
+    @Synchronized
     override fun close() {
-        revoke()
-        // Model authority is already revoked. This distinct declared cleanup grace cannot admit
-        // another request, and must not become a fresh model-execution timeout.
+        // One cleanup attempt owns one grace; retries cannot erase a missed deadline.
+        when (lock.withLock { cleanup }) {
+            AcpProviderBrokerCleanup.VERIFIED -> return
+            AcpProviderBrokerCleanup.UNVERIFIED -> throw AcpProviderBrokerCleanupFailure()
+            AcpProviderBrokerCleanup.NOT_ATTEMPTED -> Unit
+        }
         val cleanupStarted = System.nanoTime()
+        revoke()
+        // Revocation, backend teardown and lifecycle termination share this one cleanup grace.
         lifecycle.shutdownNow()
         val clean = try {
-            val backendClean = backend.closeWithin(policy.bounds.cleanupTimeout)
+            val remaining = (policy.bounds.cleanupTimeout.toNanos() - (System.nanoTime() - cleanupStarted)).coerceAtLeast(0)
+            val backendClean = backend.closeWithin(Duration.ofNanos(remaining))
             val left = (policy.bounds.cleanupTimeout.toNanos() - (System.nanoTime() - cleanupStarted)).coerceAtLeast(0)
-            backendClean && lifecycle.awaitTermination(left, TimeUnit.NANOSECONDS) && lifecycle.isTerminated
+            left > 0 && backendClean && lifecycle.awaitTermination(left, TimeUnit.NANOSECONDS) && lifecycle.isTerminated &&
+                System.nanoTime() - cleanupStarted < policy.bounds.cleanupTimeout.toNanos()
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             false
@@ -554,6 +565,15 @@ internal class AcpProviderBroker private constructor(
             maximumInvocationInputTokens?.let { it - observedInputTokens },
         )
 
+        internal fun attachOwner(value: AcpProviderBackendRequestOwner) {
+            if (recorded) {
+                if (terminal != AcpProviderTerminalKind.COMPLETED) value.cancel()
+                return
+            }
+            owner = value
+            if (terminal != null && terminal != AcpProviderTerminalKind.COMPLETED) value.cancel()
+        }
+
         fun awaitHeaders(): AcpProviderResponseHeaders = lock.withLock {
             while (responseHeaders == null) {
                 checkExchange()
@@ -687,8 +707,10 @@ internal class AcpProviderBroker private constructor(
             terminal = kind
             revoked = true
             capability.fill(0)
-            subscription?.cancel()
-            owner?.cancel()
+            parser.abort(kind)
+            runCatching { subscription?.cancel() }
+            runCatching { owner?.cancel() }
+            queue.forEach { it.fill(0) }
             queue.clear()
             recordAndRelease()
             changed.signalAll()
@@ -766,6 +788,8 @@ internal class AcpProviderBroker private constructor(
                 responseBytes, digest.digest().brokerHex(), receipt?.inputTokens, receipt?.outputTokens, result, admittedOutputTokens,
             ))
             wire.fill(0)
+            subscription = null
+            owner = null
             recorded = true
             if (active === this) active = null
         }
@@ -782,6 +806,7 @@ internal class AcpProviderBroker private constructor(
             enclosingRemaining: Duration,
             credentials: AcpProviderCredentialMaterial?,
         ): AcpProviderBroker {
+            val startedNanos = System.nanoTime()
             val approved = policy as? AcpProviderTransportPolicy.Approved
                 ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION)
             val secret = credentials ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.AUTHENTICATION)
@@ -792,11 +817,11 @@ internal class AcpProviderBroker private constructor(
                 AcpProviderBroker(
                     approved, binding, admittedRequest.cancellation, secret,
                     enclosingRemaining, minOf(approved.bounds.maximumOutputTokens.toLong(), admittedRequest.limits.maxOutputTokens ?: approved.bounds.maximumOutputTokens.toLong()).toInt(),
-                    admittedRequest.limits.maxInputTokens, backend,
+                    admittedRequest.limits.maxInputTokens, backend, startedNanos,
                 )
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
                 if (!backend.closeWithin(approved.bounds.cleanupTimeout)) throw AcpProviderBrokerCleanupFailure()
-                throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+                throw failure as? AcpProviderBrokerFailure ?: AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
             }
         }
 
@@ -807,6 +832,7 @@ internal class AcpProviderBroker private constructor(
             admittedRequest: AgentExecutionRequest,
             enclosingRemaining: Duration,
         ): AcpProviderBroker {
+            val startedNanos = System.nanoTime()
             requireValidProviderDeadline(enclosingRemaining, admittedRequest)
             val binding = AgentExecutionRequestBinding.capture(admittedRequest)
             val authorization = policy.syntheticAuthorization()
@@ -816,11 +842,11 @@ internal class AcpProviderBroker private constructor(
                 AcpProviderBroker(
                     policy, binding, admittedRequest.cancellation, credentials,
                     enclosingRemaining, minOf(policy.bounds.maximumOutputTokens.toLong(), admittedRequest.limits.maxOutputTokens ?: policy.bounds.maximumOutputTokens.toLong()).toInt(),
-                    admittedRequest.limits.maxInputTokens, backend,
+                    admittedRequest.limits.maxInputTokens, backend, startedNanos,
                 )
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
                 if (!backend.closeWithin(policy.bounds.cleanupTimeout)) throw AcpProviderBrokerCleanupFailure()
-                throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+                throw failure as? AcpProviderBrokerFailure ?: AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
             }
         }
 
@@ -832,6 +858,7 @@ internal class AcpProviderBroker private constructor(
             credentials: AcpProviderCredentialMaterial?,
             backend: AcpProviderBrokerTestBackend,
         ): AcpProviderBroker {
+            val startedNanos = System.nanoTime()
             val approved = policy as? AcpProviderTransportPolicy.Approved
                 ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.UNSUPPORTED_OPERATION)
             val secret = credentials ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.AUTHENTICATION)
@@ -839,7 +866,7 @@ internal class AcpProviderBroker private constructor(
             return AcpProviderBroker(
                 approved, AgentExecutionRequestBinding.capture(admittedRequest), admittedRequest.cancellation, secret,
                 enclosingRemaining, minOf(approved.bounds.maximumOutputTokens.toLong(), admittedRequest.limits.maxOutputTokens ?: approved.bounds.maximumOutputTokens.toLong()).toInt(),
-                admittedRequest.limits.maxInputTokens, backend,
+                admittedRequest.limits.maxInputTokens, backend, startedNanos,
             )
         }
     }
@@ -866,10 +893,22 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
         ThreadPoolExecutor.AbortPolicy(),
     )
     private val owners = Collections.synchronizedList(ArrayList<ProviderHttpAttempt>())
+    private var retiredOwners = 0
+    private fun retireFinishedOwners() {
+        val iterator = owners.iterator()
+        while (iterator.hasNext()) {
+            val owner = iterator.next()
+            if (owner.resourcesClosed() && owner.futureTerminal() && owner.executionFinished()) {
+                retiredOwners++
+                iterator.remove()
+            }
+        }
+    }
 
     override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
         require(request.endpoint == authority.endpoint) { "provider network authority is unavailable" }
         if (closed.get()) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+        if (request.deadlineNanos - System.nanoTime() <= 0) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TIMEOUT)
         val content = request.body
         require(content.size <= authority.bounds.maximumRequestBytes) { "provider request exceeds admitted bound" }
         val wire = BasicClassicHttpRequest("POST", request.endpoint).also {
@@ -882,9 +921,10 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
             it.setHeader("User-Agent", "decomp-acp-provider-http/1")
             authority.authorize(it, request.credentials)
         }
-        val owner = ProviderHttpAttempt(authority, request.timeout, wire, receiver)
+        val owner = ProviderHttpAttempt(authority, request.deadlineNanos, wire, content, receiver)
         synchronized(owners) {
             if (closed.get()) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+            retireFinishedOwners()
             owners.add(owner)
         }
         // Install cancellation before a fast header callback can precede start's return.
@@ -902,8 +942,9 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
     }
 
     fun cleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot = synchronized(owners) {
-        AcpProviderConcreteBackendCleanupSnapshot(closed.get() && executor.isTerminated && owners.all { it.resourcesClosed() },
-            executor.isTerminated, owners.size, owners.count { it.futureTerminal() })
+        retireFinishedOwners()
+        AcpProviderConcreteBackendCleanupSnapshot(closed.get() && executor.isTerminated && owners.all { it.resourcesClosed() && it.executionFinished() },
+            executor.isTerminated, retiredOwners + owners.size, retiredOwners + owners.count { it.futureTerminal() })
     }
 
     override fun closeWithin(timeout: Duration): Boolean {
@@ -912,7 +953,10 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
         synchronized(owners) { owners.forEach { it.cancel() } }
         executor.shutdownNow()
         val terminated = executor.awaitTermination((timeout.toNanos() - (System.nanoTime() - started)).coerceAtLeast(0), TimeUnit.NANOSECONDS)
-        return terminated && executor.isTerminated && synchronized(owners) { owners.all { it.resourcesClosed() && it.futureTerminal() } }
+        return terminated && executor.isTerminated && synchronized(owners) {
+            retireFinishedOwners()
+            owners.all { it.resourcesClosed() && it.futureTerminal() && it.executionFinished() }
+        }
     }
 
     companion object {
@@ -924,11 +968,15 @@ private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAu
 /** Private owner; none of its socket, resolver, TLS or request inputs is an operator capability. */
 private class ProviderHttpAttempt(
     private val authority: AcpProviderNetworkAuthority,
-    timeout: Duration,
-    private val wire: BasicClassicHttpRequest,
-    private val receiver: AcpProviderBackendReceiver,
+    private val deadline: Long,
+    wire: BasicClassicHttpRequest,
+    private val requestBody: ByteArray,
+    receiver: AcpProviderBackendReceiver,
 ) : AcpProviderBackendRequestOwner, Flow.Subscription, Runnable {
-    private val deadline = System.nanoTime() + timeout.toNanos()
+    private val wire = AtomicReference<BasicClassicHttpRequest?>(wire)
+    private val receiver = AtomicReference<AcpProviderBackendReceiver?>(receiver)
+    private val execution = java.util.concurrent.atomic.AtomicInteger(0) // queued, running, finished
+    private val cleanupFailed = AtomicBoolean()
     private val cancelled = AtomicBoolean()
     private val connectAdmitted = AtomicBoolean()
     private val raw = AtomicReference<Socket?>()
@@ -940,9 +988,18 @@ private class ProviderHttpAttempt(
     @Volatile private var rejected = false
 
     fun attach(value: Future<*>) { future = value; if (cancelled.get()) value.cancel(true) }
-    fun notSubmitted() { rejected = true }
+    fun notSubmitted() { rejected = true; finishQueued() }
+    fun executionFinished(): Boolean = execution.get() == 2
+    private fun eraseRequest() {
+        wire.getAndSet(null)?.let { request -> request.setHeaders(); request.entity = null }
+        requestBody.fill(0)
+    }
+    private fun finishQueued() {
+        if (execution.compareAndSet(0, 2)) { eraseRequest(); receiver.set(null) }
+    }
     fun futureTerminal(): Boolean = rejected || future?.isDone == true
-    fun resourcesClosed(): Boolean = (raw.get()?.isClosed != false && tls.get()?.isClosed != false && connection.get()?.isOpen != true)
+    fun resourcesClosed(): Boolean = !cleanupFailed.get() &&
+        raw.get()?.isClosed != false && tls.get()?.isClosed != false && connection.get()?.isOpen != true
 
     override fun request(n: Long) {
         if (n <= 0) { cancel(); return }
@@ -953,8 +1010,9 @@ private class ProviderHttpAttempt(
         cancelled.set(true)
         synchronized(demand) { demand.notifyAll() }
         // Closing the underlying socket aborts connect/handshake/read without HTTP/TLS draining.
-        runCatching { raw.get()?.close() }
+        runCatching { raw.get()?.close() }.onFailure { cleanupFailed.set(true) }
         future?.cancel(true)
+        finishQueued()
     }
 
     private fun activeMillis(): Int {
@@ -971,7 +1029,10 @@ private class ProviderHttpAttempt(
     }
 
     override fun run() {
+        if (!execution.compareAndSet(0, 1)) return
         var response: ClassicHttpResponse? = null
+        var outcome = AcpProviderTerminalKind.TRANSPORT
+        val callback = receiver.get()
         try {
             activeMillis()
             // Resolve the exact admitted name once, select one address, and never fall back.
@@ -1000,11 +1061,11 @@ private class ProviderHttpAttempt(
             http.bind(secure, socket)
             activeMillis()
             // Core has no request recovery, redirect, auth challenge or decompression layer.
-            response = HttpRequestExecutor().execute(wire, http, HttpCoreContext.create())
+            response = HttpRequestExecutor().execute(requireNotNull(wire.get()), http, HttpCoreContext.create())
             activeMillis()
             val headers = LinkedHashMap<String, MutableList<String>>()
             for (header in response.headers) headers.getOrPut(header.name.lowercase()) { ArrayList() }.add(header.value)
-            receiver.headers(response.code, headers)
+            callback?.headers(response.code, headers)
             activeMillis()
             val input = response.entity?.content ?: throw IOException("provider body unavailable")
             val buffer = ByteArray(authority.bounds.maximumChunkBytes)
@@ -1016,21 +1077,39 @@ private class ProviderHttpAttempt(
                 }
                 activeMillis()
                 val count = input.read(buffer, 0, minOf(buffer.size.toLong(), authority.bounds.maximumResponseBytes - observed + 1).toInt())
-                if (count < 0) { receiver.complete(); return }
+                if (count < 0) { outcome = AcpProviderTerminalKind.COMPLETED; break }
                 if (count == 0 || count > authority.bounds.maximumResponseBytes - observed) throw IOException("provider body bound exceeded")
                 observed += count
-                receiver.bytes(listOf(ByteBuffer.wrap(buffer, 0, count).asReadOnlyBuffer()))
+                callback?.bytes(listOf(ByteBuffer.wrap(buffer, 0, count).asReadOnlyBuffer()))
             }
-        } catch (_: SocketTimeoutException) { receiver.timedOut() }
-        catch (_: Exception) { receiver.failed() }
+        } catch (_: SocketTimeoutException) { outcome = AcpProviderTerminalKind.TIMEOUT }
+        catch (_: Exception) { outcome = AcpProviderTerminalKind.TRANSPORT }
         finally {
-            runCatching { raw.get()?.close() }
-            connection.get()?.close(CloseMode.IMMEDIATE)
-            runCatching { tls.get()?.close() }
-            // The raw socket is closed first; entity close cannot drain upstream data.
-            runCatching { response?.close() }
+            finishTransport(response, outcome, callback)
         }
     }
+    private fun finishTransport(response: ClassicHttpResponse?, outcome: AcpProviderTerminalKind,
+                                callback: AcpProviderBackendReceiver?) {
+            // Close all transport owners before terminal callbacks can release broker admission.
+            runCatching { raw.get()?.close() }.onFailure { cleanupFailed.set(true) }
+            runCatching { connection.get()?.close(CloseMode.IMMEDIATE) }.onFailure { cleanupFailed.set(true) }
+            runCatching { tls.get()?.close() }.onFailure { cleanupFailed.set(true) }
+            runCatching { response?.close() }.onFailure { cleanupFailed.set(true) }
+            if (raw.get()?.isClosed == true) raw.set(null)
+            if (tls.get()?.isClosed == true) tls.set(null)
+            if (connection.get()?.isOpen == false) connection.set(null)
+            eraseRequest()
+            receiver.set(null)
+            try {
+                when {
+                    !resourcesClosed() -> callback?.failed()
+                    outcome == AcpProviderTerminalKind.COMPLETED -> callback?.complete()
+                    outcome == AcpProviderTerminalKind.TIMEOUT -> callback?.timedOut()
+                    else -> callback?.failed()
+                }
+            } finally { execution.set(2) }
+    }
+
 }
 
 private fun selectProviderAddress(addresses: Array<InetAddress>): InetAddress =

@@ -19,6 +19,24 @@ import kotlin.test.assertTrue
 
 class AcpProviderExecutionEvidenceV3Test {
     @Test
+    fun `completed request requires real response bytes`() {
+        assertFailsWith<IllegalArgumentException> { request().copy(responseBytes = 0) }
+    }
+
+    @Test
+    fun `denial excludes upstream only failures`() {
+        for (kind in listOf(AcpProviderExecutionTerminal.COMPLETED, AcpProviderExecutionTerminal.AUTHENTICATION,
+            AcpProviderExecutionTerminal.AUTHORIZATION, AcpProviderExecutionTerminal.MALFORMED_RESPONSE)) {
+            assertFailsWith<IllegalArgumentException> { AcpProviderExecutionDenialEvidence(1, kind) }
+        }
+        for (kind in AcpProviderExecutionTerminal.entries.filter { it !in listOf(
+            AcpProviderExecutionTerminal.COMPLETED, AcpProviderExecutionTerminal.AUTHENTICATION,
+            AcpProviderExecutionTerminal.AUTHORIZATION, AcpProviderExecutionTerminal.MALFORMED_RESPONSE) }) {
+            assertEquals(kind, AcpProviderExecutionDenialEvidence(1, kind).terminal)
+        }
+    }
+
+    @Test
     fun `provider binding advances only invocation schema and cannot be replayed`() {
         val invocation = invocation()
         val transport = snapshot()

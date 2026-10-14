@@ -2102,6 +2102,7 @@ private class RunningAcpProcess(
     private val requestIds = JsonRpcRequestTracker()
     private val sessionId = AtomicReference<String?>()
     private val closing = AtomicBoolean(false)
+    private val guardianAdmission = Any()
     private val shutdownStarted = AtomicBoolean(false)
     private val guardianInputAbort = AtomicReference<CompletableFuture<Unit>?>()
     private val guardianSignal = AtomicReference<CompletableFuture<AcpGuardianSignalOutcome>?>()
@@ -2206,20 +2207,20 @@ private class RunningAcpProcess(
     fun guardianExited(): Boolean = guardianOwner().guardianExited()
 
     /** Upper cleanup revokes admission first. Existing failure latches are never cleared. */
-    fun markGuardianClosing() {
+    fun markGuardianClosing(): Unit = synchronized(guardianAdmission) {
         guardianOwner()
         // Publish expected teardown before an exit callback can classify its process exit.
         // A liveness sample here could race that callback and invent a cleanup failure.
         closing.set(true)
     }
 
-    fun validateGuardianInboundFrame(frame: String) {
+    fun validateGuardianInboundFrame(frame: String): Unit = synchronized(guardianAdmission) {
         guardianOwner()
         if (closing.get()) throw AcpProtocolFailure("guardian ACP admission is revoked")
         validateInboundLine(frame, redactDiagnostic = true)
     }
 
-    fun validateGuardianOutboundFrame(frame: String) {
+    fun validateGuardianOutboundFrame(frame: String): Unit = synchronized(guardianAdmission) {
         guardianOwner()
         if (closing.get()) throw AcpProtocolFailure("guardian ACP admission is revoked")
         try {
