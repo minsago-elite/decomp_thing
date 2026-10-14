@@ -1365,7 +1365,7 @@ class UploadServerTest {
     }
 
     @Test
-    fun `retained provider v4 repair receipt is available only for its actual nonrelease binding`() {
+    fun `retained provider v5 repair receipt is available only for its actual nonrelease binding`() {
         withServer { server, dataDir ->
             val upload = upload(server, "provider-receipt.elf", elfFixture(), acceptJson = true)
             val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
@@ -1374,7 +1374,7 @@ class UploadServerTest {
             val revisions = reports.resolve("repair-revisions").createDirectories()
             val attemptId = "revision_00000001_aaaaaaaaaaaaaaaa"
             val document = RepairProviderReceiptRetentionTest().receipt(jobDir, attemptId, providerFixture = true)
-            assertEquals(4, document.schemaVersion)
+            assertEquals(5, document.schemaVersion)
             assertFalse(document.releaseComplete)
             revisions.resolve("$attemptId.acp-receipt.json").writeText(document.json)
             val history = reports.resolve("repair_history.json")
@@ -1389,7 +1389,7 @@ class UploadServerTest {
                 "requestSha256":"${document.requestSha256}","resultChangesSha256":"${document.resultChangesSha256}",
                 "terminalOutcome":"${document.terminalOutcome}","receiptReleaseComplete":false,"assessmentStatus":"rejected"}}]}
             """.trimIndent()
-            history.writeText(historyWithVersion(4))
+            history.writeText(historyWithVersion(5))
             val valid = request(server, "GET", "/jobs/$jobId")
             val validBody = valid.body.decodeToString()
             assertEquals(200, valid.status)

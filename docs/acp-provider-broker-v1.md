@@ -121,23 +121,33 @@ successful completion first. Provider usage is observed data, not an independent
 
 ### Archived fixture receipts
 
-Provider invocation evidence and full/compact receipts use schema 4. Their closed
-`providerTransport` projection omits `policySha256` and `authoritySha256`: the ephemeral fixture
-listener and live issuer identity cannot be authenticated independently from archived receipt
-bytes. It contains no placeholder or replacement digest for those claims. The operational policy
-descriptor, channel comparison, private authority registry and pinned TLS trust remain unchanged.
+Provider invocation evidence and full/compact receipts use schema 5. Their closed
+`providerTransport` projection retains only the independently cross-checked factory configuration,
+qualification issuer and qualification consumer commitments in `descriptors`. It omits the guardian,
+child and Codex executable/manifest digests, ordered-argument digest and private-state-root digest:
+no independent archived facts bind those eight launch-closure claims. It also continues to omit
+`policySha256` and `authoritySha256`, whose live issuance cannot be reconstructed from the archive.
+There are no placeholder or replacement digests for omitted claims. The actual live launch descriptor,
+operational policy, channel comparison, private authority registry and pinned TLS trust are unchanged.
 
-Schema 4 retains the fixed qualification profile, model, factory/owner, invocation/request,
+Schema 5 retains the fixed qualification profile, model, factory/owner, invocation/request,
 session/turn, resource, budget, usage and cleanup commitments. Fixture evidence remains nonrelease;
 it cannot claim adapter qualification, protected provider authority or remote cost cancellation.
-Unknown fields, including either omitted digest, are rejected rather than discarded.
+Unknown fields, including any omitted digest in any position, are rejected rather than discarded.
+Omitting launch-closure fields leaves archive launch provenance unproved. This does not satisfy the
+parent's full transport-provenance requirement; independently bound executable, manifest, argument
+and state-root evidence remains required before that claim can be made. Schema 5 adds no release
+authority and does not qualify a concrete provider or launch.
 
-Historical schema-3 receipt bytes are not rewritten or upgraded. The strict receipt verifier
-explicitly rejects them as unqualified; a repair graph requiring their contents also refuses
-replay until separately supported nonqualifying legacy inspection exists. Historical graph-binding
-metadata can retain version 3 only as pending/rejected nonrelease evidence. New schema-4 bindings
-have the same restriction. Schema-2 provider-absent receipt bytes remain unchanged, and release
-archives continue to require their existing schema-2 evidence; schema 4 adds no release path.
+Historical schema-3 and schema-4 receipt bytes and their closed shapes are not rewritten, relabeled
+or upgraded. Schema 3 included the two unbound issuance digests; schema 4 omitted those but retained
+the eight unbound launch digests. The strict verified-receipt API explicitly refuses both generations
+as unqualified. A repair graph requiring their contents also refuses replay until separately
+supported nonqualifying historical inspection exists. Existing bounded graph/history metadata reads
+can retain versions 3 and 4 only as unqualified pending/rejected nonrelease metadata; that metadata
+is not a verified receipt. New schema-5 bindings have the same pending/rejected nonrelease restriction.
+Schema-1 evidence contracts and schema-2 provider-absent receipt bytes remain unchanged. Release
+archives and accepted contributions continue to require their existing schema-2 evidence.
 
 Credential-free controls exercise the building block through an internal deterministic backend;
 they do not qualify the concrete JDK network backend or TLS. The guardian and SDK are not wired

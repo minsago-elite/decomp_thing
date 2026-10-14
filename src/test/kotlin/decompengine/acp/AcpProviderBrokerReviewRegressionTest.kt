@@ -170,6 +170,30 @@ class AcpProviderBrokerReviewRegressionTest {
         } finally { type.getDeclaredMethod("notSubmitted").also { it.isAccessible = true }.invoke(owner) }
     }
 
+    @Test fun `first cleanup operation survives later failures and successful retry`() {
+        val receiver = Receiver()
+        val type = Class.forName("decompengine.acp.ProviderHttpAttempt")
+        val body = "synthetic body".toByteArray()
+        val owner = type.declaredConstructors.single().also { it.isAccessible = true }.newInstance(
+            authority(), System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+            BasicClassicHttpRequest("POST", URI("https://chatgpt.com/backend-api/codex/responses")), body, receiver)
+        @Suppress("UNCHECKED_CAST") val raw = field(owner, "raw") as AtomicReference<Socket?>
+        raw.set(object : Socket() { override fun close() { throw java.io.IOException("synthetic-only") } })
+        type.getDeclaredMethod("cancel").also { it.isAccessible = true }.invoke(owner)
+        val first = field(owner, "firstCleanupFailure") as AtomicReference<*>
+        assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
+        val finish = type.declaredMethods.single { it.name == "finishTransport" }.also { it.isAccessible = true }
+        finish.invoke(owner, null, AcpProviderTerminalKind.COMPLETED, receiver)
+        assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
+        raw.set(null)
+        finish.invoke(owner, null, AcpProviderTerminalKind.COMPLETED, receiver)
+        assertEquals(AcpProviderCleanupOperation.CANCEL_RAW_CLOSE, first.get())
+        assertTrue((field(owner, "cleanupFailed") as AtomicBoolean).get())
+        assertFalse(type.getDeclaredMethod("resourcesClosed").also { it.isAccessible = true }.invoke(owner) as Boolean)
+        assertEquals(0, receiver.completed)
+        assertTrue(body.all { it == 0.toByte() })
+    }
+
     @Test fun `held raw close delays completion then discards bearer body receiver and retired owner`() {
         val receiver = Receiver()
         val body = "synthetic body".toByteArray()

@@ -20,6 +20,9 @@ class NativeDnsControlCapsuleBoundaryTest {
             assertFalse(nativeObserverCapsuleClass(root + ".java"))
         }
         assertFalse(nativeObserverCapsuleClass("NativeDnsObserverCapacityTest.class"))
+        for (nested in listOf("Witness", "ReadStage", "Outcome", "ExceptionKind", "Companion")) {
+            assertTrue(nativeObserverCapsuleClass("NativeObserverFailure" + "$" + nested + ".class"))
+        }
     }
     @Test fun `capsule emission refuses every omitted observer root and nested substitute`() {
         val complete = nativeObserverCapsuleRoots.map { "decompengine/acp/$it.class" }.toSet()
@@ -49,7 +52,7 @@ class NativeDnsControlCapsuleBoundaryTest {
         val owner=NativeObserverBudgetOwner();val expired=NativeObserverBudget(10,{10})
         owner.acquire(expired).use { assertFailsWith<NativeObserverFailure> { owner.current!!.operation() } }
         assertNull(owner.current)
-        val independent=NativeVisibilityAccumulator();repeat(16) { independent.record("pid=$it",false) }
+        val independent=NativeVisibilityAccumulator();repeat(15) { independent.record("pid=$it",false) }
         assertEquals("DIAGNOSTIC_CAPACITY",assertFailsWith<NativeObserverFailure> { independent.record("pid=17",false) }.category)
         owner.acquire(expired).use { assertEquals("OBSERVER_DEADLINE",assertFailsWith<NativeObserverFailure> { owner.current!!.operation() }.category) }
         assertNull(owner.current)

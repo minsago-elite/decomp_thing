@@ -43,7 +43,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val permit = ownedPermit(invocation)
         assertSame(invocation, invocation.bindProviderExecutionEvidence(permit, transport))
         assertEquals("acp", invocation.providerId)
-        assertEquals(4, invocation.schemaVersion)
+        assertEquals(5, invocation.schemaVersion)
         assertSame(transport, invocation.providerTransportEvidence)
         assertNull(invocation.completeExecutionEvidence)
         assertFalse(transport.releaseComplete)
@@ -310,7 +310,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val invocation = invocation(phase = AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             cleanup = AcpExecutionCleanupDisposition.NOT_REQUIRED)
         invocation.bindProviderExecutionEvidence(ownedPermit(invocation), evidence)
-        assertEquals(4, invocation.schemaVersion)
+        assertEquals(5, invocation.schemaVersion)
         assertFalse(evidence.cleanup.admissionSticky)
     }
 
@@ -381,7 +381,7 @@ class AcpProviderExecutionEvidenceV3Test {
         assertEquals(1, evidence.requests.size)
         assertFailsWith<UnsupportedOperationException> { (evidence.requests as MutableList).clear() }
         val types = listOf(AcpProviderInvocationEvidenceSnapshot::class.java,
-            AcpProviderExecutionDescriptorEvidence::class.java, AcpProviderExecutionRequestEvidence::class.java,
+            AcpProviderExecutionDescriptorEvidence::class.java, AcpProviderExecutionOwnerEvidence::class.java, AcpProviderExecutionRequestEvidence::class.java,
             AcpProviderExecutionDenialEvidence::class.java, AcpProviderGuardianCleanupEvidence::class.java)
         for (type in types) {
             assertTrue(type.declaredFields.none { field -> field.type in listOf(ByteArray::class.java,
@@ -444,8 +444,7 @@ class AcpProviderExecutionEvidenceV3Test {
         resourceEvidence: AcpProviderExecutionResourceEvidence = resources(),
     ) = AcpProviderInvocationEvidenceSnapshot(authority, profileDigest, modelDigest,
         AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1, PROFILE.reasoning,
-        AcpProviderExecutionDescriptorEvidence(CONFIGURATION, issuerDigest, consumerDigest,
-            HASH, HASH, HASH, HASH, HASH, HASH, HASH, HASH), INVOCATION, requestDigest, session, turn,
+        AcpProviderExecutionOwnerEvidence(CONFIGURATION, issuerDigest, consumerDigest), INVOCATION, requestDigest, session, turn,
         bounds, outputLimit, inputLimit, remainingMillis, resourceEvidence,
         wireBytes, responseBytes, outputTokens, inputTokens, revoked, denial, requests, cleanup)
 

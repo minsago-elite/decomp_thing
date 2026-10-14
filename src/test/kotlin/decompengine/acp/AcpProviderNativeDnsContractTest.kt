@@ -508,12 +508,70 @@ internal fun nativeDeniedVisibilityRequiresFailure(caller: NativeNamespaceCreden
     target == null || caller.uid.any { it in target.uid } || caller.gid.any { it in target.gid }
 
 internal class NativeObserverFailure(val category: String, val observedPid: Long? = null,
-    val namespaceKind: String? = null, val observerPhase: String? = null) : IllegalStateException(category) {
+    val namespaceKind: String? = null, val observerPhase: String? = null,
+    val witness: Witness? = null) : IllegalStateException(category) {
     init {
         require(category in setOf("OBSERVER_DEADLINE", "SCAN_WORK_LIMIT", "PROC_BYTE_LIMIT", "DIAGNOSTIC_CAPACITY", "POSSIBLE_OWNED_VISIBILITY"))
         require(observedPid == null || observedPid in 1..4294967295L)
         require(namespaceKind == null || namespaceKind in setOf("net", "user"))
         require(observerPhase == null || observerPhase in setOf("HOST_CLEANUP", "OUTER_CLEANUP"))
+        require(witness == null || category == "POSSIBLE_OWNED_VISIBILITY" &&
+            witness.pid == observedPid && witness.kind == namespaceKind && witness.phase == observerPhase)
+    }
+
+    // Nested under an existing authenticated capsule root, including generated enum classes.
+    enum class ReadStage { START_BEFORE, STATUS, START_AFTER, STABILITY, CLASSIFY }
+    enum class Outcome { STABLE_OVERLAP, START_CHANGED, IDENTITY_UNAVAILABLE }
+    enum class ExceptionKind { NONE, NO_SUCH_FILE, ACCESS_DENIED, SECURITY, IO, FORMAT, STATE, OTHER }
+
+    /** Immutable text from bounded typed observations only; never exception messages or process names. */
+    class Witness(val pid: Long, val kind: String, val phase: String, callerPid: Long,
+        caller: NativeNamespaceCredentials, target: NativeNamespaceCredentials?, startBefore: Long?, startAfter: Long?,
+        stage: ReadStage, exceptionKind: ExceptionKind) {
+        val outcome: Outcome
+        val record: String
+        init {
+            require(pid in 1..4294967295L && callerPid in 1..4294967295L)
+            require(kind in setOf("net", "user") && phase in setOf("HOST_CLEANUP", "OUTER_CLEANUP"))
+            require(startBefore == null || startBefore >= 0)
+            require(startAfter == null || startAfter >= 0)
+            fun tuple(value: List<Long>): List<Long> {
+                require(value.size == 4 && value.all { it in 0..4294967295L })
+                return value.toList()
+            }
+            val callerUid = tuple(caller.uid); val callerGid = tuple(caller.gid)
+            val targetUid = target?.uid?.let(::tuple); val targetGid = target?.gid?.let(::tuple)
+            val stable = target != null && startBefore != null && startBefore == startAfter &&
+                stage == ReadStage.CLASSIFY && exceptionKind == ExceptionKind.NONE
+            val uidMatch = if (stable) callerUid.any { it in checkNotNull(targetUid) } else null
+            val gidMatch = if (stable) callerGid.any { it in checkNotNull(targetGid) } else null
+            // This diagnostic is never an alternate authority to declare a PID foreign.
+            require(!stable || uidMatch == true || gidMatch == true)
+            outcome = when {
+                stable -> Outcome.STABLE_OVERLAP
+                startBefore != null && startAfter != null && startBefore != startAfter -> Outcome.START_CHANGED
+                else -> Outcome.IDENTITY_UNAVAILABLE
+            }
+            record = "pid=$pid kind=$kind phase=$phase callerPid=$callerPid namespaceRead=ACCESS_DENIED " +
+                "callerUid=${callerUid.joinToString(",")} callerGid=${callerGid.joinToString(",")} " +
+                "targetUid=${targetUid?.joinToString(",") ?: "UNAVAILABLE"} targetGid=${targetGid?.joinToString(",") ?: "UNAVAILABLE"} " +
+                "targetIdentity=${if (stable) "STABLE" else "UNVERIFIED"} startBefore=${startBefore ?: "UNAVAILABLE"} " +
+                "startAfter=${startAfter ?: "UNAVAILABLE"} readStage=$stage outcome=$outcome exceptionClass=$exceptionKind " +
+                "uidMatch=${uidMatch ?: "UNAVAILABLE"} gidMatch=${gidMatch ?: "UNAVAILABLE"}"
+            check(record.length <= 768 && record.all { it.code in 32..126 })
+        }
+    }
+
+    companion object {
+        fun exceptionKind(failure: Exception): ExceptionKind = when (failure) {
+            is java.nio.file.NoSuchFileException -> ExceptionKind.NO_SUCH_FILE
+            is java.nio.file.AccessDeniedException -> ExceptionKind.ACCESS_DENIED
+            is SecurityException -> ExceptionKind.SECURITY
+            is java.io.IOException -> ExceptionKind.IO
+            is IllegalArgumentException -> ExceptionKind.FORMAT
+            is IllegalStateException -> ExceptionKind.STATE
+            else -> ExceptionKind.OTHER
+        }
     }
 }
 
@@ -535,12 +593,18 @@ internal class NativeObserverBudget(val endMillis: Long, private val now: () -> 
 internal class NativeVisibilityAccumulator(private val rows: MutableList<String> = mutableListOf()) {
     var overflowObservations = 0; private set
     private var digest = ByteArray(32)
+    var firstPossibleWitness: NativeObserverFailure.Witness? = null; private set
     var scanComplete = false
-    fun reset() { rows.clear(); overflowObservations = 0; digest = ByteArray(32); scanComplete = false }
+    fun reset() { rows.clear(); overflowObservations = 0; digest = ByteArray(32); firstPossibleWitness = null; scanComplete = false }
+    fun recordFirstPossible(witness: NativeObserverFailure.Witness) {
+        if (firstPossibleWitness == null) firstPossibleWitness = witness
+        scanComplete = false
+    }
     fun record(record: String, provenForeign: Boolean) {
         check(record.length <= 768 && record.all { it.code in 32..126 })
         if (record in rows) return
-        if (rows.size < 16) rows += record
+        // Fifteen ordinary details plus one reserved first-fatal slot: total remains sixteen.
+        if (rows.size < 15) rows += record
         else {
             if (!provenForeign) throw NativeObserverFailure("DIAGNOSTIC_CAPACITY")
             check(overflowObservations < 16384) { "native observer diagnostic count exhausted" }
@@ -552,9 +616,11 @@ internal class NativeVisibilityAccumulator(private val rows: MutableList<String>
         }
     }
     fun render(): ByteArray {
-        val summary = "retainedRowCount=${rows.size}\ndistinctCredentialOverflowObservations=$overflowObservations\n" +
+        val details = rows + listOfNotNull(firstPossibleWitness?.record)
+        check(details.size <= 16)
+        val summary = "retainedRowCount=${details.size}\ncredentialOverflowObservations=$overflowObservations\n" +
             "observationDigest=${digest.joinToString("") { "%02x".format(it) }}\nscanComplete=$scanComplete\n"
-        return (rows.joinToString("\n", postfix = if (rows.isEmpty()) "" else "\n") + summary)
+        return (details.joinToString("\n", postfix = if (details.isEmpty()) "" else "\n") + summary)
             .toByteArray(Charsets.US_ASCII).also { check(it.size <= 16 * 1024) }
     }
 }
@@ -625,7 +691,8 @@ private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String, pha
     var primary: Throwable? = null
     try {
         budget.beginScan()
-        val caller = nativeCredentialIdentity(ProcessHandle.current().pid(), budget)
+        val callerPid = ProcessHandle.current().pid()
+        val caller = nativeCredentialIdentity(callerPid, budget)
         val members = linkedSetOf<Long>()
         budget.operation()
         Files.list(Path.of("/proc")).use { stream ->
@@ -642,21 +709,38 @@ private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String, pha
                 } catch (_: java.nio.file.NoSuchFileException) { /* exited before observation */ }
                 catch (_: java.nio.file.AccessDeniedException) {
                     var target: NativeNamespaceCredentials? = null
-                    var start: Long? = null
+                    var observedTarget: NativeNamespaceCredentials? = null
+                    var startBefore: Long? = null
+                    var startAfter: Long? = null
+                    var readStage = NativeObserverFailure.ReadStage.START_BEFORE
+                    var exceptionKind = NativeObserverFailure.ExceptionKind.NONE
                     try {
-                        start = nativeStartTime(pid, budget)
-                        target = nativeCredentialIdentity(pid, budget)
-                        target = nativeStableDeniedCredentials(start, nativeStartTime(pid, budget), target)
+                        startBefore = nativeStartTime(pid, budget)
+                        readStage = NativeObserverFailure.ReadStage.STATUS
+                        observedTarget = nativeCredentialIdentity(pid, budget)
+                        readStage = NativeObserverFailure.ReadStage.START_AFTER
+                        startAfter = nativeStartTime(pid, budget)
+                        readStage = NativeObserverFailure.ReadStage.STABILITY
+                        target = nativeStableDeniedCredentials(startBefore, startAfter, observedTarget)
+                        if (target != null) readStage = NativeObserverFailure.ReadStage.CLASSIFY
                     } catch (failure: NativeObserverFailure) { throw NativeObserverFailure(failure.category, pid, kind, phase) }
-                    catch (_: Exception) { target = null }
+                    catch (failure: Exception) { exceptionKind = NativeObserverFailure.exceptionKind(failure); target = null }
                     val mustFail = nativeDeniedVisibilityRequiresFailure(caller, target)
                     if (mustFail) {
-                        val primary = NativeObserverFailure("POSSIBLE_OWNED_VISIBILITY", pid, kind, phase)
-                        try { nativeRecordDenied(pid, kind, phase, caller, target, start, "OBSERVER_UNAVAILABLE") }
+                        // Freeze already-observed typed facts on the primary BEFORE a diagnostic
+                        // accumulator/budget/persistence failure. No additional /proc reads or retries.
+                        val witness = NativeObserverFailure.Witness(pid, kind, phase, callerPid, caller,
+                            observedTarget, startBefore, startAfter, readStage, exceptionKind)
+                        val primary = NativeObserverFailure("POSSIBLE_OWNED_VISIBILITY", pid, kind, phase, witness)
+                        try {
+                            nativeVisibilityAccumulator.recordFirstPossible(witness)
+                            budget.operation()
+                            nativePersistVisibility()
+                        }
                         catch (diagnostic: Throwable) { primary.addSuppressed(diagnostic) }
                         throw primary
                     }
-                    nativeRecordDenied(pid, kind, phase, caller, target, start, "DISTINCT_CREDENTIALS")
+                    nativeRecordDenied(pid, kind, phase, caller, target, startBefore, "DISTINCT_CREDENTIALS")
                 }
             }
         }
@@ -803,7 +887,8 @@ internal fun nativeObserverFailureFields(failure: Throwable?, prefix: String): S
     check(prefix in setOf("primary", "cleanup"))
     val observed = failure as? NativeObserverFailure ?: return ""
     return "${prefix}ObserverCategory=${observed.category}\n${prefix}ObserverPid=${observed.observedPid ?: "UNAVAILABLE"}\n" +
-        "${prefix}ObserverKind=${observed.namespaceKind ?: "UNAVAILABLE"}\n${prefix}ObserverPhase=${observed.observerPhase ?: "UNAVAILABLE"}\n"
+        "${prefix}ObserverKind=${observed.namespaceKind ?: "UNAVAILABLE"}\n${prefix}ObserverPhase=${observed.observerPhase ?: "UNAVAILABLE"}\n" +
+        (observed.witness?.let { "${prefix}ObserverWitness=${it.record}\n" } ?: "")
 }
 
 internal fun nativeFailureCategory(failure: Throwable?): String = when (failure) {

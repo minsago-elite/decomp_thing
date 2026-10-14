@@ -19,7 +19,7 @@ enum class AcpProviderGuardianTeardownCause {
 
 enum class AcpProviderChildExitKind { EXITED, SIGTERM, SIGKILL, OTHER_SIGNAL, UNOBSERVED }
 
-/** Commitments to the factory authority and exact launch closure, never its paths or argv. */
+/** Historical schema-v3/v4 descriptor metadata; canonical digests do not prove a launch closure. */
 data class AcpProviderExecutionDescriptorEvidence(
     val factoryConfigurationSha256: String,
     val qualificationIssuerSha256: String,
@@ -38,6 +38,21 @@ data class AcpProviderExecutionDescriptorEvidence(
             guardianExecutableSha256, guardianManifestSha256, childExecutableSha256, childManifestSha256,
             codexExecutableSha256, codexManifestSha256, orderedArgumentsSha256, privateStateRootSha256,
         ).forEach(::requireProviderEvidenceDigest)
+    }
+}
+
+/** Closed schema-v5 archive owner commitments, independently checked against receipt facts.
+ * Launch closure digests remain unproved archive provenance and are deliberately absent here.
+ * The live launch descriptor and historical descriptor metadata above are separate contracts.
+ */
+data class AcpProviderExecutionOwnerEvidence(
+    val factoryConfigurationSha256: String,
+    val qualificationIssuerSha256: String,
+    val qualificationConsumerSha256: String,
+) {
+    init {
+        listOf(factoryConfigurationSha256, qualificationIssuerSha256, qualificationConsumerSha256)
+            .forEach(::requireProviderEvidenceDigest)
     }
 }
 
@@ -213,8 +228,9 @@ data class AcpProviderExecutionDenialEvidence(val sequence: Long, val terminal: 
 }
 
 /**
- * Immutable schema-v4 transport evidence. Live policy/authority identities are not archived:
+ * Immutable schema-v5 transport evidence. Live policy/authority identities are not archived:
  * their issuance cannot be reconstructed independently from these public observations.
+ * Unproved launch-closure digests are also absent from the formal owner projection.
  * This checkpoint archives no provider qualification or
  * billing claim. Even complete fixture cleanup is never a release-complete execution projection.
  */
@@ -224,7 +240,7 @@ class AcpProviderInvocationEvidenceSnapshot(
     val modelSha256: String,
     val runtimeAdapter: AcpProviderRuntimeAdapter,
     val reasoning: AcpProviderReasoning,
-    val descriptors: AcpProviderExecutionDescriptorEvidence,
+    val descriptors: AcpProviderExecutionOwnerEvidence,
     val invocationBindingSha256: String,
     val requestBindingSha256: String,
     val sessionSha256: String?,
