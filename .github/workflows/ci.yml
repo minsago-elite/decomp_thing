@@ -140,7 +140,8 @@ jobs:
         run: |
           python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
-            verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
+            verifyAcpGateHelperDistribution verifyAcpProviderGuardianDistribution verifyAcpProviderDnsDistribution \
+            verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
           web_distribution=("$GITHUB_WORKSPACE"/build/distributions/*.zip)
           test "${#web_distribution[@]}" -eq 1
