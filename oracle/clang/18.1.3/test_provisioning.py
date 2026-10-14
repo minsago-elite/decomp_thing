@@ -5406,11 +5406,25 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             provision.validate_build_record(record, self.contract, args.contract)
             provision.validate_provenance_loader_report(
                 loader, record, provision.sha256_file(args.record), args.rootfs)
-            with mock.patch.object(provision, "runtime_dependencies", return_value=actual_entries) as discover, \
+            original_root = args.rootfs.stat()
+            observed_roots = []
+
+            def discover_from_pinned_root(root, logical_paths, contract):
+                self.assertRegex(str(root), rf"^/proc/{os.getpid()}/fd/[0-9]+$")
+                # Check while the packaging lifetime still holds the descriptor.
+                held = root.stat()
+                self.assertTrue(stat.S_ISDIR(held.st_mode))
+                self.assertEqual((held.st_dev, held.st_ino),
+                                 (original_root.st_dev, original_root.st_ino))
+                observed_roots.append(root)
+                return actual_entries
+
+            with mock.patch.object(provision, "runtime_dependencies", side_effect=discover_from_pinned_root) as discover, \
                     mock.patch.object(provision, "run_probe_sandboxed", wraps=provision.run_probe_sandboxed) as probe:
                 with self.assertRaisesRegex(provision.ProvisionError, "dependency closure"):
                     provision._package_provenance_unqualified(args)
-            discover.assert_called_once_with(args.rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
+            self.assertEqual(len(observed_roots), 1)
+            discover.assert_called_once_with(observed_roots[0], list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
             self.assertEqual([call.args[1] for call in probe.call_args_list],
                              [[path, "--version"] for _, path in provision.FRONTEND_DRIVER_ROOTS])
             self.assertFalse(args.output.exists())
