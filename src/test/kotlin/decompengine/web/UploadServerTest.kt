@@ -878,6 +878,35 @@ class UploadServerTest {
     }
 
     @Test
+    fun `background diagnostics cannot persist sensitive omission markers`() {
+        val dataDir = Files.createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-redactor-fallback-tests")), "web-",
+        )
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error("x".repeat(16_385)) },
+            reconstructor = JobReconstructor { _, _ -> error("[redacted]") },
+            executor = Executor { it.run() }, sensitiveValues = secrets)
+        server.start()
+        try {
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            for (workflow in listOf("explore", "reconstruct")) {
+                assertEquals(303, request(server, "POST", "/jobs/$id/$workflow", followRedirects = false).status)
+                val job = decompengine.jobs.JobStore(dataDir).get(id)
+                assertEquals("failed", job.status)
+                assertEquals("", job.statusMessage)
+                val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+                val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+                val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+                for (text in listOf(persisted, api, page)) secrets.forEach { assertFalse(text.contains(it)) }
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic`() {
         withServer { server, root ->
             val created = upload(server, "damaged.elf", elfFixture(), acceptJson = true)

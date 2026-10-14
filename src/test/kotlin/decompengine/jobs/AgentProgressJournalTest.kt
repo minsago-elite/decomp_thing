@@ -333,6 +333,47 @@ class AgentProgressJournalTest {
         assertFalse(marker.text("hello [redacted] world").contains("[redacted]"))
     }
 
+    @Test
+    fun `fixed omission markers cannot disclose configured secrets`() {
+        val oversized = "[oversized text omitted]"
+        val unredactable = "[unredactable text omitted]"
+        assertEquals("", ProgressRedactor(listOf(oversized)).text("x".repeat(16_385)))
+        assertEquals("", ProgressRedactor(listOf("[redacted]", unredactable)).text("[redacted]"))
+        // Replacement expansion crosses the same bound even though the original input fits.
+        assertEquals("", ProgressRedactor(listOf("x", oversized)).text("x".repeat(2_000)))
+        // The truncation suffix must not bypass the final fallback check either.
+        assertEquals("", ProgressRedactor(listOf("preview truncated", unredactable)).text("abcdef", 3))
+
+        val ordinary = ProgressRedactor(emptyList())
+        assertEquals(oversized, ordinary.text("x".repeat(16_385)))
+        assertEquals(unredactable, ProgressRedactor(listOf("[redacted]")).text("[redacted]"))
+        assertEquals("a… [preview truncated]", ordinary.text("a\uD83D\uDE00b", 2))
+        assertEquals("unchanged", ordinary.text("unchanged"))
+    }
+
+    @Test
+    fun `journal persists safe empty previews when omission markers are sensitive`() {
+        val root = Files.createTempDirectory(
+            Files.createDirectories(java.nio.file.Path.of("build", "progress-redactor-fallback-tests")), "journal-",
+        )
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
+        AgentProgressJournal(root, "repair", sensitiveValues = secrets, maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("task", request(root))
+            task.event(AgentToolEvent(0, "tool", "x".repeat(16_385), AgentToolStatus.FAILED))
+            task.event(AgentMessageEvent(1, "message", AgentMessageRole.ASSISTANT, "[reda", false))
+            task.event(AgentMessageEvent(2, "message", AgentMessageRole.ASSISTANT, "cted]", true))
+        }
+        val snapshot = AgentProgressJournal.read(root)!!
+        val events = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+        val tool = events.single { it["kind"]?.jsonPrimitive?.content == "tool" }
+        val message = events.last { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals("", tool.getValue("text").jsonPrimitive.content)
+        assertEquals("", message.getValue("text").jsonPrimitive.content)
+        assertFalse(message.getValue("textOmitted").jsonPrimitive.boolean)
+        val persisted = Files.readString(root.resolve(AgentProgressJournal.FILE_NAME))
+        secrets.forEach { assertFalse(persisted.contains(it)) }
+    }
+
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(
         "fixture task", listOf(AgentWorkspaceRoot("project", root.toAbsolutePath().normalize())),
         accessPolicy = AgentAccessPolicy(emptyList()),
