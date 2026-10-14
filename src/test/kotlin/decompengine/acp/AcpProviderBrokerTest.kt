@@ -300,10 +300,11 @@ class AcpProviderBrokerTest {
             backend.headers()
             backend.subscribe()
             assertEquals(1L, backend.demand)
-            backend.emit(delta("safe candidate"))
+            // '!' cannot continue the token/account prefixes or the random capability hex.
+            backend.emit(delta("safe candidate!"))
             assertEquals(0L, backend.demand, "a queued chunk must apply backpressure")
             assertEquals(200, exchange.awaitHeaders().status)
-            assertTrue(exchange.nextChunk()!!.decodeToString().contains("safe candidate"))
+            assertTrue(exchange.nextChunk()!!.decodeToString().contains("safe candidate!"))
             assertEquals(1L, backend.demand)
             backend.emit(completed(3))
             backend.complete()
@@ -316,6 +317,74 @@ class AcpProviderBrokerTest {
             assertFalse(evidence.adapterQualified)
             assertFalse(evidence.providerCostCancellationProven)
         } finally { broker.close() }
+    }
+
+    @Test
+    fun `capability prefix quarantine requests one bounded item until disproof or secret refusal`() {
+        for (completeSecret in listOf(false, true)) {
+            val backend = FixtureBackend()
+            val broker = open(backend, policy = policy(AcpProviderTransportBounds(maximumChunkBytes = 256, maximumQueuedChunks = 1)))
+            try {
+                broker.bindSession("actual-session", "turn-1")
+                val cap = capability(broker)
+                val capabilityText = cap.joinToString("") { "%02x".format(it) }
+                val exchange = broker.beginRequest(1, cap, body())
+                backend.headers(); backend.subscribe()
+                val heldEvent = delta(capabilityText.take(32))
+                backend.emit(heldEvent)
+                assertEquals(1L, backend.demand, "held prefix permits exactly one further bounded item")
+                if (completeSecret) {
+                    backend.emit(delta(capabilityText.drop(32)))
+                    assertKind(AcpProviderTerminalKind.SECRET_EXPOSURE) { exchange.nextChunk() }
+                    assertEquals(0L, backend.demand)
+                    assertTrue(backend.cancelled)
+                    assertEquals(AcpProviderTerminalKind.SECRET_EXPOSURE, broker.snapshot().requests.single().terminal)
+                } else {
+                    val disproof = delta("!")
+                    backend.emit(disproof)
+                    assertEquals(0L, backend.demand, "disproved prefix is now queued and applies backpressure")
+                    assertContentEquals(heldEvent + disproof, exchange.nextChunk())
+                    assertEquals(1L, backend.demand)
+                    backend.emit(completed(1)); backend.complete()
+                    assertNotNull(exchange.nextChunk()); assertNull(exchange.nextChunk())
+                    assertEquals(AcpProviderTerminalKind.COMPLETED, broker.snapshot().requests.single().terminal)
+                }
+                assertEquals(1, backend.starts, "quarantine progress must not dispatch another provider request")
+            } finally { broker.close() }
+        }
+    }
+
+    @Test
+    fun `all capability first nibbles distinguish quarantined prefixes from publishable chunks`() {
+        for (nibble in "0123456789abcdef") {
+            val syntheticCapability = "$nibble" + "0".repeat(63)
+            fun stream() = AcpProviderResponseStream(
+                AcpProviderTransportBounds(maximumChunkBytes = 256, maximumQueuedChunks = 1),
+                listOf(TEST_TOKEN.toByteArray(), "fixture_account".toByteArray(), syntheticCapability.toByteArray()),
+                maximumRemainingOutputTokens = 5,
+            )
+            for (publishable in listOf(false, true)) {
+                val parser = stream()
+                val event = delta(if (publishable) "safe candidate!" else "safe candidate")
+                val held = !publishable && nibble == 'e'
+                val firstRelease = parser.accept(event)
+                if (held) assertTrue(firstRelease.isEmpty()) else assertContentEquals(event, firstRelease.single())
+                val disproof = delta("!")
+                val afterDisproof = parser.accept(disproof)
+                if (held) {
+                    assertEquals(2, afterDisproof.size)
+                    assertContentEquals(event, afterDisproof[0])
+                    assertContentEquals(disproof, afterDisproof[1])
+                } else assertContentEquals(disproof, afterDisproof.single())
+                assertTrue(parser.accept(completed(1)).isEmpty())
+                parser.finish()
+                assertEquals(1, parser.drainFinished().size)
+            }
+            val refusing = stream()
+            assertTrue(refusing.accept(delta(syntheticCapability.take(32))).isEmpty())
+            assertEquals(AcpProviderTerminalKind.SECRET_EXPOSURE,
+                assertFailsWith<AcpProviderStreamFailure> { refusing.accept(delta(syntheticCapability.drop(32))) }.kind)
+        }
     }
 
     @Test
