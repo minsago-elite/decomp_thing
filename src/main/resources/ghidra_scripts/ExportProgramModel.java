@@ -910,7 +910,13 @@ public class ExportProgramModel extends GhidraScript {
         return value != null && value.getAddress().isMemoryAddress() && value.getAddress().equals(target);
     }
 
-    // Width comes only from an exact LOAD/STORE pointer or COPY memory varnode.
+    // Finite direct-value read policy: binary floating add/multiply consume both inputs.
+    // Other arithmetic/control-flow operations remain unsupported until separately reviewed.
+    private boolean supportsDirectValueRead(int opcode) {
+        return opcode == PcodeOp.FLOAT_ADD || opcode == PcodeOp.FLOAT_MULT;
+    }
+
+    // Width comes only from an exact LOAD/STORE pointer or a supported direct RAM value.
     // Control-flow addresses, unsupported operations, dynamic pointers and multiple associations stay unknown.
     private int[] referenceWidth(Instruction instruction, Reference reference) {
         int width = 0, basis = 0, matches = 0;
@@ -930,6 +936,13 @@ public class ExportProgramModel extends GhidraScript {
                 if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
                 if (referencesMemory(output, target)) { matches++; width = output.getSize(); basis = 4; }
                 if (input.getSize() != output.getSize()) return new int[] {0, 0};
+            } else if (supportsDirectValueRead(opcode) && operation.getNumInputs() == 2 && operation.getOutput() != null) {
+                Varnode output = operation.getOutput();
+                if (referencesMemory(output, target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) {
+                    if (input.getSize() != output.getSize()) return new int[] {0, 0};
+                    if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                }
             } else {
                 if (referencesMemory(operation.getOutput(), target)) return new int[] {0, 0};
                 for (Varnode input : operation.getInputs()) if (referencesMemory(input, target)) return new int[] {0, 0};

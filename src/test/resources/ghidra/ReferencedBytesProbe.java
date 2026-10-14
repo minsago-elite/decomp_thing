@@ -213,6 +213,31 @@ public class ReferencedBytesProbe {
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"conflicting direct widths/origins stay unknown");
         ops[0]=new PcodeOp[]{new PcodeOp(target,5,PcodeOp.INT_ADD,new Varnode[]{new Varnode(target,8),pointer},new Varnode(unique.getAddress(7),8))};
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"unsupported direct operation stays unknown");
+        AddressSpace arithmeticOtherRam = new GenericAddressSpace("arithmeticOtherRam",64,AddressSpace.TYPE_RAM,7);
+        for (int opcode : new int[]{PcodeOp.FLOAT_ADD,PcodeOp.FLOAT_MULT}) {
+            Varnode register = new Varnode(unique.getAddress(10),8);
+            PcodeOp arithmetic = new PcodeOp(target,6,opcode,new Varnode[]{register,new Varnode(target,8)},register);
+            ops[0]=new PcodeOp[]{arithmetic};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{8,3}),"finite floating arithmetic direct read");
+            ops[0]=new PcodeOp[]{new PcodeOp(target,7,opcode,new Varnode[]{new Varnode(target,8),register},register)};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{8,3}),"either semantic value input is a read");
+            for (Address different : new Address[]{target.add(1),arithmeticOtherRam.getAddress(target.getOffset()),constant.getAddress(target.getOffset())}) {
+                ops[0]=new PcodeOp[]{new PcodeOp(target,8,opcode,new Varnode[]{register,new Varnode(different,8)},register)};
+                check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"floating input must match exact address and RAM space");
+            }
+            ops[0]=new PcodeOp[]{new PcodeOp(target,9,opcode,new Varnode[]{register,new Varnode(target,4)},register)};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"floating width mismatch stays unknown");
+            ops[0]=new PcodeOp[]{new PcodeOp(target,10,opcode,new Varnode[]{new Varnode(target,8),new Varnode(target,8)},register)};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"multiple floating associations stay unknown");
+            ops[0]=new PcodeOp[]{new PcodeOp(target,11,opcode,new Varnode[]{register,new Varnode(target,8)},new Varnode(target,8))};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"floating read write alias stays unknown");
+            ops[0]=new PcodeOp[]{arithmetic,directRead};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"multiple operation associations stay unknown");
+        }
+        for (int opcode : new int[]{PcodeOp.FLOAT_SUB,PcodeOp.FLOAT_DIV,PcodeOp.INT_MULT,PcodeOp.BRANCH,PcodeOp.CALL}) {
+            ops[0]=new PcodeOp[]{new PcodeOp(target,12,opcode,new Varnode[]{new Varnode(target,8),pointer},new Varnode(unique.getAddress(11),8))};
+            check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"unreviewed arithmetic/control flow stays unknown");
+        }
         ops[0]=new PcodeOp[]{store};
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{4,2}),"STORE width");
         ops[0]=new PcodeOp[]{load,store};

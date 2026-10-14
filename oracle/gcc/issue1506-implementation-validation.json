@@ -1,117 +1,105 @@
 {
   "issue": 1506,
-  "status": "offline consumer migration verified; independent review and hosted qualification pending",
-  "parentGeneration": "8da009f6305c4c89931e47accd589f5d6a23c01c",
-  "scope": "exporter12 callers and Python profile dispatch; schema3 scorer/repair/archival admission; recovery population schema registration; strict duplicate-key parsing and preallocation depth32 admission; lexical decoded-key duplicate rejection in all closed evidence frames before value scanning; root.globals and global.byteEvidence decoded duplicate boundary rejection",
+  "status": "finite direct-RAM arithmetic read correction verified on authored bundled fixtures only; independent review and original replay pending",
+  "parentGeneration": "42efc8c5c55999ee27228fd7f676411b53e43449",
+  "scope": "FLOAT_ADD/FLOAT_MULT direct memory value-input association, authored controls, current exporter12 identity bindings and policy documentation",
   "files": {
-    "oracle/function_recovery.py": "35324293e033526e08f45d276ae94106fa81b0782064a5cc9b708238ddcbf334",
-    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "06aea1f695ba41b9e3c9ef162dde5e405100ba14e67d9b1fde207d411746947a",
-    "oracle/gcc/16.2.0/compiler-engines.json": "d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732",
-    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "9810f32c57f8d62081208ff831664f29b38ab1733e1bd8340ad3b6fbce07b19b",
-    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4",
-    "oracle/gcc/compiler_engines.py": "5c58ba3f72a0e8bc7585b334f53243eca1d79557d9dc1ec6615560df6b65e4b2",
-    "oracle/gcc/historical/issue1506-initial-implementation-validation.json": "df324e6f5bd654d2c41e4b3961b1abff24b61c7dc954d852b601db3c5becac85",
-    "oracle/kotlin-schema-inventory-v1.json": "f4bf9ff95ffaf7e6c810fa6511f348cb8b086a280f17c68d86ad965a570e2a70",
-    "oracle/referenced_data_bytes.py": "eabc557ac3e177d3465b0e26bce1ef6cbf629f29ae075758dbdac5bb81b7e00b",
-    "oracle/unassessed-recovery-population.schema.json": "48f6d9772150f949b316e4243b3b28bf57da03bec6947ed6268aa0425c954644",
-    "scripts/validate-archival-docker.sh": "3844a75e5efbfd74546b1c45b960522b1815304e5b307a5b17ba7065af4ab70a",
-    "src/main/kotlin/decompengine/project/GeneratedCRepairProfile.kt": "6eb40065e916e57520eb0090158cd63c4cf520ca4650e4221a34072e3739f763",
-    "src/main/kotlin/decompengine/project/ReferencedByteEvidenceAdmission.kt": "76d70bd05f00ca86bcea5dfb0e9e82b8edf272d9c49f5a88c8c9ec7bb835296c",
-    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "4546507e7d20a6eb1ac766edcfc7d8041b4f2a294e35232902f8bda1e667512b",
-    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliCommandTest.kt": "82f874203139895bffbe80b607923e31a9af92306151d0a4aa6476bd08775350",
-    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilderTest.kt": "8f8b2c30331d58c4501282a3cee22d1ab6e3f9a6b3e184559c1d3f56cb2bcc19",
-    "src/test/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinatorTest.kt": "83876183d4b141c1a563470d14298cc11b28e086379a01b2184ebd2cc5199df9",
-    "src/test/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorkerTest.kt": "38af2a6c5ddab5b4c94b22ef0e80c12ca1bf5fcf5f0bc3d5af8e2893a4c8a4ee",
-    "src/test/kotlin/decompengine/project/ProfiledGeneratedCRepairIndexTest.kt": "ee21bd4e36f9cbfe0436a56f37a842d66dc273412092e9059ab012b3bed65ff2",
-    "src/test/kotlin/decompengine/project/ReferencedByteEvidenceAdmissionTest.kt": "d0e141393e27bf5794cd322ce152f85d18b0b360410d60d5a9793f8a9bea4ab1",
-    "tests/oracle/test_gcc_compiler_engines.py": "b67ffa417a3dd3098f10030531a1cf822df882f2423de0d9c32bf5706985697c",
-    "tests/oracle/test_gcc_function_recovery.py": "bd250f8519646f8213b75ca45c8ce7b39ff28a32bb4c9bdbdcaeccc64016989f",
-    "tests/oracle/test_referenced_data_bytes.py": "c69f49ed1e9b17648b9d05fcdc9ae09637b540b66d176782793324a13f59eb86"
+    "docs/referenced-data-byte-evidence.md": "38feedaa8f4c27d9a22080f5ca5e702fa9a139820dc87d963a0e8a1eaf2d2af8",
+    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f",
+    "oracle/gcc/historical/issue1506-migration005-validation.json": "a04e062d58073329b448c51c0ee1f032415b2d3b1406acb007c7ebb8cf665541",
+    "src/main/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfile.kt": "139eb9b2f90d44b66391630b8045165f4d7ba9568fba849ba4a36e30cdb67204",
+    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "6874e17183348605cd23927e2ad993c402ba0ebd32caa9a1010058abc3fff79e",
+    "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfileTest.kt": "67ce362d7782fd5ffd222d4d251ed2eea3b81fd3f983fc041ce6f6d076d834a3",
+    "src/test/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfileTest.kt": "fc0ca9fa41a0f51191dcc04732c0f619b2f62e49470085d59fa171326ec4e3f4",
+    "src/test/kotlin/decompengine/project/GhidraReferencedBytesExporterTest.kt": "eec102cb26321316fbd5d352be2365c69a0102498f1122b59a07498976a9083e",
+    "src/test/resources/ghidra/ControlledByteListingProbe.java": "514c46474ed7a0f948ede56e5dfa3482250999a4a295db19ca94b8ff71ad8e24",
+    "src/test/resources/ghidra/ReferencedBytesProbe.java": "2d5257f17cb9cbff6b4582c1cc8f56f4abbfd2384af0d32fc00e881a6d4e6ac5"
   },
   "historicalReceipt": {
-    "path": "oracle/gcc/historical/issue1506-initial-implementation-validation.json",
-    "sha256": "df324e6f5bd654d2c41e4b3961b1abff24b61c7dc954d852b601db3c5becac85",
-    "meaning": "Exact initial receipt bytes retained without relabeling its old tests or identities. Its original current-path state belongs to historical commit8da009f6 and freeze013; it does not describe this migration."
+    "path": "oracle/gcc/historical/issue1506-migration005-validation.json",
+    "sha256": "a04e062d58073329b448c51c0ee1f032415b2d3b1406acb007c7ebb8cf665541",
+    "meaning": "Exact previous migration005 receipt at committed generation42efc8c5 retained unchanged. Old identities/tests are historical, not retrofitted."
+  },
+  "diagnosisReferences": {
+    "root .omo/evidence/issue1517-original-retained-db-diagnosis-sol.md": "76dd3aad5d8db677f52f74f8eb90ac6cdea1f5ff3c2952eb02043b04917b10fd",
+    "root build/acp-decomp-effectiveness/callable-next-1517-retained-db-diagnosis/output/retained-db-probe.txt": "aa7656d899b5a1f575c9709106d2d4a1282850adf6cc06ee89c27e265344389a",
+    "scope": "Read-only diagnosis consumed for correction; no fresh original analysis/export/runtime/model execution by this source owner."
+  },
+  "policy": {
+    "newDirectReadOpcodes": [
+      "FLOAT_ADD",
+      "FLOAT_MULT"
+    ],
+    "guards": "Binary floating value-input reads, nonnull output, equal input/output sizes; exact memory address/space and exactly one whole-instruction association. Target output alias, multiple associations, size conflicts, dynamic pointers and unreviewed opcodes remain unknown. Existing LOAD/STORE/COPY retained.",
+    "wire": "schema3/exporter12 unchanged; existing pcode_direct_read covers semantic direct reads. No field/enum/object/type/extent/initializer authority added; exact source/profile digests distinguish implementation."
   },
   "verification": {
-    "python": {
-      "tests": 42,
-      "failures": 0,
-      "skipped": 0,
-      "command": "PYTHONPATH=$PWD python3 -B build/issue1506-migration/run-python-contained.py",
-      "scope": "Three full affected classes; checked public-key signature and tiny authored ELF fixture, no target program runtime/model/provider call. Harness bounds subprocesses30s, disables gpg autostart and lookup, redirects all home/tmp/XDG under owned build directory. Lexical depth32/exact-bound and aggregate-before-large-payload controls included. Actual archival admission prefix rejects duplicate byte fields via strict decoder before closed validation; invalid root is rejected before decoding. All four closed evidence object roles reject repeated decoded keys lexically before scanning a malformed1MB value; escaped duplicate hex is covered. General duplicate-aware decoder hook retained and separately checked. Containing root.globals/global.byteEvidence keys also reject plain and escaped duplicates before repeated-array/object values; one-key boundary vocabularies keep sets bounded."
-    },
-    "kotlin": {
-      "tests": 53,
-      "failures": 0,
-      "skipped": 2,
-      "command": "GRADLE_USER_HOME=$PWD/build/gradle-home TMPDIR=$PWD/build/issue1506-migration/tmp npm_config_cache=$PWD/build/issue1506-corrections/npm-cache ./gradlew --offline --no-daemon -I build/issue1506-corrections/focused.init.gradle -PfrontendNodeHome=/home/june/decomp_thing/build/d12-acp-node-pin/node verifyReconstructionNeutrality test --tests decompengine.oracle.gcc.GccBundledOperationCoordinatorTest --tests decompengine.oracle.gcc.GccBundledPlannerWorkerTest --tests decompengine.oracle.gcc.GccBundledCliCommandTest --tests decompengine.oracle.gcc.GccBundledCliIntentBuilderTest --tests decompengine.project.ProfiledGeneratedCRepairIndexTest --tests decompengine.oracle.core.OracleSchemasTest -Djava.io.tmpdir=$PWD/build/issue1506-migration/tmp --tests decompengine.project.ReferencedByteEvidenceAdmissionTest --tests decompengine.project.CanonicalProgramModelStreamingTest",
-      "scope": "Full seven affected classes; two preexisting opt-in skips. Repair shares canonical bounded64KiB/depth32/duplicate-key/eager-budget parser; tests reject duplicate byte fields and window33 before malformed1MB suffix. Depth32positive/33negative, schema1/2/3 and registered inventory verified."
-    },
-    "archival": "Shell syntax and embedded Python compilation pass; actual script admission prefix tested with positive schema3 and negative schema2/malformed-byte fixtures; Docker not run. Final strict duplicate-key negative passed using actual script prefix; shell syntax checked again.",
-    "diffCheck": "git diff --check passed before receipt creation; repeated after freeze",
-    "canonicalStreaming": {
-      "tests": 9,
-      "failures": 0,
-      "skipped": 0,
-      "command": "Same offline Gradle prefix as kotlin; test --tests decompengine.oracle.structural.CanonicalProgramModelStreamingTest",
-      "scope": "Correct full class executed separately. The earlier project-package selector matched no tests and contributes no coverage."
-    }
+    "command": "GRADLE_USER_HOME=$PWD/build/gradle-home TMPDIR=$PWD/build/issue1506-direct-arithmetic/tmp npm_config_cache=$PWD/build/issue1506-corrections/npm-cache ./gradlew --offline --no-daemon -I build/issue1506-corrections/focused.init.gradle -PfrontendNodeHome=/home/june/decomp_thing/build/d12-acp-node-pin/node verifyReconstructionNeutrality test --tests decompengine.project.GhidraReferencedBytesExporterTest --tests decompengine.oracle.gcc.GccCompilerEngineProfileTest --tests decompengine.oracle.gcc.GccDriverStructuralProfileTest --tests decompengine.project.GeneratedCByteEvidencePromptTest --tests decompengine.project.ReferencedByteEvidenceAdmissionTest -Djava.io.tmpdir=$PWD/build/issue1506-direct-arithmetic/tmp",
+    "tests": 34,
+    "failures": 0,
+    "skipped": 0,
+    "scope": "Five full focused classes: authored bundled publicAPI/ProgramDB1, current and historical profile identity19, F2prompt5, F1admission9. Prior005 migration code unchanged; no claim all005 classes reran.",
+    "authoredProgramDB": "Actual SLEIGH MOVSD/COPY, ADDSD/FLOAT_ADD and MULSD/FLOAT_MULT, distinct authored targets and deliberate one-byte00h listings. Export retains initializer and all eight leading-zero bytes. Separate from natural original listing observations.",
+    "negativeControls": "Both value slots; mismatched target offset/RAM space/constant space; size conflict; duplicate input/operation associations; read/write alias; unreviewed FLOAT_SUB/FLOAT_DIV/INT_MULT/BRANCH/CALL. Existing LOAD/STORE/COPY/dynamic/unsupported and bound controls retained.",
+    "processBounds": "Each javac/probe60s plus5s finalwait. Fixture JVM/javac home/tmp/preferences/JNA repository-local; perfdata disabled. No original input/native target program executed.",
+    "earlierFailure": "focused001 javac rejected duplicate local test-variable name before fixture execution; renamed; focused002 passed. Failure retained, not qualification.",
+    "docs": "UTF8/LF/header/fence syntax and whitespace checks pass; finite policy and authored/natural distinction documented."
   },
   "evidence": {
-    "build/issue1506-migration/kotlin-final-009.log": "c156fd4e95aac6cd06d00692ae41331f39543372e482c2b9655473927844271e",
-    "build/issue1506-migration/canonical-final-011.log": "9399d22c984858d58d853c7f8bfd9a9fdee76200a0c91fa6a0c6f0839e65e804",
-    "build/issue1506-migration/run-python-contained.py": "3922cd7aaa1d9c5bc984cbdb0c55f08fb64c5fa4717515902f78f915831366b4",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.oracle.core.OracleSchemasTest.xml": "76c405ef0f989be2fdb25e151dcdf859ffa36884431fcb51b938a09853ce4f21",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.oracle.gcc.GccBundledCliCommandTest.xml": "83725bc2d981d0c7bc1b7bc1d349c35cead5ad445f01536b5cac011a131ecdc4",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.oracle.gcc.GccBundledCliIntentBuilderTest.xml": "3773c46bc4e4f4e38b383d87b7eba397937f06c29c6ff23bdcd3f53555612835",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.oracle.gcc.GccBundledOperationCoordinatorTest.xml": "bbb54bc26720492aa138a30cff945e4053308a540f9b339b7f86dd8b275b7bd4",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.oracle.gcc.GccBundledPlannerWorkerTest.xml": "3f092ca5bfbf57ab1b3863e533dfa8fb0ff7bf78153741879112a54c6d2acb63",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.project.ProfiledGeneratedCRepairIndexTest.xml": "604129d2588108888df8bc82477564832906a8e57535e3c0532dbfea111f9d41",
-    "build/issue1506-migration/kotlin-final-009-results/TEST-decompengine.project.ReferencedByteEvidenceAdmissionTest.xml": "792eadb2efbedf6aba8682a2a56fa40d34cb85a87530005f81bc309be7c7ee4f",
-    "build/issue1506-migration/canonical-final-011-results/TEST-decompengine.oracle.structural.CanonicalProgramModelStreamingTest.xml": "1954ba87c09cdc65c97e84728c9e893742f0d256673e1e5dbd18d965e354bd8a",
-    "build/issue1506-migration/python-final-017.log": "87fd9123e6a5d6656dc102be20e2f84076433e398ef942840e46e9f27d0e1f21",
-    "build/issue1506-migration/duplicate-fallback-018.log": "95b003da0cb2b808e489e1a4477acf74c3ab8fca7bcb2e73ed4c5fa7a491dc64"
+    "build/issue1506-direct-arithmetic/focused-001.log": "d884314e4ccab1106d3a436d21431c6090a341379b939115371ec9e4f6109f9c",
+    "build/issue1506-direct-arithmetic/focused-002.log": "fea98ed44ed16db9b1f04d0d235527b0887784c9276d795af94a25a12e65f75a",
+    "build/issue1506-direct-arithmetic/doc-check-003.log": "f8c080d0e025a8f73913ceffed7af6b49f8dd39a8d5e6e9e8dabda98976d3d0b",
+    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.oracle.gcc.GccCompilerEngineProfileTest.xml": "c83004366d31f26b5779223a044ff440104d972aba8b45d99bc21f34e6512aa1",
+    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.oracle.gcc.GccDriverStructuralProfileTest.xml": "bfbf2f5258de0d8f44e4ebd6f45ed61c4f7329df22eeadf48d9ca2fea3207c5c",
+    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.GeneratedCByteEvidencePromptTest.xml": "b8617f387b826c2d650f05ee5ab7b21c1ac7e9e1c68ca1cbd08135f0e772cbc5",
+    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.GhidraReferencedBytesExporterTest.xml": "233bc36e1bf2fb7f5468b49393556716486a8f8b52d064fa8c91cba616722993",
+    "build/issue1506-direct-arithmetic/focused-002-results/TEST-decompengine.project.ReferencedByteEvidenceAdmissionTest.xml": "183aa1973837806c864453fc3657279e26128212c49bd19630227c945c38f444",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/controlled-listing.log": "9ec923ddb48194517dce0490ca0b7a3f5f0d7a7a97fa299750bbc50fa8852398",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/probe.log": "629f43830a4563a7cd52f99fddc811cde9bac203f1fafc8fa0bf57cabfa11a8d",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/compile.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ControlledByteListingProbe.class": "829ee4bcc8496aa0aa55b30196f5560cb54ac6895314c626a6166b5744e903ba",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$BoundFragment.class": "a0b4d1cddae6d021ba8a84c321b40253bd35579e4bf8e4ca25a9640e88a671f7",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$BoundedOutput.class": "ea9dd440ce697d472289ca50ac95297102acd9999df17a8fccf977c744064261",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$ByteWindow.class": "7fa040ff20f0c83d70ff27265b62822260697f644c16af15692b5be12ca75dff",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$FunctionExport.class": "06b64de859da450da9ba0f1a05c8f1cd102c1de6257df1bde2d83912a3f9f9e5",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$GlobalEvidence.class": "99bc799f0d594242fa0770eee01886c23b99988936588bbebe98cac83a10b6c6",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningBatchEvidence.class": "a71a4503fc626f8a39d022d7531bce8d951d7f721d3497d06200780ef0b57b75",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningBatchValidation.class": "26175cc873d21c760620b4ea437265d18ee4d613f75fc3f1e79393961485e2b6",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningEvidenceCursor.class": "0625f25b47636f0bef2183bab04ec3b08778003a2d1c7e639d3211974af3029f",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningEvidenceFragmentValidation.class": "5d3cefd8f518d753b6ec7279259939eb66365dac2cf1479240c994067a1d4ed4",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningFunctionFragmentValidation.class": "9102c0026b8f64806d054d6d6b8604422cbc93f962bab09956195dae8ecbfa0b",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningIntegrityException.class": "ed0aa278019b2d72d7bccee7a3cd4eddda18f05df4caebca9dd3f738cc8b03d0",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$PlanningSemanticState.class": "5f121fbc1247ad199ecd99b1ea3d40ac33ac1f2a3edf2028fdda69f041498a4a",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$RawLine.class": "2eace6d709dca48d827adb77e84d2d5edb280c5aa55308eaf8ed48acd36a5058",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel$TypeEvidence.class": "6f825ddbca7af3dab9ef76c1b5404c2d4458d1680b3e07e52d7b1c372c679ca6",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExportProgramModel.class": "17d3f39a7bc2479b4314cd8eadc04c7f01af226e81dbb7d1d2ee021d096ab236",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$BatchCommitment.class": "28ec6d1ecc98312dc72b2e667a0e2676eae7861055e3d352ccfc88c0a323ed2f",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$Binding.class": "4a61bfaddf80bf6bfcbb9544bd38c254b2c0fb12a6a75c39f99cf62fedfad819",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1$FragmentCommitment.class": "ab4bd01bd0714f2583b367df9cbe601b52c022cf37bfafbbd884c6b64871e090",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ExporterSemanticFingerprintV1.class": "d93ef1080002a3c4c1d05fea126e15991b68e6972e4d295881ddd1b9b1ea486d",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ReferencedBytesProbe$Call.class": "33725d827dc1b03c0f679562409048b76c396110fab3ded7b05ed35a5d4dd87c",
+    "build/referenced-byte-exporter-tests/public-api-16179145167876901237/classes/ReferencedBytesProbe.class": "6422d7a29689f26457ea6f11949d10e1ce1e2d3c24c3f5f556295c204b476b10",
+    "build/issue1506-direct-arithmetic/prepare-source-freeze.py": "dfa61e3cfc7937a2e68054b13a2047b473cc5c332b22a54a575fba1f681af949",
+    "build/issue1506-direct-arithmetic/public-api-classpath.json": "d5cc24b5da55ac4415281a51e715b2d99fcb440b2d67951f2a04a4582a5fe22d"
+  },
+  "unchangedHistoricalProfiles": {
+    "oracle/gcc/16.2.0/compiler-engines.json": "d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732",
+    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4"
   },
   "remainingGates": [
-    "independent review of this exact new source freeze",
-    "Git checkpoint and hosted checks owned by root",
-    "full archival Docker workflow not executed locally",
-    "no issue closure or production/native target qualification"
+    "independent review of exact new freeze",
+    "separate original replay by assigned Ghidra owner after review",
+    "root Git checkpoint and hosted CI/review",
+    "no issueclosure/native/model/ABI/production qualification from authored controls"
   ],
   "authority": {
+    "originalInputExecution": false,
+    "candidateExecution": false,
+    "authOrModelCall": false,
     "oracle": false,
     "abi": false,
-    "modelCall": false,
     "productionQualification": false
   },
-  "identityNote": "This file deliberately omits its own digest and any future commit identity to avoid cycles; the external source freeze and root checkpoint bind this receipt.",
-  "supersededCandidate": {
-    "sourceFreezePath": "build/issue1506-migration/source-freeze-001.json",
-    "sha256": "c2920568987cdae1102afb749b06e8fa124d4b68d65fa5fe56243480693e1496",
-    "status": "superseded before approval; depth and duplicate-key corrections required",
-    "receiptSnapshotPath": "build/issue1506-migration/superseded-c292-current-receipt.json",
-    "receiptSnapshotSha256": "fb275e0b910318d322d5e1ffaa8eae97bb639dbe526a1fe953b448eeaa4486c3"
-  },
-  "additionalSupersededCandidate": {
-    "sourceFreezePath": "build/issue1506-migration/source-freeze-002.json",
-    "sha256": "ccfc13c9648317d53fa891fdcaaf72532312fd0d9c8512017c1ab7124348e9c4",
-    "status": "not approved; coverage statement corrected and archival duplicate-key gap fixed",
-    "receiptSnapshotPath": "build/issue1506-migration/superseded-ccfc-current-receipt.json",
-    "receiptSnapshotSha256": "8e5edac7685a0465259c1a4812f22870a85917ba3cb5fbaf3ef74bf18073af70"
-  },
-  "superseded003": {
-    "sourceFreezePath": "build/issue1506-migration/source-freeze-003.json",
-    "sha256": "6e74b7b4a2f43d35e6adc876a195543d7a4226379deca9b50ed1a55ce9a29134",
-    "status": "not approved; reviewer found duplicate evidence keys allocated before general decoder hook. Freeze004 rejects duplicate decoded keys before scanning values.",
-    "receiptSnapshotPath": "build/issue1506-migration/superseded-6e74-current-receipt.json",
-    "receiptSnapshotSha256": "b4b4542862bc94b3dd1498b09d8dcb1c99c4026026de9d36ff0ec745005d498b"
-  },
-  "superseded004": {
-    "sourceFreezePath": "build/issue1506-migration/source-freeze-004.json",
-    "sha256": "11930e4af9250d2508d1e2e6325fafb6914fe4b3d4f0d09e62343298b493ab9e",
-    "status": "held before review handoff; containing boundary duplicates added after reviewer clarification. Superseded by005; not approved.",
-    "receiptSnapshotPath": "build/issue1506-migration/superseded-1193-current-receipt.json",
-    "receiptSnapshotSha256": "fd48175e4266ce3a4fd628393221189b5e2495c27be97d3ab1784a200667f01b"
-  }
+  "identityNote": "Self digest and future commit identity omitted; external sourcefreeze/root checkpoint bind this receipt."
 }
