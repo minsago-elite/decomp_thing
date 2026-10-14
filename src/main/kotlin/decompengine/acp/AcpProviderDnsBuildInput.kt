@@ -5,6 +5,8 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Collections
+import java.util.TreeMap
+import java.util.TreeSet
 import java.io.PushbackInputStream
 import java.util.zip.CRC32
 import java.util.zip.Inflater
@@ -141,7 +143,7 @@ internal object AcpProviderDnsBuildInputs {
         val layers = manifest.getValue("layers").jsonArray.map { descriptor(it) }
         require(layers.size in 1..LAYERS && diffIds.size == layers.size)
         var compressed = 0L; var expanded = 0L; var entries = 0
-        val namespace = linkedMapOf<String, Member>()
+        val namespace = TreeMap<String, Member>()
         layers.forEachIndexed { layerNumber, layer ->
             progress()
             require(layer.mediaType == TAR || layer.mediaType == GZIP) // Docker, foreign/zstd/PAX extensions unavailable.
@@ -218,9 +220,14 @@ internal object AcpProviderDnsBuildInputs {
                 val tail = ByteArray(BLOCK)
                 while (bounded.read(tail) >= 0) { error("compressed layer has trailing bytes") }
                 require(bounded.count == layer.size && "sha256:" + dnsHex(compressedHash.digest()) == layer.digest)
+                // Keep tar insertion order in additions, with a separate bounded prefix index.
+                val additionPaths = TreeSet<String>()
+                additions.keys.forEach { progress(); additionPaths.add(it) }
                 fun parents(path: String) {
+                    progress()
                     val parts = path.split('/')
                     for (depth in 1 until parts.size) {
+                        progress()
                         val p = parts.take(depth).joinToString("/")
                         val old = namespace[p]
                         require(old == null || old.kind == Kind.DIRECTORY)
@@ -228,23 +235,37 @@ internal object AcpProviderDnsBuildInputs {
                         require(namespace.size <= limits.entries)
                     }
                 }
+                fun removeNamespace(path: String, includeSelf: Boolean) {
+                    progress()
+                    if (includeSelf) namespace.remove(path)
+                    val prefix = if (path.isEmpty()) "" else "$path/"
+                    val iterator = namespace.tailMap(prefix, true).entries.iterator()
+                    while (iterator.hasNext()) {
+                        progress()
+                        if (!iterator.next().key.startsWith(prefix)) break
+                        iterator.remove()
+                    }
+                }
                 // Whiteouts act only on lower layers, independent of their order in this tar.
                 (removals + opaque.filter(String::isNotEmpty)).forEach { parents(it) }
-                removals.forEach { p -> namespace.keys.removeAll { progress(); it == p || it.startsWith("$p/") } }
+                removals.forEach { p -> removeNamespace(p, includeSelf = true) }
                 opaque.forEach { p ->
                     require(p.isEmpty() || namespace[p]?.kind in listOf(null, Kind.DIRECTORY))
-                    namespace.keys.removeAll { progress(); p.isEmpty() || it.startsWith("$p/") }
+                    removeNamespace(p, includeSelf = false)
                     if (p.isNotEmpty() && namespace[p] == null) {
                         namespace[p] = Member(p, Kind.DIRECTORY, 0, 0, 0, 0, null, null, layerNumber, 0, false)
                         require(namespace.size <= limits.entries)
                     }
                 }
                 additions.values.forEach { member ->
-                    require(member.kind == Kind.DIRECTORY || additions.keys.none { it.startsWith(member.path + "/") })
+                    progress()
+                    val prefix = member.path + "/"
+                    require(member.kind == Kind.DIRECTORY || additionPaths.ceiling(prefix)?.startsWith(prefix) != true)
                     parents(member.path)
                     if (member.kind != Kind.DIRECTORY || namespace[member.path]?.kind != Kind.DIRECTORY) {
-                        namespace.keys.removeAll { progress(); it == member.path || it.startsWith(member.path + "/") }
+                        removeNamespace(member.path, includeSelf = true)
                     }
+                    // An explicit directory replaces every metadata field, preserving its children.
                     namespace[member.path] = member
                     require(namespace.size <= limits.entries)
                 }

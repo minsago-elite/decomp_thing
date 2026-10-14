@@ -9,9 +9,10 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class AcpProviderDnsBuildInputTest {
-    private data class Entry(val path: String, val data: ByteArray = byteArrayOf(), val type: Char = '0', val target: String = "")
+    private data class Entry(val path: String, val data: ByteArray = byteArrayOf(), val type: Char = '0', val target: String = "",
+        val mode: Long = if (type == '5') 493L else 420L, val uid: Long = 0, val gid: Long = 0)
     private data class Graph(val index: ByteArray, val blobs: Map<String, ByteArray>, val layers: List<ByteArray>) {
-        fun inspect(limits: AcpProviderDnsBuildInputs.Limits = AcpProviderDnsBuildInputs.Limits()) =
+        fun inspect(limits: AcpProviderDnsBuildInputs.Limits = AcpProviderDnsBuildInputs.Limits(), checkpoint: () -> Unit = {}) =
             AcpProviderDnsBuildInputs.inspectGraph(index, { digest ->
                 object : ByteArrayInputStream(blobs.getValue(digest)) {
                     override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
@@ -19,7 +20,7 @@ class AcpProviderDnsBuildInputTest {
                         return super.read(bytes, offset, minOf(length, 97))
                     }
                 }
-            }, limits)
+            }, limits, checkpoint)
     }
     private fun bytes(value: JsonElement) = value.toString().toByteArray()
     private fun descriptor(value: ByteArray, media: String) = buildJsonObject {
@@ -46,8 +47,8 @@ class AcpProviderDnsBuildInputTest {
             val header = ByteArray(512)
             fun text(at: Int, length: Int, value: String) { val data = value.toByteArray(); require(data.size < length); data.copyInto(header, at) }
             fun octal(at: Int, length: Int, value: Long) = text(at, length, value.toString(8).padStart(length - 1, '0'))
-            text(0, 100, entry.path); octal(100, 8, if (entry.type == '5') 493 else 420)
-            octal(108, 8, 0); octal(116, 8, 0); octal(124, 12, entry.data.size.toLong()); octal(136, 12, 0)
+            text(0, 100, entry.path); octal(100, 8, entry.mode)
+            octal(108, 8, entry.uid); octal(116, 8, entry.gid); octal(124, 12, entry.data.size.toLong()); octal(136, 12, 0)
             (148..155).forEach { header[it] = 32 }; header[156] = entry.type.code.toByte()
             text(157, 100, entry.target); "ustar\u0000".toByteArray().copyInto(header, 257); "00".toByteArray().copyInto(header, 263)
             octal(148, 8, header.sumOf { it.toInt() and 255 }.toLong())
@@ -80,6 +81,85 @@ class AcpProviderDnsBuildInputTest {
         assertEquals(setOf("one", "two", "two/child"), result.members.keys)
         assertEquals(AcpProviderDnsBuildInputs.Kind.REGULAR, result.members.getValue("one").kind)
         assertFails { graph(tar(Entry("same/child", byteArrayOf(1)), Entry("same", byteArrayOf(2)))).inspect() }
+    }
+    @Test fun `explicit upper directory replaces all metadata while preserving lower children`() {
+        val result = graph(tar(Entry("tree", type = '5', mode = 448, uid = 10, gid = 11),
+            Entry("tree/child", byteArrayOf(1))), tar(Entry("tree", type = '5', mode = 488, uid = 12, gid = 13))).inspect()
+        assertEquals(AcpProviderDnsBuildInputs.Member("tree", AcpProviderDnsBuildInputs.Kind.DIRECTORY,
+            488, 12, 13, 0, null, null, 1, 512, true), result.members.getValue("tree"))
+        assertEquals(setOf("tree", "tree/child"), result.members.keys)
+        assertEquals(0, result.members.getValue("tree/child").layer)
+        assertEquals(dnsSha(byteArrayOf(1)), result.members.getValue("tree/child").sha256)
+    }
+    @Test fun `later explicit directory replaces child and opaque synthesized parent metadata`() {
+        val upper = tar(Entry("tree/child", byteArrayOf(1)), Entry("tree", type = '5', mode = 456, uid = 14, gid = 15))
+        for (result in listOf(graph(upper).inspect(), graph(tar(Entry("tree/.wh..wh..opq")), upper).inspect())) {
+            val layer = result.layers.lastIndex
+            assertEquals(AcpProviderDnsBuildInputs.Member("tree", AcpProviderDnsBuildInputs.Kind.DIRECTORY,
+                456, 14, 15, 0, null, null, layer, 1536, true), result.members.getValue("tree"))
+            assertEquals(setOf("tree", "tree/child"), result.members.keys)
+            assertEquals(layer, result.members.getValue("tree/child").layer)
+        }
+    }
+    @Test fun `prefix ranges preserve siblings and upper additions across ordinary and root opaque whiteouts`() {
+        val lower = tar(Entry("a", type = '5'), Entry("a/old", byteArrayOf(1)), Entry("a-sibling", byteArrayOf(2)),
+            Entry("other", type = '5'), Entry("other/old", byteArrayOf(3)))
+        val result = graph(lower, tar(Entry("a/new", byteArrayOf(4)), Entry(".wh.a"),
+            Entry("other/new", byteArrayOf(5)), Entry("other/.wh..wh..opq"), Entry("a", type = '5', mode = 448))).inspect()
+        assertEquals(setOf("a", "a/new", "a-sibling", "other", "other/new"), result.members.keys)
+        assertEquals(1, result.members.getValue("a").layer)
+        assertEquals(0, result.members.getValue("other").layer)
+        assertEquals(dnsSha(byteArrayOf(2)), result.members.getValue("a-sibling").sha256)
+        val rootOpaque = graph(lower, tar(Entry("fresh", byteArrayOf(6)), Entry(".wh..wh..opq"))).inspect()
+        assertEquals(setOf("fresh"), rootOpaque.members.keys)
+    }
+    @Test fun `non directory parent conflicts refuse both tar orders without rejecting lexical siblings`() {
+        for (kind in listOf('0', '1', '2')) {
+            val parent = Entry("same", type = kind, target = if (kind == '0') "" else "target")
+            val child = Entry("same/child", byteArrayOf(1))
+            assertFails { graph(tar(parent, child)).inspect() }
+            assertFails { graph(tar(child, parent)).inspect() }
+            assertEquals(setOf("same", "same-sibling"), graph(tar(parent, Entry("same-sibling"))).inspect().members.keys)
+        }
+    }
+    @Test fun `maximum admitted sibling layer merges within a linear checkpoint budget`() {
+        val count = AcpProviderDnsBuildInputs.ENTRIES
+        val raw = tar(*Array(count) { Entry("f" + it.toString().padStart(5, '0')) })
+        var checks = 0
+        val result = graph(raw).inspect(checkpoint = { check(++checks <= 16 * count + 4096) })
+        assertEquals(count, result.decodedEntries)
+        assertEquals(count, result.members.size)
+        assertEquals(512L, result.members.getValue("f00000").contentOffset)
+        assertEquals(count * 512L, result.members.getValue("f65535").contentOffset)
+        assertEquals(dnsSha(byteArrayOf()), result.members.getValue("f65535").sha256)
+    }
+    @Test fun `many ordinary whiteouts remove only their indexed lower objects within the unchanged entry ceiling`() {
+        val count = AcpProviderDnsBuildInputs.ENTRIES / 2
+        val lower = tar(*Array(count) { Entry("f" + it.toString().padStart(5, '0')) })
+        val upper = tar(*Array(count) { Entry(".wh.f" + it.toString().padStart(5, '0')) })
+        var checks = 0
+        val result = graph(lower, upper).inspect(checkpoint = { check(++checks <= 16 * count * 2 + 4096) })
+        assertEquals(AcpProviderDnsBuildInputs.ENTRIES, result.decodedEntries)
+        assertTrue(result.members.isEmpty())
+    }
+    @Test fun `merge index checkpoints preserve cancellation and close every opened blob`() {
+        val raw = tar(*Array(64) { Entry("f$it") }); val g = graph(raw)
+        val layerDigest = "sha256:" + dnsSha(raw)
+        var opened = 0; var closed = 0; var layerEnded = false
+        assertFailsWith<IllegalStateException> {
+            AcpProviderDnsBuildInputs.inspectGraph(g.index, { digest ->
+                opened++
+                object : ByteArrayInputStream(g.blobs.getValue(digest)) {
+                    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                        val n = super.read(bytes, offset, length)
+                        if (digest == layerDigest && n < 0) layerEnded = true
+                        return n
+                    }
+                    override fun close() { closed++; super.close() }
+                }
+            }, checkpoint = { if (layerEnded) throw IllegalStateException("inert merge cancellation") })
+        }
+        assertTrue(layerEnded); assertEquals(3, opened); assertEquals(opened, closed)
     }
     @Test fun `links remain recorded objects and cannot supply regular payload or parent traversal`() {
         val result = graph(tar(Entry("real", byteArrayOf(1)), Entry("symbolic", type = '2', target = "/real"), Entry("hard", type = '1', target = "real"))).inspect()
