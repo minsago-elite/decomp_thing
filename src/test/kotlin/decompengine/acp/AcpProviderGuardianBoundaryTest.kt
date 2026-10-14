@@ -643,7 +643,11 @@ class AcpProviderGuardianBoundaryTest {
         val log = target.resolveSibling("fixture-compile.log")
         val process = ProcessBuilder(compiler.toString(), "-static", "-O2", "-Wall", "-Wextra", "-Werror",
             "-Wl,--build-id=none", fixtureSource().toString(), "-o", target.toString())
-            .redirectErrorStream(true).redirectOutput(log.toFile()).also { it.environment().clear(); it.environment()["TMPDIR"] = target.parent.toString() }.start()
+            .redirectErrorStream(true).redirectOutput(log.toFile()).also {
+                it.environment().clear()
+                it.environment()["PATH"] = "/usr/bin:/bin"
+                it.environment()["TMPDIR"] = target.parent.toString()
+            }.start()
         try {
             assertTrue(process.waitFor(20, TimeUnit.SECONDS), "static guardian fixture compilation timed out")
             assertEquals(0, process.exitValue(), Files.readString(log))

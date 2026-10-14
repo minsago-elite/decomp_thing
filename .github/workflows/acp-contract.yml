@@ -40,7 +40,7 @@ jobs:
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Verify bounded provider guardian fixtures
-        run: python3 -B scripts/verify-acp-provider-guardian.py
+        run: python3 -B scripts/verify-acp-provider-guardian.py --include-v2
       - name: Prepare finite ACP quota fixture
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Qualify every required ACP and shared-agent suite
