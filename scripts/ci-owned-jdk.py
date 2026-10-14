@@ -89,16 +89,33 @@ def socket_scratch(repo):
         os.close(fd)
 
 
+def symlink_refusal(reason, key, target):
+    # Trusted selected-JDK metadata only; escape control characters and cap the complete diagnostic.
+    def detail(value):
+        text = json.dumps(value[:256], ensure_ascii=True)[1:-1]
+        prefix = text[:256]
+        truncated = len(text) > 256 or len(value) > 256
+        return prefix + ('...' if truncated else ''), truncated
+    path_detail, path_truncated = detail(key)
+    target_detail, target_truncated = detail(target)
+    message = reason + ' path=' + path_detail + ' target=' + target_detail
+    if path_truncated or target_truncated:
+        message += ' pathSha256=' + hashlib.sha256(os.fsencode(key)).hexdigest() + ' targetSha256=' + hashlib.sha256(os.fsencode(target)).hexdigest()
+    return ValueError(message)
+
+
 def validate_link_graph(entries):
     """Resolve only the closed nofollow inventory, never ambient filesystem paths."""
     work = 0
     for key, entry in entries.items():
         if entry['kind'] != 'link':
             continue
-        require(entry['target'] and not entry['target'].startswith('/'), 'JDK absolute symlink refused')
+        if not entry['target'] or entry['target'].startswith('/'):
+            raise symlink_refusal('JDK absolute symlink refused', key, entry['target'])
         stack = key.split('/')[:-1]
         pending = deque(entry['target'].split('/'))
         followed = 1
+        selected_key, selected_target = key, entry['target']
         while pending:
             work += 1
             require(work <= MAX_ENTRIES * MAX_DEPTH, 'JDK symlink work bound')
@@ -108,7 +125,8 @@ def validate_link_graph(entries):
             if component in ('', '.'):
                 continue
             if component == '..':
-                require(stack, 'JDK symlink escapes root')
+                if not stack:
+                    raise symlink_refusal('JDK symlink escapes root', selected_key, selected_target)
                 stack.pop()
                 continue
             candidate = '/'.join([*stack, component])
@@ -118,7 +136,9 @@ def validate_link_graph(entries):
                 followed += 1
                 require(followed <= MAX_DEPTH, 'JDK symlink chain/cycle bound')
                 link = target['target']
-                require(link and not link.startswith('/'), 'JDK absolute symlink refused')
+                if not link or link.startswith('/'):
+                    raise symlink_refusal('JDK absolute symlink refused', candidate, link)
+                selected_key, selected_target = candidate, link
                 pending.extendleft(reversed(link.split('/')))
             else:
                 stack.append(component)
@@ -145,7 +165,8 @@ def inventory_links(root):
             if kind == 'link':
                 link = os.readlink(name,dir_fd=fd)
                 require(len(os.fsencode(link)) <= 4096, 'JDK symlink bound')
-                require(link and not link.startswith('/'), 'JDK absolute symlink refused')
+                if not link or link.startswith('/'):
+                    raise symlink_refusal('JDK absolute symlink refused', key, link)
                 entry['target'] = link
             elif kind == 'directory':
                 child = os.open(name,os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW,dir_fd=fd)
@@ -290,6 +311,19 @@ def provision(repo: Path, source: Path):
                 os.close(bin_fd)
         finally:
             os.close(root)
+        clone_inventory_fd = secure_directory(clone)
+        try:
+            clone_entries = inventory_links(clone_inventory_fd)
+            clone_root = identity(os.fstat(clone_inventory_fd))
+        finally:
+            os.close(clone_inventory_fd)
+        require(set(clone_entries) == set(records), 'owned JDK inventory differs from source')
+        for key, entry in clone_entries.items():
+            require(entry['kind'] == records[key]['kind'], 'owned JDK kind differs from source')
+            if entry['kind'] == 'file':
+                entry['sha256'] = records[key]['sha256']
+            elif entry['kind'] == 'link':
+                require(entry['target'] == records[key]['target'], 'owned JDK link differs from source')
     finally:
         os.close(source_fd); os.close(target_fd)
     require(records.get('release', {}).get('kind') == 'file', 'JDK release must be regular')
@@ -304,7 +338,7 @@ def provision(repo: Path, source: Path):
     receipt = {'schema': 1, 'source': str(source), 'home': str(clone), 'container': str(container), 'sourceRoot': source_root,
                'uid': os.geteuid(), 'callerUid': creds['Uid'], 'callerGid': creds['Gid'], 'launcherIdentity': identity(after),
                'launcherSha256': records['bin/java']['sha256'], 'releaseSha256': hashlib.sha256(release_bytes).hexdigest(),
-               'vendor': re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M).group(1) if re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M) else 'UNAVAILABLE', 'entries': count, 'bytes': total, 'sourceEntries': records}
+               'vendor': re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M).group(1) if re.search(r'^IMPLEMENTOR="([^"\n]{1,128})"$', release, re.M) else 'UNAVAILABLE', 'entries': count, 'bytes': total, 'sourceEntries': records, 'cloneRoot': clone_root, 'cloneEntries': clone_entries}
     write_json(container / 'provision.json', receipt)
     properties = {'home': str(clone), 'java': str(clone / 'bin/java'), 'dev': str(after.st_dev), 'ino': str(after.st_ino),
                   'uid': str(after.st_uid), 'mode': '755', 'sha256': receipt['launcherSha256'],
@@ -370,6 +404,69 @@ def verify_source(receipt):
             os.close(bin_fd)
     finally:
         os.close(clone)
+    verify_clone(receipt)
+
+
+def verify_clone(receipt):
+    """Exact private-clone inventory and bytes, independently of the unchanged selected source."""
+    entries = receipt['cloneEntries']
+    require(0 < len(entries) <= MAX_ENTRIES, 'owned JDK inventory bound')
+    validate_link_graph(entries)
+    home = Path(receipt['home'])
+    root = secure_directory(home)
+    seen = set()
+    total = 0
+    def inspect(fd, prefix, depth):
+        nonlocal total
+        require(depth <= MAX_DEPTH, 'owned JDK depth bound')
+        with os.scandir(fd) as listing:
+            names = [entry.name for entry in islice(listing, MAX_ENTRIES + 1)]
+        require(len(names) <= MAX_ENTRIES, 'owned JDK directory bound')
+        for name in names:
+            key = prefix + name
+            require(key in entries and key not in seen and len(seen) < MAX_ENTRIES, 'owned JDK acquired extra entry')
+            seen.add(key); expected = entries[key]
+            value = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            require(identity(value) == tuple(expected['identity']), 'owned JDK identity/mode changed')
+            if expected['kind'] == 'file':
+                require(stat.S_ISREG(value.st_mode) and value.st_nlink == 1, 'unsafe owned JDK file')
+                original = os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=fd)
+                try:
+                    before = os.fstat(original)
+                    require(identity(before) == tuple(expected['identity']) and before.st_nlink == 1, 'owned JDK file replaced')
+                    digest = hashlib.sha256(); remaining = before.st_size
+                    require(0 <= remaining <= MAX_BYTES - total, 'owned JDK byte bound')
+                    while remaining:
+                        data = os.read(original, min(65536, remaining))
+                        require(data, 'owned JDK file shortened')
+                        digest.update(data); remaining -= len(data); total += len(data)
+                    require(not os.read(original, 1), 'owned JDK file grew')
+                    require(digest.hexdigest() == expected['sha256'], 'owned JDK content changed')
+                    after = os.fstat(original)
+                    require(identity(after) == tuple(expected['identity']) and after.st_nlink == 1, 'owned JDK file changed')
+                finally:
+                    os.close(original)
+            elif expected['kind'] == 'link':
+                require(stat.S_ISLNK(value.st_mode) and os.readlink(name, dir_fd=fd) == expected['target'], 'owned JDK link changed')
+            elif expected['kind'] == 'directory':
+                require(stat.S_ISDIR(value.st_mode), 'owned JDK directory kind changed')
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=fd)
+                try:
+                    require(identity(os.fstat(child)) == tuple(expected['identity']), 'owned JDK directory replaced')
+                    inspect(child, key + '/', depth + 1)
+                    require(identity(os.fstat(child)) == tuple(expected['identity']), 'owned JDK directory changed')
+                finally:
+                    os.close(child)
+            else:
+                raise ValueError('owned JDK special file refused')
+            require(identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) == tuple(expected['identity']), 'owned JDK entry replaced')
+    try:
+        require(identity(os.fstat(root)) == tuple(receipt['cloneRoot']), 'owned JDK root changed')
+        inspect(root, '', 0)
+        require(seen == set(entries), 'owned JDK lost entry')
+        require(identity(os.fstat(root)) == tuple(receipt['cloneRoot']) and identity(home.lstat()) == tuple(receipt['cloneRoot']), 'owned JDK root pathname changed')
+    finally:
+        os.close(root)
 
 
 def read_regular(path, maximum):
@@ -451,10 +548,10 @@ def run(repo, source, command):
     # Correct dotted Gradle property via JVM options, not an unrecognized underscore property.
     env['GRADLE_OPTS'] += ' ' + shlex.quote('-Dorg.gradle.project.kotlin.compiler.execution.strategy=in-process')
     status = subprocess.run(command, cwd=repo, env=env).returncode
-    final = {'exitCode': status, 'sourceUnchanged': False, 'actualTestJvms': 0}
+    final = {'exitCode': status, 'sourceUnchanged': False, 'cloneUnchanged': False, 'actualTestJvms': 0}
     try:
         require(socket_scratch(repo) == scratch, 'owned JVM scratch identity changed')
-        verify_source(receipt); final['sourceUnchanged'] = True
+        verify_source(receipt); final['sourceUnchanged'] = True; final['cloneUnchanged'] = True
         final['actualTestJvms'] = verify_jvms(receipt)
     finally:
         write_json(container / 'final.json', final)

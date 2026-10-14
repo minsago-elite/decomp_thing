@@ -2,6 +2,7 @@
 from pathlib import Path
 import hashlib
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -121,6 +122,92 @@ class OwnedJdkTest(unittest.TestCase):
     def test_changed_owned_launcher_refused(self):
         result = fixture.provision(self.repo, self.source); (Path(result['home']) / 'bin/java').write_bytes(b'substitute')
         with self.assertRaises(ValueError): fixture.verify_source(result)
+    def test_complete_clone_inventory_is_pinned_after_normalization(self):
+        result=fixture.provision(self.repo,self.source)
+        self.assertEqual(set(result['sourceEntries']),set(result['cloneEntries']))
+        self.assertEqual(0o755,result['cloneEntries']['bin/java']['identity'][4])
+        self.assertEqual(result['launcherIdentity'],result['cloneEntries']['bin/java']['identity'])
+        for key,entry in result['cloneEntries'].items():
+            if entry['kind']=='file':self.assertEqual(result['sourceEntries'][key]['sha256'],entry['sha256'])
+        fixture.verify_source(result)
+
+    def test_same_size_modules_tamper_with_restored_mtime_rejected_by_hash(self):
+        result=fixture.provision(self.repo,self.source);path=Path(result['home'])/'lib/modules'
+        before=path.stat();path.write_bytes(b'x'*before.st_size)
+        os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns))
+        self.assertEqual(tuple(result['cloneEntries']['lib/modules']['identity']),fixture.identity(path.stat()))
+        self.assertEqual(b'inert modules',(self.source/'lib/modules').read_bytes())
+        with self.assertRaisesRegex(ValueError,'owned JDK content changed'):fixture.verify_source(result)
+
+    def test_post_command_module_tamper_keeps_both_unchanged_facts_false(self):
+        containers=[]
+        def fake_command(command,cwd,env):
+            home=Path(env['JAVA_HOME']);containers.append(home.parent)
+            path=home/'lib/modules';before=path.stat();path.write_bytes(b'x'*before.st_size)
+            os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns))
+            return mock.Mock(returncode=0)
+        with mock.patch.object(fixture,'UNIX_SOCKET_PATH_BYTES',4096), \
+             mock.patch.object(fixture.subprocess,'run',side_effect=fake_command) as command, \
+             mock.patch.object(fixture,'verify_jvms',side_effect=AssertionError('must refuse before worker qualification')):
+            with self.assertRaisesRegex(ValueError,'owned JDK content changed'):
+                fixture.run(self.repo,self.source,['inert-never-executed'])
+        command.assert_called_once()
+        final=json.loads((containers[0]/'final.json').read_text())
+        self.assertEqual(0,final['exitCode']);self.assertFalse(final['sourceUnchanged'])
+        self.assertFalse(final['cloneUnchanged']);self.assertEqual(0,final['actualTestJvms'])
+
+    def test_cloned_configuration_change_rejected(self):
+        (self.source/'conf').mkdir();(self.source/'conf/runtime.conf').write_bytes(b'fixed configuration')
+        result=fixture.provision(self.repo,self.source)
+        (Path(result['home'])/'conf/runtime.conf').write_bytes(b'altered configuration')
+        with self.assertRaises(ValueError):fixture.verify_source(result)
+
+    def test_clone_extra_missing_replaced_mode_and_hardlink_changes_refused_without_fd_leak(self):
+        def extra(home):(home/'lib/extra').write_bytes(b'extra')
+        def missing(home):(home/'lib/modules').unlink()
+        def replace(home):
+            path=home/'lib/modules';data=path.read_bytes();path.unlink();path.write_bytes(data)
+        def mode(home):(home/'lib').chmod(0o777)
+        def hardlink(home):os.link(home/'lib/modules',self.repo/'outside-alias')
+        for mutation in [extra,missing,replace,mode,hardlink]:
+            with self.subTest(mutation=mutation.__name__):
+                result=fixture.provision(self.repo,self.source);home=Path(result['home']);mutation(home)
+                before=len(os.listdir('/proc/self/fd'))
+                try:
+                    with self.assertRaises(ValueError):fixture.verify_source(result)
+                    self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+                finally:
+                    alias=self.repo/'outside-alias'
+                    if alias.exists():alias.unlink()
+
+    def test_changed_clone_symlink_refused_without_following_external_target(self):
+        result=fixture.provision(self.repo,self.source);home=Path(result['home'])
+        target=self.repo/'external-canary';target.write_bytes(b'unchanged')
+        link=home/'lib/internal-link';link.unlink();link.symlink_to(target)
+        with self.assertRaises(ValueError):fixture.verify_source(result)
+        self.assertEqual(b'unchanged',target.read_bytes())
+
+    def test_absolute_link_refusal_identifies_relative_path_and_target_before_copy(self):
+        (self.source/'lib/hosted-link').symlink_to('/trusted-selected-jdk/absolute')
+        with mock.patch.object(fixture.os,'symlink',side_effect=AssertionError('copy before admission')):
+            with self.assertRaises(ValueError) as caught:fixture.provision(self.repo,self.source)
+        self.assertIn('JDK absolute symlink refused',str(caught.exception))
+        self.assertIn('path=lib/hosted-link',str(caught.exception))
+        self.assertIn('target=/trusted-selected-jdk/absolute',str(caught.exception))
+
+    def test_chained_absolute_link_reports_actual_offending_link(self):
+        with self.assertRaises(ValueError) as caught:
+            fixture.validate_link_graph({'alias':{'kind':'link','target':'offending'},
+                                         'offending':{'kind':'link','target':'/absolute'}})
+        self.assertIn('path=offending target=/absolute',str(caught.exception))
+
+    def test_link_diagnostic_is_escaped_bounded_and_commits_truncated_metadata(self):
+        path='lib/'+('x'*2000);target='/'+('é\n'*2000)
+        text=str(fixture.symlink_refusal('JDK absolute symlink refused',path,target))
+        self.assertLess(len(text),900);self.assertNotIn('\n',text)
+        self.assertIn('pathSha256='+hashlib.sha256(os.fsencode(path)).hexdigest(),text)
+        self.assertIn('targetSha256='+hashlib.sha256(os.fsencode(target)).hexdigest(),text)
+
     def test_full_caller_credentials_are_authority(self):
         result = fixture.credentials('Pid:\t123\nUid:\t10 11 12 13\nGid:\t20 21 22 23\n', 123)
         self.assertEqual({'Uid':'10,11,12,13','Gid':'20,21,22,23'}, result)
