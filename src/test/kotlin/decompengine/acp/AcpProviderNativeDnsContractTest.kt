@@ -139,7 +139,7 @@ private fun nativeDnsCase(caseName: String) {
     var childOutcome = "NOT_STARTED"
     nativeVisibilitySink = root.resolve("$caseName-$runId-visibility.properties")
     nativeVisibilityAccumulator.reset()
-    nativeObserverBudget = NativeObserverBudget(endMillis)
+    val observerLease = nativeObserverBudgetOwner.acquire(NativeObserverBudget(endMillis))
     try {
         Files.createDirectory(input.resolve("jdk"))
         val control = snapshotNativeControl(input)
@@ -258,6 +258,8 @@ private fun nativeDnsCase(caseName: String) {
                 catch (diagnostic: Throwable) { (primaryFailure ?: cleanupFailure)?.addSuppressed(diagnostic) }
             }
             nativeVisibilitySink = null
+            try { observerLease.close() }
+            catch (failure: Throwable) { nativeKeepPrimaryFailure(primaryFailure ?: cleanupFailure, failure) }
         }
     }
 }
@@ -267,9 +269,12 @@ object AcpProviderNativeDnsControl {
     private var stage = "STARTUP"
     @JvmStatic
     fun main(args: Array<String>) {
+        var observerLease: AutoCloseable? = null
+        var failed = false
         try {
             nativeVisibilitySink = Path.of("/fixture-output/native-visibility.properties")
-            check(args.isNotEmpty())
+            check(args.size >= 3)
+            observerLease = nativeObserverBudgetOwner.acquire(NativeObserverBudget(args[2].toLong()))
             when (args[0]) {
                 "outer" -> runOuter(args)
                 "inner" -> runInner(args)
@@ -283,8 +288,12 @@ object AcpProviderNativeDnsControl {
             try { Files.writeString(Path.of("/fixture-output/native-$role-failure.properties"), text, CREATE_NEW) }
             catch (diagnostic: Throwable) { failure.addSuppressed(diagnostic) }
             print("NATIVE_DNS_CONTROL_FAILED_$stage\n")
-            exitProcess(1)
+            failed = true
+        } finally {
+            nativeVisibilitySink = null
+            observerLease?.close()
         }
+        if (failed) exitProcess(1)
     }
 
     private fun runOuter(args: Array<String>) {
@@ -292,7 +301,6 @@ object AcpProviderNativeDnsControl {
         stage = "OUTER_ENVIRONMENT"
         check(System.getenv().isEmpty())
         val endMillis = args[2].toLong()
-        nativeObserverBudget = NativeObserverBudget(endMillis)
         nativeVisibilityAccumulator.reset()
         check(nativeCapabilities("CapEff") == OUTER_CAPABILITIES)
         stage = "OUTER_NAMESPACES"
@@ -557,7 +565,23 @@ internal fun nativeStableDeniedCredentials(before: Long?, after: Long?, target: 
 private var nativeVisibilitySink: Path? = null
 private val nativeVisibilityRecords = mutableListOf<String>()
 private val nativeVisibilityAccumulator = NativeVisibilityAccumulator(nativeVisibilityRecords)
-private var nativeObserverBudget: NativeObserverBudget? = null
+/** Exact-owner scoped fixture state; closing a lease cannot extend or replace its absolute end. */
+internal class NativeObserverBudgetOwner {
+    var current: NativeObserverBudget? = null; private set
+    fun acquire(budget: NativeObserverBudget): AutoCloseable {
+        check(current == null) { "native observer budget already owned" }
+        current = budget
+        var closed = false
+        return AutoCloseable {
+            if (!closed) {
+                check(current === budget) { "native observer budget owner changed" }
+                current = null
+                closed = true
+            }
+        }
+    }
+}
+private val nativeObserverBudgetOwner = NativeObserverBudgetOwner()
 private fun nativeProcText(path: Path, budget: NativeObserverBudget? = null): String {
     val limit = budget?.readLimit() ?: 65537
     return Files.newInputStream(path).use { input ->
@@ -575,7 +599,7 @@ private fun nativeStartTime(pid: Long, budget: NativeObserverBudget? = null): Lo
 private fun nativeRecordDenied(pid: Long, kind: String, phase: String, caller: NativeNamespaceCredentials,
     target: NativeNamespaceCredentials?, startTime: Long?, outcome: String) {
     check(kind in setOf("net", "user") && phase in setOf("HOST_CLEANUP", "OUTER_CLEANUP"))
-    nativeObserverBudget?.operation()
+    nativeObserverBudgetOwner.current?.operation()
     val procOwner = runCatching { (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toLong() }.getOrNull()
     val record = "pid=$pid kind=$kind phase=$phase callerPid=${ProcessHandle.current().pid()} outcome=$outcome startTime=${startTime ?: "UNAVAILABLE"} " +
         "callerUid=${caller.uid.joinToString(",")} callerGid=${caller.gid.joinToString(",")} procSelfOwner=${procOwner ?: "UNAVAILABLE"} " +
@@ -596,7 +620,7 @@ private fun nativePersistVisibility() {
 }
 
 private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String, phase: String): Set<Long> {
-    val budget = checkNotNull(nativeObserverBudget)
+    val budget = checkNotNull(nativeObserverBudgetOwner.current)
     nativeVisibilityAccumulator.scanComplete = false
     var primary: Throwable? = null
     try {
@@ -646,7 +670,7 @@ private fun nativeNamespaceMembers(namespace: NativeNamespace, kind: String, pha
 }
 
 private fun nativeRetainsNamespace(namespace: NativeNamespace, kind: String): Boolean {
-    val budget = checkNotNull(nativeObserverBudget)
+    val budget = checkNotNull(nativeObserverBudgetOwner.current)
     budget.beginScan(); budget.operation()
     return Files.list(Path.of("/proc/self/fd")).use { stream ->
         val iterator = stream.iterator()
@@ -709,6 +733,18 @@ private fun nativeJavaCommand(java: Path, classpath: List<Path>, output: Path): 
     classpath.joinToString(":") { "/fixture-input/${it.fileName}" },
 ).also { check(output.fileName.toString() in setOf("output", "fixture-output")) }
 
+// Explicit runtime dependency roots; include every generated nested class of each root.
+internal val nativeObserverCapsuleRoots = setOf("NativeObserverBudget", "NativeObserverBudgetOwner",
+    "NativeVisibilityAccumulator", "NativeObserverFailure")
+internal fun nativeObserverCapsuleClass(name: String): Boolean = name.endsWith(".class") &&
+    nativeObserverCapsuleRoots.any { root -> name == "$root.class" || name.startsWith("$root$") }
+internal fun nativeRequireObserverCapsuleInventory(entries: Set<String>) {
+    check(entries.size <= 256) { "native control capsule inventory capacity" }
+    check(nativeObserverCapsuleRoots.all { "decompengine/acp/$it.class" in entries }) {
+        "native control capsule is missing an observer runtime dependency"
+    }
+}
+
 private fun snapshotNativeControl(input: Path): List<Path> {
     val entries = sortedMapOf<String, ByteArray>()
     listOf(AcpProviderNativeDnsControl::class.java to "AcpProviderNativeDns", AcpProviderDnsProcess::class.java to "AcpProviderDns").forEach { (type, prefix) ->
@@ -717,10 +753,11 @@ private fun snapshotNativeControl(input: Path): List<Path> {
         val packageRoot = root.resolve("decompengine/acp")
         Files.list(packageRoot).use { paths -> paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) &&
             it.fileName.toString().let { name -> name.endsWith(".class") && (name.startsWith(prefix) ||
-                prefix == "AcpProviderNativeDns" && name.startsWith("NativeNamespace") ||
+                prefix == "AcpProviderNativeDns" && (name.startsWith("NativeNamespace") || nativeObserverCapsuleClass(name)) ||
                 prefix == "AcpProviderDns" && name.startsWith("ProviderDns")) }
         }.forEach { path -> entries["decompengine/acp/${path.fileName}"] = nativeRead(path, 1024 * 1024) } }
     }
+    nativeRequireObserverCapsuleInventory(entries.keys)
     entries[DNS_RESOURCE.removePrefix("/")] = nativeResource(DNS_RESOURCE)
     val jar = input.resolve("control.jar")
     JarOutputStream(Files.newOutputStream(jar, CREATE_NEW)).use { output -> entries.forEach { (name, bytes) ->

@@ -48,24 +48,16 @@ class NativeDnsObserverDiagnosticTest {
     }
     @Test
     fun `denial diagnostics deduplicate observations and fail on distinct overflow`() {
-        val type = Class.forName("decompengine.acp.AcpProviderNativeDnsContractTestKt")
-        @Suppress("UNCHECKED_CAST")
-        val records = type.getDeclaredField("nativeVisibilityRecords").apply { isAccessible = true }.get(null) as MutableList<String>
-        val record = type.getDeclaredMethod("nativeRecordDenied", Long::class.javaPrimitiveType, String::class.java,
-            String::class.java, NativeNamespaceCredentials::class.java, NativeNamespaceCredentials::class.java,
-            java.lang.Long::class.java, String::class.java).apply { isAccessible = true }
-        val caller = parseNativeNamespaceCredentials(status(123), 123)
-        records.clear()
-        try {
-            repeat(32) { record.invoke(null, 124L, "net", "HOST_CLEANUP", caller, null, 1L, "OBSERVER_UNAVAILABLE") }
-            assertEquals(1, records.size)
-            repeat(15) { record.invoke(null, 125L + it, "net", "HOST_CLEANUP", caller, null, 1L, "OBSERVER_UNAVAILABLE") }
-            val overflow = assertFailsWith<java.lang.reflect.InvocationTargetException> {
-                record.invoke(null, 999L, "net", "HOST_CLEANUP", caller, null, 1L, "OBSERVER_UNAVAILABLE")
-            }
-            assertTrue(overflow.targetException is IllegalStateException)
-            assertEquals(16, records.size)
-        } finally { records.clear() }
+        // This test owns its accumulator; no global deadline, sink, /proc lookup or reflection.
+        val records = mutableListOf<String>()
+        val accumulator = NativeVisibilityAccumulator(records)
+        repeat(32) { accumulator.record("pid=124 outcome=OBSERVER_UNAVAILABLE", false) }
+        assertEquals(1, records.size)
+        repeat(15) { accumulator.record("pid=${125 + it} outcome=OBSERVER_UNAVAILABLE", false) }
+        assertEquals("DIAGNOSTIC_CAPACITY", assertFailsWith<NativeObserverFailure> {
+            accumulator.record("pid=999 outcome=OBSERVER_UNAVAILABLE", false)
+        }.category)
+        assertEquals(16, records.size)
     }
 
     @Test
