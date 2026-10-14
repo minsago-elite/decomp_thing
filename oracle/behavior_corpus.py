@@ -3548,6 +3548,17 @@ def run_corpus(
             )
             for case in validated["cases"]
         ]
+    return _assemble_corpus_report(validated, corpus_payload, executable, case_reports)
+
+
+def _assemble_corpus_report(
+    validated: Mapping[str, Any],
+    corpus_payload: bytes,
+    executable: bytes,
+    case_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble only observations returned by the actual bounded case executor."""
+    executable_sha256 = hashlib.sha256(executable).hexdigest()
     categories = sorted(
         {category for case in validated["cases"] for category in case["categories"]}
     )
@@ -3593,14 +3604,14 @@ def run_corpus(
     )
 
 
-def record_corpus_expectations(
+def record_corpus_observations(
     draft_corpus: dict[str, Any],
     executable_path: Path,
     *,
     container_runtime: Path,
     container_runtime_environment: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """Record deterministic expectations for a reviewed corpus draft.
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record a reviewed draft and retain its actual execution observations.
 
     This profile-authoring operation is deliberately separate from verification.
     Each draft case must already be structurally valid; its stream normalization
@@ -3627,6 +3638,7 @@ def record_corpus_expectations(
     normalizations = _normalization_map(validated)
     retention_budget = _RetentionBudget()
     recorded = json.loads(json.dumps(validated))
+    observations: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="behavior-control-") as control_directory:
         staged_runtime = Path(control_directory) / "container-runtime"
         _write_exclusive(staged_runtime, runtime_payload, 0o500)
@@ -3647,6 +3659,7 @@ def record_corpus_expectations(
                 retention_budget,
                 record_expectations=True,
             )
+            observations.append(observation)
             if observation["exitCode"] != case["expected"]["exitCode"]:
                 raise BehaviorCorpusError(
                     f"case {case['id']} recording exit mismatch: expected "
@@ -3658,7 +3671,28 @@ def record_corpus_expectations(
                 "stderr": observation["stderr"],
                 "artifacts": observation["artifacts"],
             }
-    return validate_corpus(recorded)
+    recorded = validate_corpus(recorded)
+    report = _assemble_corpus_report(
+        recorded, corpus_json_bytes(recorded), executable, observations
+    )
+    return recorded, report
+
+
+def record_corpus_expectations(
+    draft_corpus: dict[str, Any],
+    executable_path: Path,
+    *,
+    container_runtime: Path,
+    container_runtime_environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compatibility entry point: retain exactly the recorded corpus as before."""
+    recorded, _ = record_corpus_observations(
+        draft_corpus,
+        executable_path,
+        container_runtime=container_runtime,
+        container_runtime_environment=container_runtime_environment,
+    )
+    return recorded
 
 
 def run_corpus_file(
