@@ -111,7 +111,7 @@ class RepairProviderReceiptRetentionTest {
         val raw = project.resolve(binding.receiptPath).readBytes()
         assertContentEquals(document.json.toByteArray(), raw)
         assertEquals(binding.receiptSha256, sha256(raw))
-        assertEquals("5", Json.parseToJsonElement(raw.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("6", Json.parseToJsonElement(raw.decodeToString()).jsonObject.getValue("schemaVersion").jsonPrimitive.content)
         val verified = verifyAcpExecutionReceiptDocument(raw, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD,
             Path.of(binding.receiptPath).fileName.toString().removeSuffix(".acp-receipt.json"))
         assertFalse(verified.releaseComplete)

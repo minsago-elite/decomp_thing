@@ -1704,21 +1704,25 @@ internal class LinuxBubblewrapBoundary private constructor(
             scopeObserver: AcpSandboxScopeObserver? = null,
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
         ): LinuxBubblewrapBoundary {
-            cancellationCheck()
-            val controlTemporaryParent = sandboxControlTemporaryParent()
-            return try {
-                prepareWithPinnedTemporaryParent(
-                    configuration,
-                    observer,
-                    launchHook,
-                    cleanupHook,
-                    scopeObserver,
-                    cancellationCheck,
-                    controlTemporaryParent,
-                )
-            } finally {
-                controlTemporaryParent.close()
-            }
+            val statistics = RuntimeCopyStatistics()
+            try {
+                cancellationCheck()
+                val controlTemporaryParent = sandboxControlTemporaryParent()
+                return try {
+                    prepareWithPinnedTemporaryParent(
+                        configuration,
+                        observer,
+                        launchHook,
+                        cleanupHook,
+                        scopeObserver,
+                        cancellationCheck,
+                        controlTemporaryParent,
+                        statistics,
+                    )
+                } finally {
+                    controlTemporaryParent.close()
+                }
+            } catch (failure: Throwable) { statistics.attachFailure(failure); throw failure }
         }
 
         private fun prepareWithPinnedTemporaryParent(
@@ -1729,6 +1733,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             scopeObserver: AcpSandboxScopeObserver?,
             cancellationCheck: () -> Unit,
             controlTemporaryParent: PinnedSandboxControlTemporaryParent,
+            statistics: RuntimeCopyStatistics,
         ): LinuxBubblewrapBoundary {
             requireLinuxCgroupV2()
             LinuxFilesystemSyscalls.requirePidfdSupported()
@@ -1796,6 +1801,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     forbidden,
                     controlDirectory,
                     allowUserOwnedSnapshot = true,
+                    statistics = statistics,
                     cancellationCheck = cancellationCheck,
                 ).single()
                 requireNotNull(helperValidation).requireStaticGateHelper(
@@ -1812,6 +1818,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     forbidden,
                     controlDirectory,
                     allowUserOwnedSnapshot = false,
+                    statistics = statistics,
                     cancellationCheck = cancellationCheck,
                 )
                 cancellationCheck()
@@ -2464,6 +2471,9 @@ private class RuntimePrivateControlScope private constructor(
 ) : AutoCloseable {
     private var closed = false
     private var mountChanged = false
+    private var firstMountChange: String? = null
+    private val initialProcessMountNamespace = observedMountNamespace("/proc/self/ns/mnt")
+    private val initialThreadMountNamespace = observedMountNamespace("/proc/thread-self/ns/mnt")
     private var fast = fastEligible(controls)
 
     private fun fastEligible(identities: Map<PinnedControlDirectory, ManifestControlIdentity>): Boolean {
@@ -2477,10 +2487,28 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun requireMountsUnchanged() {
-        if (mountChanged || LinuxFilesystemSyscalls.mountMetadataChanged(mountEvents)) {
-            mountChanged = true
-            throw IOException("host mounts changed during runtime manifest")
-        }
+        if (mountChanged) throw IOException("host mounts changed during runtime manifest; observation=latched; ${firstMountChange ?: "details-unavailable"}")
+        val pollStart = System.nanoTime()
+        val observation = LinuxFilesystemSyscalls.mountMetadataPoll(mountEvents)
+        val pollEnd = System.nanoTime()
+        if (!LinuxFilesystemSyscalls.mountMetadataPollChanged(observation)) return
+        // Latch before any diagnostic work; no observation can restore acceptance or repoll this epoch.
+        mountChanged = true
+        firstMountChange = "pollResult=${observation ushr 32}; revents=${observation.toInt() and 0xffff}; " +
+            "pollStartNanos=$pollStart; pollEndNanos=$pollEnd; " +
+            "initialProcessMountNs=$initialProcessMountNamespace; initialThreadMountNs=$initialThreadMountNamespace; " +
+            "observedProcessMountNs=${observedMountNamespace("/proc/self/ns/mnt")}; " +
+            "observedThreadMountNs=${observedMountNamespace("/proc/thread-self/ns/mnt")}; " +
+            "mountInfoDevice=${mountEvents.identity.key.device}; mountInfoInode=${mountEvents.identity.key.inode}"
+        throw IOException("host mounts changed during runtime manifest; observation=first; $firstMountChange")
+    }
+
+    /** Bounded raw proc labels for diagnosis only; these observations grant no namespace authority. */
+    private fun observedMountNamespace(path: String): String = try {
+        val label = Files.readSymbolicLink(Path.of(path)).toString()
+        if (label.length <= 40 && label.matches(Regex("mnt:\\[[0-9]+\\]"))) label else "unexpected-label"
+    } catch (failure: Exception) {
+        "unavailable(${failure.javaClass.simpleName.take(64)})"
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
@@ -2869,50 +2897,53 @@ private class ProviderDnsPinnedResources(
     }
 
     fun prepare(control: PinnedControlDirectory, boundaryCheckpoint: () -> Unit) {
-        val check = { checkpoint(); boundaryCheckpoint() }
-        check()
-        workingTree = control.createChild("dns-").also(trees::add)
-        val helper = packagedProviderDnsHelper()
-        val expected = packagedProviderDnsCommitment()
-        val helperSource = buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check)
-        require(!helperSource.rootDirectory && helperSource.rootIdentity.size in 1..MAXIMUM_PROVIDER_DNS_HELPER_BYTES) {
-            PROVIDER_DNS_CONTEXT_FAILURE
-        }
-        requirePinnedDescriptor(helper, helperSource.rootIdentity).use { descriptor ->
-            require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check) == expected) {
+        val statistics = RuntimeCopyStatistics()
+        try {
+            val check = { checkpoint(); boundaryCheckpoint() }
+            check()
+            workingTree = control.createChild("dns-").also(trees::add)
+            val helper = packagedProviderDnsHelper()
+            val expected = packagedProviderDnsCommitment()
+            val helperSource = buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check, statistics = statistics)
+            require(!helperSource.rootDirectory && helperSource.rootIdentity.size in 1..MAXIMUM_PROVIDER_DNS_HELPER_BYTES) {
                 PROVIDER_DNS_CONTEXT_FAILURE
             }
-        }
-        val runtime = currentProviderDnsRuntime()
-        val originalRuntime = buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check)
-        require(originalRuntime.rootDirectory && originalRuntime.recursivelyRootOwnedAndImmutable) {
-            PROVIDER_DNS_CONTEXT_FAILURE
-        }
-        runtimeSnapshot = stagePrivateRuntimeSnapshot(runtime, limits, control, check).also { trees.add(it.container) }
-        helperSnapshot = stagePrivateRuntimeSnapshot(helper, limits, control, check).also { trees.add(it.container) }
-        require(buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check) == originalRuntime &&
-            buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check) == helperSource) {
-            PROVIDER_DNS_CONTEXT_FAILURE
-        }
-        hardenPrivateSnapshot(requireNotNull(runtimeSnapshot).container, check)
-        hardenPrivateSnapshot(requireNotNull(helperSnapshot).container, check)
-        val copiedRuntime = buildRuntimeManifestOwned(requireNotNull(runtimeSnapshot).source, limits, forbidden,
-            allowPrivateControlSource = true, cancellationCheck = check,
-            privateSnapshotOwner = requireNotNull(runtimeSnapshot).container.controlKey)
-        require(copiedRuntime.rootDirectory) { PROVIDER_DNS_CONTEXT_FAILURE }
-        runtimeManifest = copiedRuntime
-        val copiedHelper = buildRuntimeManifestOwned(jar, limits, forbidden, allowPrivateControlSource = true,
-            cancellationCheck = check, privateSnapshotOwner = requireNotNull(helperSnapshot).container.controlKey)
-        val pinnedHelper = requirePinnedDescriptor(jar, copiedHelper.rootIdentity)
-        helperDescriptor = pinnedHelper
-        helperDigest = expected
-        require(copiedHelper.rootIdentity.mode.permissions == 0x124 &&
-            sha256(pinnedHelper, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check) == expected &&
-            readIdentity(javaExecutable, check).mode.permissions == 0x16d) { PROVIDER_DNS_CONTEXT_FAILURE }
-        requireCurrent()
+            requirePinnedDescriptor(helper, helperSource.rootIdentity).use { descriptor ->
+                require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expected) {
+                    PROVIDER_DNS_CONTEXT_FAILURE
+                }
+            }
+            val runtime = currentProviderDnsRuntime()
+            val originalRuntime = buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check, statistics = statistics)
+            require(originalRuntime.rootDirectory && originalRuntime.recursivelyRootOwnedAndImmutable) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            runtimeSnapshot = stagePrivateRuntimeSnapshot(runtime, limits, control, check, statistics).also { trees.add(it.container) }
+            helperSnapshot = stagePrivateRuntimeSnapshot(helper, limits, control, check, statistics).also { trees.add(it.container) }
+            require(buildRuntimeManifest(runtime, limits, forbidden, cancellationCheck = check, statistics = statistics) == originalRuntime &&
+                buildRuntimeManifest(helper, limits, forbidden, cancellationCheck = check, statistics = statistics) == helperSource) {
+                PROVIDER_DNS_CONTEXT_FAILURE
+            }
+            hardenPrivateSnapshot(requireNotNull(runtimeSnapshot).container, check)
+            hardenPrivateSnapshot(requireNotNull(helperSnapshot).container, check)
+            val copiedRuntime = buildRuntimeManifestOwned(requireNotNull(runtimeSnapshot).source, limits, forbidden,
+                allowPrivateControlSource = true, cancellationCheck = check,
+                privateSnapshotOwner = requireNotNull(runtimeSnapshot).container.controlKey, statistics = statistics)
+            require(copiedRuntime.rootDirectory) { PROVIDER_DNS_CONTEXT_FAILURE }
+            runtimeManifest = copiedRuntime
+            val copiedHelper = buildRuntimeManifestOwned(jar, limits, forbidden, allowPrivateControlSource = true,
+                cancellationCheck = check, privateSnapshotOwner = requireNotNull(helperSnapshot).container.controlKey, statistics = statistics)
+            val pinnedHelper = requirePinnedDescriptor(jar, copiedHelper.rootIdentity)
+            helperDescriptor = pinnedHelper
+            helperDigest = expected
+            require(copiedHelper.rootIdentity.mode.permissions == 0x124 &&
+                sha256(pinnedHelper, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expected &&
+                readIdentity(javaExecutable, check).mode.permissions == 0x16d) { PROVIDER_DNS_CONTEXT_FAILURE }
+            requireCurrent(statistics = statistics)
+        } catch (failure: Throwable) { statistics.attachFailure(failure); throw failure }
     }
 
-    fun requireCurrent(validationDeadlineNanos: Long = deadlineNanos, owner: AcpProviderDnsProcess? = null) {
+    fun requireCurrent(validationDeadlineNanos: Long = deadlineNanos, owner: AcpProviderDnsProcess? = null, statistics: RuntimeCopyStatistics? = null) {
         val check = { checkpoint(validationDeadlineNanos, owner) }
         check()
         requireNotNull(workingTree).requireRootDirectory().also { descriptor ->
@@ -2923,7 +2954,7 @@ private class ProviderDnsPinnedResources(
         val runtime = requireNotNull(runtimeSnapshot)
         runtime.container.requireRootDirectory()
         require(buildRuntimeManifestOwned(runtime.source, limits, forbidden, allowPrivateControlSource = true,
-            cancellationCheck = check, privateSnapshotOwner = runtime.container.controlKey) == runtimeManifest) {
+            cancellationCheck = check, privateSnapshotOwner = runtime.container.controlKey, statistics = statistics) == runtimeManifest) {
             PROVIDER_DNS_CONTEXT_FAILURE
         }
         val helper = requireNotNull(helperSnapshot)
@@ -2935,7 +2966,7 @@ private class ProviderDnsPinnedResources(
                 PROVIDER_DNS_CONTEXT_FAILURE
             }
         }
-        require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check) == expectedSha256) {
+        require(sha256(descriptor, MAXIMUM_PROVIDER_DNS_HELPER_BYTES, check, statistics) == expectedSha256) {
             PROVIDER_DNS_CONTEXT_FAILURE
         }
     }
@@ -5116,6 +5147,7 @@ private class PinnedReadOnlyMount private constructor(
             controlDirectory: PinnedControlDirectory,
             allowUserOwnedSnapshot: Boolean,
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+            statistics: RuntimeCopyStatistics? = null,
         ): PinnedReadOnlyMount {
             cancellationCheck()
             val configuredManifest = buildRuntimeManifest(
@@ -5123,6 +5155,7 @@ private class PinnedReadOnlyMount private constructor(
                 limits,
                 forbidden,
                 cancellationCheck = cancellationCheck,
+                statistics = statistics,
             )
             if (configuredManifest.recursivelyRootOwnedAndImmutable) {
                 requireCanonicalRootOwnedPath(mount.source, cancellationCheck)
@@ -5154,6 +5187,7 @@ private class PinnedReadOnlyMount private constructor(
                 limits,
                 controlDirectory,
                 cancellationCheck,
+                statistics,
             )
             try {
                 val copiedManifest = buildRuntimeManifestOwned(
@@ -5163,6 +5197,7 @@ private class PinnedReadOnlyMount private constructor(
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
+                    statistics = statistics,
                 )
                 if (copiedManifest.manifestSha256 != expected) {
                     throw IOException("user-owned runtime snapshot does not match its expected SHA-256")
@@ -5175,10 +5210,11 @@ private class PinnedReadOnlyMount private constructor(
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
+                    statistics = statistics,
                 )
                 val descriptor = requirePinnedDescriptor(snapshot.source, hardenedManifest.rootIdentity)
                 val descriptorDigest = if (hardenedManifest.rootDirectory) null else {
-                    sha256(descriptor, limits.maximumUserOwnedFileBytes, cancellationCheck)
+                    sha256(descriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics)
                 }
                 return PinnedReadOnlyMount(
                     mount,
@@ -5502,8 +5538,9 @@ internal fun buildRuntimeManifest(
     forbidden: Set<ForbiddenRuntimeFile>,
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): RuntimeManifest = buildRuntimeManifestOwned(source, limits, forbidden, allowPrivateControlSource,
-    cancellationCheck, privateSnapshotOwner = null)
+    cancellationCheck, privateSnapshotOwner = null, statistics = statistics)
 
 private fun buildRuntimeManifestOwned(
     source: Path,
@@ -5512,6 +5549,7 @@ private fun buildRuntimeManifestOwned(
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     privateSnapshotOwner: LinuxFileKey? = null,
+    statistics: RuntimeCopyStatistics? = null,
 ): RuntimeManifest {
     cancellationCheck()
     if (allowPrivateControlSource && privateSnapshotOwner == null) {
@@ -5602,7 +5640,7 @@ private fun buildRuntimeManifestOwned(
                             throw IOException("sandbox runtime file changed before hashing")
                         }
                         protection.requireDescriptor(authenticated, path)
-                        sha256(authenticated, identity.size) { protection.requireDescriptor(authenticated, path) }
+                        sha256(authenticated, identity.size, { protection.requireDescriptor(authenticated, path) }, statistics)
                     }
                     // Screening must not change an immutable root-owned runtime's provisioning
                     // manifest merely because an unrelated security tool has the same byte size.
@@ -5642,9 +5680,12 @@ internal fun calculateAcpRuntimeManifestSha256(
     limits: AcpRuntimeClosureLimits,
     cancellationCheck: () -> Unit,
 ): String {
-    cancellationCheck()
-    LinuxFilesystemSyscalls.requireSupported(source)
-    return buildRuntimeManifest(source, limits, emptySet(), cancellationCheck = cancellationCheck).manifestSha256
+    val statistics = RuntimeCopyStatistics()
+    try {
+        cancellationCheck()
+        LinuxFilesystemSyscalls.requireSupported(source)
+        return buildRuntimeManifest(source, limits, emptySet(), cancellationCheck = cancellationCheck, statistics = statistics).manifestSha256
+    } catch (failure: Throwable) { statistics.attachFailure(failure); throw failure }
 }
 
 private fun pinMounts(
@@ -5654,6 +5695,7 @@ private fun pinMounts(
     controlDirectory: PinnedControlDirectory,
     allowUserOwnedSnapshot: Boolean = true,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): List<PinnedReadOnlyMount> {
     cancellationCheck()
     if (mounts.size > MAXIMUM_SANDBOX_MOUNTS + 1) {
@@ -5683,6 +5725,7 @@ private fun pinMounts(
                 controlDirectory,
                 allowUserOwnedSnapshot,
                 cancellationCheck,
+                statistics,
             )
         }
         return pinned
@@ -5759,6 +5802,7 @@ private fun stagePrivateRuntimeSnapshot(
     limits: AcpRuntimeClosureLimits,
     controlDirectory: PinnedControlDirectory,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): PrivateRuntimeSnapshot {
     cancellationCheck()
     val container = controlDirectory.createChild("runtime-")
@@ -5781,6 +5825,7 @@ private fun stagePrivateRuntimeSnapshot(
                     budget = budget,
                     protection = protection,
                     cancellationCheck = cancellationCheck,
+                    statistics = statistics,
                 )
                 protection.finish()
             }
@@ -5809,6 +5854,7 @@ private fun copyRuntimeNode(
     budget: RuntimeSnapshotBudget,
     protection: RuntimePrivateControlScope,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ) {
     cancellationCheck()
     protection.requireDescriptor(descriptor, sourcePath)
@@ -5852,6 +5898,7 @@ private fun copyRuntimeNode(
                             budget,
                             protection,
                             cancellationCheck,
+                            statistics,
                         )
                     }
                 }
@@ -5872,7 +5919,8 @@ private fun copyRuntimeNode(
                         descriptor,
                         output,
                         remaining,
-                        { protection.requireDescriptor(descriptor, sourcePath) },
+                        statistics = statistics?.copy,
+                        cancellationCheck = { protection.requireDescriptor(descriptor, sourcePath) },
                     ),
                 )
                 LinuxFilesystemSyscalls.chmod(output, descriptor.identity.mode.permissions)
@@ -7170,6 +7218,7 @@ private fun sha256(
     descriptor: LinuxDescriptor,
     maximumBytes: Long,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): String {
     val digest = MessageDigest.getInstance("SHA-256")
     LinuxFilesystemSyscalls.copyReadableTo(
@@ -7184,7 +7233,8 @@ private fun sha256(
             }
         },
         maximumBytes,
-        cancellationCheck,
+        statistics = statistics?.hash,
+        cancellationCheck = cancellationCheck,
     )
     return digest.digest().toHex()
 }

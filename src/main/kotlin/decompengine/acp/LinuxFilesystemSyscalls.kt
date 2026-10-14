@@ -15,6 +15,61 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 
+/** Invocation-owned observations only; never used for admission or deadlines. */
+internal class RuntimeCopyStatistics {
+    enum class Operation { CHECK, READ, WRITE, FSYNC }
+    inner class Bucket {
+        private val calls = LongArray(Operation.entries.size)
+        private val nanos = LongArray(Operation.entries.size)
+        private var readBytes = 0L
+        private var writtenBytes = 0L
+        private var filesStarted = 0L
+        private var filesCompleted = 0L
+        private var supported = true
+        private fun add(left: Long, right: Long): Long {
+            if (right < 0 || left > Long.MAX_VALUE - right) { supported = false; return left }
+            return left + right
+        }
+        fun started() { filesStarted = add(filesStarted, 1) }
+        fun completed() { filesCompleted = add(filesCompleted, 1) }
+        fun read(bytes: Long) { if (bytes > 0) readBytes = add(readBytes, bytes) }
+        fun written(bytes: Long) { if (bytes > 0) writtenBytes = add(writtenBytes, bytes) }
+        fun <T> measure(operation: Operation, action: () -> T): T {
+            val before = try { System.nanoTime() } catch (_: Throwable) {
+                supported = false
+                return action()
+            }
+            try { return action() } finally {
+                try {
+                    val elapsed = System.nanoTime() - before
+                    if (elapsed <= 0) supported = false
+                    calls[operation.ordinal] = add(calls[operation.ordinal], 1)
+                    nanos[operation.ordinal] = add(nanos[operation.ordinal], elapsed)
+                } catch (_: Throwable) { supported = false }
+            }
+        }
+        fun summary(): String = "observed=${filesStarted > 0},supported=$supported,files=$filesStarted/$filesCompleted,readBytes=$readBytes," +
+            "writtenBytes=$writtenBytes," + Operation.entries.joinToString(",") { "${it.name}=${calls[it.ordinal]}/${nanos[it.ordinal]}ns" }
+    }
+    val copy = Bucket()
+    val hash = Bucket()
+    private var emitted = false
+    fun attachFailure(primary: Throwable) {
+        if (emitted) return
+        emitted = true
+        try {
+            primary.addSuppressed(IOException("runtime-copy-observation-v1;COPY[${copy.summary()}];HASH[${hash.summary()}];" +
+                "copy-loop-only;operation-calls-include-retries;observational-only;zero-is-not-success"))
+        } catch (_: Throwable) { /* Diagnostics never replace the primary failure. */ }
+    }
+}
+
+private fun <T> measuredCopyOperation(
+    statistics: RuntimeCopyStatistics.Bucket?,
+    operation: RuntimeCopyStatistics.Operation,
+    action: () -> T,
+): T = if (statistics == null) action() else statistics.measure(operation, action)
+
 /**
  * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
  *
@@ -117,23 +172,30 @@ internal object LinuxFilesystemSyscalls {
     }
 
     /** Checks the original mountinfo handle's event epoch without rereading its metadata. */
-    fun mountMetadataChanged(handle: LinuxDescriptor): Boolean = handle.whileOpen { descriptor ->
-        val polled = Memory(POLLFD_BYTES.toLong())
-        polled.setInt(0, descriptor)
-        polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
-        polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
-        while (true) {
-            val result = libc.poll(polled, NativeLong(1), 0)
-            if (result >= 0) {
-                val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
-                if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
-                return@whileOpen result > 0 && events and (POLLPRI or POLLERR) != 0
+    fun mountMetadataChanged(handle: LinuxDescriptor): Boolean = mountMetadataPollChanged(mountMetadataPoll(handle))
+
+    /** Raw successful poll result (high32) and revents (low16), from that same retained descriptor. */
+    fun mountMetadataPoll(handle: LinuxDescriptor): Long = handle.whileOpen { descriptor ->
+        Memory(POLLFD_BYTES.toLong()).use { polled ->
+            polled.setInt(0, descriptor)
+            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
+            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            while (true) {
+                val result = libc.poll(polled, NativeLong(1), 0)
+                if (result >= 0) {
+                    val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    return@whileOpen (result.toLong() shl 32) or events.toLong()
+                }
+                if (Native.getLastError() != EINTR) throw syscallFailure("inspect host mount metadata events")
             }
-            if (Native.getLastError() != EINTR) throw syscallFailure("inspect host mount metadata events")
         }
         @Suppress("UNREACHABLE_CODE")
-        false
+        0L
     }
+
+    fun mountMetadataPollChanged(observation: Long): Boolean =
+        observation ushr 32 > 0 && observation.toInt() and (POLLPRI or POLLERR) != 0
 
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
@@ -433,23 +495,31 @@ internal object LinuxFilesystemSyscalls {
         authorized: LinuxDescriptor,
         output: OutputStream,
         maximumBytes: Long,
+        statistics: RuntimeCopyStatistics.Bucket? = null,
         cancellationCheck: () -> Unit = {},
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
+        statistics?.started()
         openReadableFrom(authorized).use { readable ->
             Memory(BUFFER_BYTES.toLong()).use { buffer ->
                 var total = 0L
                 while (true) {
-                    cancellationCheck()
-                    val count = retryOnInterrupted("copy authenticated runtime file") {
-                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                    measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
+                    val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
+                        retryOnInterrupted("copy authenticated runtime file") {
+                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                        }
                     }
-                    if (count == 0L) return total
+                    statistics?.read(count)
+                    if (count == 0L) { statistics?.completed(); return total }
                     if (count < 0L) throw syscallFailure("copy authenticated runtime file")
                     total = Math.addExact(total, count)
                     if (total > maximumBytes) throw LinuxResourceLimitException()
-                    output.write(buffer.getByteArray(0, count.toInt()))
-                    cancellationCheck()
+                    measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.WRITE) {
+                        output.write(buffer.getByteArray(0, count.toInt()))
+                    }
+                    statistics?.written(count)
+                    measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                 }
             }
         }
@@ -460,21 +530,29 @@ internal object LinuxFilesystemSyscalls {
         authorized: LinuxDescriptor,
         destination: LinuxDescriptor,
         maximumBytes: Long,
+        statistics: RuntimeCopyStatistics.Bucket? = null,
         cancellationCheck: () -> Unit = {},
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
+        statistics?.started()
         openReadableFrom(authorized).use { readable ->
             Memory(BUFFER_BYTES.toLong()).use { buffer ->
                 var total = 0L
                 while (true) {
-                    cancellationCheck()
-                    val count = retryOnInterrupted("copy authenticated runtime file") {
-                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                    measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
+                    val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
+                        retryOnInterrupted("copy authenticated runtime file") {
+                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                        }
                     }
+                    statistics?.read(count)
                     if (count == 0L) {
-                        cancellationCheck()
-                        call("synchronize private runtime file") { libc.fsync(destination.fd) }
-                        cancellationCheck()
+                        measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
+                        measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.FSYNC) {
+                            call("synchronize private runtime file") { libc.fsync(destination.fd) }
+                        }
+                        measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
+                        statistics?.completed()
                         return total
                     }
                     if (count < 0L) throw syscallFailure("copy authenticated runtime file")
@@ -482,16 +560,19 @@ internal object LinuxFilesystemSyscalls {
                     if (total > maximumBytes) throw LinuxResourceLimitException()
                     var offset = 0L
                     while (offset < count) {
-                        val written = retryOnInterrupted("write private runtime file") {
-                            libc.write(
-                                destination.fd,
-                                buffer.share(offset),
-                                NativeLong(count - offset),
-                            ).toLong()
+                        val written = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.WRITE) {
+                            retryOnInterrupted("write private runtime file") {
+                                libc.write(
+                                    destination.fd,
+                                    buffer.share(offset),
+                                    NativeLong(count - offset),
+                                ).toLong()
+                            }
                         }
                         if (written <= 0L) throw syscallFailure("write private runtime file")
+                        statistics?.written(written)
                         offset += written
-                        cancellationCheck()
+                        measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     }
                 }
             }
