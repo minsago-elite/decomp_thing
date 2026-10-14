@@ -106,7 +106,7 @@ internal class AcpProviderChannelSetup private constructor(
         }
     }
 
-    internal fun requireMatches(policy: AcpProviderTransportPolicy.Approved) {
+    internal fun requireMatches(policy: AcpProviderTransportPolicy.Enabled) {
         requireMatches(policy.bounds)
         if (!MessageDigest.isEqual(policyDigest, providerDigestBytes(policy.descriptorSha256))) {
             invalid("provider channel setup differs from the approved policy")
@@ -252,7 +252,7 @@ internal object AcpProviderBrokerProtocol {
 
     fun channelSetupPayload(
         capability: ByteArray,
-        policy: AcpProviderTransportPolicy.Approved,
+        policy: AcpProviderTransportPolicy.Enabled,
         invocationBindingSha256: ByteArray,
         remainingOverallMillis: Long,
     ): ByteArray {
@@ -272,7 +272,7 @@ internal object AcpProviderBrokerProtocol {
 
     fun decodeChannelSetupPayload(
         payload: ByteArray,
-        expectedPolicy: AcpProviderTransportPolicy.Approved? = null,
+        expectedPolicy: AcpProviderTransportPolicy.Enabled? = null,
     ): AcpProviderChannelSetup {
         if (payload.size != CHANNEL_SETUP_BYTES) invalid("provider channel setup has an invalid length")
         val input = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
@@ -300,7 +300,7 @@ internal object AcpProviderBrokerProtocol {
 
 /** One host invocation owner validates identity and combined inbound/outbound frame order. */
 internal class AcpProviderFrameOrder(
-    private val policy: AcpProviderTransportPolicy.Approved,
+    private val policy: AcpProviderTransportPolicy.Enabled,
     expectedInvocationBindingSha256: ByteArray,
     expectedCapability: ByteArray,
 ) {

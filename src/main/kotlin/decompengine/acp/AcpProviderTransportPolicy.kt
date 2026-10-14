@@ -4,6 +4,8 @@ import java.net.URI
 import java.net.URISyntaxException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.IdentityHashMap
 import java.time.Duration
 
 internal const val MAXIMUM_PROVIDER_FRAME_PAYLOAD_BYTES: Int = 8 * 1024 * 1024
@@ -66,19 +68,35 @@ data class AcpProviderTransportBounds(
 sealed class AcpProviderTransportPolicy private constructor() {
     data object Disabled : AcpProviderTransportPolicy()
 
-    class Approved private constructor(
-        val endpoint: URI,
-        val model: String,
-        val reasoning: AcpProviderReasoning,
-        val bounds: AcpProviderTransportBounds,
-        val credentialReference: AcpProviderCredentialReference,
-    ) : AcpProviderTransportPolicy() {
+    sealed class Enabled protected constructor() : AcpProviderTransportPolicy() {
+        abstract val endpoint: URI
+        abstract val model: String
+        abstract val reasoning: AcpProviderReasoning
+        abstract val bounds: AcpProviderTransportBounds
+        abstract val descriptorSha256: String
         val operation: AcpProviderOperation = AcpProviderOperation.RESPONSES_CREATE
+    }
+
+    class Approved private constructor(
+        override val endpoint: URI,
+        override val model: String,
+        override val reasoning: AcpProviderReasoning,
+        override val bounds: AcpProviderTransportBounds,
+        val credentialReference: AcpProviderCredentialReference,
+    ) : Enabled() {
+        init {
+            // Kotlin emits a callable synthetic marker constructor even for private constructors.
+            // Repeat issuer validation here so that constructor cannot confer alternate authority.
+            requireCanonicalProviderEndpoint(endpoint)
+            require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"))) {
+                "provider model identifier is not canonical and bounded"
+            }
+        }
         val authenticationMechanism: AcpProviderAuthMechanism = AcpProviderAuthMechanism.CHATGPT_CACHED_ACCESS_TOKEN
         val runtimeAdapter: AcpProviderRuntimeAdapter = AcpProviderRuntimeAdapter.CODEX_GATEWAY_RESPONSES_V1
         val allowProxy: Boolean = false
         val allowRedirect: Boolean = false
-        val descriptorSha256: String = providerSha256(canonicalDescriptor())
+        override val descriptorSha256: String = providerSha256(canonicalDescriptor())
 
         private fun canonicalDescriptor(): String = listOf(
             "schema=acp-provider-transport-policy-v1",
@@ -118,6 +136,79 @@ sealed class AcpProviderTransportPolicy private constructor() {
                 }
                 return Approved(endpoint, model, reasoning, bounds, credentialReference)
             }
+        }
+    }
+
+    /**
+     * An invocation-only credential-free authority. It is not a production approval. Its port
+     * is host-local state and never rendered by evidence; only the complete descriptor digest is.
+     * Issuance consumes a factory-private provenance permit, and broker admission consumes this
+     * exact object once. A JVM synthetic constructor cannot register a forged policy.
+     */
+    internal class CredentialFreeFixture private constructor(
+        port: Int,
+        profile: AcpProviderQualificationProfile,
+        private val consumer: Any,
+        provenance: Any,
+    ) : Enabled() {
+        init {
+            require(hasConstructorProvenance(provenance)) { "fixture authority provenance is unavailable" }
+            require(port in 1024..65535) { "fixture listener is outside the ephemeral port bound" }
+        }
+        override val endpoint: URI = URI("https://127.0.0.1:$port/responses")
+        override val model: String = profile.model
+        override val reasoning: AcpProviderReasoning = profile.reasoning
+        override val bounds: AcpProviderTransportBounds = profile.bounds
+        val credentialFreeFixture: Boolean = true
+        val adapterQualified: Boolean = false
+        private val authorization = ByteArray(32).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
+        override val descriptorSha256: String = providerSha256(listOf(
+            "schema=acp-provider-credential-free-fixture-policy-v1",
+            "endpoint=${endpoint.toASCIIString()}", "operation=RESPONSES_CREATE", "method=POST",
+            "model=$model", "reasoning=${reasoning.name}",
+            "certificateSha256=$PROVIDER_FIXTURE_CERTIFICATE_SHA256", "spkiSha256=$PROVIDER_FIXTURE_SPKI_SHA256",
+            "credentialFreeFixture=true", "adapterQualified=false", "allowProxy=false", "allowRedirect=false",
+            "maximumRequestBytes=${bounds.maximumRequestBytes}", "maximumResponseBytes=${bounds.maximumResponseBytes}",
+            "maximumHeaderBytes=${bounds.maximumHeaderBytes}", "maximumHeaderFields=${bounds.maximumHeaderFields}",
+            "maximumChunkBytes=${bounds.maximumChunkBytes}", "maximumQueuedChunks=${bounds.maximumQueuedChunks}",
+            "maximumRequests=${bounds.maximumRequests}", "maximumOutputTokens=${bounds.maximumOutputTokens}",
+            "overallTimeoutMillis=${bounds.overallTimeout.toMillis()}", "idleTimeoutMillis=${bounds.idleTimeout.toMillis()}",
+            "cleanupTimeoutMillis=${bounds.cleanupTimeout.toMillis()}",
+            "maximumRetries=0", "maximumOutstandingRequests=1", "maximumQueuedRequests=0",
+        ).joinToString("\n", postfix = "\n"))
+
+        private fun isOwnedBy(owner: Any): Boolean = consumer === owner
+        internal fun syntheticAuthorization(): String = authorization
+        internal fun claimForBroker(owner: Any): String = consumeIssuedPolicy(this, owner)
+
+        override fun toString(): String = "AcpProviderTransportPolicy.CredentialFreeFixture(<fixture-only>)"
+
+        // Instance fields in this nested issuer avoid Kotlin companion-property accessors
+        // that would otherwise expose a mutable registry or the constructor provenance on JVM.
+        private class Issuer {
+            private val constructorProvenance = Any()
+            private val issuedPolicies = IdentityHashMap<CredentialFreeFixture, Boolean>()
+            fun hasConstructorProvenance(provenance: Any): Boolean = provenance === constructorProvenance
+            fun consumeIssuedPolicy(policy: CredentialFreeFixture, owner: Any): String = synchronized(issuedPolicies) {
+                val issued = issuedPolicies.remove(policy)
+                require(policy.isOwnedBy(owner) && issued == true) { "fixture authority is forged or already consumed" }
+                policy.authorization
+            }
+            fun issue(permit: AcpProviderQualificationPermit, consumer: Any, port: Int): CredentialFreeFixture {
+                val profile = AcpHarnessFactory.consumeProviderQualificationPermit(
+                    permit, consumer, AcpProviderQualificationPurpose.FIXTURE_POLICY,
+                )
+                return CredentialFreeFixture(port, profile, consumer, constructorProvenance).also {
+                    synchronized(issuedPolicies) { issuedPolicies[it] = true }
+                }
+            }
+        }
+        companion object {
+            private val issuer = Issuer()
+            private fun hasConstructorProvenance(provenance: Any): Boolean = issuer.hasConstructorProvenance(provenance)
+            private fun consumeIssuedPolicy(policy: CredentialFreeFixture, owner: Any): String = issuer.consumeIssuedPolicy(policy, owner)
+            internal fun issue(permit: AcpProviderQualificationPermit, consumer: Any, port: Int): CredentialFreeFixture =
+                issuer.issue(permit, consumer, port)
         }
     }
 
@@ -225,3 +316,10 @@ private fun parseProviderEndpoint(value: String): URI {
 
 private fun providerSha256(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(StandardCharsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+// Test-only identity is deliberately public repository data, never cached-auth material.
+internal const val PROVIDER_FIXTURE_KEYSTORE_RESOURCE = "/acp/provider-relay-fixture-v1.p12"
+internal const val PROVIDER_FIXTURE_KEYSTORE_PASSWORD = "fixture-password-v1"
+internal const val PROVIDER_FIXTURE_KEYSTORE_SHA256 = "214bb9ca1da9300cf3518323a0c2e1be0564c72be306c0ef6bec79acb7b08bad"
+internal const val PROVIDER_FIXTURE_CERTIFICATE_SHA256 = "cb604924d1d75aeb1986632b644193fbb39765589341c221dfd19d7c13e685a5"
+internal const val PROVIDER_FIXTURE_SPKI_SHA256 = "cbb03e9d20d95d7192631080637387ff4b8f8b43a6feeedaae3f79859fc1a6c8"

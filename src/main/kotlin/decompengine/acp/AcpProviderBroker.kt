@@ -8,9 +8,11 @@ import decompengine.builtin.provider.boundedProviderJson
 import decompengine.builtin.provider.writeProviderValue
 import kotlinx.serialization.json.*
 import java.io.IOException
+import java.io.ByteArrayInputStream
 import java.net.Proxy
 import java.net.ProxySelector
 import java.net.SocketAddress
+import java.net.Socket
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -20,8 +22,17 @@ import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.KeyStore
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509ExtendedTrustManager
 import java.time.Duration
 import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ExecutorService
@@ -73,6 +84,7 @@ internal data class AcpProviderBrokerRequestEvidence(
     val inputTokens: Int?,
     val outputTokens: Int?,
     val terminal: AcpProviderTerminalKind,
+    val admittedOutputTokens: Int = 0,
 )
 
 /** Building-block evidence, never an ACP invocation receipt or a validation/release approval. */
@@ -87,6 +99,7 @@ internal class AcpProviderBrokerSnapshot(
     val outputTokens: Long,
     val admissionDenial: AcpProviderAdmissionDenial?,
     requests: List<AcpProviderBrokerRequestEvidence>,
+    val credentialFreeFixture: Boolean = false,
 ) {
     val requests: List<AcpProviderBrokerRequestEvidence> = Collections.unmodifiableList(ArrayList(requests))
     val adapterQualified: Boolean = false
@@ -127,7 +140,7 @@ internal interface AcpProviderBackendReceiver {
  * network callback, client, or secret resolver. Protected qualification is a separate internal path.
  */
 internal class AcpProviderBroker private constructor(
-    val policy: AcpProviderTransportPolicy.Approved,
+    val policy: AcpProviderTransportPolicy.Enabled,
     private val requestBinding: AgentExecutionRequestBinding,
     private val cancellation: AgentCancellation,
     private val credentials: AcpProviderCredentialMaterial,
@@ -136,6 +149,13 @@ internal class AcpProviderBroker private constructor(
     private val maximumInvocationInputTokens: Long?,
     private val backend: AcpProviderBrokerTestBackend,
 ) : AutoCloseable {
+    // Validate before any lifecycle executor, capability, or backend dispatch can be created.
+    // Kotlin's public synthetic marker constructor must not permit a fixture backend substitute.
+    private val fixtureBackendAdmission: Unit = if (policy is AcpProviderTransportPolicy.CredentialFreeFixture) {
+        require(backend is JdkAcpProviderBackend && backend.ownsFixtureAuthority(policy)) {
+            "fixture broker authority is unavailable"
+        }
+    } else Unit
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
     private val capability = ByteArray(PROVIDER_INVOCATION_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
@@ -258,8 +278,12 @@ internal class AcpProviderBroker private constructor(
         AcpProviderBrokerSnapshot(
             policy.descriptorSha256, invocationBindingSha256, requestBinding.requestSha256,
             revoked, cleanup, admittedWireBytes, observedResponseBytes, observedOutputTokens, admissionDenial, records,
+            policy is AcpProviderTransportPolicy.CredentialFreeFixture,
         )
     }
+
+    internal fun concreteBackendCleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot? =
+        (backend as? JdkAcpProviderBackend)?.cleanupSnapshot()
 
     override fun close() {
         revoke()
@@ -356,6 +380,7 @@ internal class AcpProviderBroker private constructor(
         private var responseBytes = 0L
         private var lastActivityNanos = System.nanoTime()
         private var receipt: AcpProviderStreamReceipt? = null
+        private var admittedOutputTokens: Int = 0
         private var recorded = false
         private val parser = AcpProviderResponseStream(
             policy.bounds,
@@ -404,6 +429,10 @@ internal class AcpProviderBroker private constructor(
                         finishFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE); return
                     }
                 }
+            }
+            if (policy is AcpProviderTransportPolicy.CredentialFreeFixture && status == 200 &&
+                headers.keys.any { it.lowercase() !in setOf("content-type", "content-length", "date") && !(status in 300..399 && it.equals("location", true)) }) {
+                finishFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE); return
             }
             if (status != 200) {
                 finishFailure(when (status) {
@@ -469,6 +498,7 @@ internal class AcpProviderBroker private constructor(
                     maximumInvocationInputTokens?.let { finished.inputTokens == null || finished.inputTokens.toLong() > it - observedInputTokens } == true) {
                     finishFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED); return
                 }
+                admittedOutputTokens = finished.outputTokens
                 observedOutputTokens += finished.outputTokens
                 observedInputTokens += finished.inputTokens ?: 0
                 if (!enqueueEvents(parser.drainFinished())) return
@@ -559,7 +589,7 @@ internal class AcpProviderBroker private constructor(
             val result = terminal ?: return
             records.add(AcpProviderBrokerRequestEvidence(
                 sequence, session, turn, admittedDigest, brokerDigest(wire), wire.size,
-                responseBytes, digest.digest().brokerHex(), receipt?.inputTokens, receipt?.outputTokens, result,
+                responseBytes, digest.digest().brokerHex(), receipt?.inputTokens, receipt?.outputTokens, result, admittedOutputTokens,
             ))
             wire.fill(0)
             recorded = true
@@ -580,7 +610,7 @@ internal class AcpProviderBroker private constructor(
             val secret = credentials ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.AUTHENTICATION)
             requireValidProviderDeadline(enclosingRemaining, admittedRequest)
             val binding = AgentExecutionRequestBinding.capture(admittedRequest)
-            val backend = JdkAcpProviderBackend()
+            val backend = JdkAcpProviderBackend(ChatGptAcpProviderNetworkAuthority(approved))
             return try {
                 AcpProviderBroker(
                     approved, binding, admittedRequest.cancellation, secret,
@@ -589,6 +619,30 @@ internal class AcpProviderBroker private constructor(
                 )
             } catch (_: Exception) {
                 if (!backend.closeWithin(approved.bounds.cleanupTimeout)) throw AcpProviderBrokerCleanupFailure()
+                throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+            }
+        }
+
+        /** Closed credential-free TLS building block; factory wiring is a later checkpoint. */
+        internal fun openForCredentialFreeQualification(
+            policy: AcpProviderTransportPolicy.CredentialFreeFixture,
+            consumer: Any,
+            admittedRequest: AgentExecutionRequest,
+            enclosingRemaining: Duration,
+        ): AcpProviderBroker {
+            requireValidProviderDeadline(enclosingRemaining, admittedRequest)
+            val binding = AgentExecutionRequestBinding.capture(admittedRequest)
+            val authorization = policy.syntheticAuthorization()
+            val credentials = AcpProviderCredentialMaterial.cachedChatGpt(authorization, "credential_free_fixture_v1")
+            val backend = JdkAcpProviderBackend.openFixture(policy, consumer)
+            return try {
+                AcpProviderBroker(
+                    policy, binding, admittedRequest.cancellation, credentials,
+                    enclosingRemaining, minOf(policy.bounds.maximumOutputTokens.toLong(), admittedRequest.limits.maxOutputTokens ?: policy.bounds.maximumOutputTokens.toLong()).toInt(),
+                    admittedRequest.limits.maxInputTokens, backend,
+                )
+            } catch (_: Exception) {
+                if (!backend.closeWithin(policy.bounds.cleanupTimeout)) throw AcpProviderBrokerCleanupFailure()
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
             }
         }
@@ -617,23 +671,31 @@ internal class AcpProviderBroker private constructor(
 internal class AcpProviderBrokerCleanupFailure : IOException("ACP provider broker cleanup was not verified")
 
 /** No inherited proxy, authenticator, cookie jar, redirects, or body/error logging. */
-private class JdkAcpProviderBackend : AcpProviderBrokerTestBackend {
+internal data class AcpProviderConcreteBackendCleanupSnapshot(
+    val clientTerminated: Boolean,
+    val executorTerminated: Boolean,
+    val requestFutureCount: Int,
+    val terminalFutureCount: Int,
+)
+
+private class JdkAcpProviderBackend(private val authority: AcpProviderNetworkAuthority) : AcpProviderBrokerTestBackend {
+    private val authorityAdmission = authority.admitToBackend()
+    private var fixtureBrokerClaimed = false
     private val executor: ExecutorService = ThreadPoolExecutor(
         2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32),
         { task -> Thread(task, "decomp-acp-provider-http").also { it.isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
-    private val client = HttpClient.newBuilder().executor(executor).followRedirects(HttpClient.Redirect.NEVER)
+    private val client = authority.configure(HttpClient.newBuilder().executor(executor).followRedirects(HttpClient.Redirect.NEVER)
         .connectTimeout(Duration.ofSeconds(10)).proxy(object : ProxySelector() {
             override fun select(uri: URI): List<Proxy> = listOf(Proxy.NO_PROXY)
             override fun connectFailed(uri: URI, sa: SocketAddress, ioe: IOException) = Unit
-        }).build()
+        })).build()
     private val owners = Collections.synchronizedList(ArrayList<CompletableFuture<*>>())
 
     override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
-        val wire = HttpRequest.newBuilder(request.endpoint).timeout(request.timeout)
-            .header("Authorization", "Bearer ${request.credentials.accessToken}")
-            .header("ChatGPT-Account-ID", request.credentials.accountId)
+        require(request.endpoint == authority.endpoint) { "provider network authority is unavailable" }
+        val wire = authority.authorize(HttpRequest.newBuilder(request.endpoint).timeout(request.timeout), request.credentials)
             .header("Accept", "text/event-stream").header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofByteArray(request.body)).build()
         val future = client.sendAsync(wire) { information ->
@@ -655,6 +717,17 @@ private class JdkAcpProviderBackend : AcpProviderBrokerTestBackend {
         return object : AcpProviderBackendRequestOwner { override fun cancel() { future.cancel(true) } }
     }
 
+    @Synchronized
+    fun ownsFixtureAuthority(policy: AcpProviderTransportPolicy.CredentialFreeFixture): Boolean {
+        if (fixtureBrokerClaimed || authority !is FixtureAcpProviderNetworkAuthority || authority.policy !== policy) return false
+        fixtureBrokerClaimed = true
+        return true
+    }
+
+    fun cleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot = synchronized(owners) {
+        AcpProviderConcreteBackendCleanupSnapshot(client.isTerminated, executor.isTerminated, owners.size, owners.count { it.isDone })
+    }
+
     override fun closeWithin(timeout: Duration): Boolean {
         val started = System.nanoTime()
         val nanos = timeout.toNanos()
@@ -663,8 +736,121 @@ private class JdkAcpProviderBackend : AcpProviderBrokerTestBackend {
         executor.shutdownNow()
         val clientClean = client.awaitTermination(Duration.ofNanos((nanos - (System.nanoTime() - started)).coerceAtLeast(0)))
         val executorClean = executor.awaitTermination((nanos - (System.nanoTime() - started)).coerceAtLeast(0), TimeUnit.NANOSECONDS)
-        return clientClean && client.isTerminated && executorClean && executor.isTerminated
+        return clientClean && client.isTerminated && executorClean && executor.isTerminated && synchronized(owners) { owners.all { it.isDone } }
     }
+
+    companion object {
+        fun openFixture(policy: AcpProviderTransportPolicy.CredentialFreeFixture, consumer: Any): JdkAcpProviderBackend =
+            JdkAcpProviderBackend(FixtureAcpProviderNetworkAuthority.issue(policy, consumer))
+    }
+}
+
+/** Distinct concrete authorities: fixture TLS never changes production default trust. */
+private sealed class AcpProviderNetworkAuthority protected constructor() {
+    abstract val endpoint: URI
+    open fun admitToBackend() = Unit
+    abstract fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder
+    open fun configure(builder: HttpClient.Builder): HttpClient.Builder = builder
+}
+
+private class ChatGptAcpProviderNetworkAuthority(policy: AcpProviderTransportPolicy.Approved) : AcpProviderNetworkAuthority() {
+    override val endpoint: URI = policy.endpoint
+    init { require(endpoint == APPROVED_CODEX_CHATGPT_RESPONSES_ENDPOINT) { "provider network authority is unavailable" } }
+    override fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder =
+        builder.header("Authorization", "Bearer ${credentials.accessToken}").header("ChatGPT-Account-ID", credentials.accountId)
+}
+
+private class FixtureAcpProviderNetworkAuthority(
+    val policy: AcpProviderTransportPolicy.CredentialFreeFixture,
+    private val authorization: String,
+    provenance: Any,
+) : AcpProviderNetworkAuthority() {
+    init { require(hasProvenance(provenance)) { "fixture network authority is unavailable" } }
+    override val endpoint: URI = policy.endpoint
+    // All authority state is private instance state, not companion static fields whose synthetic
+    // accessors could return provenance or mutable identity registries.
+    private class Issuer {
+        private val provenance = Any()
+        private val issuedAuthorities = IdentityHashMap<FixtureAcpProviderNetworkAuthority, Boolean>()
+        fun hasProvenance(value: Any): Boolean = value === provenance
+        fun issue(policy: AcpProviderTransportPolicy.CredentialFreeFixture, consumer: Any): FixtureAcpProviderNetworkAuthority {
+            val authorization = policy.claimForBroker(consumer)
+            return FixtureAcpProviderNetworkAuthority(policy, authorization, provenance).also {
+                synchronized(issuedAuthorities) { issuedAuthorities[it] = true }
+            }
+        }
+        fun consume(authority: FixtureAcpProviderNetworkAuthority) = synchronized(issuedAuthorities) {
+            require(issuedAuthorities.remove(authority) == true) { "fixture network authority is forged or consumed" }
+        }
+    }
+    companion object {
+        private val issuer = Issuer()
+        private fun hasProvenance(value: Any): Boolean = issuer.hasProvenance(value)
+        fun issue(policy: AcpProviderTransportPolicy.CredentialFreeFixture, consumer: Any): FixtureAcpProviderNetworkAuthority =
+            issuer.issue(policy, consumer)
+    }
+    override fun admitToBackend() = issuer.consume(this)
+    override fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder {
+        require(credentials.accessToken == authorization && credentials.accountId == "credential_free_fixture_v1") {
+            "fixture authorization is unavailable"
+        }
+        return builder.header("Authorization", "Bearer $authorization")
+    }
+    private val tlsContext: SSLContext = createTlsContext()
+    private fun createTlsContext(): SSLContext {
+        val identityBytes = AcpProviderBroker::class.java.getResourceAsStream(PROVIDER_FIXTURE_KEYSTORE_RESOURCE)
+            ?.use { stream -> stream.readNBytes(16 * 1024 + 1) }
+            ?: throw IllegalArgumentException("fixture TLS identity is unavailable")
+        require(identityBytes.size <= 16 * 1024 && brokerDigest(identityBytes) == PROVIDER_FIXTURE_KEYSTORE_SHA256) {
+            "fixture TLS identity integrity failed"
+        }
+        val identity = KeyStore.getInstance("PKCS12").also {
+            it.load(ByteArrayInputStream(identityBytes), PROVIDER_FIXTURE_KEYSTORE_PASSWORD.toCharArray())
+        }
+        val certificate = identity.getCertificate("fixture") as? X509Certificate
+            ?: throw IllegalArgumentException("fixture TLS certificate is unavailable")
+        require(brokerDigest(certificate.encoded) == PROVIDER_FIXTURE_CERTIFICATE_SHA256 &&
+            brokerDigest(certificate.publicKey.encoded) == PROVIDER_FIXTURE_SPKI_SHA256) { "fixture TLS certificate integrity failed" }
+        val trust = KeyStore.getInstance(KeyStore.getDefaultType()).also {
+            it.load(null, null); it.setCertificateEntry("fixture", certificate)
+        }
+        val delegate = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).also { it.init(trust) }
+            .trustManagers.filterIsInstance<X509ExtendedTrustManager>().single()
+        val context = SSLContext.getInstance("TLS").also {
+            it.init(null, arrayOf(PinnedFixtureTrustManager(delegate)), SecureRandom())
+        }
+        return context
+    }
+    override fun configure(builder: HttpClient.Builder): HttpClient.Builder =
+        builder.version(HttpClient.Version.HTTP_1_1).sslContext(tlsContext).sslParameters(SSLParameters().also {
+            it.endpointIdentificationAlgorithm = "HTTPS"
+            it.protocols = arrayOf("TLSv1.3", "TLSv1.2")
+        })
+}
+
+/** Extended overloads preserve the JDK's IP SAN verification as well as both exact pins. */
+private class PinnedFixtureTrustManager(private val delegate: X509ExtendedTrustManager) : X509ExtendedTrustManager() {
+    private fun requirePin(chain: Array<out X509Certificate>?) {
+        val leaf = chain?.singleOrNull() ?: throw CertificateException("fixture TLS certificate was refused")
+        if (brokerDigest(leaf.encoded) != PROVIDER_FIXTURE_CERTIFICATE_SHA256 ||
+            brokerDigest(leaf.publicKey.encoded) != PROVIDER_FIXTURE_SPKI_SHA256) {
+            throw CertificateException("fixture TLS certificate was refused")
+        }
+        leaf.checkValidity()
+    }
+    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+        requirePin(chain); delegate.checkServerTrusted(chain, authType)
+    }
+    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) {
+        requirePin(chain); delegate.checkServerTrusted(chain, authType, socket)
+    }
+    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) {
+        requirePin(chain); delegate.checkServerTrusted(chain, authType, engine)
+    }
+    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) { throw CertificateException("fixture client certificates are unsupported") }
+    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) { throw CertificateException("fixture client certificates are unsupported") }
+    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) { throw CertificateException("fixture client certificates are unsupported") }
+    override fun getAcceptedIssuers(): Array<X509Certificate> = delegate.acceptedIssuers.clone()
 }
 
 private val REQUEST_KEYS = setOf(
