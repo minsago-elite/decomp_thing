@@ -29,7 +29,7 @@ import kotlinx.serialization.json.jsonPrimitive
 /** Data fixtures exercise normal graph publication; they never launch or qualify a provider. */
 class RepairProviderReceiptRetentionTest {
     @Test
-    fun `normal repair loop durably rejects a provider v5 failure before any candidate is installed`() = withProject { project ->
+    fun `normal repair loop durably rejects a provider v6 failure before any candidate is installed`() = withProject { project ->
         val original = project.resolve("fixture.original").also { it.writeBytes(byteArrayOf(1, 2, 3)) }
         val before = project.resolve("src/modules/alpha.c").readBytes()
         var calls = 0
@@ -69,7 +69,7 @@ class RepairProviderReceiptRetentionTest {
         val iteration = history.all().single()
         assertFalse(iteration.succeeded)
         val binding = assertNotNull(iteration.agentInvocation)
-        assertEquals(5, binding.receiptSchemaVersion)
+        assertEquals(6, binding.receiptSchemaVersion)
         assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
         assertEquals("failed-protocol", binding.terminalOutcome)
         assertFalse(binding.receiptReleaseComplete)
@@ -85,7 +85,7 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `normal graph publication retains binds rejects and replays provider v5 without an orphan`() = withProject { project ->
+    fun `normal graph publication retains binds rejects and replays provider v6 without an orphan`() = withProject { project ->
         lateinit var binding: RepairAgentInvocationBinding
         lateinit var document: AcpExecutionReceiptDocument
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
@@ -95,9 +95,9 @@ class RepairProviderReceiptRetentionTest {
                 graph.persistAndBindAgentInvocation(attempt, document)
             } catch (failure: Exception) {
                 val raw = project.resolve("reports/repair-revisions/${attempt.id}.acp-receipt.json")
-                throw AssertionError("schema-v5 publication failed; immutable receipt exists=${Files.exists(raw)}", failure)
+                throw AssertionError("schema-v6 publication failed; immutable receipt exists=${Files.exists(raw)}", failure)
             }
-            assertEquals(5, binding.receiptSchemaVersion)
+            assertEquals(6, binding.receiptSchemaVersion)
             assertEquals(RepairAgentAssessmentStatus.PENDING, binding.assessmentStatus)
             assertFalse(binding.receiptReleaseComplete)
             assertEquals(document.sha256, binding.receiptSha256)
@@ -126,7 +126,7 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `durable unbound provider v5 recovers as rejected with its actual version`() = withProject { project ->
+    fun `durable unbound provider v6 recovers as rejected with its actual version`() = withProject { project ->
         var armed = false
         val graph = ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile,
             faultInjector = ModuleRevisionFaultInjector { point ->
@@ -155,7 +155,7 @@ class RepairProviderReceiptRetentionTest {
             assertTrue(node.recoveredAfterCrash)
             assertEquals(ModuleRevisionStatus.REJECTED, node.status)
             val binding = assertNotNull(node.repairMetadata?.agentInvocation)
-            assertEquals(5, binding.receiptSchemaVersion)
+            assertEquals(6, binding.receiptSchemaVersion)
             assertEquals(document.sha256, binding.receiptSha256)
             assertEquals(document.requestSha256, binding.requestSha256)
             assertEquals(document.resultChangesSha256, binding.resultChangesSha256)
@@ -184,7 +184,7 @@ class RepairProviderReceiptRetentionTest {
     }
 
     @Test
-    fun `provider v5 binding cannot claim release or promote a retained fixture`() {
+    fun `provider v6 binding cannot claim release or promote a retained fixture`() {
         val pending = RepairAgentInvocationBinding("reports/repair-revisions/revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json",
             "a".repeat(64), 5, "b".repeat(64), "c".repeat(64), "returned-completed", false,
             RepairAgentAssessmentStatus.PENDING)

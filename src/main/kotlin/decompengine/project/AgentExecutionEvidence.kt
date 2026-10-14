@@ -229,7 +229,7 @@ internal class BoundedAcpExecutionReceiptArtifact private constructor(
 ) {
     val requestSha256: String get() = request.requestSha256
     private val providerTransport = acp.providerTransportEvidence
-    private val receiptSchemaVersion: Int = if (providerTransport == null) 2 else 5
+    private val receiptSchemaVersion: Int = if (providerTransport == null) 2 else 6
     private val eventChanges: List<AgentFileChange> =
         events.events.filterIsInstance<ArchivedFileChangeEvent>().map { it.change }
     val terminalOutcome: String = when (outcome) {
@@ -404,7 +404,7 @@ internal class AcpExecutionReceiptDocument private constructor(
     // avoids reparsing an otherwise potentially large artifact just to retain its version.
     val schemaVersion: Int = when {
         json.startsWith("{\n  \"schemaVersion\": 2,") -> 2
-        json.startsWith("{\n  \"schemaVersion\": 5,") -> 5
+        json.startsWith("{\n  \"schemaVersion\": 6,") -> 6
         else -> error("ACP receipt renderer produced an unsupported schema")
     }
     val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
@@ -472,9 +472,10 @@ internal fun verifyAcpExecutionReceiptDocument(
     require(schemaVersion != 4) {
         "historical schema-v4 provider receipts are unqualified; launch descriptor identities were not independently bound"
     }
-    require(schemaVersion == 2 || schemaVersion == 5) { "ACP receipt schema is unsupported" }
+    require(schemaVersion != 5) { "historical schema-v5 provider receipts are unqualified; invocation and payload commitments lacked independent witnesses" }
+    require(schemaVersion == 2 || schemaVersion == 6) { "ACP receipt schema is unsupported" }
     val expectedRootFields = ACP_RECEIPT_BINDING_ROOT_FIELDS + taskIdentityField +
-        if (schemaVersion == 5) setOf("providerTransport") else emptySet()
+        if (schemaVersion == 6) setOf("providerTransport") else emptySet()
     require(root.keys == expectedRootFields) { "ACP receipt has missing, extra, or duplicate binding fields" }
     require(root.receiptString("kind") == evidenceKind) { "ACP receipt kind is cross-paired" }
     require(root.receiptString(taskIdentityField) == taskId) { "ACP receipt task identity is cross-paired" }
@@ -532,7 +533,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         }
         else -> throw IllegalArgumentException("ACP receipt outcome type is invalid")
     }
-    if (schemaVersion == 5) {
+    if (schemaVersion == 6) {
         require(!releaseComplete) { "provider fixture receipt cannot claim release completeness" }
         verifyProviderTransportReceipt(root, request)
     }
@@ -2296,22 +2297,22 @@ private const val MAXIMUM_ARCHIVED_OUTCOME_ISSUES = 4_096
 private const val MAXIMUM_ARCHIVED_OUTCOME_MESSAGE_BYTES = 64 * 1024
 private const val MAXIMUM_ARCHIVED_OUTCOME_ENTITY_IDS = 32_768
 
-/** One closed projection shared by full and compact v5 receipts; no unproved launch/issuance identities. */
+/** One closed projection shared by full and compact v6 receipts; no unproved launch/issuance identities. */
 private fun StringBuilder.appendReceiptProviderTransport(evidence: AcpProviderInvocationEvidenceSnapshot) {
     append("\n  \"providerTransport\": ")
-    append(String(OracleJson.canonicalBytes(providerTransportJson(evidence), PROVIDER_TRANSPORT_JSON_LIMITS), StandardCharsets.UTF_8))
+    append(String(OracleJson.canonicalBytes(providerTransportJson(archiveProviderInvocation(evidence)), PROVIDER_TRANSPORT_JSON_LIMITS), StandardCharsets.UTF_8))
     append(',')
 }
 
-private fun providerTransportJson(value: AcpProviderInvocationEvidenceSnapshot): JsonObject = providerObject(
+private fun providerTransportJson(value: AcpProviderArchivedInvocationEvidence): JsonObject = providerObject(
     "authority" to value.authority, "qualificationProfileSha256" to value.qualificationProfileSha256,
     "modelSha256" to value.modelSha256, "runtimeAdapter" to value.runtimeAdapter, "reasoning" to value.reasoning,
     "descriptors" to value.descriptors.let { d -> providerObject(
         "factoryConfigurationSha256" to d.factoryConfigurationSha256,
-        "qualificationIssuerSha256" to d.qualificationIssuerSha256, "qualificationConsumerSha256" to d.qualificationConsumerSha256,
+        "qualificationIssuerSha256" to d.qualificationIssuerSha256,
     ) },
-    "invocationBindingSha256" to value.invocationBindingSha256, "requestBindingSha256" to value.requestBindingSha256,
-    "sessionSha256" to value.sessionSha256, "turnSha256" to value.turnSha256,
+    "requestBindingSha256" to value.requestBindingSha256,
+    "sessionSha256" to value.sessionSha256,
     "bounds" to value.bounds.let { b -> providerObject(
         "maximumRequestBytes" to b.maximumRequestBytes, "maximumResponseBytes" to b.maximumResponseBytes,
         "maximumHeaderBytes" to b.maximumHeaderBytes, "maximumHeaderFields" to b.maximumHeaderFields,
@@ -2338,10 +2339,9 @@ private fun providerTransportJson(value: AcpProviderInvocationEvidenceSnapshot):
     "outputTokens" to value.outputTokens, "inputTokens" to value.inputTokens, "revoked" to value.revoked,
     "admissionDenial" to value.admissionDenial?.let { providerObject("sequence" to it.sequence, "terminal" to it.terminal) },
     "requests" to JsonArray(value.requests.map { r -> providerObject(
-        "sequence" to r.sequence, "sessionSha256" to r.sessionSha256, "turnSha256" to r.turnSha256,
-        "admittedBodySha256" to r.admittedBodySha256, "wireBodySha256" to r.wireBodySha256,
+        "sequence" to r.sequence, "sessionSha256" to r.sessionSha256,
         "wireRequestBytes" to r.wireRequestBytes, "responseBytes" to r.responseBytes,
-        "responseSha256" to r.responseSha256, "inputTokens" to r.inputTokens, "outputTokens" to r.outputTokens,
+        "inputTokens" to r.inputTokens, "outputTokens" to r.outputTokens,
         "admittedOutputTokens" to r.admittedOutputTokens, "terminal" to r.terminal,
     ) }),
     "cleanup" to value.cleanup.let { c -> providerObject(
@@ -2373,7 +2373,7 @@ private fun providerObject(vararg fields: Pair<String, Any?>): JsonObject = Json
 ))
 
 /** Reconstruct the bounded immutable contract, then require its exact canonical projection. */
-private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvidenceSnapshot {
+private fun parseProviderTransport(value: JsonObject): AcpProviderArchivedInvocationEvidence {
     OracleJson.canonicalBytes(value, PROVIDER_TRANSPORT_JSON_LIMITS)
     val b = value.transportObject("bounds")
     val bounds = AcpProviderTransportBounds(b.transportInt("maximumRequestBytes"), b.transportInt("maximumResponseBytes"),
@@ -2382,8 +2382,8 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvid
         Duration.ofMillis(b.transportLong("overallTimeoutMillis")), Duration.ofMillis(b.transportLong("idleTimeoutMillis")),
         Duration.ofMillis(b.transportLong("cleanupTimeoutMillis")))
     val d = value.transportObject("descriptors")
-    val descriptors = AcpProviderExecutionOwnerEvidence(d.transportString("factoryConfigurationSha256"),
-        d.transportString("qualificationIssuerSha256"), d.transportString("qualificationConsumerSha256"))
+    val descriptors = AcpProviderArchivedOwnerEvidence(d.transportString("factoryConfigurationSha256"),
+        d.transportString("qualificationIssuerSha256"))
     val r = value.transportObject("resources")
     val resources = AcpProviderExecutionResourceEvidence(r.transportInt("maximumProcesses"), r.transportInt("maximumOpenFiles"),
         r.transportLong("maximumAddressSpaceBytes"), r.transportLong("maximumMemoryBytes"), r.transportLong("maximumSwapBytes"),
@@ -2404,19 +2404,18 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvid
     require(rows.size <= bounds.maximumRequests) { "provider receipt exceeds request bound" }
     val requests = rows.map { element ->
         val row = element as? JsonObject ?: transportInvalid()
-        AcpProviderExecutionRequestEvidence(row.transportLong("sequence"), row.transportString("sessionSha256"),
-            row.transportString("turnSha256"), row.transportString("admittedBodySha256"), row.transportString("wireBodySha256"),
-            row.transportInt("wireRequestBytes"), row.transportLong("responseBytes"), row.transportString("responseSha256"),
+        AcpProviderArchivedRequestEvidence(row.transportLong("sequence"), row.transportString("sessionSha256"),
+            row.transportInt("wireRequestBytes"), row.transportLong("responseBytes"),
             row.transportNullableInt("inputTokens"), row.transportNullableInt("outputTokens"),
             row.transportInt("admittedOutputTokens"), row.transportEnum("terminal"))
     }
     val denial = value.transportNullableObject("admissionDenial")?.let {
         AcpProviderExecutionDenialEvidence(it.transportLong("sequence"), it.transportEnum("terminal"))
     }
-    val evidence = AcpProviderInvocationEvidenceSnapshot(value.transportEnum("authority"), value.transportString("qualificationProfileSha256"),
+    val evidence = AcpProviderArchivedInvocationEvidence(value.transportEnum("authority"), value.transportString("qualificationProfileSha256"),
         value.transportString("modelSha256"), value.transportEnum("runtimeAdapter"), value.transportEnum("reasoning"),
-        descriptors, value.transportString("invocationBindingSha256"), value.transportString("requestBindingSha256"),
-        value.transportNullableString("sessionSha256"), value.transportNullableString("turnSha256"), bounds,
+        descriptors, value.transportString("requestBindingSha256"),
+        value.transportNullableString("sessionSha256"), bounds,
         value.transportInt("maximumInvocationOutputTokens"), value.transportNullableLong("maximumInvocationInputTokens"),
         value.transportLong("remainingOverallTimeoutMillis"), resources, value.transportLong("wireRequestBytes"),
         value.transportLong("responseBytes"), value.transportLong("outputTokens"), value.transportNullableLong("inputTokens"),
@@ -2427,7 +2426,7 @@ private fun parseProviderTransport(value: JsonObject): AcpProviderInvocationEvid
 }
 
 private fun verifyProviderTransportReceipt(root: JsonObject, request: JsonObject) {
-    require(root.transportInt("schemaVersion") == 5 && root.transportObject("provider").transportInt("evidenceSchemaVersion") == 5) {
+    require(root.transportInt("schemaVersion") == 6 && root.transportObject("provider").transportInt("evidenceSchemaVersion") == 6) {
         "provider receipt versions differ"
     }
     verifyProviderReceiptLegacyShapes(root)
@@ -2464,7 +2463,9 @@ private fun verifyProviderTransportReceipt(root: JsonObject, request: JsonObject
         (cleanup != AcpExecutionCleanupDisposition.NOT_REQUIRED ||
             (evidence.cleanup.guardian.disposition == AcpExecutionCleanupDisposition.NOT_REQUIRED &&
                 evidence.cleanup.sandbox == AcpExecutionCleanupDisposition.NOT_REQUIRED)) &&
-        (evidence.requests.isEmpty() || phase >= AcpExecutionLifecyclePhase.PROMPT_DISPATCHED)
+        ((evidence.requests.isEmpty() && evidence.admissionDenial == null) ||
+            (phase >= AcpExecutionLifecyclePhase.PROMPT_DISPATCHED &&
+                cleanup == AcpExecutionCleanupDisposition.VERIFIED))
     ) { "provider receipt invocation lifecycle differs" }
     require(request.transportInt("contractVersion") == AGENT_EXECUTION_CONTRACT_VERSION &&
         request.transportString("accessPolicySha256").isSha256() &&

@@ -43,7 +43,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val permit = ownedPermit(invocation)
         assertSame(invocation, invocation.bindProviderExecutionEvidence(permit, transport))
         assertEquals("acp", invocation.providerId)
-        assertEquals(5, invocation.schemaVersion)
+        assertEquals(6, invocation.schemaVersion)
         assertSame(transport, invocation.providerTransportEvidence)
         assertNull(invocation.completeExecutionEvidence)
         assertFalse(transport.releaseComplete)
@@ -310,7 +310,7 @@ class AcpProviderExecutionEvidenceV3Test {
         val invocation = invocation(phase = AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             cleanup = AcpExecutionCleanupDisposition.NOT_REQUIRED)
         invocation.bindProviderExecutionEvidence(ownedPermit(invocation), evidence)
-        assertEquals(5, invocation.schemaVersion)
+        assertEquals(6, invocation.schemaVersion)
         assertFalse(evidence.cleanup.admissionSticky)
     }
 

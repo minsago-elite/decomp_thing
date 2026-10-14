@@ -420,7 +420,7 @@ class AcpProviderResponseStreamTest {
     @Test
     fun `completion requires exact nonnegative integer usage and completed status`() {
         for (output in listOf("null", "\"1\"", "-1", "1.0", "1e0", "2147483648", "true")) {
-            val json = "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"output_tokens\":$output}}}"
+            val json = "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"completed\",\"usage\":{\"input_tokens\":0,\"total_tokens\":0,\"output_tokens\":$output}}}"
             assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE, "data: $json\n\n".toByteArray())
         }
         for (json in listOf(
@@ -445,9 +445,112 @@ class AcpProviderResponseStreamTest {
     }
 
     @Test
+    fun `pinned native completion fields and optional metadata remain held until EOF`() {
+        val terminal = completedResponse("""{"id":"resp_native","status":"completed","end_turn":true,"usage_metadata":{"amount":"0.01","metadata":{"extension":true}},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":1},"codex_rollout_budget_units":0.5},"future_field":[1]}""")
+        val stream = stream()
+        assertTrue(stream.accept(terminal).isEmpty())
+        val receipt = stream.finish()
+        assertEquals(1, receipt.inputTokens)
+        assertEquals(2, receipt.outputTokens)
+        assertContentEquals(terminal, stream.drainFinished().single())
+    }
+
+    @Test
+    fun `pinned completion rejects missing id and each required integer usage field`() {
+        for (id in listOf(null, "null", "7", "true", "[]", "{}")) {
+            val field = if (id == null) "" else "\"id\":$id,"
+            assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                completedResponse("""{${field}"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}"""))
+        }
+        for (field in listOf("input_tokens", "output_tokens", "total_tokens")) {
+            val invalidValues = listOf(null, "null", "\"0\"", "true", "1.0", "1e0", "9223372036854775808") +
+                if (field == "total_tokens") emptyList() else listOf("-1", "2147483648")
+            for (invalid in invalidValues) {
+                val fields = linkedMapOf("input_tokens" to "1", "output_tokens" to "2", "total_tokens" to "3")
+                if (invalid == null) fields.remove(field) else fields[field] = invalid
+                val usage = fields.entries.joinToString(",") { "\"${it.key}\":${it.value}" }
+                assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                    completedResponse("""{"id":"resp_native","status":"completed","usage":{$usage}}"""))
+            }
+        }
+        // This exact formerly accepted envelope cannot produce the pinned native Completed event.
+        val stream = stream()
+        assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) {
+            stream.accept(completedResponse("""{"status":"completed","usage":{"output_tokens":0}}"""))
+        }
+        assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { stream.finish() }
+        assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { stream.drainFinished() }
+    }
+
+    @Test
+    fun `pinned completion rejects malformed present detail and metadata shapes`() {
+        for (extra in listOf(
+            "\"end_turn\":\"true\"", "\"end_turn\":0", "\"usage_metadata\":[]",
+            "\"usage_metadata\":{\"amount\":1}",
+        )) {
+            assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                completedResponse("""{"id":"resp_native","status":"completed",$extra,"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}"""))
+        }
+        for (extra in listOf(
+            "\"input_tokens_details\":[]", "\"input_tokens_details\":{}",
+            "\"input_tokens_details\":{\"cached_tokens\":\"1\"}",
+            "\"input_tokens_details\":{\"cached_tokens\":1,\"cache_write_tokens\":null}",
+            "\"input_tokens_details\":{\"cached_tokens\":9223372036854775808}",
+            "\"output_tokens_details\":[]", "\"output_tokens_details\":{}",
+            "\"output_tokens_details\":{\"reasoning_tokens\":true}",
+            "\"codex_rollout_budget_units\":\"0.5\"", "\"codex_rollout_budget_units\":true",
+            "\"codex_rollout_budget_units\":[]", "\"codex_rollout_budget_units\":1e400",
+        )) {
+            assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                completedResponse("""{"id":"resp_native","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,$extra}}"""))
+        }
+        val terminal = completedResponse("""{"id":"resp_native","status":"completed","end_turn":null,"usage_metadata":{"amount":null,"metadata":null},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":null,"codex_rollout_budget_units":null}}""")
+        val stream = stream()
+        assertTrue(stream.accept(terminal).isEmpty())
+        stream.finish()
+        assertContentEquals(terminal, stream.drainFinished().single())
+    }
+
+    @Test
+    fun `known optional wire fields reject wrong present types without requiring absent fields`() {
+        for (field in listOf("item_id", "call_id", "delta", "text")) {
+            for (invalid in listOf("7", "true", "[]", "{}")) {
+                assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                    "data: {\"type\":\"response.output_text.done\",\"$field\":$invalid}\n\n".toByteArray())
+            }
+        }
+        for (field in listOf("summary_index", "content_index")) {
+            for (invalid in listOf("\"0\"", "true", "1.0", "1e0", "9223372036854775808")) {
+                assertRejected(AcpProviderTerminalKind.MALFORMED_RESPONSE,
+                    "data: {\"type\":\"response.output_text.done\",\"$field\":$invalid}\n\n".toByteArray())
+            }
+        }
+        val ignored = "data: {\"type\":\"response.output_text.done\",\"item_id\":null,\"call_id\":null,\"delta\":null,\"text\":null,\"summary_index\":null,\"content_index\":null,\"output_index\":\"extension\",\"sequence_number\":{\"extension\":true}}\n\n".toByteArray()
+        assertContentEquals(ignored, stream().accept(ignored).single())
+        val signedIndices = "data: {\"type\":\"response.output_text.done\",\"summary_index\":-9223372036854775808,\"content_index\":9223372036854775807}\n\n".toByteArray()
+        assertContentEquals(signedIndices, stream().accept(signedIndices).single())
+    }
+
+    @Test
+    fun `pinned ignored kinds preserve type only events and unknown fields`() {
+        for (type in listOf("response.in_progress", "response.content_part.added", "response.content_part.done",
+            "response.output_text.done", "response.custom_tool_call_input.done", "response.function_call_arguments.delta",
+            "response.function_call_arguments.done", "response.reasoning_summary_part.done")) {
+            // The adapter retains its existing stricter delta policy even for this native-ignored kind.
+            val extra = if (type == "response.function_call_arguments.delta") ",\"delta\":\"safe\"" else ""
+            val ignored = "data: {\"type\":\"$type\",\"future_field\":true$extra}\n\n".toByteArray()
+            val stream = stream()
+            assertContentEquals(ignored, stream.accept(ignored).single())
+            assertTrue(stream.accept(completed(0)).isEmpty())
+            assertEquals(2, stream.finish().eventCount)
+            assertEquals(1, stream.drainFinished().size)
+        }
+    }
+
+    @Test
     fun `input token cap requires reported usage and refuses excess before terminal release`() {
         val missing = AcpProviderResponseStream(AcpProviderTransportBounds(), emptyList(), 3, 10)
-        assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { missing.accept(completed(0)) }
+        assertFailure(AcpProviderTerminalKind.MALFORMED_RESPONSE) { missing.accept(completed(0, null)) }
         val excess = AcpProviderResponseStream(AcpProviderTransportBounds(), emptyList(), 3, 10)
         assertFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED) { excess.accept(completed(0, 11)) }
         val atLimit = AcpProviderResponseStream(AcpProviderTransportBounds(), emptyList(), 3, 10)
@@ -547,14 +650,18 @@ class AcpProviderResponseStreamTest {
         return "data: $fields\n\n".toByteArray()
     }
 
-    private fun completed(output: Int, input: Int? = null): ByteArray {
-        val usage = linkedMapOf("output_tokens" to JsonPrimitive(output))
+    private fun completed(output: Int, input: Int? = 0): ByteArray {
+        val usage = linkedMapOf("output_tokens" to JsonPrimitive(output),
+            "total_tokens" to JsonPrimitive(output.toLong() + (input?.toLong() ?: 0L)))
         input?.let { usage["input_tokens"] = JsonPrimitive(it) }
         val json = JsonObject(mapOf("type" to JsonPrimitive("response.completed"), "response" to JsonObject(mapOf(
-            "status" to JsonPrimitive("completed"), "usage" to JsonObject(usage),
+            "id" to JsonPrimitive("resp_fixture"), "status" to JsonPrimitive("completed"), "usage" to JsonObject(usage),
         ))))
         return "event: response.completed\ndata: $json\n\n".toByteArray()
     }
+
+    private fun completedResponse(response: String): ByteArray =
+        "data: {\"type\":\"response.completed\",\"response\":$response}\n\n".toByteArray()
 
     private fun assertRejected(kind: AcpProviderTerminalKind, bytes: ByteArray,
         bounds: AcpProviderTransportBounds = AcpProviderTransportBounds(), secrets: List<String> = emptyList()) {

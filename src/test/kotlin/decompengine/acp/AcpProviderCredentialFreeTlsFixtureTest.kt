@@ -842,7 +842,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         assertEquals(cleanup.requestFutureCount, cleanup.terminalFutureCount)
     }
     private fun completed(inputTokens: Int = 1): ByteArray = """event: response.completed
-data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":$inputTokens,"output_tokens":2}}}
+data: {"type":"response.completed","response":{"id":"resp_tls_fixture","status":"completed","usage":{"input_tokens":$inputTokens,"output_tokens":2,"total_tokens":${inputTokens.toLong() + 2L}}}}
 
 """.toByteArray()
     private fun ownedClientThreads(): Set<Long> = Thread.getAllStackTraces().keys.filter {
