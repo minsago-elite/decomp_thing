@@ -18,7 +18,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.parallel.ResourceLock
+import org.junit.jupiter.api.parallel.Resources
 
+@ResourceLock(Resources.SYSTEM_PROPERTIES)
 class BundledGhidraVerificationProcessTest {
     @Test
     fun `bounded verifier returns the authenticated sorted library inventory`() = withFixture { bundle ->
@@ -29,6 +32,59 @@ class BundledGhidraVerificationProcessTest {
             bundle.release.resolve("Ghidra/Features/Decompiler/lib/A.jar"),
             bundle.release.resolve("Ghidra/Features/DecompilerDependent/lib/B.jar"),
         ), actual)
+    }
+
+    @Test
+    fun `default verifier forwards separated parent directories and preserves bounded JVM options`() = withFixture { bundle ->
+        val workingDirectory = Path.of("").toAbsolutePath().normalize()
+        val home = bundle.root.resolve("parent home = kept").createDirectories()
+        val temporary = bundle.root.resolve("parent temp").createDirectories()
+        val nativeTemporary = bundle.root.resolve("native temp").createDirectories()
+        withParentDirectoryProperties(mapOf(
+            "user.home" to home.toString(),
+            "java.io.tmpdir" to workingDirectory.relativize(temporary).toString(),
+            "jna.tmpdir" to nativeTemporary.toString(),
+            "decompengine.unrelated.parent.property" to "not-forwarded",
+        )) {
+            val captured = CompletableFuture<List<String>>()
+            val verifier = BundledGhidraVerificationProcess(processStarter = { command, root ->
+                captured.complete(command)
+                ProcessBuilder(command).directory(root.toFile()).start()
+            })
+            assertEquals(3, verifier.verifyAndGetLibraries(bundle.root) {}.size)
+            val command = captured.get(1, TimeUnit.SECONDS)
+            assertEquals(listOf(
+                "-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$nativeTemporary",
+            ), command.filter { it.startsWith("-Duser.home=") || it.startsWith("-Djava.io.tmpdir=") || it.startsWith("-Djna.tmpdir=") })
+            for (option in listOf("-Xmx256m", "-XX:MaxMetaspaceSize=128m", "-XX:+DisableAttachMechanism", "-XX:-UsePerfData")) {
+                assertEquals(1, command.count { it == option })
+            }
+            assertFalse(command.any { it.contains("decompengine.unrelated.parent.property") || it.contains("not-forwarded") })
+            assertEquals(bundle.root.toString(), command.last())
+        }
+    }
+
+    @Test
+    fun `default verifier omits absent JNA directory and rejects invalid directories before process launch`() = withFixture { bundle ->
+        withParentDirectoryProperties(mapOf("jna.tmpdir" to null)) {
+            val verifier = BundledGhidraVerificationProcess(processStarter = { command, root ->
+                assertFalse(command.any { it.startsWith("-Djna.tmpdir=") })
+                ProcessBuilder(command).directory(root.toFile()).start()
+            })
+            assertEquals(3, verifier.verifyAndGetLibraries(bundle.root) {}.size)
+        }
+        val invalidValues = listOf<String?>(null, "", " \t", "bad\npath", "bad\u0000path", "bad\u007fpath")
+        for (name in listOf("user.home", "java.io.tmpdir", "jna.tmpdir")) {
+            for (value in invalidValues.filterNot { name == "jna.tmpdir" && it == null }) {
+                withParentDirectoryProperties(mapOf(name to value)) {
+                    val verifier = BundledGhidraVerificationProcess(processStarter = { _, _ ->
+                        throw AssertionError("invalid directory reached process launch")
+                    })
+                    val failure = assertFailsWith<IllegalArgumentException> { verifier.verifyAndGetLibraries(bundle.root) {} }
+                    assertTrue(failure.message.orEmpty().contains(name), failure.message)
+                }
+            }
+        }
     }
 
     @Test
@@ -156,7 +212,8 @@ class BundledGhidraVerificationProcessTest {
     }
 
     private fun withFixture(block: (BundledGhidra) -> Unit) {
-        val root = createTempDirectory("bundled-ghidra-verifier-")
+        val parent = Path.of("build/bundled-ghidra-directory-tests").toAbsolutePath().normalize().createDirectories()
+        val root = createTempDirectory(parent, "bundled-ghidra-verifier-")
         try {
             val files = linkedMapOf(
                 "decomp-ghidra-bridge.jar" to "bridge fixture\n",
@@ -176,9 +233,23 @@ class BundledGhidraVerificationProcessTest {
             root.resolve("bundle.sha256").writeText(files.toSortedMap().entries.joinToString("") { (relative, content) ->
                 "${sha256(content.toByteArray())}  $relative\n"
             })
-            block(BundledGhidra.at(root))
+            val home = root.resolve("home").createDirectories()
+            val temporary = root.resolve("tmp").createDirectories()
+            withParentDirectoryProperties(mapOf(
+                "user.home" to home.toString(), "java.io.tmpdir" to temporary.toString(), "jna.tmpdir" to temporary.toString(),
+            )) { block(BundledGhidra.at(root)) }
         } finally {
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
+    private fun withParentDirectoryProperties(values: Map<String, String?>, block: () -> Unit) {
+        val previous = values.keys.associateWith(System::getProperty)
+        try {
+            values.forEach { (name, value) -> if (value == null) System.clearProperty(name) else System.setProperty(name, value) }
+            block()
+        } finally {
+            previous.forEach { (name, value) -> if (value == null) System.clearProperty(name) else System.setProperty(name, value) }
         }
     }
 }
