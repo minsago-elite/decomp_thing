@@ -253,6 +253,29 @@ class AcpProviderExecutionEvidenceV3Test {
     }
 
     @Test
+    fun `archive denial drops supplied scalar while live authored observations retain it`() {
+        // Authored observation cases, not evidence of wire admission or an executed broker attempt.
+        val cases = listOf(Triple(0, 1L, AcpProviderExecutionTerminal.TIMEOUT),
+            Triple(1, 1L, AcpProviderExecutionTerminal.REVOKED), // denied replay
+            Triple(0, 2L, AcpProviderExecutionTerminal.REVOKED), // denied out of order
+            Triple(0, Long.MAX_VALUE, AcpProviderExecutionTerminal.REVOKED),
+            Triple(64, 65L, AcpProviderExecutionTerminal.RESOURCE_EXHAUSTED),
+            Triple(0, 0L, AcpProviderExecutionTerminal.REVOKED), // direct live scalar, not frame admission
+            Triple(0, -1L, AcpProviderExecutionTerminal.REVOKED))
+        for ((count, supplied, terminal) in cases) {
+            val rows = (1..count).map { request().copy(sequence = it.toLong(), inputTokens = 0, outputTokens = 0, admittedOutputTokens = 0) }
+            val live = snapshot(requests = rows, bounds = PROFILE.bounds.copy(maximumRequests = 64),
+                denial = AcpProviderExecutionDenialEvidence(supplied, terminal))
+            val archived = archiveProviderInvocation(live)
+            assertEquals(supplied, live.admissionDenial?.sequence)
+            assertEquals(terminal, archived.admissionDenial?.terminal)
+            assertEquals(count, archived.requests.size)
+            assertTrue(AcpProviderArchivedDenialEvidence::class.java.declaredFields.none { it.name == "sequence" })
+        }
+        assertFailsWith<IllegalArgumentException> { AcpProviderArchivedDenialEvidence(AcpProviderExecutionTerminal.COMPLETED) }
+    }
+
+    @Test
     fun `bounded signal escalation records actual child outcome and verified cleanup`() {
         for (kind in listOf(AcpProviderChildExitKind.SIGTERM, AcpProviderChildExitKind.SIGKILL)) {
             val guardian = guardian().copy(

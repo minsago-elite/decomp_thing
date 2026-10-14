@@ -426,7 +426,7 @@ internal class AcpProviderArchivedInvocationEvidence(
     val outputTokens: Long,
     val inputTokens: Long?,
     val revoked: Boolean,
-    val admissionDenial: AcpProviderExecutionDenialEvidence?,
+    val admissionDenial: AcpProviderArchivedDenialEvidence?,
     requests: Collection<AcpProviderArchivedRequestEvidence>,
     val cleanup: AcpProviderExecutionCleanupEvidence,
 ) {
@@ -534,7 +534,20 @@ internal fun archiveProviderInvocation(value: AcpProviderInvocationEvidenceSnaps
     value.outputTokens,
     value.inputTokens,
     value.revoked,
-    value.admissionDenial,
+    value.admissionDenial?.let { AcpProviderArchivedDenialEvidence(it.terminal) },
     value.requests.map { r -> AcpProviderArchivedRequestEvidence(r.sequence, r.sessionSha256, r.wireRequestBytes, r.responseBytes, r.inputTokens, r.outputTokens, r.admittedOutputTokens, r.terminal) },
     value.cleanup
 )
+
+/** Only the denial classification is archived; its supplied scalar has no independent witness. */
+internal data class AcpProviderArchivedDenialEvidence(val terminal: AcpProviderExecutionTerminal) {
+    init {
+        require(terminal in setOf(AcpProviderExecutionTerminal.RESOURCE_EXHAUSTED,
+            AcpProviderExecutionTerminal.TIMEOUT, AcpProviderExecutionTerminal.CANCELLED,
+            AcpProviderExecutionTerminal.UNSUPPORTED_OPERATION, AcpProviderExecutionTerminal.UNSUPPORTED_MODEL,
+            AcpProviderExecutionTerminal.MALFORMED_REQUEST, AcpProviderExecutionTerminal.TRANSPORT,
+            AcpProviderExecutionTerminal.REVOKED, AcpProviderExecutionTerminal.SECRET_EXPOSURE)) {
+            "ACP provider denial is not a pre-dispatch terminal"
+        }
+    }
+}

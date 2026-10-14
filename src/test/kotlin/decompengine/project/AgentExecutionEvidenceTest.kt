@@ -366,9 +366,17 @@ class AgentExecutionEvidenceTest {
                 "requests" to JsonArray(emptyList()), "wireRequestBytes" to JsonPrimitive(0),
                 "responseBytes" to JsonPrimitive(0), "outputTokens" to JsonPrimitive(0), "inputTokens" to JsonNull,
                 "revoked" to JsonPrimitive(true), "admissionDenial" to JsonObject(mapOf(
-                    "sequence" to JsonPrimitive(1), "terminal" to JsonPrimitive("TIMEOUT"))),
+                    "terminal" to JsonPrimitive("TIMEOUT"))),
             )) denied = mutateReceiptField(denied, listOf("providerTransport", field), value)
             assertFalse(verifyDataReceipt(denied.toString()).releaseComplete)
+            for (sequence in listOf(Long.MIN_VALUE, -1L, 0L, 1L, 2L, 65L, Long.MAX_VALUE)) {
+                // Every live-shaped scalar is unknown in the terminal-only archive projection.
+                val injected = mutateReceiptField(denied, listOf("providerTransport", "admissionDenial", "sequence"),
+                    JsonPrimitive(sequence))
+                assertFailsWith<IllegalArgumentException> { verifyDataReceipt(injected.toString()) }
+            }
+            assertFailsWith<IllegalArgumentException> { verifyDataReceipt(mutateReceiptField(denied,
+                listOf("providerTransport", "admissionDenial", "terminal"), JsonPrimitive("COMPLETED")).toString()) }
             for (owner in listOf("router", "broker", "sandbox")) {
                 val changed = mutateReceiptField(denied, listOf("providerTransport", "cleanup", owner), JsonPrimitive("NOT_REQUIRED"))
                 assertFailsWith<IllegalArgumentException> { verifyDataReceipt(changed.toString()) }
