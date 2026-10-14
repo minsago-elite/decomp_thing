@@ -1,0 +1,21 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"Callable evaluator v2 control receipt",
+  "type":"object",
+  "required":["schemaVersion","phases","admitted","candidateCalled","callerLaunchCount","recordedCallCount","scenarios","behaviorRate","formalStructuralScore","productionFactoryQualified","productionProviderQualified","productionFilesystemQualified"],
+  "properties":{
+    "schemaVersion":{"const":2},
+    "phases":{"type":"object","required":["preprocess","compile","link","exports","declarations","gccAssertions","load","behavior"],"additionalProperties":{"type":"object","required":["status"],"properties":{"status":{"enum":["passed","failed","refused","unknown","not-attempted"]}}}},
+    "candidateCalled":{"type":"boolean"},
+    "callerLaunchCount":{"type":"integer","minimum":0,"maximum":24},
+    "recordedCallCount":{"type":"integer","minimum":0},
+    "scenarioCount":{"const":24},
+    "scenarios":{"type":"array","minItems":24,"maxItems":24,"items":{"type":"object","required":["id","family","status","candidateCalled"],"properties":{"id":{"type":"integer","minimum":0,"maximum":23},"status":{"enum":["admission-refused","load-failed","runtime-failed","matched","mismatched"]}}}},
+    "behaviorRate":{"type":["number","null"],"minimum":0,"maximum":1},
+    "formalStructuralScore":{"const":null},
+    "productionFactoryQualified":{"const":false},
+    "productionProviderQualified":{"const":false},
+    "productionFilesystemQualified":{"const":false}
+  },
+  "allOf":[{"if":{"properties":{"executedScenarios":{"const":0}}},"then":{"properties":{"behaviorRate":{"const":null}}}},{"if":{"properties":{"admitted":{"const":false}}},"then":{"properties":{"callerLaunchCount":{"const":0},"recordedCallCount":{"const":0},"candidateCalled":{"const":false}}}}]
+}
