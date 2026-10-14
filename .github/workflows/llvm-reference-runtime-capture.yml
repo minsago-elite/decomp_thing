@@ -1,0 +1,138 @@
+name: LLVM reference runtime capture (draft only)
+
+# This workflow never acquires Clang, runs a produced program, or approves a profile.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/llvm-reference-runtime-capture.yml'
+      - 'scripts/oracle/capture_llvm_reference_runtime.py'
+      - 'tests/oracle/test_capture_llvm_reference_runtime.py'
+
+permissions:
+  contents: read
+
+jobs:
+  source-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      HOME: ${{ github.workspace }}/build/r97-static/home
+      TMPDIR: ${{ github.workspace }}/build/r97-static/tmp
+      RUNNER_TEMP: ${{ github.workspace }}/build/r97-static/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/r97-static/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/r97-static/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/r97-static/share
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/build/r97-static/run
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Allocate owned static-check state
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          umask 077
+          mkdir -p "$GITHUB_WORKSPACE/build/r97-static/"{home,tmp,cache,config,share,run}
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          clean: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/llvm-reference-runtime-capture.yml
+            /scripts/oracle/capture_llvm_reference_runtime.py
+            /tests/oracle/test_capture_llvm_reference_runtime.py
+      - name: Run guarded pure capture source controls only
+        run: python3 -I -B tests/oracle/test_capture_llvm_reference_runtime.py
+  capture:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      HOME: ${{ github.workspace }}/build/r97/home
+      TMPDIR: ${{ github.workspace }}/build/r97/tmp
+      RUNNER_TEMP: ${{ github.workspace }}/build/r97/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/r97/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/r97/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/r97/share
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/build/r97/run
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Allocate this fresh capture workspace
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          umask 077
+          test ! -e "$GITHUB_WORKSPACE/build/r97"
+          mkdir -p "$GITHUB_WORKSPACE/build/r97"
+          for child in home tmp cache config share run state raw downloads artifacts buildx; do
+            mkdir -m 700 "$GITHUB_WORKSPACE/build/r97/$child"
+          done
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          clean: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/workflows/llvm-reference-runtime-capture.yml
+            /scripts/oracle/capture_llvm_reference_runtime.py
+            /oracle/gcc/16.2.0/build-toolchain.Dockerfile
+            /oracle/gcc/16.2.0/toolchain-reproduction.json
+            /oracle/gcc/16.2.0/build-record.json
+            /oracle/gcc/16.2.0/source-lock.json
+      - name: Verify existing host prerequisites without changing the host
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          root="$GITHUB_WORKSPACE/build/r97"
+          python3 -I -B -X "pycache_prefix=$root/cache/python" \
+            scripts/oracle/capture_llvm_reference_runtime.py --root "$root" --preflight
+      - name: Authenticate the existing Docker distributions and prepare inputs
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          umask 077
+          root="$GITHUB_WORKSPACE/build/r97"
+          # Single bounded acquisition per immutable distribution, no mirror fallback.
+          timeout --kill-after=5s 190s curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 \
+            --max-filesize 268435456 \
+            https://download.docker.com/linux/static/stable/x86_64/docker-29.7.2.tgz \
+            --output "$root/downloads/docker.tgz"
+          timeout --kill-after=5s 190s curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 \
+            --max-filesize 268435456 \
+            https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
+            --output "$root/downloads/extras.tgz"
+          python3 -I -B -X "pycache_prefix=$root/cache/python" \
+            scripts/oracle/capture_llvm_reference_runtime.py --root "$root" --prepare-inputs
+      - name: Capture the bounded runtime draft without executing any target
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          root="$GITHUB_WORKSPACE/build/r97"
+          python3 -I -B -X "pycache_prefix=$root/cache/python" \
+            scripts/oracle/capture_llvm_reference_runtime.py --root "$root"
+      - name: Retain a typed bootstrap refusal when capture did not start
+        if: failure()
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE']) / 'build/r97'
+          path = root / 'artifacts/workflow-failure.json'
+          if path.parent.is_dir():
+              with path.open('x') as out:
+                  json.dump({'schemaVersion': 1, 'approved': False, 'status': 'failed',
+                      'failureCode': 'CAPTURE_OR_BOOTSTRAP_FAILED',
+                      'details': 'Inspect the bounded stage receipts; no runtime profile was approved.'}, out)
+          PY
+      - name: Upload draft and exact captured image for independent review
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: llvm-reference-runtime-DRAFT-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            build/r97/artifacts/
+            build/r97/raw/
+            build/r97/build-metadata.json
+            build/r97/state/capture-claim.json
