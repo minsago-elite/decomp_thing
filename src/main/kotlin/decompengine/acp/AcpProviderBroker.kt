@@ -9,14 +9,13 @@ import decompengine.builtin.provider.writeProviderValue
 import kotlinx.serialization.json.*
 import java.io.IOException
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Proxy
-import java.net.ProxySelector
-import java.net.SocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
@@ -27,14 +26,12 @@ import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
-import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509ExtendedTrustManager
 import java.time.Duration
 import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionStage
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Flow
@@ -42,6 +39,26 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import org.apache.hc.core5.http.ClassicHttpResponse
+import org.apache.hc.core5.http.ContentLengthStrategy
+import org.apache.hc.core5.http.ContentType
+import org.apache.hc.core5.http.HttpVersion
+import org.apache.hc.core5.http.config.Http1Config
+import org.apache.hc.core5.http.impl.io.ChunkedInputStream
+import org.apache.hc.core5.http.impl.io.DefaultBHttpClientConnection
+import org.apache.hc.core5.http.impl.io.DefaultHttpResponseParser
+import org.apache.hc.core5.http.impl.io.HttpRequestExecutor
+import org.apache.hc.core5.http.io.HttpMessageParser
+import org.apache.hc.core5.http.io.HttpMessageParserFactory
+import org.apache.hc.core5.http.io.SessionInputBuffer
+import org.apache.hc.core5.http.io.entity.ByteArrayEntity
+import org.apache.hc.core5.http.message.BasicClassicHttpRequest
+import org.apache.hc.core5.http.protocol.HttpCoreContext
+import org.apache.hc.core5.io.CloseMode
+import org.apache.hc.core5.util.CharArrayBuffer
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -118,7 +135,7 @@ internal class AcpProviderBackendRequest(
     override fun toString(): String = "AcpProviderBackendRequest(<redacted>)"
 }
 
-/** Internal deterministic control seam; production issuance always selects the concrete JDK backend. */
+/** Internal deterministic control seam; production issuance always selects the concrete HTTP/1.1 backend. */
 internal interface AcpProviderBrokerTestBackend {
     fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner
     fun closeWithin(timeout: Duration): Boolean
@@ -132,6 +149,7 @@ internal interface AcpProviderBackendReceiver {
     fun bytes(buffers: List<ByteBuffer>)
     fun complete()
     fun failed()
+    fun timedOut() = failed()
 }
 
 /**
@@ -152,7 +170,7 @@ internal class AcpProviderBroker private constructor(
     // Validate before any lifecycle executor, capability, or backend dispatch can be created.
     // Kotlin's public synthetic marker constructor must not permit a fixture backend substitute.
     private val fixtureBackendAdmission: Unit = if (policy is AcpProviderTransportPolicy.CredentialFreeFixture) {
-        require(backend is JdkAcpProviderBackend && backend.ownsFixtureAuthority(policy)) {
+        require(backend is CoreAcpProviderBackend && backend.ownsFixtureAuthority(policy)) {
             "fixture broker authority is unavailable"
         }
     } else Unit
@@ -251,7 +269,7 @@ internal class AcpProviderBroker private constructor(
             active = exchange
             nextSequence++
             try {
-                // The concrete backend's start is nonblocking sendAsync with a finite byte publisher.
+                // The concrete backend queues one bounded HTTP/1.1 exchange without blocking this owner.
                 // Test implementations have the same nonblocking contract; no caller callback is public.
                 exchange.owner = backend.start(
                     AcpProviderBackendRequest(policy.endpoint, wire, credentials, Duration.ofMillis(remainingMillis())), exchange,
@@ -286,7 +304,7 @@ internal class AcpProviderBroker private constructor(
     }
 
     internal fun concreteBackendCleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot? =
-        (backend as? JdkAcpProviderBackend)?.cleanupSnapshot()
+        (backend as? CoreAcpProviderBackend)?.cleanupSnapshot()
 
     override fun close() {
         revoke()
@@ -529,6 +547,7 @@ internal class AcpProviderBroker private constructor(
         }
 
         override fun failed() = lock.withLock { finishFailure(AcpProviderTerminalKind.TRANSPORT) }
+        override fun timedOut() = lock.withLock { finishFailure(AcpProviderTerminalKind.TIMEOUT) }
 
         internal fun finishFailure(kind: AcpProviderTerminalKind) {
             if (recorded || terminal != null && terminal != AcpProviderTerminalKind.COMPLETED) return
@@ -630,7 +649,7 @@ internal class AcpProviderBroker private constructor(
             val secret = credentials ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.AUTHENTICATION)
             requireValidProviderDeadline(enclosingRemaining, admittedRequest)
             val binding = AgentExecutionRequestBinding.capture(admittedRequest)
-            val backend = JdkAcpProviderBackend(ChatGptAcpProviderNetworkAuthority(approved))
+            val backend = CoreAcpProviderBackend(ChatGptAcpProviderNetworkAuthority(approved))
             return try {
                 AcpProviderBroker(
                     approved, binding, admittedRequest.cancellation, secret,
@@ -654,7 +673,7 @@ internal class AcpProviderBroker private constructor(
             val binding = AgentExecutionRequestBinding.capture(admittedRequest)
             val authorization = policy.syntheticAuthorization()
             val credentials = AcpProviderCredentialMaterial.cachedChatGpt(authorization, "credential_free_fixture_v1")
-            val backend = JdkAcpProviderBackend.openFixture(policy, consumer)
+            val backend = CoreAcpProviderBackend.openFixture(policy, consumer)
             return try {
                 AcpProviderBroker(
                     policy, binding, admittedRequest.cancellation, credentials,
@@ -692,49 +711,49 @@ internal class AcpProviderBrokerCleanupFailure : IOException("ACP provider broke
 
 /** No inherited proxy, authenticator, cookie jar, redirects, or body/error logging. */
 internal data class AcpProviderConcreteBackendCleanupSnapshot(
-    val clientTerminated: Boolean,
+    val transportTerminated: Boolean,
     val executorTerminated: Boolean,
     val requestFutureCount: Int,
     val terminalFutureCount: Int,
 )
 
-private class JdkAcpProviderBackend(private val authority: AcpProviderNetworkAuthority) : AcpProviderBrokerTestBackend {
+/** One owned connection and one HTTP exchange per request. No HttpClient recovery layer exists. */
+private class CoreAcpProviderBackend(private val authority: AcpProviderNetworkAuthority) : AcpProviderBrokerTestBackend {
     private val authorityAdmission = authority.admitToBackend()
     private var fixtureBrokerClaimed = false
+    private val closed = AtomicBoolean()
     private val executor: ExecutorService = ThreadPoolExecutor(
         2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32),
         { task -> Thread(task, "decomp-acp-provider-http").also { it.isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
-    private val client = authority.configure(HttpClient.newBuilder().executor(executor).followRedirects(HttpClient.Redirect.NEVER)
-        .connectTimeout(Duration.ofSeconds(10)).proxy(object : ProxySelector() {
-            override fun select(uri: URI): List<Proxy> = listOf(Proxy.NO_PROXY)
-            override fun connectFailed(uri: URI, sa: SocketAddress, ioe: IOException) = Unit
-        })).build()
-    private val owners = Collections.synchronizedList(ArrayList<CompletableFuture<*>>())
+    private val owners = Collections.synchronizedList(ArrayList<ProviderHttpAttempt>())
 
     override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
         require(request.endpoint == authority.endpoint) { "provider network authority is unavailable" }
-        val wire = authority.authorize(HttpRequest.newBuilder(request.endpoint).timeout(request.timeout), request.credentials)
-            .header("Accept", "text/event-stream").header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofByteArray(request.body)).build()
-        val future = client.sendAsync(wire) { information ->
-            receiver.headers(information.statusCode(), information.headers().map())
-            object : HttpResponse.BodySubscriber<Unit> {
-                private val finished = CompletableFuture<Unit>()
-                override fun getBody(): CompletionStage<Unit> = finished
-                override fun onSubscribe(subscription: Flow.Subscription) = receiver.subscribe(object : Flow.Subscription {
-                    override fun request(n: Long) = subscription.request(n)
-                    override fun cancel() { subscription.cancel(); finished.complete(Unit) }
-                })
-                override fun onNext(item: List<ByteBuffer>) = receiver.bytes(item)
-                override fun onError(throwable: Throwable) { receiver.failed(); finished.completeExceptionally(IOException("provider body failed")) }
-                override fun onComplete() { receiver.complete(); finished.complete(Unit) }
-            }
+        if (closed.get()) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+        val content = request.body
+        require(content.size <= authority.bounds.maximumRequestBytes) { "provider request exceeds admitted bound" }
+        val wire = BasicClassicHttpRequest("POST", request.endpoint).also {
+            it.version = HttpVersion.HTTP_1_1
+            it.entity = ByteArrayEntity(content, ContentType.APPLICATION_JSON)
+            it.setHeader("Accept", "text/event-stream")
+            it.setHeader("Content-Type", "application/json")
+            it.setHeader("Content-Length", content.size.toString())
+            it.setHeader("Host", request.endpoint.rawAuthority)
+            it.setHeader("User-Agent", "decomp-acp-provider-http/1")
+            authority.authorize(it, request.credentials)
         }
-        owners.add(future)
-        future.whenComplete { _, failure -> if (failure != null) receiver.failed() }
-        return object : AcpProviderBackendRequestOwner { override fun cancel() { future.cancel(true) } }
+        val owner = ProviderHttpAttempt(authority, request.timeout, wire, receiver)
+        synchronized(owners) {
+            if (closed.get()) throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
+            owners.add(owner)
+        }
+        // Install cancellation before a fast header callback can precede start's return.
+        receiver.subscribe(owner)
+        try { owner.attach(executor.submit(owner)) }
+        catch (_: Exception) { owner.cancel(); owner.notSubmitted(); receiver.failed() }
+        return owner
     }
 
     @Synchronized
@@ -745,23 +764,224 @@ private class JdkAcpProviderBackend(private val authority: AcpProviderNetworkAut
     }
 
     fun cleanupSnapshot(): AcpProviderConcreteBackendCleanupSnapshot = synchronized(owners) {
-        AcpProviderConcreteBackendCleanupSnapshot(client.isTerminated, executor.isTerminated, owners.size, owners.count { it.isDone })
+        AcpProviderConcreteBackendCleanupSnapshot(closed.get() && executor.isTerminated && owners.all { it.resourcesClosed() },
+            executor.isTerminated, owners.size, owners.count { it.futureTerminal() })
     }
 
     override fun closeWithin(timeout: Duration): Boolean {
         val started = System.nanoTime()
-        val nanos = timeout.toNanos()
-        synchronized(owners) { owners.forEach { it.cancel(true) } }
-        client.shutdownNow()
+        closed.set(true)
+        synchronized(owners) { owners.forEach { it.cancel() } }
         executor.shutdownNow()
-        val clientClean = client.awaitTermination(Duration.ofNanos((nanos - (System.nanoTime() - started)).coerceAtLeast(0)))
-        val executorClean = executor.awaitTermination((nanos - (System.nanoTime() - started)).coerceAtLeast(0), TimeUnit.NANOSECONDS)
-        return clientClean && client.isTerminated && executorClean && executor.isTerminated && synchronized(owners) { owners.all { it.isDone } }
+        val terminated = executor.awaitTermination((timeout.toNanos() - (System.nanoTime() - started)).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+        return terminated && executor.isTerminated && synchronized(owners) { owners.all { it.resourcesClosed() && it.futureTerminal() } }
     }
 
     companion object {
-        fun openFixture(policy: AcpProviderTransportPolicy.CredentialFreeFixture, consumer: Any): JdkAcpProviderBackend =
-            JdkAcpProviderBackend(FixtureAcpProviderNetworkAuthority.issue(policy, consumer))
+        fun openFixture(policy: AcpProviderTransportPolicy.CredentialFreeFixture, consumer: Any): CoreAcpProviderBackend =
+            CoreAcpProviderBackend(FixtureAcpProviderNetworkAuthority.issue(policy, consumer))
+    }
+}
+
+/** Private owner; none of its socket, resolver, TLS or request inputs is an operator capability. */
+private class ProviderHttpAttempt(
+    private val authority: AcpProviderNetworkAuthority,
+    timeout: Duration,
+    private val wire: BasicClassicHttpRequest,
+    private val receiver: AcpProviderBackendReceiver,
+) : AcpProviderBackendRequestOwner, Flow.Subscription, Runnable {
+    private val deadline = System.nanoTime() + timeout.toNanos()
+    private val cancelled = AtomicBoolean()
+    private val connectAdmitted = AtomicBoolean()
+    private val raw = AtomicReference<Socket?>()
+    private val tls = AtomicReference<SSLSocket?>()
+    private val connection = AtomicReference<ProviderHttpConnection?>()
+    private val demand = Object()
+    private var outstanding = 0L
+    @Volatile private var future: Future<*>? = null
+    @Volatile private var rejected = false
+
+    fun attach(value: Future<*>) { future = value; if (cancelled.get()) value.cancel(true) }
+    fun notSubmitted() { rejected = true }
+    fun futureTerminal(): Boolean = rejected || future?.isDone == true
+    fun resourcesClosed(): Boolean = (raw.get()?.isClosed != false && tls.get()?.isClosed != false && connection.get()?.isOpen != true)
+
+    override fun request(n: Long) {
+        if (n <= 0) { cancel(); return }
+        synchronized(demand) { outstanding = minOf(Long.MAX_VALUE - outstanding, n) + outstanding; demand.notifyAll() }
+    }
+
+    override fun cancel() {
+        cancelled.set(true)
+        synchronized(demand) { demand.notifyAll() }
+        // Closing the underlying socket aborts connect/handshake/read without HTTP/TLS draining.
+        runCatching { raw.get()?.close() }
+        future?.cancel(true)
+    }
+
+    private fun activeMillis(): Int {
+        if (cancelled.get() || Thread.currentThread().isInterrupted) throw IOException("provider exchange stopped")
+        val remaining = deadline - System.nanoTime()
+        if (remaining <= 0) throw SocketTimeoutException("provider exchange timed out")
+        return minOf(TimeUnit.NANOSECONDS.toMillis(remaining).coerceAtLeast(1), Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /** Even an accidental second call cannot start another application connection. */
+    private fun connectOnce(socket: Socket, address: InetSocketAddress) {
+        if (!connectAdmitted.compareAndSet(false, true)) throw IOException("provider connection attempt refused")
+        socket.connect(address, minOf(10_000, activeMillis()))
+    }
+
+    override fun run() {
+        var response: ClassicHttpResponse? = null
+        try {
+            activeMillis()
+            // Resolve the exact admitted name once, select one address, and never fall back.
+            val address = selectProviderAddress(InetAddress.getAllByName(authority.endpoint.host))
+            activeMillis()
+            val socket = Socket(Proxy.NO_PROXY)
+            raw.set(socket)
+            activeMillis()
+            socket.soTimeout = minOf(authority.bounds.idleTimeout.toMillis(), activeMillis().toLong()).coerceAtLeast(1).toInt()
+            socket.tcpNoDelay = true
+            connectOnce(socket, InetSocketAddress(address, if (authority.endpoint.port < 0) 443 else authority.endpoint.port))
+            val secure = authority.tlsContext.socketFactory.createSocket(socket, authority.endpoint.host,
+                if (authority.endpoint.port < 0) 443 else authority.endpoint.port, false) as SSLSocket
+            tls.set(secure)
+            activeMillis()
+            secure.soTimeout = minOf(authority.bounds.idleTimeout.toMillis(), activeMillis().toLong()).coerceAtLeast(1).toInt()
+            secure.sslParameters = secure.sslParameters.also {
+                it.endpointIdentificationAlgorithm = "HTTPS"
+                it.protocols = arrayOf("TLSv1.3", "TLSv1.2")
+                it.applicationProtocols = emptyArray()
+            }
+            secure.startHandshake()
+            activeMillis()
+            val http = ProviderHttpConnection(authority.bounds)
+            connection.set(http)
+            http.bind(secure, socket)
+            activeMillis()
+            // Core has no request recovery, redirect, auth challenge or decompression layer.
+            response = HttpRequestExecutor().execute(wire, http, HttpCoreContext.create())
+            activeMillis()
+            val headers = LinkedHashMap<String, MutableList<String>>()
+            for (header in response.headers) headers.getOrPut(header.name.lowercase()) { ArrayList() }.add(header.value)
+            receiver.headers(response.code, headers)
+            activeMillis()
+            val input = response.entity?.content ?: throw IOException("provider body unavailable")
+            val buffer = ByteArray(authority.bounds.maximumChunkBytes)
+            var observed = 0L
+            while (true) {
+                synchronized(demand) {
+                    while (outstanding == 0L) demand.wait(minOf(25, activeMillis()).toLong())
+                    outstanding--
+                }
+                activeMillis()
+                val count = input.read(buffer, 0, minOf(buffer.size.toLong(), authority.bounds.maximumResponseBytes - observed + 1).toInt())
+                if (count < 0) { receiver.complete(); return }
+                if (count == 0 || count > authority.bounds.maximumResponseBytes - observed) throw IOException("provider body bound exceeded")
+                observed += count
+                receiver.bytes(listOf(ByteBuffer.wrap(buffer, 0, count).asReadOnlyBuffer()))
+            }
+        } catch (_: SocketTimeoutException) { receiver.timedOut() }
+        catch (_: Exception) { receiver.failed() }
+        finally {
+            runCatching { raw.get()?.close() }
+            connection.get()?.close(CloseMode.IMMEDIATE)
+            runCatching { tls.get()?.close() }
+            // The raw socket is closed first; entity close cannot drain upstream data.
+            runCatching { response?.close() }
+        }
+    }
+}
+
+private fun selectProviderAddress(addresses: Array<InetAddress>): InetAddress =
+    addresses.firstOrNull() ?: throw IOException("provider address unavailable")
+
+private fun providerHttp1Config(bounds: AcpProviderTransportBounds): Http1Config = Http1Config.custom()
+    .setVersion(HttpVersion.HTTP_1_1).setBufferSize(1024).setChunkSizeHint(bounds.maximumChunkBytes)
+    .setMaxLineLength(bounds.maximumHeaderBytes + 5).setMaxHeaderCount(bounds.maximumHeaderFields + 1)
+    .setMaxEmptyLineCount(1).build()
+
+private class ProviderHttpConnection(private val bounds: AcpProviderTransportBounds) : DefaultBHttpClientConnection(
+    providerHttp1Config(bounds), null, null, null, null, null,
+    object : HttpMessageParserFactory<ClassicHttpResponse> {
+        override fun create(config: Http1Config): HttpMessageParser<ClassicHttpResponse> = HttpMessageParser { buffer, input ->
+            val parsed = DefaultHttpResponseParser(providerHttp1Config(bounds)).parse(ProviderHeaderBuffer(buffer, bounds), input)
+            if (parsed.version != HttpVersion.HTTP_1_1 || parsed.code !in 200..599) throw IOException("provider response framing refused")
+            parsed
+        }
+    },
+) {
+    override fun close() = close(CloseMode.IMMEDIATE)
+    override fun createContentInputStream(length: Long, buffer: SessionInputBuffer, input: InputStream): InputStream =
+        if (length == ContentLengthStrategy.CHUNKED) ChunkedInputStream(ProviderChunkMetadataBuffer(buffer, bounds), input, providerHttp1Config(bounds))
+        else super.createContentInputStream(length, buffer, input)
+}
+
+/** Scratch is bounded by policy before the parser can retain a header or grow its header list. */
+private class ProviderHeaderBuffer(private val source: SessionInputBuffer, private val bounds: AcpProviderTransportBounds) : SessionInputBuffer by source {
+    private val scratch = CharArrayBuffer(maxOf(128, bounds.maximumHeaderBytes + 4))
+    private var status = true
+    private var fields = 0
+    private var bytes = 0L
+    private var rawHeaderCharacters = 0L
+    override fun readLine(target: CharArrayBuffer, input: InputStream): Int {
+        scratch.clear()
+        val count = readProviderCrlfLine(source, input, scratch, if (status) 128 else bounds.maximumHeaderBytes + 3)
+        if (status) {
+            status = false
+            if (count !in 12..128) throw IOException("provider status refused")
+        } else if (count != 0) {
+            if (scratch[0] == ' ' || scratch[0] == '\t') throw IOException("provider folded header refused")
+            val colon = scratch.indexOf(':')
+            if (colon <= 0) throw IOException("provider header refused")
+            var start = colon + 1
+            var end = scratch.length
+            while (start < end && scratch[start] == ' ') start++
+            while (end > start && scratch[end - 1] == ' ') end--
+            fields++
+            bytes += colon.toLong() + end - start
+            if (fields > bounds.maximumHeaderFields || bytes > bounds.maximumHeaderBytes) throw IOException("provider header bound exceeded")
+            // Core retains each raw line (including OWS). Bound that storage independently of
+            // normalized name/value bytes, allowing fixed colon/OWS overhead per declared field.
+            // CRLF adds at most another 2*F wire bytes; status/terminator are separately fixed.
+            rawHeaderCharacters += count
+            if (rawHeaderCharacters > bounds.maximumHeaderBytes.toLong() + 4L * bounds.maximumHeaderFields) {
+                throw IOException("provider raw header bound exceeded")
+            }
+        }
+        target.append(scratch)
+        return count
+    }
+}
+
+/** The library's lenient readLine discards CRLF/EOF proof, so bound and verify each wire line here. */
+private fun readProviderCrlfLine(source: SessionInputBuffer, input: InputStream, target: CharArrayBuffer, maximum: Int): Int {
+    while (true) {
+        val next = source.read(input)
+        if (next == 13) {
+            if (source.read(input) != 10) throw IOException("provider line framing refused")
+            return target.length
+        }
+        if (next !in 32..126 || target.length >= maximum) throw IOException("provider line framing refused")
+        target.append(next.toChar())
+    }
+}
+
+/** Bounded framing metadata; this closed adapter does not admit trailing response headers. */
+private class ProviderChunkMetadataBuffer(private val source: SessionInputBuffer, private val bounds: AcpProviderTransportBounds) : SessionInputBuffer by source {
+    private val scratch = CharArrayBuffer(bounds.maximumHeaderBytes + 4)
+    private var bytes = 0L
+    private var trailers = false
+    override fun readLine(target: CharArrayBuffer, input: InputStream): Int {
+        scratch.clear()
+        val count = readProviderCrlfLine(source, input, scratch, bounds.maximumHeaderBytes)
+        bytes += count.toLong() + 2
+        if (bytes > bounds.maximumHeaderBytes || trailers && count != 0) throw IOException("provider chunk metadata refused")
+        if (scratch.toString().substringBefore(';').trim().toLongOrNull(16) == 0L) trailers = true
+        target.append(scratch)
+        return count
     }
 }
 
@@ -769,15 +989,20 @@ private class JdkAcpProviderBackend(private val authority: AcpProviderNetworkAut
 private sealed class AcpProviderNetworkAuthority protected constructor() {
     abstract val endpoint: URI
     open fun admitToBackend() = Unit
-    abstract fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder
-    open fun configure(builder: HttpClient.Builder): HttpClient.Builder = builder
+    abstract val bounds: AcpProviderTransportBounds
+    abstract val tlsContext: SSLContext
+    abstract fun authorize(request: BasicClassicHttpRequest, credentials: AcpProviderCredentialMaterial)
 }
 
 private class ChatGptAcpProviderNetworkAuthority(policy: AcpProviderTransportPolicy.Approved) : AcpProviderNetworkAuthority() {
     override val endpoint: URI = policy.endpoint
+    override val bounds = policy.bounds
+    override val tlsContext: SSLContext = SSLContext.getDefault()
     init { require(endpoint == APPROVED_CODEX_CHATGPT_RESPONSES_ENDPOINT) { "provider network authority is unavailable" } }
-    override fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder =
-        builder.header("Authorization", "Bearer ${credentials.accessToken}").header("ChatGPT-Account-ID", credentials.accountId)
+    override fun authorize(request: BasicClassicHttpRequest, credentials: AcpProviderCredentialMaterial) {
+        request.setHeader("Authorization", "Bearer ${credentials.accessToken}")
+        request.setHeader("ChatGPT-Account-ID", credentials.accountId)
+    }
 }
 
 private class FixtureAcpProviderNetworkAuthority(
@@ -787,6 +1012,7 @@ private class FixtureAcpProviderNetworkAuthority(
 ) : AcpProviderNetworkAuthority() {
     init { require(hasProvenance(provenance)) { "fixture network authority is unavailable" } }
     override val endpoint: URI = policy.endpoint
+    override val bounds = policy.bounds
     // All authority state is private instance state, not companion static fields whose synthetic
     // accessors could return provenance or mutable identity registries.
     private class Issuer {
@@ -810,13 +1036,13 @@ private class FixtureAcpProviderNetworkAuthority(
             issuer.issue(policy, consumer)
     }
     override fun admitToBackend() = issuer.consume(this)
-    override fun authorize(builder: HttpRequest.Builder, credentials: AcpProviderCredentialMaterial): HttpRequest.Builder {
+    override fun authorize(request: BasicClassicHttpRequest, credentials: AcpProviderCredentialMaterial) {
         require(credentials.accessToken == authorization && credentials.accountId == "credential_free_fixture_v1") {
             "fixture authorization is unavailable"
         }
-        return builder.header("Authorization", "Bearer $authorization")
+        request.setHeader("Authorization", "Bearer $authorization")
     }
-    private val tlsContext: SSLContext = createTlsContext()
+    override val tlsContext: SSLContext = createTlsContext()
     private fun createTlsContext(): SSLContext {
         val identityBytes = AcpProviderBroker::class.java.getResourceAsStream(PROVIDER_FIXTURE_KEYSTORE_RESOURCE)
             ?.use { stream -> stream.readNBytes(16 * 1024 + 1) }
@@ -841,11 +1067,7 @@ private class FixtureAcpProviderNetworkAuthority(
         }
         return context
     }
-    override fun configure(builder: HttpClient.Builder): HttpClient.Builder =
-        builder.version(HttpClient.Version.HTTP_1_1).sslContext(tlsContext).sslParameters(SSLParameters().also {
-            it.endpointIdentificationAlgorithm = "HTTPS"
-            it.protocols = arrayOf("TLSv1.3", "TLSv1.2")
-        })
+
 }
 
 /** Extended overloads preserve the JDK's IP SAN verification as well as both exact pins. */

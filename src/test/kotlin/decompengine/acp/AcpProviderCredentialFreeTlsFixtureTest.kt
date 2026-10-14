@@ -7,11 +7,15 @@ import com.sun.net.httpserver.HttpsExchange
 import com.sun.net.httpserver.HttpsServer
 import decompengine.agent.*
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.Socket
+import java.net.ServerSocket
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.file.Files
@@ -24,9 +28,11 @@ import java.util.IdentityHashMap
 import java.util.Properties
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Flow
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLHandshakeException
@@ -107,10 +113,12 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             // exposes no context/host injection. The exact pinned certificate lacks localhost SAN.
             val backendField = AcpProviderBroker::class.java.getDeclaredField("backend").also { it.isAccessible = true }
             val backend = backendField.get(broker)
-            val clientField = backend.javaClass.getDeclaredField("client").also { it.isAccessible = true }
-            val client = clientField.get(backend) as java.net.http.HttpClient
+            val authorityField = backend.javaClass.getDeclaredField("authority").also { it.isAccessible = true }
+            val authority = authorityField.get(backend)
+            val contextField = authority.javaClass.getDeclaredField("tlsContext").also { it.isAccessible = true }
+            val context = contextField.get(authority) as SSLContext
             Socket(InetAddress.getByName("127.0.0.1"), fixture.port).use { raw ->
-                (client.sslContext().socketFactory.createSocket(raw, "localhost", fixture.port, false) as SSLSocket).use { socket ->
+                (context.socketFactory.createSocket(raw, "localhost", fixture.port, false) as SSLSocket).use { socket ->
                     socket.soTimeout = 2000
                     socket.sslParameters = socket.sslParameters.also { it.endpointIdentificationAlgorithm = "HTTPS" }
                     assertFailsWith<SSLHandshakeException> { socket.startHandshake() }
@@ -269,7 +277,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
             val companion = authorityClass.getDeclaredField("Companion").also { it.isAccessible = true }.get(null)
             val issue = companion.javaClass.declaredMethods.single { it.name == "issue" }.also { it.isAccessible = true }
             val authority = issue.invoke(companion, policy, owner)
-            val backendClass = Class.forName("decompengine.acp.JdkAcpProviderBackend")
+            val backendClass = Class.forName("decompengine.acp.CoreAcpProviderBackend")
             val constructor = backendClass.declaredConstructors.single().also { it.isAccessible = true }
             concreteBackend = constructor.newInstance(authority)
             val beforeThreads = ownedClientThreads()
@@ -285,7 +293,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
                     assertEquals(true, close.invoke(backend, Duration.ofNanos((cleanupDeadline - System.nanoTime()).coerceAtLeast(0))))
                     val snapshotMethod = backend.javaClass.getDeclaredMethod("cleanupSnapshot").also { it.isAccessible = true }
                     val snapshot = snapshotMethod.invoke(backend) as AcpProviderConcreteBackendCleanupSnapshot
-                    assertTrue(snapshot.clientTerminated && snapshot.executorTerminated)
+                    assertTrue(snapshot.transportTerminated && snapshot.executorTerminated)
                     assertEquals(snapshot.requestFutureCount, snapshot.terminalFutureCount)
                 }
             } finally { fixture.closeVerified(cleanupDeadline) }
@@ -356,7 +364,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         }
         // Synthetic accessors may enforce checks but must never return mutable issuer registries
         // or provenance objects usable to fabricate new fixture authorities.
-        for (type in listOf(fixture, fixture.getDeclaredField("Companion").type, Class.forName("decompengine.acp.AcpProviderTransportPolicyKt"), Class.forName("decompengine.acp.AcpProviderBrokerKt"), Class.forName("decompengine.acp.JdkAcpProviderBackend"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority\$Companion"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority\$Issuer"), Class.forName("decompengine.acp.JdkAcpProviderBackend\$Companion"), Class.forName("decompengine.acp.AcpProviderTransportPolicy\$CredentialFreeFixture\$Issuer"))) {
+        for (type in listOf(fixture, fixture.getDeclaredField("Companion").type, Class.forName("decompengine.acp.AcpProviderTransportPolicyKt"), Class.forName("decompengine.acp.AcpProviderBrokerKt"), Class.forName("decompengine.acp.CoreAcpProviderBackend"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority\$Companion"), Class.forName("decompengine.acp.FixtureAcpProviderNetworkAuthority\$Issuer"), Class.forName("decompengine.acp.CoreAcpProviderBackend\$Companion"), Class.forName("decompengine.acp.AcpProviderTransportPolicy\$CredentialFreeFixture\$Issuer"))) {
             assertTrue(type.methods.none { Modifier.isPublic(it.modifiers) && (IdentityHashMap::class.java.isAssignableFrom(it.returnType) || (it.name.startsWith("access$") && it.returnType == Any::class.java)) })
         }
         val properties = Properties().also { values -> javaClass.getResourceAsStream("/acp/provider-relay-fixture-v1.properties")!!.use(values::load) }
@@ -366,6 +374,257 @@ class AcpProviderCredentialFreeTlsFixtureTest {
         assertEquals(PROVIDER_FIXTURE_SPKI_SHA256, properties.getProperty("spkiSha256"))
         assertEquals("true", properties.getProperty("credentialFreeFixture"))
         assertEquals("false", properties.getProperty("adapterQualified"))
+    }
+
+    @Test
+    fun `actual reset authentication challenge and redirect never replay the POST`() {
+        for (mode in listOf(RawMode.RESET, RawMode.AUTH_CHALLENGE, RawMode.REDIRECT)) {
+            val fixture = RawTlsFixture(mode)
+            val owner = Any(); val policy = issueFixture(owner, fixture.port)
+            val broker = open(policy, owner)
+            val capture = CaptureReceiver()
+            try {
+                fixture.start()
+                backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+                assertTrue(capture.terminal.await(2, TimeUnit.SECONDS), mode.name)
+                assertFalse(capture.completed)
+                assertEquals(1, fixture.connections.get())
+                assertEquals(1, fixture.posts.get())
+                assertEquals("Bearer ${policy.syntheticAuthorization()}", fixture.authorization)
+                assertEquals(0, capture.bytes.size(), "denied upstream bodies must remain unread")
+                if (mode != RawMode.RESET) assertEquals(if (mode == RawMode.AUTH_CHALLENGE) 401 else 302, capture.status)
+            } finally { closeRawVerified(broker, fixture) }
+        }
+    }
+
+    @Test
+    fun `actual refused connection cannot fall back or connect again to a second address`() {
+        val refusedPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val fallback = RawTlsFixture(RawMode.RESET)
+        val owner = Any(); val policy = issueFixture(owner, refusedPort)
+        val broker = open(policy, owner)
+        val capture = CaptureReceiver()
+        try {
+            fallback.start()
+            val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+            assertTrue(capture.terminal.await(2, TimeUnit.SECONDS))
+            assertFalse(capture.completed)
+            val method = requestOwner.javaClass.getDeclaredMethod("connectOnce", Socket::class.java, InetSocketAddress::class.java).also { it.isAccessible = true }
+            Socket(Proxy.NO_PROXY).use { second ->
+                val failure = assertFailsWith<InvocationTargetException> {
+                    method.invoke(requestOwner, second, InetSocketAddress(InetAddress.getByName("127.0.0.2"), fallback.port))
+                }
+                assertTrue(failure.cause is IOException)
+                assertEquals("provider connection attempt refused", failure.cause!!.message)
+                assertNull(failure.cause!!.cause)
+                assertFalse(second.isConnected)
+                assertEquals(-1, second.localPort, "second connect is refused before socket bind or network IO")
+            }
+            assertEquals(0, fallback.connections.get())
+            assertEquals(0, capture.bytes.size())
+        } finally { closeRawVerified(broker, fallback) }
+    }
+
+    @Test
+    fun `actual bounded chunked response completes while malformed metadata trailers and body fail closed`() {
+        for (mode in listOf(RawMode.CHUNKED, RawMode.HEADER_LINE, RawMode.HEADER_COUNT, RawMode.HEADER_TOTAL, RawMode.HEADER_PADDING,
+            RawMode.FOLDED, RawMode.INTERIM, RawMode.TRAILER, RawMode.TRUNCATED_CHUNK, RawMode.CHUNK_METADATA, RawMode.BODY_LIMIT)) {
+            val fixture = RawTlsFixture(mode)
+            val owner = Any(); val policy = issueFixture(owner, fixture.port)
+            val broker = open(policy, owner)
+            val capture = CaptureReceiver()
+            try {
+                fixture.start()
+                backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+                assertTrue(capture.terminal.await(2, TimeUnit.SECONDS), mode.name)
+                assertEquals(mode == RawMode.CHUNKED, capture.completed, mode.name)
+                assertEquals(1, fixture.connections.get(), mode.name)
+                assertEquals(1, fixture.posts.get(), mode.name)
+                assertTrue(capture.bytes.size() <= policy.bounds.maximumResponseBytes, mode.name)
+                if (mode == RawMode.CHUNKED) assertEquals("hello", capture.bytes.toString(Charsets.UTF_8))
+                if (mode in listOf(RawMode.HEADER_LINE, RawMode.HEADER_COUNT, RawMode.HEADER_TOTAL, RawMode.HEADER_PADDING, RawMode.FOLDED, RawMode.INTERIM)) {
+                    assertNull(capture.status, "header admission precedes callbacks: $mode")
+                    assertEquals(0, capture.bytes.size(), mode.name)
+                }
+                assertFalse(capture.bytes.toString(Charsets.UTF_8).contains("unreleased_error"), mode.name)
+            } finally { closeRawVerified(broker, fixture) }
+        }
+    }
+
+    @Test
+    fun `cancellation aborts actual handshake header body and demand waits within cleanup grace`() {
+        for (mode in listOf(RawMode.STALL_HANDSHAKE, RawMode.STALL_HEADERS, RawMode.STALL_BODY, RawMode.STALL_DEMAND)) {
+            val fixture = RawTlsFixture(mode)
+            val owner = Any(); val policy = issueFixture(owner, fixture.port)
+            val broker = open(policy, owner)
+            val capture = CaptureReceiver(automaticDemand = mode != RawMode.STALL_DEMAND)
+            try {
+                fixture.start()
+                val requestOwner = backend(broker).start(AcpProviderBackendRequest(policy.endpoint, body(), fixtureCredentials(policy), Duration.ofSeconds(5)), capture)
+                assertTrue(fixture.phase.await(2, TimeUnit.SECONDS), mode.name)
+                if (mode == RawMode.STALL_DEMAND) assertTrue(capture.headers.await(2, TimeUnit.SECONDS))
+                awaitClientWait(mode)
+                val started = System.nanoTime()
+                requestOwner.cancel()
+                closeRawVerified(broker, fixture)
+                assertTrue(System.nanoTime() - started < policy.bounds.cleanupTimeout.toNanos(), mode.name)
+                assertFalse(capture.completed, mode.name)
+            } finally { closeRawVerified(broker, fixture) }
+        }
+    }
+
+    @Test
+    fun `unjoined owned work produces bounded unverified cleanup instead of a terminal future claim`() {
+        val fixture = RawTlsFixture(RawMode.RESET)
+        val owner = Any(); val policy = issueFixture(owner, fixture.port)
+        val broker = open(policy, owner)
+        val transport = backend(broker)
+        val executor = transport.javaClass.getDeclaredField("executor").also { it.isAccessible = true }.get(transport) as ThreadPoolExecutor
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        executor.submit {
+            entered.countDown()
+            while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { }
+        }
+        try {
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            val started = System.nanoTime()
+            assertFalse(transport.closeWithin(Duration.ofMillis(40)))
+            assertTrue(System.nanoTime() - started < Duration.ofSeconds(1).toNanos())
+            val snapshot = assertNotNull(broker.concreteBackendCleanupSnapshot())
+            assertFalse(snapshot.transportTerminated)
+            assertFalse(snapshot.executorTerminated)
+            assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+            assertEquals(AcpProviderBrokerCleanup.UNVERIFIED, broker.snapshot().cleanup)
+        } finally {
+            release.countDown()
+            closeRawVerified(broker, fixture)
+        }
+    }
+
+    private fun awaitClientWait(mode: RawMode) {
+        val deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos()
+        while (System.nanoTime() < deadline) {
+            val entered = Thread.getAllStackTraces().any { (thread, frames) ->
+                thread.name == "decomp-acp-provider-http" && frames.any { it.className == "decompengine.acp.ProviderHttpAttempt" && it.methodName == "run" } &&
+                    when (mode) {
+                        RawMode.STALL_HANDSHAKE -> frames.any { it.methodName == "startHandshake" }
+                        RawMode.STALL_HEADERS -> frames.any { it.className == "decompengine.acp.ProviderHeaderBuffer" && it.methodName == "readLine" }
+                        RawMode.STALL_BODY -> frames.any { it.className == "org.apache.hc.core5.http.impl.io.ContentLengthInputStream" && it.methodName == "read" }
+                        RawMode.STALL_DEMAND -> frames.any { it.className == "java.lang.Object" && it.methodName.startsWith("wait") }
+                        else -> false
+                    }
+            }
+            if (entered) return
+            Thread.sleep(1)
+        }
+        fail("owned HTTP client did not enter the intended wait: $mode")
+    }
+
+    private fun backend(broker: AcpProviderBroker): AcpProviderBrokerTestBackend =
+        AcpProviderBroker::class.java.getDeclaredField("backend").also { it.isAccessible = true }.get(broker) as AcpProviderBrokerTestBackend
+    private fun fixtureCredentials(policy: AcpProviderTransportPolicy.CredentialFreeFixture): AcpProviderCredentialMaterial =
+        AcpProviderCredentialMaterial.cachedChatGpt(policy.syntheticAuthorization(), "credential_free_fixture_v1")
+    private fun closeRawVerified(broker: AcpProviderBroker, fixture: RawTlsFixture) {
+        val deadline = System.nanoTime() + broker.policy.bounds.cleanupTimeout.toNanos()
+        try { broker.close(); assertBackendCleanup(broker) } finally { fixture.closeVerified(deadline) }
+        assertTrue(System.nanoTime() <= deadline, "shared raw transport/server cleanup grace expired")
+    }
+
+    private class CaptureReceiver(private val automaticDemand: Boolean = true) : AcpProviderBackendReceiver {
+        val terminal = CountDownLatch(1)
+        val headers = CountDownLatch(1)
+        val bytes = ByteArrayOutputStream()
+        @Volatile var completed = false
+        @Volatile var status: Int? = null
+        private var subscription: Flow.Subscription? = null
+        override fun subscribe(subscription: Flow.Subscription) { this.subscription = subscription; if (automaticDemand) subscription.request(Long.MAX_VALUE) }
+        override fun headers(status: Int, headers: Map<String, List<String>>) {
+            this.status = status
+            if (status != 200) subscription!!.cancel()
+            this.headers.countDown()
+        }
+        override fun bytes(buffers: List<ByteBuffer>) {
+            for (buffer in buffers) { val copy = ByteArray(buffer.remaining()); buffer.get(copy); bytes.write(copy) }
+        }
+        override fun complete() { completed = true; terminal.countDown() }
+        override fun failed() { terminal.countDown() }
+    }
+
+    private enum class RawMode { RESET, AUTH_CHALLENGE, REDIRECT, CHUNKED, HEADER_LINE, HEADER_COUNT, HEADER_TOTAL, HEADER_PADDING,
+        FOLDED, INTERIM, TRAILER, TRUNCATED_CHUNK, CHUNK_METADATA, BODY_LIMIT, STALL_HANDSHAKE, STALL_HEADERS, STALL_BODY, STALL_DEMAND }
+    private inner class RawTlsFixture(private val mode: RawMode) {
+        private val initialSockets = initializedSocketRuntimeCensus()
+        private val listener: ServerSocket = if (mode == RawMode.STALL_HANDSHAKE) ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+            else serverContext("fixture").serverSocketFactory.createServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+        val port = listener.localPort
+        private val closed = AtomicBoolean()
+        private val executor = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(1),
+            { task -> Thread(task, "decomp-acp-raw-fixture").also { it.isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
+        private val sockets = Collections.synchronizedSet(Collections.newSetFromMap(IdentityHashMap<Socket, Boolean>()))
+        val connections = AtomicInteger()
+        val posts = AtomicInteger()
+        val phase = CountDownLatch(1)
+        @Volatile var authorization: String? = null
+        fun start() { executor.submit {
+            while (!closed.get()) {
+                val socket = try { listener.accept() } catch (_: IOException) { break }
+                sockets.add(socket); connections.incrementAndGet()
+                try {
+                    socket.soTimeout = 5000
+                    if (mode == RawMode.STALL_HANDSHAKE) { phase.countDown(); while (socket.getInputStream().read() >= 0) { }; continue }
+                    (socket as SSLSocket).startHandshake()
+                    val input = socket.getInputStream()
+                    val head = ByteArrayOutputStream()
+                    while (head.size() <= 8192) {
+                        val byte = input.read(); if (byte < 0) throw IOException("fixture request incomplete")
+                        head.write(byte)
+                        if (head.size() >= 4 && head.toString(Charsets.US_ASCII).endsWith("\r\n\r\n")) break
+                    }
+                    check(head.size() <= 8192)
+                    val lines = head.toString(Charsets.US_ASCII).split("\r\n")
+                    check(lines.first() == "POST /responses HTTP/1.1")
+                    authorization = lines.single { it.startsWith("Authorization:", true) }.substringAfter(':').trim()
+                    val length = lines.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                    check(length in 1..8192 && input.readNBytes(length).size == length)
+                    posts.incrementAndGet()
+                    if (mode == RawMode.RESET) { socket.setSoLinger(true, 0); continue }
+                    if (mode == RawMode.STALL_HEADERS) { phase.countDown(); while (input.read() >= 0) { }; continue }
+                    val regular = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    val content = when (mode) {
+                        RawMode.AUTH_CHALLENGE -> "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=fixture\r\nContent-Length: 16\r\n\r\nunreleased_error"
+                        RawMode.REDIRECT -> "HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:$port/responses\r\nContent-Length: 16\r\n\r\nunreleased_error"
+                        RawMode.HEADER_LINE -> regular + "X-Huge: " + "a".repeat(5000) + "\r\n\r\n"
+                        RawMode.HEADER_COUNT -> regular + (1..17).joinToString("") { "X-$it: a\r\n" } + "\r\n"
+                        RawMode.HEADER_TOTAL -> regular + "X-A: " + "a".repeat(2100) + "\r\nX-B: " + "a".repeat(2100) + "\r\n\r\n"
+                        RawMode.HEADER_PADDING -> regular + (1..15).joinToString("") { "X-$it:" + " ".repeat(400) + "a\r\n" } + "\r\n"
+                        RawMode.FOLDED -> regular + " hidden: value\r\n\r\n"
+                        RawMode.INTERIM -> "HTTP/1.1 100 Continue\r\n\r\n" + regular + "Content-Length: 0\r\n\r\n"
+                        RawMode.BODY_LIMIT -> regular + "Content-Length: 65537\r\n\r\n" + "a".repeat(65537)
+                        RawMode.STALL_BODY -> regular + "Content-Length: 100\r\n\r\na"
+                        RawMode.STALL_DEMAND -> regular + "Content-Length: 1\r\n\r\na"
+                        else -> regular + "Transfer-Encoding: chunked\r\n\r\n" + when (mode) {
+                            RawMode.TRAILER -> "1\r\na\r\n0\r\nX-Forbidden: unreleased_error\r\n\r\n"
+                            RawMode.TRUNCATED_CHUNK -> "1\r\na\r\n0\r\n"
+                            RawMode.CHUNK_METADATA -> "1;" + "a".repeat(4090) + "\r\na\r\n0\r\n\r\n"
+                            else -> "5\r\nhello\r\n0\r\n\r\n"
+                        }
+                    }
+                    socket.getOutputStream().write(content.toByteArray(Charsets.US_ASCII)); socket.getOutputStream().flush()
+                    phase.countDown()
+                    if (mode in listOf(RawMode.STALL_BODY, RawMode.STALL_DEMAND)) while (input.read() >= 0) { }
+                } catch (_: Exception) { }
+                finally { runCatching { socket.close() }; sockets.remove(socket) }
+            }
+        } }
+        fun closeVerified(deadline: Long) {
+            closed.set(true); listener.close()
+            synchronized(sockets) { sockets.toList().forEach { runCatching { it.close() } } }
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS))
+            assertTrue(executor.isTerminated && sockets.isEmpty())
+            while (System.nanoTime() < deadline && (socketInodes() - initialSockets).isNotEmpty()) Thread.sleep(5)
+            assertTrue((socketInodes() - initialSockets).isEmpty(), "raw fixture sockets remained: ${socketInodes() - initialSockets}")
+        }
     }
 
     private fun open(policy: AcpProviderTransportPolicy.CredentialFreeFixture, owner: Any): AcpProviderBroker =
@@ -419,7 +678,7 @@ class AcpProviderCredentialFreeTlsFixtureTest {
     }
     private fun assertBackendCleanup(broker: AcpProviderBroker) {
         val cleanup = assertNotNull(broker.concreteBackendCleanupSnapshot())
-        assertTrue(cleanup.clientTerminated)
+        assertTrue(cleanup.transportTerminated)
         assertTrue(cleanup.executorTerminated)
         assertEquals(cleanup.requestFutureCount, cleanup.terminalFutureCount)
     }
@@ -434,7 +693,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
     private enum class Mode { SUCCESS, WRONG_PIN, PLAINTEXT, REDIRECT, UNKNOWN_HEADER, WRONG_AUTHORIZATION }
 
     private inner class TlsFixture(private val mode: Mode = Mode.SUCCESS) {
-        private val initialSockets = socketInodes()
+        private val initialSockets = initializedSocketRuntimeCensus()
         private val initialDispatcherThreads = Thread.getAllStackTraces().keys.filter { it.name == "HTTP-Dispatcher" }.map { it.threadId() }.toSet()
         private val executor = ThreadPoolExecutor(2, 2, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(8),
             { task -> Thread(task, "decomp-acp-fixture-server").also { it.isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
@@ -509,13 +768,21 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             assertTrue(executor.isTerminated)
             assertTrue(exchanges.isEmpty())
             while (System.nanoTime() < stop && (socketInodes() - initialSockets).isNotEmpty()) Thread.sleep(5)
-            assertTrue((socketInodes() - initialSockets).isEmpty(), "fixture client/server sockets remained open")
+            assertTrue((socketInodes() - initialSockets).isEmpty(), "fixture client/server sockets remained open: ${socketInodes() - initialSockets}")
             while (System.nanoTime() < stop && newDispatcherAlive()) Thread.sleep(5)
             assertFalse(newDispatcherAlive(), "fixture HTTP dispatcher remained alive")
         }
         private fun newDispatcherAlive(): Boolean = Thread.getAllStackTraces().keys.any {
             it.isAlive && it.name == "HTTP-Dispatcher" && it.threadId() !in initialDispatcherThreads
         }
+    }
+
+    private fun initializedSocketRuntimeCensus(): Set<String> {
+        // A first ordinary JDK Socket bind/close initializes a process-wide native close socket.
+        // Establish that runtime state before the owned client/server FD baseline; every later
+        // owned FD still has to disappear. See the standalone SocketRuntimeProbe evidence.
+        Socket(Proxy.NO_PROXY).use { it.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0)) }
+        return socketInodes()
     }
 
     private fun socketInodes(): Set<String> = Files.newDirectoryStream(Path.of("/proc/self/fd")).use { entries ->

@@ -457,7 +457,7 @@ class AcpProviderBrokerTest {
     }
 
     @Test
-    fun `concrete JDK client and lifecycle terminate without any provider request`() {
+    fun `concrete HTTP transport and lifecycle terminate without any provider request`() {
         val request = AgentExecutionRequest("construct and close host owner only", listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
             accessPolicy = AgentAccessPolicy(emptyList()), limits = AgentExecutionLimits(wallClockTimeout = Duration.ofSeconds(10)))
         val broker = AcpProviderBroker.openForProtectedQualification(policy(), request, Duration.ofSeconds(2),

@@ -1739,6 +1739,7 @@ v3BoundaryCensusIsolated.configure { shouldRunAfter(v3BoundaryPublicationIsolate
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")
+    implementation("org.apache.httpcomponents.core5:httpcore5:5.4.4") { version { strictly("5.4.4") } }
     implementation("com.fasterxml.jackson.core:jackson-core:2.21.5")
     implementation("io.github.optimumcode:json-schema-validator:0.5.5")
     implementation("net.java.dev.jna:jna:5.19.1")
