@@ -1142,8 +1142,28 @@ private class ProviderHttpConnection(private val bounds: AcpProviderTransportBou
 ) {
     override fun close() = close(CloseMode.IMMEDIATE)
     override fun createContentInputStream(length: Long, buffer: SessionInputBuffer, input: InputStream): InputStream =
-        if (length == ContentLengthStrategy.CHUNKED) ChunkedInputStream(ProviderChunkMetadataBuffer(buffer, bounds), input, providerHttp1Config(bounds))
-        else super.createContentInputStream(length, buffer, input)
+        ProviderBodyInputView(
+            if (length == ContentLengthStrategy.CHUNKED) ChunkedInputStream(ProviderChunkMetadataBuffer(buffer, bounds), input, providerHttp1Config(bounds))
+            else super.createContentInputStream(length, buffer, input),
+        )
+}
+
+/** Transport owns the socket. Logical entity close must neither drain framing nor close transport. */
+private class ProviderBodyInputView(private val framing: InputStream) : InputStream() {
+    private val closed = AtomicBoolean(false)
+
+    private fun requireOpen() {
+        if (closed.get()) throw IOException("provider response body closed")
+    }
+
+    override fun read(): Int { requireOpen(); return framing.read() }
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+        requireOpen()
+        return framing.read(bytes, offset, length)
+    }
+    override fun skip(count: Long): Long { requireOpen(); return framing.skip(count) }
+    override fun available(): Int { requireOpen(); return framing.available() }
+    override fun close() { closed.set(true) }
 }
 
 /** Scratch is bounded by policy before the parser can retain a header or grow its header list. */
