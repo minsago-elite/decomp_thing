@@ -7,15 +7,22 @@ import decompengine.oracle.fulltree.StableControlFile
 import java.io.ByteArrayOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
+import java.io.OutputStream
+import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.tukaani.xz.XZInputStream
 
@@ -26,10 +33,7 @@ import org.tukaani.xz.XZInputStream
 object LlvmBehaviorNativeRuntimeMeasurementV2LiveMain {
     @JvmStatic
     fun main(arguments: Array<String>) {
-        require(arguments.size == 7) {
-            "expected raw OCI directory, fixed client, empty config, private socket, authenticated source archive, detached signature, fresh output"
-        }
-        val selected = arguments.map { Path.of(it).toAbsolutePath().normalize() }
+        val (listenerContinuity, selected) = nativeLiveArguments(arguments)
         val deadline = AnalysisDeadline.start(TimeUnit.MINUTES.toNanos(20), "manual native resource byte proof")
         val checkpoint: (String) -> Unit = deadline::checkpoint
         val deploymentPath = Path.of(LlvmBehaviorNativeRuntimeMeasurementV2::class.java.protectionDomain
@@ -58,24 +62,70 @@ object LlvmBehaviorNativeRuntimeMeasurementV2LiveMain {
                     }
                     source.verifyUnchanged("signed source archive resource proof")
                     signature.verifyUnchanged("detached signature resource proof")
-                    val candidate = LlvmBehaviorNativeRuntimeMeasurementV2.measure(selected[0], selected[1], selected[2], selected[3])
-                    val bytes = candidate.canonicalBytes()
-                    val value = OracleJson.parseCanonical(bytes, NATIVE_MEASUREMENT_JSON_LIMITS, checkpoint) as JsonObject
-                    check(value["runtimeProfileApproved"] == JsonPrimitive(false) && value["startAuthorized"] == JsonPrimitive(false))
-                    check(value["mergedNamespaceSha256"] == measuredFiles["mergedNamespaceSha256"]) {
-                        "raw image changed between independent signed-source byte proof and production runtime measurement"
+                    var cliTranscript: NativeListenerCliTranscript? = null
+                    val cliOutput = if (listenerContinuity) {
+                        val mainClass = Class.forName("decompengine.MainKt", false,
+                            LlvmBehaviorNativeRuntimeMeasurementV2LiveMain::class.java.classLoader)
+                        val mainDeployment = Path.of(mainClass.protectionDomain.codeSource.location.toURI())
+                            .toAbsolutePath().normalize()
+                        check(mainDeployment == deploymentPath) {
+                            "manual listener measurement must invoke MainKt from the retained installed application JAR"
+                        }
+                        deployment.verifyUnchanged("before installed production CLI invocation")
+                        checkpoint("before installed production listener CLI invocation")
+                        Files.createDirectories(selected[6].parent)
+                        cliTranscript = captureNativeListenerCli {
+                            decompengine.main(nativeListenerProductionArguments(selected))
+                        }
+                        StableControlFile.openWithCheckpoint(selected[6],
+                            NATIVE_MEASUREMENT_JSON_LIMITS.maximumInputBytes.toLong(),
+                            "installed production listener candidate", checkpoint)
+                    } else null
+                    try {
+                        val bytes = if (cliOutput != null) {
+                            cliOutput.requireSingleLink("before installed production candidate use")
+                            check(cliOutput.size in 1L..NATIVE_MEASUREMENT_JSON_LIMITS.maximumInputBytes.toLong()) {
+                                "installed production listener candidate exceeds its JSON byte bound"
+                            }
+                            cliOutput.readExactly(0L, cliOutput.size.toInt(), "installed production listener candidate", checkpoint)
+                                .also { cliOutput.verifyUnchanged("installed production candidate read") }
+                        } else {
+                            LlvmBehaviorNativeRuntimeMeasurementV2.measure(selected[0], selected[1], selected[2], selected[3])
+                                .canonicalBytes()
+                        }
+                        val candidateSha256 = OracleArtifacts.sha256(bytes)
+                        if (cliOutput != null) {
+                            val transcript = requireNotNull(cliTranscript)
+                            requireNativeCliCandidateBytes(transcript, cliOutput.authenticatedSha256, bytes)
+                            System.out.write(transcript.bytes)
+                            System.out.flush()
+                        }
+                        val value = OracleJson.parseCanonical(bytes, NATIVE_MEASUREMENT_JSON_LIMITS, checkpoint) as JsonObject
+                        if (listenerContinuity) requireNativeListenerCandidate(value)
+                        else check(value["runtimeProfileApproved"] == JsonPrimitive(false) && value["startAuthorized"] == JsonPrimitive(false))
+                        check(value["mergedNamespaceSha256"] == measuredFiles["mergedNamespaceSha256"]) {
+                            "raw image changed between independent signed-source byte proof and production runtime measurement"
+                        }
+                        source.verifyUnchanged("signed source archive final boundary")
+                        signature.verifyUnchanged("detached signature final boundary")
+                        deployment.verifyUnchanged("manual installed factory final boundary")
+                        val referenceFacts = OracleJson.canonicalBytes(measuredFiles, NATIVE_MEASUREMENT_JSON_LIMITS, checkpoint)
+                        checkpoint("before publishing manual measurement candidates")
+                        Files.createDirectories(selected[6].parent)
+                        Files.write(selected[6].resolveSibling("locked-reference-byte-measurement.json"), referenceFacts,
+                            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+                        if (!listenerContinuity) {
+                            Files.write(selected[6], bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+                        }
+                        cliOutput?.verifyUnchanged("manual installed CLI candidate final boundary")
+                        println("Actual installed raw OCI/Docker export measurement candidate SHA-256=$candidateSha256; signed-source resource proof SHA-256=${OracleArtifacts.sha256(referenceFacts)}")
+                        println("runtimeProfileApproved=false startAuthorized=false containmentProved=false scoringAuthority=false releaseEligible=false")
+                        if (listenerContinuity) {
+                            println("Listener continuity observed by the installed production CLI; daemonExecutableApproved=false httpResponderIdentityProved=false")
+                        }
+                    } finally {
+                        cliOutput?.close()
                     }
-                    source.verifyUnchanged("signed source archive final boundary")
-                    signature.verifyUnchanged("detached signature final boundary")
-                    deployment.verifyUnchanged("manual installed factory final boundary")
-                    val referenceFacts = OracleJson.canonicalBytes(measuredFiles, NATIVE_MEASUREMENT_JSON_LIMITS, checkpoint)
-                    checkpoint("before publishing manual measurement candidates")
-                    Files.createDirectories(selected[6].parent)
-                    Files.write(selected[6].resolveSibling("locked-reference-byte-measurement.json"), referenceFacts,
-                        StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-                    Files.write(selected[6], bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-                    println("Actual installed raw OCI/Docker export measurement candidate SHA-256=${candidate.sha256}; signed-source resource proof SHA-256=${OracleArtifacts.sha256(referenceFacts)}")
-                    println("runtimeProfileApproved=false startAuthorized=false containmentProved=false scoringAuthority=false releaseEligible=false")
                 }
             }
         }
@@ -382,4 +432,245 @@ object LlvmBehaviorNativeRuntimeMeasurementV2LiveMain {
     private const val MAXIMUM_RESOURCE_BYTES = 64L * 1024 * 1024
     private val GENERATED_RESOURCE_NAMES = setOf("arm_neon.h", "arm_fp16.h", "arm_sve.h", "arm_sme.h", "arm_bf16.h", "arm_mve.h",
         "arm_cde.h", "arm_vector_types.h", "riscv_vector.h")
+}
+
+private fun nativeLiveArguments(arguments: Array<String>): Pair<Boolean, List<Path>> {
+    val listenerContinuity = arguments.firstOrNull() == "--listener-continuity"
+    val paths = if (listenerContinuity) arguments.drop(1) else arguments.asList()
+    require(paths.size == 7 && paths.all { it.isNotEmpty() && !it.startsWith("-") }) {
+        "expected one optional leading --listener-continuity and raw OCI directory, fixed client, empty config, private socket, authenticated source archive, detached signature, fresh output"
+    }
+    return listenerContinuity to paths.map { Path.of(it).toAbsolutePath().normalize() }
+}
+
+private fun nativeListenerProductionArguments(selected: List<Path>): Array<String> =
+    arrayOf("llvm-native-runtime-measurement", "--listener-continuity", selected[0].toString(), selected[1].toString(),
+        selected[2].toString(), selected[3].toString(), selected[6].toString())
+
+private const val NATIVE_CLI_STDOUT_MAXIMUM_BYTES = 8 * 1024
+private const val NATIVE_CLI_AUTHORITY_LINE = "oracleAuthority=false runtimeProfileApproved=false startAuthorized=false " +
+    "containmentProved=false scoringAuthority=false releaseEligible=false"
+private const val NATIVE_CLI_SCOPE_LINE = "Daemon executable approval and HTTP responder identity proof remain unavailable."
+private val nativeCliStdoutCaptureLock = Any()
+
+private data class NativeListenerCliTranscript(val sha256: String, val bytes: ByteArray)
+
+/** Private manual-probe capture only; synthetic controls do not exercise a Docker measurement. */
+private class BoundedNativeCliOutput : OutputStream() {
+    private val captured = ByteArrayOutputStream()
+    var overflowed: Boolean = false
+        private set
+
+    @Synchronized
+    override fun write(value: Int) {
+        requireCapacity(1)
+        captured.write(value)
+    }
+
+    @Synchronized
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        java.util.Objects.checkFromIndexSize(offset, length, bytes.size)
+        requireCapacity(length)
+        captured.write(bytes, offset, length)
+    }
+
+    private fun requireCapacity(additional: Int) {
+        if (overflowed || additional > NATIVE_CLI_STDOUT_MAXIMUM_BYTES - captured.size()) {
+            overflowed = true
+            // PrintStream swallows IOExceptions. A runtime failure and the sticky state both refuse overflow.
+            throw IllegalStateException("installed production CLI stdout exceeds its private capture bound")
+        }
+    }
+
+    @Synchronized
+    fun bytes(): ByteArray = captured.toByteArray()
+}
+
+private fun captureNativeListenerCli(operation: () -> Unit): NativeListenerCliTranscript =
+    synchronized(nativeCliStdoutCaptureLock) {
+        val original = System.out
+        val output = BoundedNativeCliOutput()
+        val capture = PrintStream(output, false, Charsets.UTF_8)
+        try {
+            System.setOut(capture)
+            operation()
+            capture.flush()
+            check(!output.overflowed && !capture.checkError()) { "installed production CLI stdout capture failed" }
+            val bytes = output.bytes()
+            NativeListenerCliTranscript(nativeListenerCliSha256(bytes), bytes)
+        } finally {
+            System.setOut(original)
+            capture.close()
+        }
+    }
+
+private fun nativeListenerCliSha256(bytes: ByteArray): String {
+    check(bytes.size <= NATIVE_CLI_STDOUT_MAXIMUM_BYTES &&
+        bytes.all { it == '\n'.code.toByte() || (it.toInt() and 0xff) in 0x20..0x7e }) {
+        "installed production CLI transcript exceeds its ASCII or byte bound"
+    }
+    val lines = bytes.toString(Charsets.US_ASCII).split('\n')
+    check(lines.size == 4 && lines[3].isEmpty() && lines[1] == NATIVE_CLI_AUTHORITY_LINE &&
+        lines[2] == NATIVE_CLI_SCOPE_LINE) {
+        "installed production CLI transcript lacks its exact candidate, authority, and scope lines"
+    }
+    val digest = Regex("candidate sha256: ([0-9a-f]{64})").matchEntire(lines[0])
+    check(digest != null) { "installed production CLI transcript lacks one exact lowercase candidate SHA-256" }
+    return digest.groupValues[1]
+}
+
+private fun requireNativeCliCandidateBytes(
+    transcript: NativeListenerCliTranscript,
+    authenticatedSha256: String,
+    bytes: ByteArray,
+) {
+    check(authenticatedSha256 == transcript.sha256 && OracleArtifacts.sha256(bytes) == transcript.sha256) {
+        "reopened listener candidate bytes differ from the exact installed production CLI invocation"
+    }
+}
+
+private fun requireNativeListenerCandidate(value: JsonObject) {
+    check(value["schemaVersion"] == JsonPrimitive(3) &&
+        value["artifactKind"] == JsonPrimitive("native-runtime-measurement-candidate") &&
+        value["authority"] == JsonPrimitive("unapproved-raw-measurement-only") &&
+        listOf("oracleAuthority", "runtimeProfileApproved", "startAuthorized", "containmentProved", "scoringAuthority",
+            "releaseEligible").all { value[it] == JsonPrimitive(false) }) {
+        "installed production listener candidate is not an unapproved schema-3 measurement"
+    }
+    val observed = (value["readOnlyRuntime"] as? JsonObject)?.get("observedListenerContinuity") as? JsonObject
+    val fixed = linkedMapOf(
+        "schemaVersion" to JsonPrimitive(1),
+        "identityKind" to JsonPrimitive("linux-af-unix-listener-credential-snapshot"),
+        "identifierNamespace" to JsonPrimitive("observer"),
+        "peerHandleMechanism" to JsonPrimitive("SO_PEERPIDFD"),
+        "fixedExchangeCount" to JsonPrimitive(5),
+        "sameListenerSnapshot" to JsonPrimitive(true),
+        "retentionBoundary" to JsonPrimitive("final-factory-guard"),
+        "daemonExecutableApproved" to JsonPrimitive(false),
+        "httpResponderIdentityProved" to JsonPrimitive(false),
+    )
+    check(observed != null && observed.keys == fixed.keys + setOf("pid", "uid", "gid") &&
+        fixed.all { (key, expected) -> observed[key] == expected }) {
+        "installed production candidate lacks its exact unapproved listener continuity facts"
+    }
+    for ((key, range) in listOf("pid" to 1L..Int.MAX_VALUE.toLong(), "uid" to 0L..0xffff_ffffL,
+        "gid" to 0L..0xffff_ffffL)) {
+        val number = (observed[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
+        check(number != null && number in range) { "installed production listener $key is outside its observer namespace bound" }
+    }
+}
+
+class LlvmBehaviorNativeRuntimeMeasurementV2LiveArgumentsTest {
+    @Test
+    fun `manual runner retains seven default paths and routes one leading listener option to five CLI paths`() {
+        val paths = (0..6).map { "build/live-argument-control/path-$it" }.toTypedArray()
+        val original = nativeLiveArguments(paths)
+        val strict = nativeLiveArguments(arrayOf("--listener-continuity", *paths))
+        assertEquals(false, original.first)
+        assertEquals(true, strict.first)
+        assertEquals(original.second, strict.second)
+        assertEquals(listOf("llvm-native-runtime-measurement", "--listener-continuity",
+            original.second[0].toString(), original.second[1].toString(), original.second[2].toString(),
+            original.second[3].toString(), original.second[6].toString()),
+            nativeListenerProductionArguments(strict.second).toList())
+    }
+
+    @Test
+    fun `manual runner refuses unknown duplicate misplaced and missing listener option arguments`() {
+        val paths = (0..6).map { "build/live-argument-control/path-$it" }.toTypedArray()
+        for (arguments in listOf(arrayOf("--unknown", *paths), arrayOf("--listener-continuity", "--listener-continuity", *paths),
+            paths.copyOf().apply { this[3] = "--listener-continuity" }, arrayOf("--listener-continuity", *paths.dropLast(1).toTypedArray()),
+            paths.copyOf().apply { this[4] = "" })) {
+            assertFailsWith<IllegalArgumentException> { nativeLiveArguments(arguments) }
+        }
+    }
+}
+
+/** Synthetic stdout-binding controls; none is an actual installed Docker qualification. */
+class LlvmBehaviorNativeRuntimeMeasurementV2LiveCliReceiptTest {
+    @Test
+    fun `bounded exact CLI transcript binds authenticated and consumed candidate bytes`() {
+        val bytes = "synthetic candidate binding bytes\n".encodeToByteArray()
+        val sha256 = OracleArtifacts.sha256(bytes)
+        val original = System.out
+        val transcript = captureNativeListenerCli { printSyntheticCliTranscript(sha256) }
+        assertSame(original, System.out)
+        assertEquals(sha256, transcript.sha256)
+        requireNativeCliCandidateBytes(transcript, sha256, bytes)
+    }
+
+    @Test
+    fun `CLI transcript refuses missing duplicate and malformed candidate digest lines`() {
+        val sha256 = "a".repeat(64)
+        val authorityAndScope = "$NATIVE_CLI_AUTHORITY_LINE\n$NATIVE_CLI_SCOPE_LINE\n"
+        val valid = "candidate sha256: $sha256\n$authorityAndScope"
+        for (text in listOf(authorityAndScope, "candidate sha256: $sha256\n$valid",
+            "candidate sha256: ${"a".repeat(63)}\n$authorityAndScope",
+            "candidate sha256: ${"A".repeat(64)}\n$authorityAndScope",
+            "candidate sha256: ${"g".repeat(64)}\n$authorityAndScope")) {
+            assertFailsWith<IllegalStateException> { nativeListenerCliSha256(text.encodeToByteArray()) }
+        }
+    }
+
+    @Test
+    fun `CLI transcript refuses unknown authority lines non ASCII and excess bytes`() {
+        val valid = "candidate sha256: ${"a".repeat(64)}\n$NATIVE_CLI_AUTHORITY_LINE\n$NATIVE_CLI_SCOPE_LINE\n"
+        for (text in listOf(valid + "extra\n", valid.replace("startAuthorized=false", "startAuthorized=true"),
+            valid.replace("Daemon", "Dæmon"), valid.removeSuffix("\n"))) {
+            assertFailsWith<IllegalStateException> { nativeListenerCliSha256(text.encodeToByteArray()) }
+        }
+        assertFailsWith<IllegalStateException> { nativeListenerCliSha256(ByteArray(NATIVE_CLI_STDOUT_MAXIMUM_BYTES + 1)) }
+    }
+
+    @Test
+    fun `stdout overflow propagates despite PrintStream and restores original output`() {
+        val original = System.out
+        assertFailsWith<IllegalStateException> {
+            captureNativeListenerCli { System.out.write(ByteArray(NATIVE_CLI_STDOUT_MAXIMUM_BYTES + 1) { 65 }) }
+        }
+        assertSame(original, System.out)
+    }
+
+    @Test
+    fun `swallowed stdout overflow remains poisoned and restores original output`() {
+        val original = System.out
+        assertFailsWith<IllegalStateException> {
+            captureNativeListenerCli {
+                runCatching { System.out.write(ByteArray(NATIVE_CLI_STDOUT_MAXIMUM_BYTES + 1) { 65 }) }
+            }
+        }
+        assertSame(original, System.out)
+    }
+
+    @Test
+    fun `operation failure is preserved and original stdout is restored`() {
+        val original = System.out
+        val failure = IllegalArgumentException("synthetic CLI operation failure")
+        val observed = assertFailsWith<IllegalArgumentException> {
+            captureNativeListenerCli {
+                System.out.println("partial synthetic transcript")
+                throw failure
+            }
+        }
+        assertSame(failure, observed)
+        assertSame(original, System.out)
+    }
+
+    @Test
+    fun `CLI digest binding refuses replacement metadata and consumed content separately`() {
+        val bytes = "synthetic original candidate\n".encodeToByteArray()
+        val replacement = "synthetic replacement candidate\n".encodeToByteArray()
+        val sha256 = OracleArtifacts.sha256(bytes)
+        val transcript = captureNativeListenerCli { printSyntheticCliTranscript(sha256) }
+        assertFailsWith<IllegalStateException> {
+            requireNativeCliCandidateBytes(transcript, OracleArtifacts.sha256(replacement), bytes)
+        }
+        assertFailsWith<IllegalStateException> { requireNativeCliCandidateBytes(transcript, sha256, replacement) }
+    }
+
+    private fun printSyntheticCliTranscript(sha256: String) {
+        System.out.println("candidate sha256: $sha256")
+        System.out.println(NATIVE_CLI_AUTHORITY_LINE)
+        System.out.println(NATIVE_CLI_SCOPE_LINE)
+    }
 }

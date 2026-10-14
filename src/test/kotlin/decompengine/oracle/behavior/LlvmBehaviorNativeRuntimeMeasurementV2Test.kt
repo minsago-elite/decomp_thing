@@ -215,6 +215,7 @@ class LlvmBehaviorNativeRuntimeMeasurementV2Test {
             fixture.image().use { image ->
                 fixture.bindings().use { binding ->
                     val result = privateMeasurement(binding, image)
+                    assertFalse("observedListenerContinuity" in result, "legacy V2 must retain its existing schema")
                     assertEquals(JsonPrimitive(image.configSha256), result["exportConfigSha256"])
                     assertEquals(JsonPrimitive(image.namespaceSha256), result["exportMergedNamespaceSha256"])
                     assertEquals(JsonPrimitive(OracleArtifacts.sha256(fixture.export)), result["exportSha256"])
@@ -317,6 +318,89 @@ class LlvmBehaviorNativeRuntimeMeasurementV2Test {
             }
         }
     }
+    @Test
+    fun `V3 listener candidate preserves raw authority and immutable canonical bytes`() {
+        val fields = listenerCandidateFields()
+        val candidate = LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(fields, {})
+        val bytes = candidate.canonicalBytes()
+        bytes.fill(0)
+        assertEquals(candidate.sha256, OracleArtifacts.sha256(candidate.canonicalBytes()))
+        assertEquals(JsonPrimitive(3), nativeMeasurementObject(candidate.canonicalBytes(), "V3 candidate", {})["schemaVersion"])
+        listOf("oracleAuthority", "runtimeProfileApproved", "startAuthorized", "containmentProved",
+            "scoringAuthority", "releaseEligible").forEach { key ->
+            assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception>(key) {
+                LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(JsonObject(fields + (key to JsonPrimitive(true))), {})
+            }
+        }
+        for (version in listOf(JsonPrimitive(2), JsonPrimitive(4), JsonPrimitive("3"))) {
+            assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception> {
+                LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(JsonObject(fields + ("schemaVersion" to version)), {})
+            }
+        }
+    }
+
+    @Test
+    fun `V3 listener candidate requires exact snapshot semantics and observer numeric bounds`() {
+        val accepted = listenerContinuityFields()
+        val alterations = linkedMapOf(
+            "schemaVersion" to JsonPrimitive(2),
+            "identityKind" to JsonPrimitive("approved-daemon"),
+            "identifierNamespace" to JsonPrimitive("daemon"),
+            "peerHandleMechanism" to JsonPrimitive("SO_PEERCRED"),
+            "fixedExchangeCount" to JsonPrimitive(6),
+            "sameListenerSnapshot" to JsonPrimitive(false),
+            "retentionBoundary" to JsonPrimitive("HTTP-exchange-only"),
+            "daemonExecutableApproved" to JsonPrimitive(true),
+            "httpResponderIdentityProved" to JsonPrimitive(true),
+            "pid" to JsonPrimitive(0),
+            "uid" to JsonPrimitive(-1),
+            "gid" to JsonPrimitive(0x1_0000_0000L),
+        )
+        for ((key, changed) in alterations) {
+            assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception>(key) {
+                LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(
+                    listenerCandidateFields(JsonObject(accepted + (key to changed))), {},
+                )
+            }
+        }
+        accepted.keys.forEach { key ->
+            assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception>("missing $key") {
+                LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(listenerCandidateFields(JsonObject(accepted - key)), {})
+            }
+        }
+        for (changed in listOf(JsonPrimitive(-1), JsonPrimitive(Int.MAX_VALUE.toLong() + 1), JsonPrimitive("1"),
+            JsonPrimitive(true), JsonPrimitive(1.0))) {
+            assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception> {
+                LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(
+                    listenerCandidateFields(JsonObject(accepted + ("pid" to changed))), {},
+                )
+            }
+        }
+        for (key in listOf("uid", "gid")) {
+            for (changed in listOf(JsonPrimitive(-1), JsonPrimitive(0x1_0000_0000L), JsonPrimitive("0"),
+                JsonPrimitive(true), JsonPrimitive(0.0))) {
+                assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception>(key) {
+                    LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(
+                        listenerCandidateFields(JsonObject(accepted + (key to changed))), {},
+                    )
+                }
+            }
+        }
+        assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception> {
+            LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(
+                listenerCandidateFields(JsonObject(accepted + ("startAuthorized" to JsonPrimitive(false)))), {},
+            )
+        }
+        assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception> {
+            LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(
+                JsonObject(listenerCandidateFields() + ("readOnlyRuntime" to JsonObject(emptyMap()))), {},
+            )
+        }
+        LlvmBehaviorNativeRuntimeMeasurementV3Candidate.measured(listenerCandidateFields(JsonObject(accepted + mapOf(
+            "pid" to JsonPrimitive(Int.MAX_VALUE), "uid" to JsonPrimitive(0xffff_ffffL), "gid" to JsonPrimitive(0xffff_ffffL),
+        ))), {})
+    }
+
     @Test
     fun `actual compiled ELF RUNPATH is local while inherited RPATH retains the dependency chain`() {
         listOf(false, true).forEach { inherited ->
@@ -529,6 +613,27 @@ class LlvmBehaviorNativeRuntimeMeasurementV2Test {
     }
 
     @Test
+    fun `opt in V3 production factory rejects classes directory before supplied paths`() {
+        val absent = Path.of("build/nrm/absent-v3-factory-input")
+        val failure = assertFailsWith<LlvmBehaviorNativeRuntimeMeasurementV2Exception> {
+            LlvmBehaviorNativeRuntimeMeasurementV2.measureWithListenerContinuity(absent, absent, absent, absent)
+        }
+        assertTrue(failure.message.orEmpty().contains("own installed application JAR"))
+        assertFalse(Files.exists(absent))
+    }
+
+    @Test
+    fun `fixed V3 capture bridge rejects tiny client before any actual socket connection`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            val failure = assertFails { fixture.captureFixedWithTinyClient(listenerContinuity = true) }
+            assertTrue(failure.message.orEmpty().contains("byte length"))
+            assertFalse(fixture.connectionAccepted.await(50, TimeUnit.MILLISECONDS))
+            assertTrue(fixture.requests.isEmpty())
+        }
+    }
+
+    @Test
     fun `fixed native factory bridge rejects a tiny client before any actual socket connection`() {
         NativeMeasurementFixture().use { fixture ->
             fixture.start()
@@ -540,6 +645,27 @@ class LlvmBehaviorNativeRuntimeMeasurementV2Test {
     }
 
 }
+
+private fun listenerContinuityFields(): JsonObject = JsonObject(linkedMapOf(
+    "schemaVersion" to JsonPrimitive(1),
+    "identityKind" to JsonPrimitive("linux-af-unix-listener-credential-snapshot"),
+    "pid" to JsonPrimitive(1), "uid" to JsonPrimitive(0), "gid" to JsonPrimitive(0),
+    "identifierNamespace" to JsonPrimitive("observer"),
+    "peerHandleMechanism" to JsonPrimitive("SO_PEERPIDFD"),
+    "fixedExchangeCount" to JsonPrimitive(5), "sameListenerSnapshot" to JsonPrimitive(true),
+    "retentionBoundary" to JsonPrimitive("final-factory-guard"),
+    "daemonExecutableApproved" to JsonPrimitive(false), "httpResponderIdentityProved" to JsonPrimitive(false),
+))
+
+private fun listenerCandidateFields(observed: JsonObject = listenerContinuityFields()): JsonObject = JsonObject(linkedMapOf(
+    "schemaVersion" to JsonPrimitive(3),
+    "artifactKind" to JsonPrimitive("native-runtime-measurement-candidate"),
+    "authority" to JsonPrimitive("unapproved-raw-measurement-only"),
+    "oracleAuthority" to JsonPrimitive(false), "runtimeProfileApproved" to JsonPrimitive(false),
+    "startAuthorized" to JsonPrimitive(false), "containmentProved" to JsonPrimitive(false),
+    "scoringAuthority" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+    "readOnlyRuntime" to JsonObject(mapOf("observedListenerContinuity" to observed)),
+))
 
 private fun privateMeasurement(
     binding: PinnedDockerRuntimeBindings,
@@ -628,8 +754,9 @@ private class NativeMeasurementFixture(private val behavior: String = "good") : 
         server.bind(UnixDomainSocketAddress.of(socket))
     }
 
-    fun captureFixedWithTinyClient(): PinnedDockerRuntimeBindings {
-        val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single { it.name == "captureForNativeRuntimeV2" }
+    fun captureFixedWithTinyClient(listenerContinuity: Boolean = false): PinnedDockerRuntimeBindings {
+        val bridgeName = if (listenerContinuity) "captureForNativeRuntimeV3" else "captureForNativeRuntimeV2"
+        val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single { it.name == bridgeName }
         assertTrue(bridge.trySetAccessible())
         return try {
             bridge.invoke(PinnedDockerRuntimeBindings.Companion, client, config, socket,

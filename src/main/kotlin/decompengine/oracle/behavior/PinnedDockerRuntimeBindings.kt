@@ -15,6 +15,8 @@ import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.NativeLong
 import com.sun.jna.Platform
+import com.sun.jna.Pointer
+import com.sun.jna.ptr.IntByReference
 import java.io.OutputStream
 import java.io.InputStream
 import java.io.ByteArrayOutputStream
@@ -406,7 +408,7 @@ internal class PinnedDockerRuntimeBindings private constructor(
             runtimeSocketPath: Path,
         ): PinnedDockerRuntimeBindings = captureWithCheckpoint(
             controlClientPath, expectedControlClientBytes, expectedControlClientSha256, maximumControlClientBytes,
-            dockerConfigPath, runtimeSocketPath, {},
+            dockerConfigPath, runtimeSocketPath, {}, false,
         )
 
         private fun captureForNativeRuntimeV2(
@@ -417,7 +419,19 @@ internal class PinnedDockerRuntimeBindings private constructor(
         ): PinnedDockerRuntimeBindings = captureWithCheckpoint(
             controlClientPath, 42_677_472L,
             "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
-            42_677_472L, dockerConfigPath, runtimeSocketPath, deadline::checkpoint,
+            42_677_472L, dockerConfigPath, runtimeSocketPath, deadline::checkpoint, false,
+        )
+
+        /** Opt-in kernel listener continuity; legacy capture deliberately keeps its old profile. */
+        private fun captureForNativeRuntimeV3(
+            controlClientPath: Path,
+            dockerConfigPath: Path,
+            runtimeSocketPath: Path,
+            deadline: AnalysisDeadline,
+        ): PinnedDockerRuntimeBindings = captureWithCheckpoint(
+            controlClientPath, 42_677_472L,
+            "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
+            42_677_472L, dockerConfigPath, runtimeSocketPath, deadline::checkpoint, true,
         )
 
         private fun captureWithCheckpoint(
@@ -428,6 +442,7 @@ internal class PinnedDockerRuntimeBindings private constructor(
             dockerConfigPath: Path,
             runtimeSocketPath: Path,
             checkpoint: (String) -> Unit,
+            listenerContinuity: Boolean,
         ): PinnedDockerRuntimeBindings = translateBindingFailures("capture pinned Docker runtime bindings") {
             checkpoint("before pinned Docker runtime binding capture")
             if (maximumControlClientBytes <= 0L) {
@@ -553,12 +568,14 @@ internal class PinnedDockerRuntimeBindings private constructor(
                         LinuxDescriptor::class.java,
                         LinuxFileIdentity::class.java,
                         LinuxFileIdentity::class.java,
+                        Boolean::class.javaPrimitiveType,
                     ).also { constructor -> check(constructor.trySetAccessible()) }.newInstance(
                         runtimeSocketPath,
                         openedSocketParent,
                         openedSocket,
                         socketParentIdentity,
                         socketIdentity,
+                        listenerContinuity,
                     ),
                 ).also {
                     clientDescriptor = null
@@ -666,8 +683,11 @@ private class PinnedDockerEndpointState private constructor(
     private val runtimeSocketDescriptor: LinuxDescriptor,
     private val runtimeSocketParentIdentity: LinuxFileIdentity,
     private val runtimeSocketIdentity: LinuxFileIdentity,
+    private val listenerContinuity: Boolean,
 ) : AutoCloseable {
     private var closed = false
+    private var listenerAnchor: ListenerSnapshot? = null
+    private var listenerExchanges = 0
     private var headPingAttempted = false
     private var nativeMeasurementWatch: EndpointDirectoryMutationWatch? = null
     private var nativeMeasurementCompleted = false
@@ -713,6 +733,10 @@ private class PinnedDockerEndpointState private constructor(
                 // before connect. Do not drain a baseline: every queued mutation is hostile.
                 requireCurrent()
                 mutationWatch.requireQuiet()
+                if (listenerContinuity) {
+                    performListenerHeadPing(deadline, mutationWatch)
+                    return@use
+                }
                 SocketChannel.open(StandardProtocolFamily.UNIX).use { channel ->
                     Selector.open().use { selector ->
                         channel.configureBlocking(false)
@@ -793,6 +817,358 @@ private class PinnedDockerEndpointState private constructor(
                 throw failure
             }
         }
+    }
+
+    /** Linux reports the listening socket's credential snapshot, not the HTTP responder. */
+    private data class ListenerCredentials(val pid: Int, val uid: Long, val gid: Long)
+
+    private interface ListenerLibC : Library {
+        fun socket(domain: Int, type: Int, protocol: Int): Int
+        fun connect(fd: Int, address: Pointer, length: Int): Int
+        fun getsockopt(fd: Int, level: Int, option: Int, value: Pointer, length: IntByReference): Int
+        fun send(fd: Int, buffer: Pointer, count: NativeLong, flags: Int): NativeLong
+        fun recv(fd: Int, buffer: Pointer, count: NativeLong, flags: Int): NativeLong
+        fun poll(descriptors: Pointer?, count: NativeLong, timeout: Int): Int
+        fun fcntl(fd: Int, command: Int): Int
+        fun close(fd: Int): Int
+    }
+
+    /** Retire ownership before close: an EINTR result must never cause a reused fd to be closed. */
+    private class ListenerDescriptor(private val libc: ListenerLibC, descriptor: Int) : AutoCloseable {
+        private var descriptor = descriptor
+        fun fd(): Int = descriptor.takeIf { it >= 0 } ?: bindingFail("listener descriptor is closed")
+        fun requireCloseOnExec() {
+            val flags = libc.fcntl(fd(), 1 /* F_GETFD */)
+            if (flags < 0 || flags and 1 == 0) bindingFail("listener descriptor lacks FD_CLOEXEC")
+        }
+        fun requireAlive() {
+            Memory(8).use { pollfd ->
+                pollfd.clear()
+                pollfd.setInt(0, fd())
+                pollfd.setShort(4, 1 /* POLLIN */)
+                val result = libc.poll(pollfd, NativeLong(1), 0)
+                if (result < 0) {
+                    if (Native.getLastError() == EINTR) bindingFail("listener liveness probe was interrupted")
+                    bindingFail("cannot probe retained listener pidfd (errno=${Native.getLastError()})")
+                }
+                if (result != 0 || pollfd.getShort(6).toInt() != 0) {
+                    bindingFail("retained kernel listener exited or its pidfd is invalid")
+                }
+            }
+        }
+        override fun close() {
+            val owned = descriptor
+            if (owned < 0) return
+            descriptor = -1
+            if (libc.close(owned) != 0) bindingFail("cannot close listener descriptor (errno=${Native.getLastError()})")
+        }
+    }
+
+    private class ListenerSnapshot(val credentials: ListenerCredentials, private val pidfd: ListenerDescriptor) : AutoCloseable {
+        fun requireAlive() = pidfd.requireAlive()
+        override fun close() = pidfd.close()
+    }
+
+    private fun requireListenerAlive() {
+        if (listenerContinuity) {
+            val anchor = listenerAnchor ?: bindingFail("strict native measurement lacks its retained kernel listener")
+            anchor.requireAlive()
+        }
+    }
+
+    private fun listenerFacts(): JsonObject {
+        requireListenerAlive()
+        if (listenerExchanges != 5) bindingFail("strict native measurement did not complete its five listener exchanges")
+        val peer = listenerAnchor!!.credentials
+        return JsonObject(linkedMapOf(
+            "schemaVersion" to JsonPrimitive(1),
+            "identityKind" to JsonPrimitive("linux-af-unix-listener-credential-snapshot"),
+            "pid" to JsonPrimitive(peer.pid), "uid" to JsonPrimitive(peer.uid), "gid" to JsonPrimitive(peer.gid),
+            "identifierNamespace" to JsonPrimitive("observer"),
+            "peerHandleMechanism" to JsonPrimitive("SO_PEERPIDFD"),
+            "fixedExchangeCount" to JsonPrimitive(5),
+            "sameListenerSnapshot" to JsonPrimitive(true),
+            "retentionBoundary" to JsonPrimitive("final-factory-guard"),
+            "daemonExecutableApproved" to JsonPrimitive(false),
+            "httpResponderIdentityProved" to JsonPrimitive(false),
+        ))
+    }
+
+    private fun listenerLibC(): ListenerLibC {
+        if (!Platform.isLinux() || Native.POINTER_SIZE != 8 || NativeLong.SIZE != 8) {
+            bindingFail("kernel listener continuity requires the Linux LP64 profile")
+        }
+        return Native.load(Platform.C_LIBRARY_NAME, ListenerLibC::class.java)
+    }
+
+    private fun readListenerCredentials(libc: ListenerLibC, fd: Int): ListenerCredentials = Memory(12).use { value ->
+        value.clear()
+        val length = IntByReference(12)
+        if (libc.getsockopt(fd, 1 /* SOL_SOCKET */, 17 /* SO_PEERCRED */, value, length) != 0 || length.value != 12) {
+            bindingFail("cannot read exact Linux SO_PEERCRED listener snapshot (errno=${Native.getLastError()})")
+        }
+        val peer = ListenerCredentials(value.getInt(0), Integer.toUnsignedLong(value.getInt(4)),
+            Integer.toUnsignedLong(value.getInt(8)))
+        if (peer.pid <= 0 || peer.uid != Integer.toUnsignedLong(runtimeSocketIdentity.uid)) {
+            bindingFail("kernel listener PID or socket-owner UID is invalid")
+        }
+        peer
+    }
+
+    private fun readListenerSnapshot(libc: ListenerLibC, fd: Int): ListenerSnapshot {
+        val before = readListenerCredentials(libc, fd)
+        return Memory(4).use { value ->
+            value.setInt(0, -1)
+            val length = IntByReference(4)
+            if (libc.getsockopt(fd, 1 /* SOL_SOCKET */, 77 /* SO_PEERPIDFD */, value, length) != 0) {
+                bindingFail("Linux SO_PEERPIDFD is required for listener continuity (errno=${Native.getLastError()})")
+            }
+            // Successful getsockopt installs an owned fd. Adopt it before any length/coherence check.
+            val handle = ListenerDescriptor(libc, value.getInt(0))
+            try {
+                if (length.value != 4 || value.getInt(0) < 0) bindingFail("SO_PEERPIDFD returned a malformed owned descriptor")
+                handle.requireCloseOnExec()
+                handle.requireAlive()
+                if (readListenerCredentials(libc, fd) != before) bindingFail("kernel listener credentials changed during pidfd capture")
+                handle.requireAlive()
+                ListenerSnapshot(before, handle)
+            } catch (failure: Throwable) {
+                runCatching { handle.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
+        }
+    }
+
+    /** The connected socket and its transient pidfd never escape the fixed request scope. */
+    private inner class ListenerConnection(
+        private val libc: ListenerLibC,
+        private val socket: ListenerDescriptor,
+        private val transientPeer: ListenerSnapshot?,
+        private val remaining: (String) -> Long,
+        private val watch: EndpointDirectoryMutationWatch,
+    ) : AutoCloseable {
+        private fun checkpoint(phase: String): Long {
+            val left = remaining(phase)
+            watch.requireQuiet()
+            requireListenerAlive()
+            transientPeer?.requireAlive()
+            return left
+        }
+        private fun await(events: Int, phase: String) {
+            val left = checkpoint(phase)
+            Memory(8).use { pollfd ->
+                pollfd.clear()
+                pollfd.setInt(0, socket.fd())
+                pollfd.setShort(4, events.toShort())
+                val result = libc.poll(pollfd, NativeLong(1),
+                    minOf(100L, maxOf(1L, left / 1_000_000L)).toInt())
+                if (result < 0 && Native.getLastError() != EINTR) {
+                    bindingFail("cannot wait for fixed listener transport (errno=${Native.getLastError()})")
+                }
+                if (pollfd.getShort(6).toInt() and 0x20 /* POLLNVAL */ != 0) bindingFail("fixed listener transport descriptor is invalid")
+                // HUP is not EOF: the next recv must drain any queued response bytes.
+            }
+            checkpoint(phase)
+        }
+        fun writeAll(bytes: ByteArray) {
+            Memory(bytes.size.toLong()).use { buffer ->
+                buffer.write(0, bytes, 0, bytes.size)
+                var written = 0
+                while (written < bytes.size) {
+                    checkpoint("write request")
+                    val count = libc.send(socket.fd(), buffer.share(written.toLong()), NativeLong((bytes.size - written).toLong()),
+                        0x4000 /* MSG_NOSIGNAL */).toLong()
+                    when {
+                        count > 0 -> {
+                            if (count > bytes.size - written) bindingFail("fixed listener send exceeded its supplied buffer")
+                            written += count.toInt()
+                        }
+                        count == 0L -> bindingFail("fixed listener send made no progress")
+                        Native.getLastError() == EINTR -> Unit
+                        Native.getLastError() == EAGAIN -> await(4 /* POLLOUT */, "write request")
+                        else -> bindingFail("cannot send fixed listener request (errno=${Native.getLastError()})")
+                    }
+                }
+                checkpoint("after request write")
+            }
+        }
+        fun input(): InputStream = object : InputStream() {
+            private val single = ByteArray(1)
+            override fun read(): Int = if (read(single, 0, 1) < 0) -1 else single[0].toInt() and 255
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                java.util.Objects.checkFromIndexSize(offset, length, bytes.size)
+                if (length == 0) return 0
+                val bound = minOf(length, 32 * 1024)
+                Memory(bound.toLong()).use { buffer ->
+                    while (true) {
+                        checkpoint("read response")
+                        val count = libc.recv(socket.fd(), buffer, NativeLong(bound.toLong()), 0).toLong()
+                        when {
+                            count > 0 -> {
+                                if (count > bound) bindingFail("fixed listener recv exceeded its supplied buffer")
+                                buffer.read(0, bytes, offset, count.toInt())
+                                checkpoint("after response read")
+                                return count.toInt()
+                            }
+                            count == 0L -> { checkpoint("after response EOF"); return -1 }
+                            Native.getLastError() == EINTR -> Unit
+                            Native.getLastError() == EAGAIN -> await(1 /* POLLIN */, "read response")
+                            else -> bindingFail("cannot receive fixed listener response (errno=${Native.getLastError()})")
+                        }
+                    }
+                }
+            }
+            override fun close() = Unit
+        }
+        fun requireTerminal() { checkpoint("terminal response"); requireCurrent(); checkpoint("after terminal identity") }
+        override fun close() {
+            var failure: Throwable? = null
+            runCatching { transientPeer?.close() }.exceptionOrNull()?.let { failure = it }
+            runCatching { socket.close() }.exceptionOrNull()?.let { closeFailure ->
+                failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
+            }
+            failure?.let { throw it }
+        }
+    }
+
+    private fun connectListener(
+        remaining: (String) -> Long,
+        watch: EndpointDirectoryMutationWatch,
+        establishAnchor: Boolean,
+    ): ListenerConnection {
+        val libc = listenerLibC()
+        remaining("before connect")
+        watch.requireQuiet()
+        requireCurrent()
+        if (!establishAnchor) requireListenerAlive()
+        val raw = libc.socket(1 /* AF_UNIX */, 1 /* SOCK_STREAM */ or O_NONBLOCK or O_CLOEXEC, 0)
+        if (raw < 0) bindingFail("cannot open fixed listener socket (errno=${Native.getLastError()})")
+        val socket = ListenerDescriptor(libc, raw)
+        var snapshot: ListenerSnapshot? = null
+        try {
+            socket.requireCloseOnExec()
+            runtimeSocketParent.whileOpen { parentFd ->
+                val name = runtimeSocketPath.fileName.toString()
+                if (name.isEmpty() || name.indexOf('\u0000') >= 0 || name.contains('/') ||
+                    Path.of(name).toString() != name) bindingFail("fixed listener basename is not exact")
+                val address = "/proc/self/fd/$parentFd/$name"
+                val encoded = address.toByteArray(StandardCharsets.UTF_8)
+                if (String(encoded, StandardCharsets.UTF_8) != address || encoded.size >= 108 || encoded.any { it == 0.toByte() }) {
+                    bindingFail("fixed listener sockaddr_un path is aliased or exceeds its ceiling")
+                }
+                Memory(110).use { sockaddr ->
+                    sockaddr.clear()
+                    sockaddr.setShort(0, 1 /* AF_UNIX */)
+                    sockaddr.write(2, encoded, 0, encoded.size)
+                    var pending = false
+                    while (true) {
+                        remaining("connect")
+                        watch.requireQuiet()
+                        if (!establishAnchor) requireListenerAlive()
+                        if (!pending) {
+                            val result = libc.connect(raw, sockaddr, 2 + encoded.size + 1)
+                            val error = if (result < 0) Native.getLastError() else 0
+                            if (result == 0 || error == 106 /* EISCONN */) break
+                            if (error == EINTR) continue
+                            if (error == EAGAIN) {
+                                // AF_UNIX backlog EAGAIN is not an in-progress connect. Retry only after a bounded wait.
+                                val left = remaining("connect backlog wait")
+                                val waited = libc.poll(Pointer.NULL, NativeLong(0), minOf(10L, maxOf(1L, left / 1_000_000L)).toInt())
+                                if (waited < 0 && Native.getLastError() != EINTR) bindingFail("cannot wait for listener backlog")
+                                continue
+                            }
+                            if (error != 115 /* EINPROGRESS */ && error != 114 /* EALREADY */) {
+                                bindingFail("cannot connect fixed listener socket (errno=$error)")
+                            }
+                            pending = true
+                        }
+                        Memory(8).use { pollfd ->
+                            pollfd.clear(); pollfd.setInt(0, raw); pollfd.setShort(4, 4)
+                            val left = remaining("connect wait")
+                            val result = libc.poll(pollfd, NativeLong(1), minOf(100L, maxOf(1L, left / 1_000_000L)).toInt())
+                            if (result < 0) {
+                                if (Native.getLastError() != EINTR) bindingFail("cannot wait for listener connection")
+                            } else if (result > 0) {
+                                Memory(4).use { errorValue ->
+                                    val length = IntByReference(4)
+                                    if (libc.getsockopt(raw, 1, 4 /* SO_ERROR */, errorValue, length) != 0 || length.value != 4) {
+                                        bindingFail("cannot authenticate fixed listener connect completion")
+                                    }
+                                    val error = errorValue.getInt(0)
+                                    if (error != 0) bindingFail("fixed listener connect failed (errno=$error)")
+                                }
+                                // SO_PEERCRED/SO_PEERPIDFD below establish that this socket actually connected.
+                                pending = false
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            remaining("after connect")
+            watch.requireQuiet()
+            requireCurrent()
+            if (!establishAnchor) requireListenerAlive()
+            snapshot = readListenerSnapshot(libc, raw)
+            val observed = snapshot
+            if (establishAnchor) {
+                if (listenerAnchor != null || listenerExchanges != 0) bindingFail("kernel listener anchor was already captured")
+                listenerAnchor = observed
+                snapshot = null
+            } else {
+                val anchor = listenerAnchor ?: bindingFail("kernel listener anchor is absent")
+                anchor.requireAlive(); observed.requireAlive()
+                if (anchor.credentials != observed.credentials) bindingFail("fixed requests have different kernel listener snapshots")
+                observed.requireAlive(); anchor.requireAlive()
+            }
+            remaining("before request bytes")
+            watch.requireQuiet()
+            requireListenerAlive()
+            observed.requireAlive()
+            listenerExchanges++
+            return ListenerConnection(libc, socket, snapshot, remaining, watch).also { snapshot = null }
+        } catch (failure: Throwable) {
+            runCatching { snapshot?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            runCatching { socket.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    private fun performListenerHeadPing(deadline: FixedHeadPingDeadline, watch: EndpointDirectoryMutationWatch) {
+        connectListener(deadline::requireRemaining, watch, true).use { connection ->
+            connection.writeAll(FIXED_HEAD_PING_REQUEST_TEXT.toByteArray(StandardCharsets.US_ASCII))
+            val response = ByteArray(FIXED_HEAD_PING_RESPONSE_BYTES)
+            var bytes = 0
+            val input = connection.input()
+            val buffer = ByteArray(FIXED_HEAD_PING_READ_BUFFER_BYTES)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (bytes + count > response.size) bindingFail("fixed Docker Engine HEAD /_ping response exceeds its byte ceiling")
+                System.arraycopy(buffer, 0, response, bytes, count)
+                bytes += count
+            }
+            connection.requireTerminal()
+            requireFixedHeadPingResponse(response, bytes)
+            connection.requireTerminal()
+        }
+    }
+
+    private fun <T> withListenerMeasurementBody(
+        operation: NativeMeasurementGet,
+        target: String,
+        deadline: AnalysisDeadline,
+        watch: EndpointDirectoryMutationWatch,
+        parse: (InputStream) -> T,
+    ): T = connectListener(deadline::remainingNanos, watch, false).use { connection ->
+        connection.writeAll("GET $target HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n".toByteArray(StandardCharsets.US_ASCII))
+        val raw = BufferedInputStream(connection.input(), 32 * 1024)
+        val headers = readMeasurementHeaders(raw, operation)
+        val body = FixedMeasurementBody(raw, headers, operation.maximumBytes, deadline::checkpoint)
+        val result = parse(body)
+        if (body.read() != -1) bindingFail("fixed Docker GET $target parser left body bytes unconsumed")
+        connection.requireTerminal()
+        result
     }
 
     private fun requireCurrentUserPeer(channel: SocketChannel) {
@@ -923,7 +1299,7 @@ private class PinnedDockerEndpointState private constructor(
         val checkpoint: (String) -> Unit = deadline::checkpoint
         val watch = EndpointDirectoryMutationWatch.open(runtimeSocketParent)
         nativeMeasurementWatch = watch
-        return run {
+        return try {
             watch.requireQuiet()
             requireCurrent()
             performFixedHeadPing(FixedHeadPingDeadline.start(deadline))
@@ -990,10 +1366,20 @@ private class PinnedDockerEndpointState private constructor(
                 "exportSha256" to JsonPrimitive(exported.exportSha256),
                 "exportBytes" to JsonPrimitive(exported.exportBytes),
                 "exportMergedNamespaceSha256" to JsonPrimitive(exported.namespaceSha256),
-            ))
+            ) + if (listenerContinuity) mapOf("observedListenerContinuity" to listenerFacts()) else emptyMap())
             watch.requireQuiet()
             nativeMeasurementCompleted = true
             facts
+        } catch (failure: Throwable) {
+            if (listenerContinuity) {
+                val retained = listenerAnchor
+                listenerAnchor = null
+                runCatching { retained?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                val retainedWatch = nativeMeasurementWatch
+                nativeMeasurementWatch = null
+                runCatching { retainedWatch?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
+            throw failure
         }
     }
 
@@ -1003,8 +1389,10 @@ private class PinnedDockerEndpointState private constructor(
         if (closed || !nativeMeasurementCompleted) bindingFail("fixed native measurement has no completed retained exchange")
         val watch = nativeMeasurementWatch ?: bindingFail("fixed native measurement has no retained endpoint watch")
         watch.requireQuiet()
+        requireListenerAlive()
         requireCurrent()
         watch.requireQuiet()
+        requireListenerAlive()
         deadline.checkpoint("after final native endpoint watch authentication")
     }
 
@@ -1052,6 +1440,9 @@ private class PinnedDockerEndpointState private constructor(
         deadline.checkpoint("before fixed Docker GET $target")
         watch.requireQuiet()
         requireCurrent()
+        if (listenerContinuity) {
+            return withListenerMeasurementBody(operation, target, deadline, watch, parse)
+        }
         return SocketChannel.open(StandardProtocolFamily.UNIX).use { channel ->
             Selector.open().use { selector ->
                 channel.configureBlocking(false)
@@ -1228,7 +1619,11 @@ private class PinnedDockerEndpointState private constructor(
         if (closed) return
         closed = true
         var failure: Throwable? = null
-        runCatching { nativeMeasurementWatch?.close() }.exceptionOrNull()?.let { failure = it }
+        runCatching { listenerAnchor?.close() }.exceptionOrNull()?.let { failure = it }
+        listenerAnchor = null
+        runCatching { nativeMeasurementWatch?.close() }.exceptionOrNull()?.let { closeFailure ->
+            failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
+        }
         nativeMeasurementWatch = null
         runCatching { runtimeSocketDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
             failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure

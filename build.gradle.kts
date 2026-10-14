@@ -200,6 +200,26 @@ fun registerOracleJavaExecTask(
     mainClass.set(entryPoint)
 }
 
+/** Opt-in raw measurement uses the installed application, never the development classes. */
+tasks.register<JavaExec>("llvmNativeRuntimeMeasurement") {
+    group = "oracle"
+    description = "Measures an unapproved raw runtime candidate; --args='[--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>'"
+    dependsOn(tasks.named("installDist"))
+    mainClass.set("decompengine.MainKt")
+    maxHeapSize = "1g"
+    val installedLib = layout.buildDirectory.dir("install/llm_bin_patch/lib")
+    val applicationJarName = tasks.named<Jar>("jar").flatMap { it.archiveFileName }
+    classpath = files(applicationJarName.map { name -> installedLib.get().file(name) }) + files(provider {
+        installedLib.get().asFile.listFiles().orEmpty()
+            .filter { it.isFile && it.extension == "jar" && it.name != applicationJarName.get() }
+            .sortedBy { it.name }
+    })
+    doFirst {
+        // JavaExec --args replaces configured arguments; keep the production command explicit.
+        setArgs(listOf("llvm-native-runtime-measurement") + args)
+    }
+}
+
 tasks.register<JavaExec>("generatedCRepairQualification") {
     group = "verification"
     description = "Runs the explicitly provisioned generated-C public-factory qualification driver"
