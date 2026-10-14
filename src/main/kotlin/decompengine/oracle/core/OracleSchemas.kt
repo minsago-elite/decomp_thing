@@ -349,6 +349,7 @@ object OracleSchemas {
         "gcc/build-record",
         "gcc/compiler-engines",
         "gcc/compiler-engines-exporter12",
+        "gcc/compiler-engines-exporter13",
         "gcc/compiler-engine-plan-evidence",
         "gcc/oracle-manifest",
         "gcc/source-lock",

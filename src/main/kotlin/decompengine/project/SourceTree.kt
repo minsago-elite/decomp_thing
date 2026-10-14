@@ -1123,7 +1123,7 @@ object SourceTreeGenerator {
         val profileSha256: String? = null,
     ) {
         init {
-            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2, 3) &&
+            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2, 3, 4) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
             require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",

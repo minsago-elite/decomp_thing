@@ -820,8 +820,8 @@ def load_program_model(
     )
     del payload
     model_version = root["schemaVersion"]
-    if type(model_version) is not int or model_version not in (1, 2, 3):
-        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1, 2 or 3")
+    if type(model_version) is not int or model_version not in (1, 2, 3, 4):
+        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1, 2, 3 or 4")
     status_field = "status" if model_version == 1 else "extractionStatus"
     input_sha256 = _sha256(
         root["inputSha256"],
@@ -849,7 +849,7 @@ def load_program_model(
     byte_budget = [0, 0]
     for index, raw in enumerate(globals_records):
         item_path = f"{twin} program model.globals[{index}]"
-        if model_version != 3:
+        if model_version not in (3, 4):
             if isinstance(raw, dict) and "byteEvidence" in raw:
                 raise ScoringError("historical models cannot contain byteEvidence")
             continue
@@ -863,10 +863,13 @@ def load_program_model(
         if _string(item["extractionStatus"], item_path + ".extractionStatus", maximum=32) not in _RECOVERY_STATUSES or item["recoveryAssessment"] != "unassessed":
             raise ScoringError(item_path + " has invalid extraction status or scored recovery assessment")
         try:
-            validate_evidence(item["byteEvidence"], byte_budget)
+            # Null means generic model4 evidence was not supplied. All ordinary
+            # global fields above, types below and function projection still validate.
+            if item["byteEvidence"] is not None or model_version != 4:
+                validate_evidence(item["byteEvidence"], byte_budget, schema_version=2 if model_version == 4 else 1)
         except ValueError as error:
             raise ScoringError(str(error)) from error
-    if model_version == 3:
+    if model_version in (3, 4):
         for index, raw in enumerate(type_records):
             item_path = f"{twin} program model.types[{index}]"
             item = _object(raw, item_path, {"id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"})

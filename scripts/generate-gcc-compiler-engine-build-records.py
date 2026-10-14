@@ -18,7 +18,7 @@ from oracle.gcc.verify_source_lock import VerificationError  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", type=Path, default=REPOSITORY_ROOT / "oracle/gcc/16.2.0/compiler-engines-exporter12.json")
+    parser.add_argument("--profile", type=Path, default=REPOSITORY_ROOT / "oracle/gcc/16.2.0/compiler-engines-exporter13.json")
     parser.add_argument("--output-root", type=Path)
     arguments = parser.parse_args()
     try:

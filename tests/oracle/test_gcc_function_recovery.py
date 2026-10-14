@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import copy
 from dataclasses import replace
 import hashlib
@@ -249,6 +249,58 @@ class GccFunctionRecoveryTest(unittest.TestCase):
                 current_path.write_text(json.dumps(altered))
                 with self.assertRaisesRegex(ScoringError, "does not match"):
                     load_program_model(current_path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+
+    @staticmethod
+    def schema_four_fixture(model: dict[str, Any], supplied: Any) -> None:
+        model["schemaVersion"] = 4
+        for kind in ("functions", "globals", "types"):
+            for entity in model[kind]:
+                entity["extractionStatus"] = entity.pop("status"); entity["recoveryAssessment"] = "unassessed"
+        model["globals"] = [{"id": "global_authored", "name": "authored", "address": "0x2000", "type": "undefined1", "initializer": None, "extractionStatus": "recovered", "recoveryAssessment": "unassessed", "byteEvidence": copy.deepcopy(supplied)}]
+
+    def test_schema_four_null_and_v2_omissions_preserve_real_scorer_projection(self) -> None:
+        from tests.oracle.test_referenced_data_bytes import evidence_v2
+        oracle = load_function_oracle(ORACLE); expected = score_fixture()
+        for supplied in (None, evidence_v2(), {"schemaVersion": 2, "windows": [], "omissionReason": None, "collectionOmissions": ["reference_work_limit"]}):
+            with ExitStack() as stack:
+                paths = {}
+                for twin, source, base in (("rich", RICH_MODEL, RICH_MODEL_IMAGE_BASE), ("stripped", STRIPPED_MODEL, STRIPPED_MODEL_IMAGE_BASE)):
+                    path = stack.enter_context(self.staged_json(source, lambda model: self.schema_four_fixture(model, supplied))); paths[twin] = path
+                    current = load_program_model(path, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+                    previous = load_program_model(source, twin=twin, artifact=oracle.artifacts[twin], model_image_base=base)
+                    self.assertEqual(previous.functions, current.functions)
+                report = score_fixture(rich_model=paths["rich"], stripped_model=paths["stripped"])
+                self.assertEqual(expected, report); validate_json_schema(json.loads(SCORE_SCHEMA.read_bytes()), report)
+                self.assertFalse(report["oracle"]["verification"]["productionVerified"])
+
+    def test_schema_four_null_does_not_bypass_closed_global_type_and_status_validation(self) -> None:
+        oracle = load_function_oracle(ORACLE); model = json.loads(RICH_MODEL.read_bytes()); self.schema_four_fixture(model, None)
+        model["types"] = [{"id": "type_authored", "declaration": "int", "sourceAddress": None, "extractionStatus": "recovered", "recoveryAssessment": "unassessed"}]
+        cases = []
+        for field, value in (("id", False), ("name", None), ("address", "bad"), ("type", {}), ("initializer", []), ("extractionStatus", "assessed"), ("recoveryAssessment", "abi-equivalent"), ("extra", True), ("byteEvidence", "null")):
+            changed = copy.deepcopy(model); changed["globals"][0][field] = value; cases.append(changed)
+        changed = copy.deepcopy(model); del changed["globals"][0]["byteEvidence"]; cases.append(changed)
+        changed = copy.deepcopy(model); changed["types"][0]["recoveryAssessment"] = "assessed"; cases.append(changed)
+        changed = copy.deepcopy(model); changed["functions"][0]["recoveryAssessment"] = "assessed"; cases.append(changed)
+        for version in (True, 5, "4"):
+            changed = copy.deepcopy(model); changed["schemaVersion"] = version; cases.append(changed)
+        from tests.oracle.test_referenced_data_bytes import evidence, evidence_v2
+        for version, supplied in ((4, evidence()), (3, evidence_v2()), (3, None)):
+            changed = copy.deepcopy(model); changed["schemaVersion"] = version; changed["globals"][0]["byteEvidence"] = supplied; cases.append(changed)
+        for changed in cases:
+            with self.subTest(model=changed), self.staged_text("model.json", json.dumps(changed)) as path, self.assertRaises(ScoringError):
+                load_program_model(path, twin="rich", artifact=oracle.artifacts["rich"], model_image_base=RICH_MODEL_IMAGE_BASE)
+
+    def test_schema_four_no_globals_and_string_only_relations_need_no_synthetic_evidence(self) -> None:
+        oracle = load_function_oracle(ORACLE)
+        for strings in ([], ["authored string-only reference"]):
+            def migrate(model: dict[str, Any]) -> None:
+                self.schema_four_fixture(model, None); model["globals"] = []
+                for entity in model["functions"]: entity["strings"] = strings
+            with self.staged_json(RICH_MODEL, migrate) as path:
+                current = load_program_model(path, twin="rich", artifact=oracle.artifacts["rich"], model_image_base=RICH_MODEL_IMAGE_BASE)
+                old = load_program_model(RICH_MODEL, twin="rich", artifact=oracle.artifacts["rich"], model_image_base=RICH_MODEL_IMAGE_BASE)
+                self.assertEqual(old.functions, current.functions)
 
     @contextmanager
     def staged_text(self, name: str, payload: str) -> Iterator[Path]:

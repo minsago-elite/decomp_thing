@@ -80,7 +80,8 @@ def load_compiler_engine_profile(path: Path) -> tuple[dict[str, Any], dict[str, 
     analysis = profile.get("analysis")
     exporter = analysis.get("exporter") if isinstance(analysis, dict) else None
     version = exporter.get("version") if isinstance(exporter, dict) else None
-    schemas = {11: "compiler-engines.schema.json", 12: "compiler-engines-exporter12.schema.json"}
+    schemas = {11: "compiler-engines.schema.json", 12: "compiler-engines-exporter12.schema.json",
+               13: "compiler-engines-exporter13.schema.json"}
     if type(version) is not int or version not in schemas:
         raise VerificationError("compiler-engine profile has unsupported exporter version")
     schema, _ = _load_json(Path(__file__).with_name(schemas[version]), "compiler-engine schema")

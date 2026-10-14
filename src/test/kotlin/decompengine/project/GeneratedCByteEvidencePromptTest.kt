@@ -91,4 +91,26 @@ class GeneratedCByteEvidencePromptTest {
     private fun request(model: RecoveredProgramModel) = ModuleReconstructionRequest(
         PlannedModule("m", "src/m.c", "include/m.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
         model, "", "", "", emptyMap(), Path.of("build"))
+    @Test fun `current null and cutoff have distinct completeness labels and commitments`() {
+        val base = RecoveredProgramModel(4, "fixture", emptyList(),
+            listOf(RecoveredGlobal("g", "value", 0x2008UL, "undefined", "00h")))
+        val unsupplied = GeneratedCModulePrompt.render(request(base)).evidence
+        assertContains(unsupplied, "not supplied; completeness unknown")
+        val reasonA = ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("model_window_limit"))
+        val reasonB = reasonA.copy(collectionOmissions = listOf("reference_work_limit"))
+        val models = listOf(reasonA, reasonB).map { base.copy(globals = listOf(base.globals.single().copy(byteEvidence = it))) }
+        val prompts = models.map { GeneratedCModulePrompt.render(request(it)).evidence }
+        models.zip(prompts).forEach { (m, prompt) ->
+            assertContains(prompt, ReferencedDataByteEvidenceJson.render(m.globals.single().byteEvidence!!))
+            assertContains(prompt, "further referenced data may be absent because collection stopped")
+            assertContains(prompt, "initializer=00h")
+        }
+        kotlin.test.assertNotEquals(prompts[0], prompts[1])
+        val fingerprints = models.map { SourceTreeGenerator.moduleFingerprint(request(it).module, it, "", "", "", emptyMap(), null, request(it).profile.sha256, "authored-policy") }
+        kotlin.test.assertNotEquals(fingerprints[0], fingerprints[1])
+        val exact = ReferencedDataByteEvidenceJson.render(reasonA).length.toLong()
+        assertEquals(exact, ReferencedDataByteEvidenceJson.renderedLength(reasonA, exact))
+        assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.renderedLength(reasonA, exact - 1) }
+    }
+
 }

@@ -627,7 +627,7 @@ private fun verifyAssembledModel(
     requireSha256(inputSha256, "assembled program-model input")
     val verifier = ExactByteVerifier(actual, "completed program model", limits.assembledModelBytes)
     verifier.accept(
-        "{\n  \"schemaVersion\": 3,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
+        "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
     )
     verifier.acceptRecordArray(functions.map { it.bytes })
     verifier.accept("  ],\n  \"globals\": [\n")
@@ -1273,7 +1273,9 @@ private fun parseFunctionFragment(
 }
 
 private fun renderValidatedByteEvidence(root: JsonObject): String = try {
-    ReferencedDataByteEvidenceJson.render(ReferencedDataByteEvidenceJson.parse(root.getValue("byteEvidence").jsonObject))
+    ReferencedDataByteEvidenceJson.render(requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4)) {
+        "eligible bundled exporter global lacks supplied byte evidence schema 2"
+    })
 } catch (failure: Exception) {
     throw GccCompilerEngineResumeEvidenceException("global byte evidence is invalid", failure)
 }
@@ -1282,7 +1284,9 @@ private fun validateGlobalByteEvidenceBudget(globals: Map<String, BoundRecord>) 
     val budget = ReferencedDataByteEvidenceJson.Budget()
     globals.values.forEach { record ->
         val root = strictRecordObject(record.bytes, MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES, "global record")
-        budget.charge(ReferencedDataByteEvidenceJson.parse(root.getValue("byteEvidence").jsonObject))
+        requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4, budget)) {
+            "eligible bundled exporter global lacks supplied byte evidence schema 2"
+        }
     }
 } catch (failure: Exception) {
     throw GccCompilerEngineResumeEvidenceException("global byte evidence exceeds its model budget", failure)
@@ -1822,7 +1826,7 @@ private const val MAXIMUM_RECORD_STRING_BYTES = 1024 * 1024
 private const val MAXIMUM_RECORD_JSON_NODES = 1_000_000
 private const val MAXIMUM_RECORD_ARRAY_ENTRIES = 1_000_000
 private const val MAXIMUM_IDENTITY_CHARACTERS = 256
-private const val SUPPORTED_EXPORTER_VERSION = 12
+private const val SUPPORTED_EXPORTER_VERSION = 13
 private const val FUNCTION_RECORD_TAG: Byte = 1
 private const val GLOBAL_RECORD_TAG: Byte = 2
 private const val TYPE_RECORD_TAG: Byte = 3

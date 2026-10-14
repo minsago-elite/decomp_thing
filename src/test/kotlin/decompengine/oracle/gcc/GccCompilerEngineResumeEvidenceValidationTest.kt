@@ -34,6 +34,33 @@ import kotlinx.serialization.json.boolean
 
 class GccCompilerEngineResumeEvidenceValidationTest {
     @Test
+    fun `active resume preserves bounded collection omissions and rejects nullable or historical evidence`() {
+        val base = twoBatchFixture()
+        fun withEvidence(evidence: String): RunFixture = buildFixture(base.specs.map { spec ->
+            spec.copy(globals = spec.globals.map { global ->
+                record(global.id, globalRecord(global.id, "shared", byteEvidence = evidence))
+            })
+        })
+        val omitted = """{"schemaVersion":2,"windows":[],"omissionReason":null,"collectionOmissions":["reference_work_limit"]}"""
+        val completed = withEvidence(omitted)
+        val transition = transitionFixture(completed)
+        val retained = transition.interrupted.batches.single().globals.copyOf()
+        val result = assessTransition(transition)
+        assertContentEquals(transition.resumed.model, transition.fresh.model)
+        assertEquals(sha(completed.model), result.programModelSha256)
+        assertContentEquals(retained, transition.interrupted.batches.single().globals)
+        assertTrue(completed.model.decodeToString().contains(omitted))
+        val changed = withEvidence(omitted.replace("reference_work_limit", "model_window_limit"))
+        assertNotEquals(sha(completed.model), sha(changed.model))
+        assertNotEquals(completed.semantic.sha256, changed.semantic.sha256)
+        assertRejected(completed.copy(model = completed.model.decodeToString()
+            .replace("\"schemaVersion\": 4", "\"schemaVersion\": 3").toByteArray()))
+        for (invalid in listOf("null", defaultByteEvidence().replace("\"schemaVersion\":2", "\"schemaVersion\":1"))) {
+            assertRejected(withEvidence(invalid))
+        }
+    }
+
+    @Test
     fun `live progress triggers only a nonterminal full batch and stopped validation binds its state`() {
         val fixture = transitionFixture(twoBatchFixture()).interrupted
         withDescriptorExportFixture(fixture, includeModel = false) { captured ->
@@ -683,9 +710,9 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val fixture = oneBatchFixture()
         val current = GccCompilerEngineResumeByteValidator.assessExporterState(fixture.state)
         assertEquals(sha(fixture.state), current.artifactSha256)
-        assertTrue("\"exporterVersion\":12" in fixture.state.decodeToString())
+        assertTrue("\"exporterVersion\":13" in fixture.state.decodeToString())
         val historical = fixture.state.decodeToString()
-            .replace("\"exporterVersion\":12", "\"exporterVersion\":11").toByteArray()
+            .replace("\"exporterVersion\":13", "\"exporterVersion\":12").toByteArray()
         val retained = historical.copyOf()
         val failure = assertFailsWith<GccCompilerEngineResumeEvidenceException> {
             GccCompilerEngineResumeByteValidator.assessExporterState(historical)
@@ -1564,7 +1591,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=12\n")
+        append("exporterVersion=13\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1593,7 +1620,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":12,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":13,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +
@@ -1691,14 +1718,19 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         }.toByteArray(),
     )
 
-    private fun globalRecord(id: String, name: String, type: String = "int"): ByteArray = buildString {
+    private fun defaultByteEvidence(): String = """{"schemaVersion":2,"windows":[{"address":"0x400100","requestedLength":1,"origin":{"instructionAddress":"0x400010","referenceAddress":"0x400100","operandIndex":0,"widthBasis":"pcode_load"},"availability":"available","segments":[{"offset":0,"length":1,"availability":"available","hex":"00","reason":null}]}],"omissionReason":null,"collectionOmissions":[]}"""
+
+    private fun globalRecord(
+        id: String, name: String, type: String = "int",
+        byteEvidence: String = defaultByteEvidence(),
+    ): ByteArray = buildString {
         append("    {\n")
         append("      \"id\": \"$id\",\n")
         append("      \"name\": \"$name\",\n")
         append("      \"address\": \"${addressForId(id)}\",\n")
         append("      \"type\": ${kotlinx.serialization.json.JsonPrimitive(type)},\n")
         append("      \"initializer\": null,\n")
-        append("      \"byteEvidence\": {\"schemaVersion\":1,\"windows\":[{\"address\":\"0x400100\",\"requestedLength\":1,\"origin\":{\"instructionAddress\":\"0x400010\",\"referenceAddress\":\"0x400100\",\"operandIndex\":0,\"widthBasis\":\"pcode_load\"},\"availability\":\"available\",\"segments\":[{\"offset\":0,\"length\":1,\"availability\":\"available\",\"hex\":\"00\",\"reason\":null}]}],\"omissionReason\":null},\n")
+        append("      \"byteEvidence\": ").append(byteEvidence).append(",\n")
         append("      \"extractionStatus\": \"recovered\",\n")
         append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
@@ -1724,7 +1756,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
 
     private fun model(functions: List<ByteArray>, globals: List<ByteArray>, types: List<ByteArray>): ByteArray =
         buildString {
-            append("{\n  \"schemaVersion\": 3,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
+            append("{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
             append(modelRecords(functions))
             append("  ],\n  \"globals\": [\n")
             append(modelRecords(globals))

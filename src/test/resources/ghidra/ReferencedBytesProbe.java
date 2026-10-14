@@ -5,6 +5,9 @@ import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.pcode.*;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.ReferenceIterator;
+import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.program.model.symbol.RefType;
 import ghidra.util.task.TaskMonitor;
 
 /** Runs against the actual bundled public APIs without requiring a database or external Ghidra. */
@@ -33,121 +36,303 @@ public class ReferencedBytesProbe {
         return method.invoke(exporter,args);
     }
     static void check(boolean condition, Object detail) { if (!condition) throw new AssertionError(detail); }
-    static void boundedPrepass(Object exporter, AddressSpace ram, AddressSpace constant, AddressSpace unique,
-        AddressFactory addresses, int count, int width, int lastWidth, boolean candidateOnly, String expectedFailure) throws Exception {
-        ghidra.program.model.symbol.SymbolTable symbols=proxy(ghidra.program.model.symbol.SymbolTable.class,(m,a)->null);
-        FunctionManager manager=proxy(FunctionManager.class,(m,a)->null);
-        Listing listing=proxy(Listing.class,(m,a)-> {
-            if (!m.getName().equals("getInstructions")) return null;
-            int[] cursor={0};
-            return proxy(InstructionIterator.class,(im,ia)-> {
-                if(im.getName().equals("hasNext")) return cursor[0] < (candidateOnly ? 1 : count);
-                if(!im.getName().equals("next")) return null;
-                final int index=cursor[0]++;
-                Address target=candidateOnly ? constant.getAddress(7) : ram.getAddress(0x10000L+index*512L);
-                Reference ref=proxy(Reference.class,(rm,ra)-> {
-                    if(rm.getName().equals("getToAddress")) return target;
-                    if(rm.getName().equals("getReferenceType")) return ghidra.program.model.symbol.RefType.DATA;
-                    if(rm.getName().equals("getOperandIndex")) return 0;
+    static Object get(Object object, String name) throws Exception {
+        Field field=object.getClass().getDeclaredField(name); field.setAccessible(true); return field.get(object);
+    }
+    static int occurrences(String text, String needle) {
+        int count=0, offset=0;
+        while ((offset=text.indexOf(needle,offset))>=0) { count++; offset+=needle.length(); }
+        return count;
+    }
+    /** Authored fixed-snapshot API fixture, not a binary-analysis result. */
+    static class CollectionFixture {
+        final AddressSpace ram, unique;
+        final AddressFactory addresses;
+        final List<Instruction> instructions=new ArrayList<>();
+        final Map<Address,List<Reference>> references=new HashMap<>();
+        boolean sharedGlobal, strings, reverse, conflicting, streamNextInstruction;
+        long sharedBelow=Long.MAX_VALUE;
+        int memoryQueries, widthQueries, referenceVisits;
+        CollectionFixture(AddressSpace ram, AddressSpace unique, AddressFactory addresses) {
+            this.ram=ram; this.unique=unique; this.addresses=addresses;
+        }
+        void add(int count, int width) {
+            for (int i=0;i<count;i++) batch(new long[]{0x10000L+instructions.size()*512L},width,1);
+        }
+        void batch(long[] targets, int width, int repeats) {
+            Address from=ram.getAddress(0x2000L+instructions.size());
+            List<Reference> refs=new ArrayList<>();
+            List<PcodeOp> ops=new ArrayList<>();
+            for (long offset:targets) {
+                Address target=ram.getAddress(offset);
+                Reference ref=proxy(Reference.class,(m,a)-> {
+                    if(m.getName().equals("getFromAddress")) return from;
+                    if(m.getName().equals("getToAddress")) return target;
+                    if(m.getName().equals("getReferenceType")) return RefType.DATA;
+                    if(m.getName().equals("getOperandIndex")) return -2; // normalized to wire null
                     return null;
                 });
-                int currentWidth=index == count-1 ? lastWidth : width;
-                PcodeOp[] pcode=currentWidth == 0 ? new PcodeOp[0] : new PcodeOp[]{
-                    new PcodeOp(ram.getAddress(0x2000L+index),0,PcodeOp.LOAD,
-                        new Varnode[]{new Varnode(constant.getAddress(ram.getSpaceID()),4),new Varnode(constant.getAddress(target.getOffset()),8)},
-                        new Varnode(unique.getAddress(1),currentWidth))};
-                return proxy(Instruction.class,(nm,na)-> {
-                    if(nm.getName().equals("getAddress")) return ram.getAddress(0x2000L+index);
-                    if(nm.getName().equals("getPcode")) return pcode;
-                    if(nm.getName().equals("getReferencesFrom")) {
-                        Reference[] refs=new Reference[candidateOnly ? count : 1]; Arrays.fill(refs,ref); return refs;
-                    }
+                for(int n=0;n<repeats;n++) refs.add(ref);
+                if(width>0) ops.add(new PcodeOp(from,ops.size(),PcodeOp.COPY,
+                    new Varnode[]{new Varnode(target,width)},new Varnode(unique.getAddress(1),width)));
+            }
+            references.put(from,refs);
+            instructions.add(proxy(Instruction.class,(m,a)-> {
+                if(m.getName().equals("getAddress")) return from;
+                if(m.getName().equals("getReferencesFrom")) throw new AssertionError("prepass must use streaming ReferenceManager");
+                if(m.getName().equals("getPcode")) {
+                    widthQueries++;
+                    if(conflicting) return new PcodeOp[]{new PcodeOp(from,0,PcodeOp.COPY,
+                        new Varnode[]{new Varnode(ram.getAddress(targets[0]),widthQueries%2==1 ? 1 : 2)},
+                        new Varnode(unique.getAddress(1),widthQueries%2==1 ? 1 : 2))};
+                    return ops.toArray(new PcodeOp[0]);
+                }
+                return null;
+            }));
+        }
+        Program program() {
+            Data data=proxy(Data.class,(m,a)-> {
+                if(m.getName().equals("getAddress")) return ram.getAddress(0x1000);
+                if(m.getName().equals("hasStringValue")) return strings;
+                if(m.getName().equals("getValue") && strings) return "synthetic string";
+                if(m.getName().equals("getDataType")) return ghidra.program.model.data.Undefined8DataType.dataType;
+                if(m.getName().equals("getDefaultValueRepresentation")) return "00h";
+                return null;
+            });
+            Listing listing=proxy(Listing.class,(m,a)-> {
+                if(m.getName().equals("getDataContaining")) return strings || (sharedGlobal && ((Address)a[0]).getOffset()<sharedBelow) ? data : null;
+                if(!m.getName().equals("getInstructions")) return null;
+                Iterator<Instruction> it=instructions.iterator();
+                return proxy(InstructionIterator.class,(im,ia)->im.getName().equals("hasNext") ? it.hasNext() : im.getName().equals("next") ? it.next() : null);
+            });
+            ReferenceManager manager=proxy(ReferenceManager.class,(m,a)-> {
+                if(!m.getName().equals("getReferenceIterator")) return null;
+                List<Reference> refs=new ArrayList<>(references.get((Address)a[0]));
+                if(reverse) Collections.reverse(refs);
+                if(streamNextInstruction) {
+                    List<Reference> next=references.get(((Address)a[0]).add(1));
+                    if(next!=null && !next.isEmpty()) refs.add(next.get(0));
+                }
+                Iterator<Reference> it=refs.iterator();
+                return proxy(ReferenceIterator.class,(im,ia)-> {
+                    if(im.getName().equals("hasNext")) return it.hasNext();
+                    if(im.getName().equals("next")) { referenceVisits++; return it.next(); }
                     return null;
                 });
             });
-        });
-        // Every known-width byte is explicitly unmapped; budgets still count its requested span.
-        Memory memory=proxy(Memory.class,(m,a)->null);
-        field(exporter,"currentProgram",proxy(Program.class,(m,a)-> {
-            if(m.getName().equals("getAddressFactory")) return addresses;
-            if(m.getName().equals("getListing")) return listing;
-            if(m.getName().equals("getSymbolTable")) return symbols;
-            if(m.getName().equals("getFunctionManager")) return manager;
-            if(m.getName().equals("getMemory")) return memory;
-            return null;
-        }));
-        try {
-            invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(proxy(Function.class,(m,a)->null)));
-            check(expectedFailure == null,"expected bound diagnostic: "+expectedFailure);
-        } catch(InvocationTargetException failure) {
-            check(expectedFailure != null && failure.getCause().getMessage().contains(expectedFailure),failure.getCause());
-        }
-    }
-    static void sharedGlobalOrigins(Object exporter, AddressSpace ram, AddressSpace unique, AddressFactory addresses) throws Exception {
-        Address base=ram.getAddress(0x1000);
-        boolean[] stringData={false};
-        Data data=proxy(Data.class,(m,a)-> {
-            if(m.getName().equals("getAddress")) return base;
-            if(m.getName().equals("getDataType")) return ghidra.program.model.data.Undefined8DataType.dataType;
-            if(m.getName().equals("getLength")) return 8;
-            if(m.getName().equals("hasStringValue")) return stringData[0];
-            if(m.getName().equals("getValue") && stringData[0]) return "synthetic string";
-            if(m.getName().equals("getDefaultValueRepresentation")) return "00h";
-            return null;
-        });
-        AddressSet firstBody=new AddressSet(ram.getAddress(0x3000)), secondBody=new AddressSet(ram.getAddress(0x4000));
-        Function first=proxy(Function.class,(m,a)->m.getName().equals("getBody") ? firstBody : null);
-        Function second=proxy(Function.class,(m,a)->m.getName().equals("getBody") ? secondBody : null);
-        boolean[] reverse={false};
-        Listing listing=proxy(Listing.class,(m,a)-> {
-            if(m.getName().equals("getDataContaining")) return data;
-            if(!m.getName().equals("getInstructions")) return null;
-            List<Instruction> items=new ArrayList<>();
-            int[] indices=a[0]==firstBody ? new int[]{0,2} : new int[]{1};
-            for(int index:indices) {
-                Address target=index==2 ? base.add(2) : base;
-                int width=index==0 ? 8 : index==1 ? 4 : 2;
-                Address origin=ram.getAddress(0x2000+index);
-                Reference ref=proxy(Reference.class,(rm,ra)-> {
-                    if(rm.getName().equals("getToAddress")) return target;
-                    if(rm.getName().equals("getReferenceType")) return ghidra.program.model.symbol.RefType.DATA;
-                    if(rm.getName().equals("getOperandIndex")) return index;
-                    return null;
+            return proxy(Program.class,(m,a)-> {
+                if(m.getName().equals("getAddressFactory")) return addresses;
+                if(m.getName().equals("getListing")) return listing;
+                if(m.getName().equals("getReferenceManager")) return manager;
+                if(m.getName().equals("getSymbolTable")) return proxy(ghidra.program.model.symbol.SymbolTable.class,(sm,sa)->null);
+                if(m.getName().equals("getFunctionManager")) return proxy(FunctionManager.class,(fm,fa)->null);
+                if(m.getName().equals("getMemory")) return proxy(Memory.class,(mm,ma)-> {
+                    if(mm.getName().equals("getBlock")) memoryQueries++;
+                    return null; // known widths are explicitly unmapped, never fabricated bytes
                 });
-                PcodeOp op=index==1 ? new PcodeOp(origin,0,PcodeOp.COPY,new Varnode[]{new Varnode(unique.getAddress(1),width)},new Varnode(target,width)) :
-                    new PcodeOp(origin,0,PcodeOp.COPY,new Varnode[]{new Varnode(target,width)},new Varnode(unique.getAddress(2),width));
-                items.add(proxy(Instruction.class,(im,ia)-> {
-                    if(im.getName().equals("getAddress")) return origin;
-                    if(im.getName().equals("getPcode")) return new PcodeOp[]{op};
-                    if(im.getName().equals("getReferencesFrom")) return new Reference[]{ref};
-                    return null;
-                }));
+                return null;
+            });
+        }
+        Map<String,String> run(Object exporter) throws Exception {
+            memoryQueries=widthQueries=referenceVisits=0;
+            field(exporter,"currentProgram",program());
+            invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(proxy(Function.class,(m,a)->null)));
+            return new TreeMap<>((Map<String,String>)get(exporter,"referencedByteEvidence"));
+        }
+        String only(Object exporter) throws Exception { return run(exporter).values().iterator().next(); }
+    }
+    static void omissionControls(Object exporter, AddressSpace ram, AddressSpace unique, AddressFactory addresses) throws Exception {
+        CollectionFixture f=new CollectionFixture(ram,unique,addresses);
+        f.sharedGlobal=true; f.add(32,1);
+        String exact=f.only(exporter);
+        check(occurrences(exact,"\"requestedLength\":")==32 && exact.contains("\"collectionOmissions\":[]"),"32 distinct origins complete");
+        f.add(1,1);
+        String capped=f.only(exporter);
+        check(occurrences(capped,"\"requestedLength\":")==32 && capped.contains("[\"global_window_limit\"]") && f.memoryQueries==32,"33rd origin has no byte read");
+        f=new CollectionFixture(ram,unique,addresses); f.batch(new long[]{0x1000},1,33);
+        String duplicate=f.only(exporter);
+        check(occurrences(duplicate,"\"requestedLength\":")==1 && duplicate.contains("\"collectionOmissions\":[]") && f.memoryQueries==1 && f.widthQueries==33,"duplicates charge work not payload");
+        f.conflicting=true;
+        try { f.run(exporter); throw new AssertionError("conflicting origin accepted"); }
+        catch(InvocationTargetException failure) { check(failure.getCause().getMessage().contains("conflicting reference"),failure.getCause()); }
+        f=new CollectionFixture(ram,unique,addresses); f.sharedGlobal=true;
+        long[] targets=new long[33]; for(int n=0;n<33;n++) targets[n]=0x1000+n;
+        f.batch(targets,1,1); Map<String,String> forward=f.run(exporter); f.reverse=true;
+        check(forward.equals(f.run(exporter)),"reference API reversal must not change retained selection");
+        // A capped hot global must not consume the cold global's slot or requested bytes.
+        f=new CollectionFixture(ram,unique,addresses); f.sharedGlobal=true; f.sharedBelow=0x800000; f.add(40,0);
+        f.batch(new long[]{0x900000},2,1);
+        Map<String,String> hotCold=f.run(exporter);
+        check(hotCold.size()==2 && f.memoryQueries==2 && hotCold.values().stream().anyMatch(v->v.contains("\"requestedLength\":2") && v.contains("\"collectionOmissions\":[]")),"hot omissions leave cold payload capacity");
+        f=new CollectionFixture(ram,unique,addresses); f.sharedGlobal=true;
+        f.batch(new long[]{0x1000},8,1); f.batch(new long[]{0x1000},4,1); f.batch(new long[]{0x1002},2,1);
+        String interior=f.only(exporter);
+        check(occurrences(interior,"\"requestedLength\":")==3 && interior.contains("\"requestedLength\":8") && interior.contains("\"requestedLength\":4") && interior.contains("\"requestedLength\":2") && interior.contains("0x1002"),"shared global retains distinct origin widths and interior addresses");
+        // Separate globals exercise the aggregate window cap and a later uncached fallback.
+        f=new CollectionFixture(ram,unique,addresses); f.add(4096,0);
+        check(f.run(exporter).size()==4096 && get(exporter,"referenceCollectionCutoff")==null,"4096 exact windows");
+        f.add(1,0); Map<String,String> model=f.run(exporter);
+        check(model.size()==4096 && model.values().stream().allMatch(v->v.contains("[\"model_window_limit\"]")),"4097 marks all retained globals");
+        Object later=invoke(exporter,"globalAt",new Class<?>[]{Address.class},ram.getAddress(0x900000));
+        Field evidence=later.getClass().getDeclaredField("byteEvidence"); evidence.setAccessible(true);
+        check(evidence.get(later).equals("{\"schemaVersion\":2,\"windows\":[],\"omissionReason\":null,\"collectionOmissions\":[\"model_window_limit\"]}"),"true stop gives exact empty fallback");
+        check(((Map<?,?>)get(exporter,"referencedByteEvidence")).size()==4096,"fallback never caches unseen IDs");
+        field(exporter,"referenceCollectionCutoff",null);
+        try { invoke(exporter,"globalAt",new Class<?>[]{Address.class},ram.getAddress(0x900000)); throw new AssertionError("missing origin accepted without cutoff"); }
+        catch(InvocationTargetException failure) { check(failure.getCause().getMessage().startsWith("missing reference byte-evidence origin: "),failure.getCause()); }
+        f=new CollectionFixture(ram,unique,addresses); f.add(256,256);
+        check(f.run(exporter).size()==256 && f.memoryQueries==65536,"65536 exact requested bytes");
+        f.add(1,1); model=f.run(exporter);
+        check(model.size()==256 && f.memoryQueries==65536 && model.values().stream().allMatch(v->v.contains("model_requested_byte_limit")),"crossing window is wholly unread");
+        f=new CollectionFixture(ram,unique,addresses); f.sharedGlobal=true; f.sharedBelow=0x800000; f.add(33,0);
+        for(int n=0;n<256;n++) f.batch(new long[]{0x900000L+n*512L},256,1);
+        f.batch(new long[]{0xa00000},1,1); model=f.run(exporter);
+        check(model.size()==257 && f.memoryQueries==65536 && model.values().stream().anyMatch(v->v.contains("\"omissionReason\":\"unknown_access_width\"") && v.contains("[\"global_window_limit\",\"model_requested_byte_limit\"]")),"local plus actual aggregate reason stays ordered and separate from unknown width");
+        f=new CollectionFixture(ram,unique,addresses); f.add(255,256); f.add(1,255); f.add(1,2);
+        check(f.run(exporter).size()==256 && f.memoryQueries==65535,"65535 plus two does not take a partial byte");
+        f=new CollectionFixture(ram,unique,addresses); f.add(1,257);
+        try { f.run(exporter); throw new AssertionError("width257 accepted"); }
+        catch(InvocationTargetException failure) { check(failure.getCause().getMessage().contains("requested-byte bound"),failure.getCause()); }
+        f=new CollectionFixture(ram,unique,addresses); f.batch(new long[]{0x1000},0,65536);
+        check(f.run(exporter).size()==1 && f.widthQueries==65536 && get(exporter,"referenceCollectionCutoff")==null,"work65536 exact with duplicate dedup");
+        f=new CollectionFixture(ram,unique,addresses); f.batch(new long[]{0x1000},0,65537);
+        check(f.run(exporter).isEmpty() && f.referenceVisits==65537 && f.widthQueries==0 && f.memoryQueries==0 && get(exporter,"referenceCollectionCutoff").equals("reference_work_limit"),"whole oversized batch unadmitted with one lookahead");
+        f=new CollectionFixture(ram,unique,addresses); f.batch(new long[]{0x1000},0,65535); f.batch(new long[]{0x2000,0x2001},1,1);
+        check(f.run(exporter).size()==1 && f.widthQueries==65535 && f.memoryQueries==0 && f.referenceVisits==65537 && get(exporter,"referenceCollectionCutoff").equals("reference_work_limit"),"remaining work rejects whole next batch before width/read");
+        f.reverse=true;
+        check(f.run(exporter).size()==1 && f.widthQueries==65535,"oversized batch reversal retains no partial batch");
+        f=new CollectionFixture(ram,unique,addresses); f.add(2,1); f.streamNextInstruction=true;
+        check(f.run(exporter).size()==2 && f.widthQueries==2 && f.referenceVisits==3,"stream iterator stops when fromAddress leaves current instruction");
+        f=new CollectionFixture(ram,unique,addresses); f.sharedGlobal=true; f.add(33,0);
+        String unknown=f.only(exporter);
+        check(unknown.contains("\"omissionReason\":\"unknown_access_width\"") && unknown.contains("global_window_limit"),"width unknown is separate from collection omission");
+        f=new CollectionFixture(ram,unique,addresses);
+        check(f.run(exporter).isEmpty() && get(exporter,"referenceCollectionCutoff")==null,"no refs invent no globals/cutoff");
+        f.add(1,1); f.strings=true;
+        check(f.run(exporter).isEmpty() && f.widthQueries==0,"recognized nonnull strings invent no byte globals");
+        cancellationControls(exporter,ram,unique,addresses);
+        System.out.println("omission controls passed: local32 model4096 bytes65536 work65536 deterministic dedup true-cutoff fallback");
+    }
+
+    static void interruptedCollection(Object exporter, CollectionFixture fixture, TaskMonitor monitor, String detail) throws Exception {
+        field(exporter,"monitor",monitor);
+        try { fixture.run(exporter); throw new AssertionError("cancellation ignored: "+detail); }
+        catch(InvocationTargetException failure) { check(failure.getCause() instanceof InterruptedException,detail+": "+failure.getCause()); }
+        finally { field(exporter,"monitor",TaskMonitor.DUMMY); }
+    }
+    static void cancellationControls(Object exporter, AddressSpace ram, AddressSpace unique, AddressFactory addresses) throws Exception {
+        for(int boundary:new int[]{32,33}) {
+            CollectionFixture fixture=new CollectionFixture(ram,unique,addresses); fixture.sharedGlobal=true; fixture.add(33,0);
+            interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled") && fixture.widthQueries>=boundary),"local boundary"+boundary);
+        }
+        CollectionFixture fixture=new CollectionFixture(ram,unique,addresses); fixture.batch(new long[]{0x1000},0,65537);
+        interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled") && get(exporter,"referenceCollectionCutoff")!=null),"immediately after true work stop");
+        fixture=new CollectionFixture(ram,unique,addresses); fixture.add(4097,0);
+        interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled") && get(exporter,"referenceCollectionCutoff")!=null),"immediately after aggregate window stop");
+        fixture=new CollectionFixture(ram,unique,addresses); fixture.add(257,256);
+        interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled") && get(exporter,"referenceCollectionCutoff")!=null),"immediately after aggregate byte stop");
+        fixture=new CollectionFixture(ram,unique,addresses); fixture.add(2,0);
+        interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled") && !((Map<?,?>)get(exporter,"referencedByteEvidence")).isEmpty()),"retained rendering");
+        fixture=new CollectionFixture(ram,unique,addresses); fixture.batch(new long[]{0x1000,0x1001},0,1);
+        interruptedCollection(exporter,fixture,proxy(TaskMonitor.class,(m,a)-> {
+            if(!m.getName().equals("isCancelled")) return null;
+            for(StackTraceElement frame:Thread.currentThread().getStackTrace())
+                if(frame.getMethodName().equals("checkByteSortCancellation")) return true;
+            return false;
+        }),"bounded reference sort");
+        field(exporter,"referenceCollectionCutoff","model_window_limit");
+        field(exporter,"monitor",proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled")));
+        try { invoke(exporter,"globalAt",new Class<?>[]{Address.class},ram.getAddress(0x900000)); throw new AssertionError("cancelled fallback accepted"); }
+        catch(InvocationTargetException failure) { check(failure.getCause() instanceof InterruptedException,failure.getCause()); }
+        finally { field(exporter,"monitor",TaskMonitor.DUMMY); }
+    }
+
+    /** Exercise the actual production recovery catch, not only the private cancellation helper. */
+    static void threadOnlyProductionCatchControl(Object exporter, AddressSpace ram, AddressFactory addresses) throws Exception {
+        check(!Thread.currentThread().isInterrupted(),"thread-only control starts without inherited interruption");
+        boolean[] enteredDataReference={false};
+        Reference reference=proxy(Reference.class,(m,a)-> {
+            if(m.getName().equals("getToAddress")) return ram.getAddress(0x1000);
+            if(m.getName().equals("getReferenceType")) return RefType.DATA;
+            return null;
+        });
+        Instruction instruction=proxy(Instruction.class,(m,a)-> {
+            if(m.getName().equals("getAddress")) return ram.getAddress(0x2000);
+            if(m.getName().equals("getReferencesFrom")) {
+                enteredDataReference[0]=true;
+                Thread.currentThread().interrupt(); // monitor stays false; globalAt throws.
+                return new Reference[]{reference};
             }
-            if(reverse[0]) Collections.reverse(items);
-            Iterator<Instruction> iterator=items.iterator();
-            return proxy(InstructionIterator.class,(im,ia)->im.getName().equals("hasNext") ? iterator.hasNext() : im.getName().equals("next") ? iterator.next() : null);
+            return null;
+        });
+        Listing listing=proxy(Listing.class,(m,a)-> {
+            if(!m.getName().equals("getInstructions")) return null;
+            Iterator<Instruction> it=List.of(instruction).iterator();
+            return proxy(InstructionIterator.class,(im,ia)->im.getName().equals("hasNext") ? it.hasNext() : im.getName().equals("next") ? it.next() : null);
         });
         field(exporter,"currentProgram",proxy(Program.class,(m,a)-> {
             if(m.getName().equals("getAddressFactory")) return addresses;
             if(m.getName().equals("getListing")) return listing;
-            if(m.getName().equals("getMemory")) return proxy(Memory.class,(mm,ma)->null);
-            if(m.getName().equals("getSymbolTable")) return proxy(ghidra.program.model.symbol.SymbolTable.class,(mm,ma)->null);
-            if(m.getName().equals("getFunctionManager")) return proxy(FunctionManager.class,(mm,ma)->null);
+            if(m.getName().equals("getFunctionManager")) return proxy(FunctionManager.class,(fm,fa)->null);
             return null;
         }));
-        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(first,second));
-        Field field=exporter.getClass().getDeclaredField("referencedByteEvidence");field.setAccessible(true);
-        Map<?,?> original=new TreeMap<>((Map<?,?>)field.get(exporter));
-        check(original.size()==1,"interior references must retain one existing global ID");
-        String wire=original.values().iterator().next().toString();
-        check(wire.contains("\"requestedLength\":8") && wire.contains("\"requestedLength\":4") && wire.contains("\"requestedLength\":2") &&
-            wire.contains("0x1002") && wire.contains("pcode_direct_read") && wire.contains("pcode_direct_write"),"distinct origin/width/interior windows retained");
-        reverse[0]=true;
-        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(second,first));
-        check(original.equals(field.get(exporter)),"function and instruction traversal order must not change canonical windows");
-        stringData[0]=true;
-        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(first,second));
-        check(((Map<?,?>)field.get(exporter)).isEmpty(),"existing string references must not mint global byte windows");
+        TaskMonitor uncancelled=proxy(TaskMonitor.class,(m,a)->false);
+        field(exporter,"monitor",uncancelled);
+        Function function=proxy(Function.class,(m,a)-> {
+            if(m.getName().equals("getCalledFunctions")) return Collections.emptySet();
+            if(m.getName().equals("getReturnType")) throw new AssertionError("interruption was downgraded to function recovery");
+            return null;
+        });
+        Class<?> planningEvidence=Arrays.stream(exporter.getClass().getDeclaredClasses())
+            .filter(c->c.getSimpleName().equals("PlanningBatchEvidence")).findFirst().orElseThrow();
+        try {
+            invoke(exporter,"exportFunction",new Class<?>[]{Function.class,ghidra.app.decompiler.DecompInterface.class,
+                java.nio.file.Path.class,java.nio.file.Path.class,planningEvidence,boolean.class},
+                function,null,null,null,null,false);
+            throw new AssertionError("thread-only interrupted export returned a FunctionExport");
+        } catch(InvocationTargetException failure) {
+            check(enteredDataReference[0] && failure.getCause() instanceof InterruptedException,failure.getCause());
+            check(!uncancelled.isCancelled() && Thread.currentThread().isInterrupted(),"production catch must preserve thread-only cancellation and flag");
+        } finally {
+            Thread.interrupted(); // Clear only this authored control's interrupt, never production state.
+            field(exporter,"monitor",TaskMonitor.DUMMY);
+        }
+        // Also preserve an InterruptedException whose originating API cleared the thread flag.
+        InterruptedException clearedFlag=new InterruptedException("authored cleared-flag interruption");
+        try {
+            invoke(exporter,"rethrowInfrastructureFailure",new Class<?>[]{Exception.class},clearedFlag);
+            throw new AssertionError("cleared-flag InterruptedException was classified as recovery");
+        } catch(InvocationTargetException failure) {
+            check(failure.getCause()==clearedFlag && Thread.currentThread().isInterrupted(),"typed interruption identity and flag restored");
+        } finally { Thread.interrupted(); }
+        // A current interrupt must also keep an unrelated recovery exception out of partial output.
+        IllegalStateException flaggedFailure=new IllegalStateException("authored flagged recovery failure");
+        try {
+            Thread.currentThread().interrupt();
+            invoke(exporter,"rethrowInfrastructureFailure",new Class<?>[]{Exception.class},flaggedFailure);
+            throw new AssertionError("current interrupt flag was classified as recovery");
+        } catch(InvocationTargetException failure) {
+            check(failure.getCause()==flaggedFailure && Thread.currentThread().isInterrupted(),"flagged infrastructure failure preserves identity and flag");
+        } finally { Thread.interrupted(); }
+        // Existing infrastructure and monitor boundaries still propagate the original failure.
+        Constructor<?> integrity=Arrays.stream(exporter.getClass().getDeclaredClasses())
+            .filter(c->c.getSimpleName().equals("PlanningIntegrityException")).findFirst().orElseThrow().getDeclaredConstructor(String.class);
+        integrity.setAccessible(true);
+        for(Exception original:new Exception[]{new java.io.IOException("authored IO"),(Exception)integrity.newInstance("authored integrity")}) {
+            try {
+                invoke(exporter,"rethrowInfrastructureFailure",new Class<?>[]{Exception.class},original);
+                throw new AssertionError("existing infrastructure failure swallowed");
+            } catch(InvocationTargetException failure) { check(failure.getCause()==original,"infrastructure failure identity retained"); }
+        }
+        Exception ordinary=new Exception("authored ordinary recovery failure");
+        invoke(exporter,"rethrowInfrastructureFailure",new Class<?>[]{Exception.class},ordinary);
+        field(exporter,"monitor",proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled")));
+        try {
+            invoke(exporter,"rethrowInfrastructureFailure",new Class<?>[]{Exception.class},ordinary);
+            throw new AssertionError("existing monitor cancellation swallowed");
+        } catch(InvocationTargetException failure) { check(failure.getCause()==ordinary,"monitor cancellation preserves original failure"); }
+        finally { field(exporter,"monitor",TaskMonitor.DUMMY); }
+        System.out.println("production catch thread-only interruption controls passed");
     }
 
     public static void main(String[] args) throws Exception {
@@ -245,61 +430,8 @@ public class ReferencedBytesProbe {
         PcodeOp dynamic=new PcodeOp(target,2,PcodeOp.LOAD,new Varnode[]{space,new Varnode(unique.getAddress(3),8)},new Varnode(unique.getAddress(4),8));
         ops[0]=new PcodeOp[]{dynamic};
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"dynamic width");
-        // Exercise the actual prepass: duplicate work is charged before deterministic deduplication.
-        Reference repeated=proxy(Reference.class,(m,a) -> {
-            if (m.getName().equals("getToAddress")) return target;
-            if (m.getName().equals("getReferenceType")) return ghidra.program.model.symbol.RefType.DATA;
-            if (m.getName().equals("getOperandIndex")) return -1;
-            return null;
-        });
-        int[] occurrenceCount={32};
-        Instruction repeatedInstruction=proxy(Instruction.class,(m,a)-> {
-            if(m.getName().equals("getAddress")) return ram.getAddress(0x2000);
-            if(m.getName().equals("getReferencesFrom")) {
-                Reference[] refs=new Reference[occurrenceCount[0]]; Arrays.fill(refs,repeated); return refs;
-            }
-            if(m.getName().equals("getPcode")) return new PcodeOp[]{dynamic};
-            return null;
-        });
-        Listing listing=proxy(Listing.class,(m,a)-> {
-            if(m.getName().equals("getInstructions")) {
-                boolean[] consumed={false};
-                return proxy(InstructionIterator.class,(im,ia)-> {
-                    if(im.getName().equals("hasNext")) return !consumed[0];
-                    if(im.getName().equals("next")) { consumed[0]=true; return repeatedInstruction; }
-                    return null;
-                });
-            }
-            return null;
-        });
-        ghidra.program.model.symbol.SymbolTable symbols=proxy(ghidra.program.model.symbol.SymbolTable.class,(m,a)->null);
-        FunctionManager manager=proxy(FunctionManager.class,(m,a)->null);
-        Program prepassProgram=proxy(Program.class,(m,a)-> {
-            if(m.getName().equals("getAddressFactory")) return addresses;
-            if(m.getName().equals("getListing")) return listing;
-            if(m.getName().equals("getSymbolTable")) return symbols;
-            if(m.getName().equals("getFunctionManager")) return manager;
-            return null;
-        });
-        field(exporter,"currentProgram",prepassProgram);
-        Function function=proxy(Function.class,(m,a)->null);
-        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(function));
-        Field evidenceField=exporter.getClass().getDeclaredField("referencedByteEvidence"); evidenceField.setAccessible(true);
-        String evidence=((Map<?,?>)evidenceField.get(exporter)).values().iterator().next().toString();
-        check(evidence.contains("\"omissionReason\":\"unknown_access_width\"") &&
-            evidence.indexOf("\"requestedLength\"")==evidence.lastIndexOf("\"requestedLength\""),evidence);
-        occurrenceCount[0]=33;
-        try { invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(function)); throw new AssertionError("global work bound ignored"); }
-        catch(InvocationTargetException expected) { check(expected.getCause().getMessage().contains("global bound"),expected.getCause()); }
-        boundedPrepass(exporter,ram,constant,unique,addresses,65536,0,0,true,null);
-        boundedPrepass(exporter,ram,constant,unique,addresses,65537,0,0,true,"candidate bound");
-        boundedPrepass(exporter,ram,constant,unique,addresses,4096,0,0,false,null);
-        boundedPrepass(exporter,ram,constant,unique,addresses,4097,0,0,false,"window model bound");
-        boundedPrepass(exporter,ram,constant,unique,addresses,1,256,256,false,null);
-        boundedPrepass(exporter,ram,constant,unique,addresses,1,257,257,false,"window requested-byte bound");
-        boundedPrepass(exporter,ram,constant,unique,addresses,256,256,256,false,null);
-        boundedPrepass(exporter,ram,constant,unique,addresses,257,256,1,false,"model requested-byte bound");
-        System.out.println("exact/one-over candidate65536 windows4096 windowBytes256 requestedBytes65536 bounds passed");
+        omissionControls(exporter,ram,unique,addresses);
+        threadOnlyProductionCatchControl(exporter,ram,addresses);
         field(exporter,"currentProgram",proxy(Program.class,(m,a) ->
             m.getName().equals("getMemory") ? memory : m.getName().equals("getAddressFactory") ? addresses : null));
         AddressSpace otherRam = new GenericAddressSpace("other_ram",64,AddressSpace.TYPE_RAM,3);
@@ -307,7 +439,6 @@ public class ReferencedBytesProbe {
             throw new AssertionError("offset alias in another memory space accepted"); }
         catch(InvocationTargetException expected) { check(expected.getCause().getMessage().contains("unrepresentable"),expected.getCause()); }
         check(invoke(exporter,"byteAddress",new Class<?>[]{Address.class},target).equals("0x1000"),"default address space");
-        sharedGlobalOrigins(exporter,ram,unique,addresses);
         field(exporter,"monitor",proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled")));
         try { invoke(exporter,"readByteSegments",readTypes,target,8); throw new AssertionError("cancellation ignored"); }
         catch (InvocationTargetException expected) { check(expected.getCause() instanceof InterruptedException,expected); }

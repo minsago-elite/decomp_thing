@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class GhidraReferencedBytesExporterTest {
     @Test
-    fun `bundled public APIs preserve exact memory bytes missing spans widths and prepass bounds`() {
+    fun `bundled public APIs preserve exact bytes widths and deterministic bounded omission controls`() {
         val bundleSetting = System.getProperty("decompengine.ghidra.bundle")
         assumeTrue(bundleSetting != null, "bundled Ghidra qualification supplies its authenticated bundle")
         val repository = Path.of(System.getProperty("user.dir")).toRealPath()
@@ -56,7 +56,10 @@ class GhidraReferencedBytesExporterTest {
             repository.resolve("src/test/resources/ghidra/ControlledByteListingProbe.java").toString()))
         run("probe", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary", "-Duser.home=$home", "-Djava.util.prefs.userRoot=$home/prefs",
             "-Djna.tmpdir=$temporary", "-XX:-UsePerfData", "-cp", classpath, "ReferencedBytesProbe"))
-        assertTrue(work.resolve("probe.log").readText().contains("referenced byte API probe passed"))
+        val probeLog = work.resolve("probe.log").readText()
+        assertTrue(probeLog.contains("referenced byte API probe passed"))
+        assertTrue(probeLog.contains("production catch thread-only interruption controls passed"))
+        assertTrue(probeLog.contains("omission controls passed: local32 model4096 bytes65536 work65536 deterministic dedup true-cutoff fallback"))
         val applicationRoots = Files.walk(bundle).use { paths ->
             paths.filter { Files.isRegularFile(it) && it.fileName.toString() == "application.properties" &&
                 it.parent.fileName.toString() == "Ghidra" }.map { it.parent.parent }.toList()

@@ -6,7 +6,7 @@ internal object GeneratedCModulePrompt {
         val target = request.module.sourcePath
         val localFunctions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val localGlobals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
-        val byteEvidence = renderByteEvidence(localGlobals)
+        val byteEvidence = renderByteEvidence(localGlobals, request.model.schemaVersion)
         val functionEvidence = localFunctions.joinToString("\n\n") { function ->
             "${function.id} @ 0x${function.address.toString(16)}\nprototype: ${function.prototype}\n" +
                 "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
@@ -43,7 +43,7 @@ internal object GeneratedCModulePrompt {
     }
 
     /** Bound raw input before constructing the complete prompt or invoking an agent. */
-    private fun renderByteEvidence(globals: List<RecoveredGlobal>): Map<String, String> {
+    private fun renderByteEvidence(globals: List<RecoveredGlobal>, modelSchemaVersion: Int): Map<String, String> {
         var decodedBytes = 0L
         var renderedBytes = 0L
 
@@ -60,7 +60,7 @@ internal object GeneratedCModulePrompt {
                     }
                 }
             }
-            val prefix = if (value == null) HISTORICAL_BYTES else BYTE_PREFIX
+            val prefix = if (value == null) { if (modelSchemaVersion == 4) UNSUPPLIED_BYTES else HISTORICAL_BYTES } else if (value.collectionOmissions.isNotEmpty()) OMITTED_PREFIX else BYTE_PREFIX
             renderedBytes = Math.addExact(renderedBytes, prefix.length.toLong())
             require(renderedBytes <= ReferencedDataByteEvidenceJson.MAXIMUM_PROMPT_RENDERED_BYTES) {
                 "module referenced byte evidence rendered-text prompt bound exceeded"
@@ -73,10 +73,12 @@ internal object GeneratedCModulePrompt {
         }
         // No per-global evidence text is constructed until the complete module is admitted.
         return globals.associate { global ->
-            global.id to (global.byteEvidence?.let { BYTE_PREFIX + ReferencedDataByteEvidenceJson.render(it) } ?: HISTORICAL_BYTES)
+            global.id to (global.byteEvidence?.let { (if (it.collectionOmissions.isNotEmpty()) OMITTED_PREFIX else BYTE_PREFIX) + ReferencedDataByteEvidenceJson.render(it) } ?: if (modelSchemaVersion == 4) UNSUPPLIED_BYTES else HISTORICAL_BYTES)
         }
     }
 
+    private const val UNSUPPLIED_BYTES = "recovered input windows: <not supplied; completeness unknown>"
+    private const val OMITTED_PREFIX = "recovered input windows (non-authoritative; further referenced data may be absent because collection stopped; no object extent, type or initializer semantics): "
     private const val HISTORICAL_BYTES = "recovered input windows: <unavailable in historical model>"
     private const val BYTE_PREFIX = "recovered input windows (non-authoritative; no object extent, type or initializer semantics): "
 }

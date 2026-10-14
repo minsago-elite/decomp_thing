@@ -84,7 +84,7 @@ internal class CanonicalProgramModelSnapshot internal constructor(
 )
 
 /**
- * Parses the exact schema 1–3 exporter wire form without constructing a generic JSON tree.
+ * Parses the exact schema 1–4 exporter wire form without constructing a generic JSON tree.
  *
  * The input is copied only after its byte bound is checked. Jackson then enforces strict UTF-8,
  * duplicate-key, token, number, and nesting limits while this parser enforces the closed field
@@ -156,7 +156,7 @@ private class TypedReader(
         expectField("schemaVersion")
         requireToken(parser.nextToken(), JsonToken.VALUE_NUMBER_INT, "program model schemaVersion must be an integer")
         budget.chargeNode("schemaVersion")
-        if (parser.text !in setOf("1", "2", "3")) modelFail("program model schemaVersion must be 1, 2 or 3")
+        if (parser.text !in setOf("1", "2", "3", "4")) modelFail("program model schemaVersion must be 1, 2, 3 or 4")
         schemaVersion = parser.text.toInt()
 
         expectField("inputSha256")
@@ -268,11 +268,11 @@ private class TypedReader(
             val type = readString("program model global type", limits.maximumTextCodePoints, allowEmpty = true)
             expectField("initializer")
             val initializer = readNullableString("program model global initializer", limits.maximumTextCodePoints)
-            val evidence = if (schemaVersion == 3) {
+            val evidence = if (schemaVersion >= 3) {
                 expectField("byteEvidence")
                 pendingEvidenceWindows = 0
                 pendingEvidenceBytes = 0
-                ReferencedDataByteEvidenceJson.parse(readEvidenceValue(0).jsonObject).also(byteBudget::charge)
+                ReferencedDataByteEvidenceJson.parseForModel(readEvidenceValue(0), schemaVersion, byteBudget)
             } else null
             val status = readExtractionStatus("program model global status")
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model global has missing or extra fields")
@@ -304,6 +304,7 @@ private class TypedReader(
                     val maximum = when (field) {
                         "windows" -> ReferencedDataByteEvidenceJson.MAXIMUM_WINDOWS_PER_GLOBAL
                         "segments" -> ReferencedDataByteEvidenceJson.MAXIMUM_WINDOW_BYTES
+                        "collectionOmissions" -> 2
                         else -> modelFail("unexpected byte evidence array")
                     }
                     if (values.size >= maximum) modelFail("byte evidence array bound exceeded")
@@ -313,7 +314,10 @@ private class TypedReader(
                             modelFail("referenced byte model window bound exceeded")
                     }
                     // The recursive reader advances once, so return the current token through a helper.
-                    values += readEvidenceCurrent(depth + 1)
+                    values += if (field == "collectionOmissions") {
+                        requireToken(parser.currentToken(), JsonToken.VALUE_STRING, "collection omissions must be strings")
+                        JsonPrimitive(readCurrentString("collection omission", 32, false))
+                    } else readEvidenceCurrent(depth + 1)
                 }
                 JsonArray(values)
             }
@@ -609,9 +613,9 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(global.type)
             ascii(",\n      \"initializer\": ")
             nullableString(global.initializer)
-            if (model.schemaVersion == 3) {
+            if (model.schemaVersion >= 3) {
                 ascii(",\n      \"byteEvidence\": ")
-                ascii(ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence)))
+                ascii(global.byteEvidence?.let(ReferencedDataByteEvidenceJson::render) ?: "null")
             }
             ascii(",\n      ")
             jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")

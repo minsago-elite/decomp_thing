@@ -253,7 +253,7 @@ internal object GccBundledFullExportCapture {
         val model = capture.read(reports, "program_model.json", minOf(limits.assembledModelBytes, MAXIMUM_MODEL_BYTES))
         requireFullModelHeader(model, expectedInput)
         val modelVerifier = ExactByteVerifier(model, "GCC full program model", MAXIMUM_MODEL_BYTES)
-        modelVerifier.accept("{\n  \"schemaVersion\": 3,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
+        modelVerifier.accept("{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
 
         val functionNames = captureDirectoryFiles(functions, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
         require(functionNames.size.toLong() == progress.total &&
@@ -420,7 +420,7 @@ internal object GccBundledFullExportCapture {
             "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 12L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 13L &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool
@@ -481,7 +481,7 @@ internal object GccBundledFullExportCapture {
     }
 
     private fun requireFullModelHeader(model: ByteArray, inputSha256: String) {
-        val prefix = "{\n  \"schemaVersion\": 3,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
+        val prefix = "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
         val suffix = "  ]\n}\n".toByteArray(StandardCharsets.UTF_8)
         require(model.size >= prefix.size + suffix.size && model.copyOfRange(0, prefix.size).contentEquals(prefix) &&
             model.copyOfRange(model.size - suffix.size, model.size).contentEquals(suffix)
@@ -566,7 +566,9 @@ internal object GccBundledFullExportCapture {
         require(canonicalAddress(address) && expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')) {
             "GCC full global record identity does not match its canonical 64-bit address"
         }
-        budget.charge(ReferencedDataByteEvidenceJson.parse(root.getValue("byteEvidence").jsonObject))
+        requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4, budget)) {
+            "eligible bundled exporter global lacks supplied byte evidence schema 2"
+        }
         requirePrettyExporterRecord(bytes, root, "global", GLOBAL_FIELDS, nullableField = "initializer")
         return address
     }
@@ -819,7 +821,7 @@ internal object GccBundledFullExportCapture {
                     }
                     verifier.accept("]")
                 }
-                field == "byteEvidence" -> verifier.accept(ReferencedDataByteEvidenceJson.render(ReferencedDataByteEvidenceJson.parse(value.jsonObject)))
+                field == "byteEvidence" -> verifier.accept(ReferencedDataByteEvidenceJson.render(requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(value, 4))))
                 field == nullableField && value == JsonNull -> verifier.accept("null")
                 else -> verifier.acceptExporterString(string(root, field))
             }

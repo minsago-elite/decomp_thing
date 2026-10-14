@@ -1569,6 +1569,35 @@ class SourceTreeTest {
         })
     }
 
+    @Test
+    fun `model four checkpoint binds nullable evidence and refuses omission-only stale reuse`() {
+        val project = createTempDirectory("schema-four-checkpoint-")
+        val base = oneModuleModel().copy(schemaVersion = 4,
+            functions = oneModuleModel().functions.map { it.copy(referencedGlobals = setOf("g")) },
+            globals = listOf(RecoveredGlobal("g", "authored", 0x2000UL, "int")))
+        var calls = 0
+        val reconstructor = validReconstructor { calls++ }
+        SourceTreeGenerator.generate(base, project, reconstructor = reconstructor)
+        val first = calls
+        SourceTreeGenerator.generate(base, project, reconstructor = reconstructor)
+        assertEquals(first, calls)
+        val evidence = ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("model_window_limit"))
+        val changed = base.copy(globals = listOf(base.globals.single().copy(byteEvidence = evidence)))
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor)
+        assertTrue(calls > first)
+        val second = calls
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor)
+        assertEquals(second, calls)
+        val other = changed.copy(globals = listOf(changed.globals.single().copy(byteEvidence = evidence.copy(collectionOmissions = listOf("reference_work_limit")))))
+        SourceTreeGenerator.generate(other, project, reconstructor = reconstructor)
+        assertTrue(calls > second)
+        assertEquals(other, ProgramModelJson.readCanonical(project.resolve("reports/program_model.json").readText().toByteArray()))
+        val checkpoints = Files.list(project.resolve("reports/modules")).use { paths ->
+            paths.filter { it.fileName.toString().endsWith(".json") }.toList()
+        }
+        assertTrue(checkpoints.any { path -> Json.parseToJsonElement(path.readText()).jsonObject["modelSchemaVersion"] == JsonPrimitive(4) })
+    }
+
     private fun writingHarness(source: String): AgentHarness = object : AgentHarness {
         override fun execute(
             request: AgentExecutionRequest,

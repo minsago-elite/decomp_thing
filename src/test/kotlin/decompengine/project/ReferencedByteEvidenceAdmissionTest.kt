@@ -72,4 +72,25 @@ class ReferencedByteEvidenceAdmissionTest {
         }
     }
 
+    @Test fun `collection omission third entry refuses before malformed suffix`() {
+        rejectsBeforePayload("{\"globals\":[{\"byteEvidence\":{\"collectionOmissions\":[\"global_window_limit\",\"model_window_limit\",\"" + "x".repeat(1_000_000), "collection omission bound")
+    }
+    @Test fun `nullable boundary refuses pseudo null and nonobject values early`() {
+        for (payload in listOf("null" + "x".repeat(1_000_000), "\"" + "x".repeat(1_000_000), "[" + "x".repeat(1_000_000))) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                val a = ReferencedByteEvidenceAdmission(false)
+                ("{\"globals\":[{\"byteEvidence\":" + payload).forEach { a.accept(it.code) }
+            }
+            assertContains(failure.message.orEmpty(), "byte evidence")
+        }
+    }
+    @Test fun `decoded duplicates reject before their malformed large values`() {
+        for (duplicate in listOf("hex", "he\\u0078")) {
+            rejectsBeforePayload("{\"globals\":[{\"byteEvidence\":{\"windows\":[{\"segments\":[{\"hex\":\"00\",\"$duplicate\":\"" + "x".repeat(1_000_000), "duplicate byte evidence field")
+        }
+        for (duplicate in listOf("byteEvidence", "byteEvidenc\\u0065")) {
+            rejectsBeforePayload("{\"globals\":[{\"byteEvidence\":null,\"$duplicate\":\"" + "x".repeat(1_000_000), "duplicate byte evidence field")
+        }
+    }
+
 }

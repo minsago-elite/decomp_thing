@@ -304,7 +304,7 @@ class BundledGhidraTest {
     fun `installed release retains exact original GCC provenance archive bytes and tree`() {
         assumeTrue(System.getenv("RUN_REAL_GHIDRA") == "true", "installed Ghidra provenance check is opt-in")
         val bundle = BundledGhidra.locate()
-        val toolchain = GccCompilerEngineProfiles.load(Path.of("oracle/gcc/16.2.0/compiler-engines-exporter12.json")).analysis
+        val toolchain = GccCompilerEngineProfiles.load(Path.of("oracle/gcc/16.2.0/compiler-engines-exporter13.json")).analysis
         val authentication = toolchain.authenticateGhidraInstallation(
             Path.of(System.getProperty("decompengine.ghidra.provenanceArchive")), bundle.release,
         )

@@ -3,7 +3,7 @@ package decompengine.project
 import kotlinx.serialization.json.*
 
 /** Recovered input windows; neither object extents nor type/initializer authority. */
-data class ReferencedDataByteEvidence(val schemaVersion: Int = 1, val windows: List<ReferencedDataByteWindow>, val omissionReason: String? = null)
+data class ReferencedDataByteEvidence(val schemaVersion: Int = 1, val windows: List<ReferencedDataByteWindow>, val omissionReason: String? = null, val collectionOmissions: List<String> = emptyList())
 data class ReferencedDataByteWindow(val address: ULong, val requestedLength: Int?, val origin: ReferencedDataByteOrigin, val availability: String, val segments: List<ReferencedDataByteSegment>)
 data class ReferencedDataByteOrigin(val instructionAddress: ULong, val referenceAddress: ULong, val operandIndex: Int?, val widthBasis: String)
 data class ReferencedDataByteSegment(val offset: Int, val length: Int, val availability: String, val hex: String?, val reason: String?)
@@ -16,6 +16,7 @@ object ReferencedDataByteEvidenceJson {
     const val MAXIMUM_REFERENCE_CANDIDATES = 65536
     const val MAXIMUM_PROMPT_DECODED_BYTES = 65536
     const val MAXIMUM_PROMPT_RENDERED_BYTES = 524288
+    val collectionOmissionOrder = listOf("global_window_limit", "model_window_limit", "model_requested_byte_limit", "reference_work_limit")
     val windowComparator: Comparator<ReferencedDataByteWindow> = compareBy<ReferencedDataByteWindow> { it.address }
         .thenBy { it.origin.instructionAddress }.thenBy { it.origin.referenceAddress }
         .thenBy { it.origin.operandIndex ?: -1 }.thenBy { it.origin.widthBasis }.thenBy { it.requestedLength ?: -1 }
@@ -35,8 +36,17 @@ object ReferencedDataByteEvidenceJson {
     }
 
     fun validate(value: ReferencedDataByteEvidence) {
-        require(value.schemaVersion == 1) { "unsupported byte evidence schema" }
-        require(value.windows.size in 1..MAXIMUM_WINDOWS_PER_GLOBAL) { "referenced byte global window bound exceeded or empty" }
+        require(value.schemaVersion in 1..2) { "unsupported byte evidence schema" }
+        require(value.windows.size in (if (value.schemaVersion == 1) 1 else 0)..MAXIMUM_WINDOWS_PER_GLOBAL) { "referenced byte global window bound exceeded or empty" }
+        if (value.schemaVersion == 1) require(value.collectionOmissions.isEmpty()) { "historical evidence cannot contain collection omissions" }
+        else {
+            val reasons = value.collectionOmissions
+            require(reasons.size <= 2 && reasons.distinct().size == reasons.size && reasons.all { it in collectionOmissionOrder }) { "invalid collection omissions" }
+            require(reasons == collectionOmissionOrder.filter { it in reasons } && reasons.count { it != "global_window_limit" } <= 1) { "invalid collection omission order or aggregate combination" }
+            require("global_window_limit" !in reasons || value.windows.size == MAXIMUM_WINDOWS_PER_GLOBAL) { "global omission requires 32 windows" }
+            require(value.windows.isNotEmpty() || reasons.any { it != "global_window_limit" }) { "empty evidence requires aggregate collection omission" }
+            require(value.windows.map { Triple(it.address, it.origin.instructionAddress, it.origin.operandIndex) }.distinct().size == value.windows.size) { "duplicate byte window origin" }
+        }
         require(value.omissionReason == if (value.windows.any { it.requestedLength == null }) "unknown_access_width" else null) { "invalid byte evidence omissionReason" }
         require(value.windows.distinct().size == value.windows.size) { "duplicate byte windows" }
         require(value.windows.sortedWith(windowComparator).zipWithNext().all { (a, b) -> windowComparator.compare(a, b) != 0 }) { "conflicting byte window identity" }
@@ -78,9 +88,15 @@ object ReferencedDataByteEvidenceJson {
         fun JsonObject.nullString(name: String): String? = if (getValue(name) == JsonNull) null else string(name)
         fun JsonObject.number(name: String): Int { val p = getValue(name).jsonPrimitive; require(!p.isString && p.content.matches(Regex("0|[1-9][0-9]*"))); return p.content.toInt() }
         fun JsonObject.address(name: String): ULong { val s = string(name); require(s.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})"))); return s.substring(2).toULong(16) }
-        value.keys("schemaVersion", "windows", "omissionReason")
+        val version = value.number("schemaVersion")
+        require(version in 1..2) { "unsupported byte evidence schema" }
+        if (version == 1) value.keys("schemaVersion", "windows", "omissionReason")
+        else value.keys("schemaVersion", "windows", "omissionReason", "collectionOmissions")
+        val omissions = if (version == 1) emptyList() else value.getValue("collectionOmissions").jsonArray.also { require(it.size <= 2) }.map {
+            val token = it.jsonPrimitive; require(token.isString); token.content
+        }
         val windows = value.getValue("windows").jsonArray
-        require(windows.size in 1..MAXIMUM_WINDOWS_PER_GLOBAL)
+        require(windows.size in (if (version == 1) 1 else 0)..MAXIMUM_WINDOWS_PER_GLOBAL)
         return ReferencedDataByteEvidence(value.number("schemaVersion"), windows.map { element ->
             val w = element.jsonObject; w.keys("address", "requestedLength", "origin", "availability", "segments")
             val o = w.getValue("origin").jsonObject; o.keys("instructionAddress", "referenceAddress", "operandIndex", "widthBasis")
@@ -90,7 +106,16 @@ object ReferencedDataByteEvidenceJson {
                     val s = it.jsonObject; s.keys("offset", "length", "availability", "hex", "reason")
                     ReferencedDataByteSegment(s.number("offset"), s.number("length"), s.string("availability"), s.nullString("hex"), s.nullString("reason"))
                 })
-        }, value.nullString("omissionReason")).also(::validate)
+        }, value.nullString("omissionReason"), omissions).also(::validate)
+    }
+
+    fun parseForModel(element: JsonElement, modelSchemaVersion: Int, budget: Budget? = null): ReferencedDataByteEvidence? {
+        if (modelSchemaVersion == 4 && element == JsonNull) return null
+        require(modelSchemaVersion in 3..4) { "historical models cannot contain byteEvidence" }
+        return parse(element.jsonObject).also {
+            require(it.schemaVersion == modelSchemaVersion - 2) { "program model and byte evidence generation mismatch" }
+            budget?.charge(it)
+        }
     }
 
     /** Count canonical bytes without allocating a per-global string or UTF-8 byte array. */
@@ -111,7 +136,7 @@ object ReferencedDataByteEvidenceJson {
         validate(value)
         fun q(s: String?) = s?.let { JsonPrimitive(it).toString() } ?: "null"
         fun address(a: ULong) = q("0x${a.toString(16)}")
-        emit("{\"schemaVersion\":1,\"windows\":[")
+        emit("{\"schemaVersion\":${value.schemaVersion},\"windows\":[")
         value.windows.sortedWith(windowComparator).forEachIndexed { index, w ->
             if (index != 0) emit(",")
             val o = w.origin
@@ -122,7 +147,9 @@ object ReferencedDataByteEvidenceJson {
             }
             emit("]}")
         }
-        emit("],\"omissionReason\":${q(value.omissionReason)}}")
+        emit("],\"omissionReason\":${q(value.omissionReason)}")
+        if (value.schemaVersion == 2) emit(",\"collectionOmissions\":[${value.collectionOmissions.joinToString(",") { q(it) }}]")
+        emit("}")
     }
 
 }

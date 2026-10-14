@@ -1,4 +1,4 @@
-"""Closed schema3 byte-window admission and validation; no scoring authority."""
+"""Closed historical v1/current v2 byte-window admission and validation; no scoring authority."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,9 @@ from typing import Any
 
 _ADDRESS = re.compile(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})\Z")
 _HEX = re.compile(r"[0-9a-f]+\Z")
+COLLECTION_OMISSIONS = (
+    "global_window_limit", "model_window_limit", "model_requested_byte_limit", "reference_work_limit",
+)
 _FIELDS = {
     "evidence": {"schemaVersion", "windows", "omissionReason"},
     "window": {"address", "requestedLength", "origin", "availability", "segments"},
@@ -58,10 +61,17 @@ def admit_program_model_bytes(payload: bytes) -> None:
             if parent["role"] == "windows":
                 windows += 1
                 _require(parent["entries"] <= 32 and windows <= 4096, "window bound exceeded")
+            if parent["role"] == "collectionOmissions":
+                _require(parent["entries"] <= 2, "collection omission bound exceeded")
+                _require(c == ord('"'), "collection omissions must be scalar strings")
             if parent["role"] == "segments":
                 _require(parent["entries"] <= 256, "segment bound exceeded")
         if parent and parent["role"] == "global" and parent["field"] == "byteEvidence" and not key:
-            _require(c == ord('{'), "byteEvidence must be an object")
+            exact_null = payload[position:position + 4] == b"null" and (
+                position + 4 == length or payload[position + 4] in b",} \t\r\n")
+            _require(c == ord('{') or exact_null, "byteEvidence must be an object or exact null")
+        if parent and parent["role"] == "evidence" and parent["field"] == "collectionOmissions" and not key:
+            _require(c == ord('['), "collectionOmissions must be an array")
         if c in b"{[":
             role = "other"
             if parent is None:
@@ -72,6 +82,8 @@ def admit_program_model_bytes(payload: bytes) -> None:
                 role = "global"
             elif parent["role"] == "global" and parent["field"] == "byteEvidence" and c == ord('{'):
                 role = "evidence"
+            elif parent["role"] == "evidence" and parent["field"] == "collectionOmissions" and c == ord('['):
+                role = "collectionOmissions"
             elif parent["role"] == "evidence" and parent["field"] == "windows" and c == ord('['):
                 role = "windows"
             elif parent["role"] == "windows" and c == ord('{'):
@@ -96,7 +108,7 @@ def admit_program_model_bytes(payload: bytes) -> None:
             decoded = 0
             while position < length and payload[position] != ord('"'):
                 decoded += 1
-                _require(not depth or decoded <= (32 if key else 512), "string bound exceeded")
+                _require(not depth or decoded <= (32 if key or parent["role"] == "collectionOmissions" else 512), "string bound exceeded")
                 if key:
                     _require(position - start < 24576, "field name bound exceeded")
                 if payload[position] == ord('\\'):
@@ -107,7 +119,10 @@ def admit_program_model_bytes(payload: bytes) -> None:
             if key and position < length:
                 field = json.loads(payload[start:position + 1])
                 if depth:
-                    _require(field in _FIELDS.get(parent["role"], set()), "unexpected field")
+                    fields = _FIELDS.get(parent["role"], set())
+                    if parent["role"] == "evidence":
+                        fields = fields | {"collectionOmissions"}
+                    _require(field in fields, "unexpected field")
                 if depth or field in _BOUNDARY_FIELDS.get(parent["role"], set()):
                     # Closed vocabularies bound these sets; reject before scanning values.
                     _require(field not in parent["seen"], "duplicate byte evidence field or containing boundary")
@@ -143,10 +158,12 @@ def decode_program_model_bytes(payload: bytes) -> dict[str, Any]:
     return json.loads(payload, object_pairs_hook=unique_fields)
 
 
-def validate_evidence(value: Any, budget: list[int]) -> None:
-    """Validate all wire invariants, charging [windows, requested bytes] in place."""
+def validate_evidence(value: Any, budget: list[int], *, schema_version: int = 1) -> None:
+    """Validate the expected nested generation (historical1 by default) and charge payload budgets."""
+    _require(type(schema_version) is int and schema_version in (1, 2), "invalid expected evidence generation")
     def obj(item: Any, role: str) -> dict[str, Any]:
-        _require(type(item) is dict and set(item) == _FIELDS[role], "invalid " + role + " fields")
+        fields = _FIELDS[role] | ({"collectionOmissions"} if role == "evidence" and schema_version == 2 else set())
+        _require(type(item) is dict and set(item) == fields, "invalid " + role + " fields")
         return item
 
     def integer(item: Any, minimum: int, maximum: int) -> int:
@@ -158,9 +175,17 @@ def validate_evidence(value: Any, budget: list[int]) -> None:
         return int(item, 16)
 
     evidence = obj(value, "evidence")
-    integer(evidence["schemaVersion"], 1, 1)
+    integer(evidence["schemaVersion"], schema_version, schema_version)
+    omissions = evidence["collectionOmissions"] if schema_version == 2 else []
+    _require(type(omissions) is list and len(omissions) <= 2 and
+        all(type(reason) is str and reason in COLLECTION_OMISSIONS for reason in omissions), "invalid collection omissions")
+    _require(len(set(omissions)) == len(omissions) and
+        omissions == sorted(omissions, key=COLLECTION_OMISSIONS.index) and
+        sum(reason != "global_window_limit" for reason in omissions) <= 1, "noncanonical collection omissions")
     windows = evidence["windows"]
-    _require(type(windows) is list and 1 <= len(windows) <= 32, "global window bound exceeded or empty")
+    _require(type(windows) is list and (1 if schema_version == 1 else 0) <= len(windows) <= 32, "global window bound exceeded or empty")
+    _require(bool(windows) or any(reason != "global_window_limit" for reason in omissions), "empty windows require aggregate collection omission")
+    _require("global_window_limit" not in omissions or len(windows) == 32, "global window omission requires exactly 32 retained windows")
     budget[0] += len(windows)
     _require(budget[0] <= 4096, "model window bound exceeded")
     identities: set[tuple[Any, ...]] = set()
@@ -206,7 +231,7 @@ def validate_evidence(value: Any, budget: list[int]) -> None:
                 offset += count
             _require(offset == width, "invalid segment coverage")
             _require(window["availability"] == ("available" if available == width else "unavailable" if available == 0 else "partial"), "contradictory availability")
-        identity = (start, instruction, target, operand, basis, width)
+        identity = (start, instruction, target, operand, basis, width) if schema_version == 1 else (target, instruction, operand)
         _require(identity not in identities, "duplicate/conflicting window identity")
         identities.add(identity)
     _require(evidence["omissionReason"] == ("unknown_access_width" if unknown else None), "invalid omissionReason")

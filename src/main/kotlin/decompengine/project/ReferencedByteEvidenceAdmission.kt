@@ -5,7 +5,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Lexical admission runs before a parser input chunk is returned to Jackson's token buffers. */
 internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
-    private data class Frame(val role: String, val objectValue: Boolean, var field: String? = null, var key: Boolean = true, var entries: Int = 0)
+    private data class Frame(val role: String, val objectValue: Boolean, var field: String? = null, var key: Boolean = true, var entries: Int = 0, val seen: MutableSet<String> = hashSetOf())
     private val stack = ArrayList<Frame>()
     private var first = true
     private var bom = 0
@@ -18,6 +18,7 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
     private var primitive = false
     private var requestedLength = false
     private var scopedPrimitive = false
+    private var nullableEvidence = false
     private val number = StringBuilder()
     private var evidenceDepth = 0
     private var windows = 0L
@@ -53,6 +54,9 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
                     val field = Json.parseToJsonElement("\"$encoded").jsonPrimitive.content
                     val frame = stack.last()
                     if (evidence()) require(field in fields(frame.role)) { "unexpected byte evidence field" }
+                    if (evidence() || (frame.role == "global" && field == "byteEvidence")) {
+                        require(frame.seen.add(field)) { "duplicate byte evidence field" }
+                    }
                     frame.field = field
                     frame.key = false
                 }
@@ -66,7 +70,7 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
         if (primitive) {
             if (c !in ",]} \t\r\n") {
                 if (scopedPrimitive) {
-                    require(number.length < 64) { "byte evidence number bound exceeded" }
+                    require(number.length < if (nullableEvidence) 4 else 64) { "byte evidence number bound exceeded" }
                     number.append(c)
                 }
                 return
@@ -87,12 +91,14 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
                     windows++
                     require(windows <= ReferencedDataByteEvidenceJson.MAXIMUM_MODEL_WINDOWS) { "referenced byte model window bound exceeded" }
                 }
+                "collectionOmissions" -> require(parent.entries <= 2) { "collection omission bound exceeded" }
                 "segments" -> require(parent.entries <= ReferencedDataByteEvidenceJson.MAXIMUM_WINDOW_BYTES) { "referenced byte segment bound exceeded" }
             }
         }
         if (parent?.objectValue == true && !parent.key && parent.role == "global" && parent.field == "byteEvidence") {
-            require(c == '{') { "byte evidence must be an object" }
+            require(c == '{' || c == 'n') { "byte evidence must be an object or null" }
         }
+        if (parent?.role == "collectionOmissions") require(c == '"') { "collection omissions must be strings" }
         when (c) {
             '{', '[' -> {
                 val role = when {
@@ -100,6 +106,7 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
                     parent.role == "root" && parent.field == "globals" && c == '[' -> "globals"
                     parent.role == "globals" && c == '{' -> "global"
                     parent.role == "global" && parent.field == "byteEvidence" && c == '{' -> "evidence"
+                    parent.role == "evidence" && parent.field == "collectionOmissions" && c == '[' -> "collectionOmissions"
                     parent.role == "evidence" && parent.field == "windows" && c == '[' -> "windows"
                     parent.role == "windows" && c == '{' -> "window"
                     parent.role == "window" && parent.field == "origin" && c == '{' -> "origin"
@@ -121,7 +128,8 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
             else -> {
                 primitive = true
                 requestedLength = parent?.role == "window" && parent.field == "requestedLength"
-                scopedPrimitive = evidence()
+                nullableEvidence = parent?.role == "global" && parent.field == "byteEvidence"
+                scopedPrimitive = evidence() || nullableEvidence
                 number.setLength(0)
                 if (scopedPrimitive) number.append(c)
             }
@@ -130,6 +138,7 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
 
     fun finish() { if (primitive) finishPrimitive() }
     private fun finishPrimitive() {
+        if (nullableEvidence) require(number.toString() == "null") { "byte evidence must be an object or null" }
         if (requestedLength && number.toString() != "null") {
             val length = number.toString().toIntOrNull()
             require(length != null && length in 1..ReferencedDataByteEvidenceJson.MAXIMUM_WINDOW_BYTES) { "referenced byte window requested-byte bound exceeded" }
@@ -139,7 +148,7 @@ internal class ReferencedByteEvidenceAdmission(private val byteInput: Boolean) {
         primitive = false
     }
     private fun fields(role: String): Set<String> = when (role) {
-        "evidence" -> setOf("schemaVersion", "windows", "omissionReason")
+        "evidence" -> setOf("schemaVersion", "windows", "omissionReason", "collectionOmissions")
         "window" -> setOf("address", "requestedLength", "origin", "availability", "segments")
         "origin" -> setOf("instructionAddress", "referenceAddress", "operandIndex", "widthBasis")
         "segment" -> setOf("offset", "length", "availability", "hex", "reason")

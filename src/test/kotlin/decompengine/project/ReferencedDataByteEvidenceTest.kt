@@ -156,4 +156,85 @@ class ReferencedDataByteEvidenceTest {
             assertFailsWith<IllegalArgumentException> { m.copy(globals = listOf(m.globals.single().copy(byteEvidence = ReferencedDataByteEvidence(windows = listOf(known()))))) }
         }
     }
+    @Test fun `model four nullable and v2 evidence roundtrip through strict readers`() {
+        val variants = listOf(null, ReferencedDataByteEvidence(2, listOf(known())),
+            ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("reference_work_limit")),
+            ReferencedDataByteEvidence(2, listOf(unknown()), "unknown_access_width", listOf("model_window_limit")))
+        for (e in variants) {
+            val m = RecoveredProgramModel(4, "a".repeat(64), emptyList(),
+                listOf(RecoveredGlobal("g", "g", 0x100uL, "undefined", "00h", byteEvidence = e)))
+            val wire = m.toJson()
+            assertContains(wire, "\"byteEvidence\":")
+            assertEquals(m, ProgramModelJson.read(wire))
+            assertEquals(m, ProgramModelJson.readCanonical(wire.toByteArray()))
+            assertEquals(m, CanonicalProgramModelStreaming.readCanonical(wire.toByteArray()).model)
+            assertEquals(wire, CanonicalProgramModelStreaming.readCanonical(wire.toByteArray()).model.toJson())
+        }
+        val noGlobals = RecoveredProgramModel(4, "a".repeat(64), emptyList(), emptyList())
+        assertEquals(noGlobals, ProgramModelJson.readCanonical(noGlobals.toJson().toByteArray()))
+    }
+
+    @Test fun `v2 omission relations are closed and origin metadata cannot split one identity`() {
+        val complete = ReferencedDataByteEvidence(2, listOf(known()))
+        for (reasons in listOf(listOf("other"), listOf("reference_work_limit", "reference_work_limit"),
+            listOf("model_window_limit", "reference_work_limit"), listOf("reference_work_limit", "global_window_limit"),
+            listOf("global_window_limit"), listOf("global_window_limit", "model_window_limit", "reference_work_limit"))) {
+            assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.validate(complete.copy(collectionOmissions = reasons)) }
+        }
+        val full = complete.copy(windows = (0 until 32).map { known((0x100 + it * 8).toULong()) },
+            collectionOmissions = listOf("global_window_limit", "model_requested_byte_limit"))
+        assertEquals(full, parseReferencedDataByteEvidence(Json.parseToJsonElement(renderReferencedDataByteEvidence(full))))
+        assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.validate(complete.copy(windows = emptyList())) }
+        assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.validate(complete.copy(windows = listOf(known(), known().copy(origin = known().origin.copy(widthBasis = "pcode_direct_read"))))) }
+    }
+
+    @Test fun `model generations cannot mix and model four requires a nullable key`() {
+        val m = RecoveredProgramModel(4, "a".repeat(64), emptyList(), listOf(RecoveredGlobal("g", "g", 1uL, "int")))
+        val nullWire = m.toJson()
+        val v1 = renderReferencedDataByteEvidence(ReferencedDataByteEvidence(windows = listOf(known())))
+        val v2 = renderReferencedDataByteEvidence(ReferencedDataByteEvidence(2, listOf(known())))
+        val malformed = listOf(nullWire.replace("\"byteEvidence\": null,", ""),
+            nullWire.replace("\"byteEvidence\": null", "\"byteEvidence\": \"null\""),
+            nullWire.replace("\"byteEvidence\": null", "\"byteEvidence\": $v1"),
+            nullWire.replace("\"schemaVersion\": 4", "\"schemaVersion\": 3"),
+            nullWire.replace("\"byteEvidence\": null", "\"byteEvidence\": $v2").replace("\"schemaVersion\": 4", "\"schemaVersion\": 3"))
+        for (wire in malformed) {
+            assertNotEquals(nullWire, wire)
+            assertFails { ProgramModelJson.read(wire) }
+            assertFails { ProgramModelJson.readCanonical(wire.toByteArray()) }
+            assertFails { CanonicalProgramModelStreaming.readCanonical(wire.toByteArray()) }
+        }
+    }
+    @Test fun `actual model four population stays unassessed under exact population schema`() {
+        val model = RecoveredProgramModel(4, "a".repeat(64), emptyList(),
+            listOf(RecoveredGlobal("g", "g", 1uL, "int")))
+        val population = model.unassessedRecoveryAssessment()
+        val definition = java.nio.file.Files.readString(java.nio.file.Path.of("oracle/unassessed-recovery-population.schema.json"))
+        val schema = io.github.optimumcode.json.schema.JsonSchema.fromDefinition(definition)
+        assertTrue(schema.validate(population) {})
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(4), population.getValue("modelSchemaVersion"))
+        assertEquals(kotlinx.serialization.json.JsonArray(emptyList()), population.getValue("assessedEntityIds"))
+        assertEquals(kotlinx.serialization.json.JsonPrimitive("unassessed"), population.getValue("state"))
+    }
+    @Test fun `typed oversized evidence refuses before accessing any lazy window`() {
+        var accesses = 0
+        val windows = object : AbstractList<ReferencedDataByteWindow>() {
+            override val size: Int get() = 33
+            override fun get(index: Int): ReferencedDataByteWindow {
+                accesses++
+                error("oversized list element must not be accessed")
+            }
+            override fun iterator(): Iterator<ReferencedDataByteWindow> {
+                accesses++
+                error("oversized list must not be iterated")
+            }
+        }
+        for (version in listOf(1, 2)) {
+            val value = ReferencedDataByteEvidence(version, windows)
+            val failure = assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.validate(value) }
+            assertContains(failure.message.orEmpty(), "global window bound")
+            assertEquals(0, accesses)
+        }
+    }
+
 }

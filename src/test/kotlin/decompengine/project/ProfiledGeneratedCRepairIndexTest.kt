@@ -83,6 +83,41 @@ class ProfiledGeneratedCRepairIndexTest {
     }
 
     @Test
+    fun `repair index model four retains nullable evidence and supplied omission pairing`() {
+        val window = ReferencedDataByteWindow(0x2000UL, 8,
+            ReferencedDataByteOrigin(0x1000UL, 0x2000UL, 0, "pcode_direct_read"), "available",
+            listOf(ReferencedDataByteSegment(0, 8, "available", "000000000000e03f", null)))
+        val cases = listOf(null, ReferencedDataByteEvidence(2, listOf(window)),
+            ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("reference_work_limit")))
+        for (evidence in cases) {
+            val project = createTempDirectory("repair-model-four-")
+            val model = RecoveredProgramModel(4, "a".repeat(64),
+                listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)", referencedGlobals = setOf("g"))),
+                listOf(RecoveredGlobal("g", "authored", 0x2000UL, "undefined1", "00h", byteEvidence = evidence)))
+            SourceTreeGenerator.generate(model, project)
+            ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+            val path = project.resolve("reports/program_model.json")
+            val original = path.readText()
+            val bad = mutableListOf(original.replace("\"recoveryAssessment\": \"unassessed\"", "\"recoveryAssessment\": \"assessed\""))
+            bad += original.replace("\"byteEvidence\":", "\"byteEvidence\":null,\"byteEvidence\":")
+            if (evidence == null) bad += original.replace("\"byteEvidence\": null,", "")
+            else {
+                bad += original.replace("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+                bad += original.replace("\"schemaVersion\":2", "\"schemaVersion\":1")
+                if (evidence.windows.isNotEmpty()) bad += original.replace("\"requestedLength\":8", "\"requestedLength\":257")
+                else bad += original.replace("reference_work_limit", "invented")
+            }
+            for (changed in bad) {
+                assertTrue(changed != original)
+                path.writeText(changed)
+                assertFailsWith<IllegalArgumentException> { ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile) }
+            }
+            path.writeText(original)
+            ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        }
+    }
+
+    @Test
     fun `relocated declared roots retain dependency context and recover under the same descriptor`() {
         val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor,
             sourceRoot = "workspace/code", interfaceRoot = "workspace/headers")

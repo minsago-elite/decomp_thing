@@ -511,7 +511,7 @@ class GccBundledOperationCoordinatorTest {
 
     @Test
     fun `version two intent binds complete planner policy and independently retains it`() {
-        val checked = Path.of(System.getProperty("user.dir")).resolve("oracle/gcc/16.2.0/compiler-engines-exporter12.json")
+        val checked = Path.of(System.getProperty("user.dir")).resolve("oracle/gcc/16.2.0/compiler-engines-exporter13.json")
         val root = Files.createTempDirectory("gcc-planner-intent-")
         GccRetainedCompilerEngineProfile.open(checked).use { original ->
             val inputs = OracleJson.parseCanonical(original.policyBytes()).jsonObject.getValue("inputs").jsonArray
@@ -523,7 +523,7 @@ class GccBundledOperationCoordinatorTest {
             }
         }
         lateinit var bound: GccBundledOperationIntent
-        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter12.json")).use { profile ->
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter13.json")).use { profile ->
             val suite = profile.suite
             val engine = suite.engine("cc1")
             val controls = mapOf(
@@ -587,7 +587,7 @@ class GccBundledOperationCoordinatorTest {
             Files.write(dependency, original)
             assertFails { retained.requireCurrent() }
         }
-        val path = root.resolve("compiler-engines-exporter12.json")
+        val path = root.resolve("compiler-engines-exporter13.json")
         Files.write(path, Files.readAllBytes(path) + byteArrayOf(32))
         assertFails { bound.openPlannerProfile(emptyList()) }
     }

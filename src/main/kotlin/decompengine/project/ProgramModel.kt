@@ -48,10 +48,16 @@ data class RecoveredProgramModel(
     val types: List<RecoveredType> = emptyList(),
 ) {
     init {
-        require(schemaVersion in 1..3) { "unsupported program model schemaVersion: $schemaVersion" }
+        require(schemaVersion in 1..4) { "unsupported program model schemaVersion: $schemaVersion" }
         val byteBudget = ReferencedDataByteEvidenceJson.Budget()
         globals.forEach { global ->
-            if (schemaVersion == 3) byteBudget.charge(requireNotNull(global.byteEvidence) { "schema 3 requires byteEvidence" })
+            if (schemaVersion >= 3) {
+                if (schemaVersion == 3) requireNotNull(global.byteEvidence) { "schema 3 requires byteEvidence" }
+                global.byteEvidence?.let {
+                    require(it.schemaVersion == schemaVersion - 2) { "program model and byte evidence generation mismatch" }
+                    byteBudget.charge(it)
+                }
+            }
             else require(global.byteEvidence == null) { "historical models cannot contain byteEvidence" }
         }
         require(functions.map { it.id }.distinct().size == functions.size) { "function IDs must be unique" }
@@ -114,7 +120,7 @@ data class RecoveredProgramModel(
               "address": "0x${global.address.toString(16)}",
               "type": "${global.type.json(checkpoint)}",
               "initializer": ${global.initializer?.let { "\"${it.json(checkpoint)}\"" } ?: "null"},
-              ${if (schemaVersion == 3) "\"byteEvidence\": ${ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence))},\n              " else ""}${statusFields(global.status)}
+              ${if (schemaVersion >= 3) "\"byteEvidence\": ${global.byteEvidence?.let(ReferencedDataByteEvidenceJson::render) ?: "null"},\n              " else ""}${statusFields(global.status)}
             }""".trimIndent().prependIndent("    ")
                     }
                 }
@@ -176,15 +182,15 @@ object ProgramModelJson {
 
     private fun read(root: JsonObject, checkpoint: (String) -> Unit): RecoveredProgramModel {
         val schemaVersion = root.int("schemaVersion", 1)
-        require(schemaVersion in 1..3) { "unsupported program model schemaVersion: $schemaVersion" }
-        if (schemaVersion == 3) require(root.keys == setOf("schemaVersion", "inputSha256", "functions", "globals", "types"))
+        require(schemaVersion in 1..4) { "unsupported program model schemaVersion: $schemaVersion" }
+        if (schemaVersion >= 3) require(root.keys == setOf("schemaVersion", "inputSha256", "functions", "globals", "types"))
         val byteBudget = ReferencedDataByteEvidenceJson.Budget()
         val inputSha256 = root.string("inputSha256")
         val functions = checkedModelStage("reading program model functions", checkpoint) {
             root.array("functions").map { element ->
                 checkedModelStage("reading program model function", checkpoint) {
                     val item = element.jsonObject
-                    if (schemaVersion == 3) require(item.keys == setOf("id", "name", "address", "prototype", "extractionStatus", "recoveryAssessment", "calls", "referencedGlobals", "strings", "decompiledC"))
+                    if (schemaVersion >= 3) require(item.keys == setOf("id", "name", "address", "prototype", "extractionStatus", "recoveryAssessment", "calls", "referencedGlobals", "strings", "decompiledC"))
                     RecoveredFunction(
                         id = item.string("id"),
                         name = item.string("name"),
@@ -203,7 +209,7 @@ object ProgramModelJson {
             root.array("globals").map { element ->
                 checkedModelStage("reading program model global", checkpoint) {
                     val item = element.jsonObject
-                    if (schemaVersion == 3) require(item.keys == setOf("id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment"))
+                    if (schemaVersion >= 3) require(item.keys == setOf("id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment"))
                     else require("byteEvidence" !in item) { "historical models cannot contain byteEvidence" }
                     RecoveredGlobal(
                         id = item.string("id"),
@@ -211,7 +217,7 @@ object ProgramModelJson {
                         address = item.string("address").removePrefix("0x").toULong(16),
                         type = item.string("type"),
                         initializer = item["initializer"]?.jsonPrimitive?.contentOrNull,
-                        byteEvidence = if (schemaVersion == 3) ReferencedDataByteEvidenceJson.parse(item.getValue("byteEvidence").jsonObject).also(byteBudget::charge) else null,
+                        byteEvidence = if (schemaVersion >= 3) ReferencedDataByteEvidenceJson.parseForModel(item.getValue("byteEvidence"), schemaVersion, byteBudget) else null,
                         status = readExtractionStatus(item, schemaVersion),
                     )
                 }
@@ -221,7 +227,7 @@ object ProgramModelJson {
             root.array("types").map { element ->
                 checkedModelStage("reading program model type", checkpoint) {
                     val item = element.jsonObject
-                    if (schemaVersion == 3) require(item.keys == setOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"))
+                    if (schemaVersion >= 3) require(item.keys == setOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"))
                     RecoveredType(
                         id = item.string("id"),
                         declaration = item.string("declaration"),

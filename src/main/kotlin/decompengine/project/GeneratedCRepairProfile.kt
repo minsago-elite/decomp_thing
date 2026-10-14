@@ -274,7 +274,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val modelRoot = parseCheckpointedProgramModelJson(requireNotNull(modelBytes).inputStream()) { }
         modelRoot.requireExactKeys(MODEL_ROOT_KEYS, modelRelative)
         val modelSchemaVersion = modelRoot.requiredInt("schemaVersion", modelRelative)
-        require(modelSchemaVersion in 1..3) {
+        require(modelSchemaVersion in 1..4) {
             "unsupported generated C program-model schemaVersion"
         }
         fun modelKeys(legacyKeys: Set<String>): Set<String> = if (modelSchemaVersion == 1) legacyKeys
@@ -380,9 +380,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         globalElements.forEach { element ->
             val global = element.jsonObject
             global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS) +
-                if (modelSchemaVersion == 3) setOf("byteEvidence") else emptySet(), "$modelRelative global")
-            if (modelSchemaVersion == 3) {
-                byteEvidenceBudget.charge(ReferencedDataByteEvidenceJson.parse(global.getValue("byteEvidence").jsonObject))
+                if (modelSchemaVersion >= 3) setOf("byteEvidence") else emptySet(), "$modelRelative global")
+            if (modelSchemaVersion >= 3) {
+                ReferencedDataByteEvidenceJson.parseForModel(global.getValue("byteEvidence"), modelSchemaVersion, byteEvidenceBudget)
             }
             global.requiredBoundedString("id", modelRelative, identifierLimit)
             global.requiredBoundedString("name", modelRelative, identifierLimit)

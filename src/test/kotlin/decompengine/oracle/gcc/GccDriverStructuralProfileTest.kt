@@ -31,8 +31,8 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc-cc1-16.2.0", profile.profileId)
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
-        assertEquals("f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19", profile.compilerEngineProfileSha256)
-        assertEquals("011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f",
+        assertEquals("0d2c6f571b1ee7a977b2baf496823186da3fa95c97ede358e2c4ef75403927ca", profile.compilerEngineProfileSha256)
+        assertEquals("1075cd580b0a5bc872149633c1aa95a30b08b9da2f2e9feb689352571032b615",
             profile.fullExportProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
@@ -63,11 +63,11 @@ class GccDriverStructuralProfileTest {
         val parent = Files.createTempDirectory("gcc-driver-structural-profile-")
         val root = Files.createDirectory(parent.resolve("16.2.0"))
         try {
-            val original = OracleJson.parse(Files.readAllBytes(Path.of("oracle/gcc/16.2.0/compiler-engines-exporter12.json")))
+            val original = OracleJson.parse(Files.readAllBytes(Path.of("oracle/gcc/16.2.0/compiler-engines-exporter13.json")))
                 .jsonObject
             val changedBenchmark = JsonObject(original.getValue("benchmark").jsonObject +
                 ("id" to JsonPrimitive("attacker-profile")))
-            Files.write(root.resolve("compiler-engines-exporter12.json"), OracleJson.canonicalBytes(
+            Files.write(root.resolve("compiler-engines-exporter13.json"), OracleJson.canonicalBytes(
                 JsonObject(original + ("benchmark" to changedBenchmark)),
             ))
 
@@ -289,7 +289,7 @@ class GccDriverStructuralProfileTest {
         language: String = profile.targetAbi.ghidraLanguage,
         compilerSpec: String = profile.targetAbi.ghidraCompilerSpec,
     ): GccBundledFullExportSnapshot {
-        val runtime = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines-exporter12.json")).use {
+        val runtime = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines-exporter13.json")).use {
             it.suite.analysis
         }
         val exporterBytes = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
@@ -328,7 +328,7 @@ class GccDriverStructuralProfileTest {
         intentExporterSha256: String = snapshot.exporterSha256,
     ): GccBundledFullExportOperation {
         val operationId = "a".repeat(64)
-        val plannerProfile = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines-exporter12.json")).use {
+        val plannerProfile = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines-exporter13.json")).use {
             OracleJson.parseCanonical(it.policyBytes()) as JsonObject
         }
         val intent = JsonObject(mapOf(
