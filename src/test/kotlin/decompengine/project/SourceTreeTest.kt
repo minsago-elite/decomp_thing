@@ -1550,6 +1550,25 @@ class SourceTreeTest {
         assertTrue(project.resolve("reports/build.log").readText().contains("unowned C files"))
     }
 
+    @Test
+    fun `schema three checkpoints retain input identity and resume without dispatch`() {
+        val input = oneModuleModel().copy(schemaVersion = 3, globals = emptyList())
+        val project = createTempDirectory("schema-three-checkpoint-")
+        var calls = 0
+        val reconstructor = validReconstructor { calls++ }
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+        assertTrue(calls > 0)
+        val before = calls
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+        assertEquals(before, calls)
+        val checkpoints = Files.list(project.resolve("reports/modules")).use { paths ->
+            paths.filter { it.fileName.toString().endsWith(".json") }.toList()
+        }
+        assertTrue(checkpoints.any { path ->
+            Json.parseToJsonElement(path.readText()).jsonObject["modelSchemaVersion"] == JsonPrimitive(3)
+        })
+    }
+
     private fun writingHarness(source: String): AgentHarness = object : AgentHarness {
         override fun execute(
             request: AgentExecutionRequest,

@@ -165,7 +165,12 @@ object ProgramModelJson {
 
     /** Library parsing and constructor validation remain nonpreemptible between checkpoints. */
     internal fun read(text: String, checkpoint: (String) -> Unit): RecoveredProgramModel {
-        val root = checkedModelStage("parsing program model JSON", checkpoint) { parseCheckpointedProgramModelJson(text.byteInputStream(), checkpoint) }
+        val root = checkedModelStage("parsing program model JSON", checkpoint) {
+            val input = text.reader()
+            // The former UTF-8 stream accepted an initial BOM; avoid copying the complete text to retain it.
+            if (text.firstOrNull() == '\uFEFF') input.read()
+            parseCheckpointedProgramModelJson(input, checkpoint)
+        }
         return read(root, checkpoint)
     }
 

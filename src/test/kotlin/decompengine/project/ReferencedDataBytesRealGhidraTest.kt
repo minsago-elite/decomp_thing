@@ -50,7 +50,7 @@ class ReferencedDataBytesRealGhidraTest {
         val symbols = command(root, "readelf", "-sW", binary.toString())
         val addresses = listOf("half_value", "quarter_value", "eight_value").associateWith { name ->
             val row = symbols.lineSequence().single { it.trim().endsWith(" $name") }.trim().split(Regex("\\s+"))
-            assertEquals("1", row[2], "fixture deliberately declares one-byte listing objects")
+            assertEquals("1", row[2], "fixture deliberately declares one-byte ELF symbols; analysis may create wider listing data")
             row[1].toULong(16)
         }
         val expected = mapOf("half_value" to "000000000000e03f", "quarter_value" to "000000000000d03f", "eight_value" to "0000000000002040")
@@ -74,7 +74,7 @@ class ReferencedDataBytesRealGhidraTest {
             val windows = model.globals.flatMap { it.byteEvidence!!.windows }.filter { it.address == address && it.requestedLength == 8 }
             assertTrue(windows.isNotEmpty(), "missing eight-byte access for $name at $address")
             windows.forEach { window ->
-                assertEquals("pcode_load", window.origin.widthBasis)
+                assertEquals("pcode_direct_read", window.origin.widthBasis)
                 assertEquals(address, window.origin.referenceAddress)
                 assertEquals("available", window.availability)
                 assertEquals(expected.getValue(name), window.segments.joinToString("") { it.hex!! })

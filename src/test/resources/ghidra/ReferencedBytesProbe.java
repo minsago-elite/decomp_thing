@@ -83,6 +83,73 @@ public class ReferencedBytesProbe {
             check(expectedFailure != null && failure.getCause().getMessage().contains(expectedFailure),failure.getCause());
         }
     }
+    static void sharedGlobalOrigins(Object exporter, AddressSpace ram, AddressSpace unique, AddressFactory addresses) throws Exception {
+        Address base=ram.getAddress(0x1000);
+        boolean[] stringData={false};
+        Data data=proxy(Data.class,(m,a)-> {
+            if(m.getName().equals("getAddress")) return base;
+            if(m.getName().equals("getDataType")) return ghidra.program.model.data.Undefined8DataType.dataType;
+            if(m.getName().equals("getLength")) return 8;
+            if(m.getName().equals("hasStringValue")) return stringData[0];
+            if(m.getName().equals("getValue") && stringData[0]) return "synthetic string";
+            if(m.getName().equals("getDefaultValueRepresentation")) return "00h";
+            return null;
+        });
+        AddressSet firstBody=new AddressSet(ram.getAddress(0x3000)), secondBody=new AddressSet(ram.getAddress(0x4000));
+        Function first=proxy(Function.class,(m,a)->m.getName().equals("getBody") ? firstBody : null);
+        Function second=proxy(Function.class,(m,a)->m.getName().equals("getBody") ? secondBody : null);
+        boolean[] reverse={false};
+        Listing listing=proxy(Listing.class,(m,a)-> {
+            if(m.getName().equals("getDataContaining")) return data;
+            if(!m.getName().equals("getInstructions")) return null;
+            List<Instruction> items=new ArrayList<>();
+            int[] indices=a[0]==firstBody ? new int[]{0,2} : new int[]{1};
+            for(int index:indices) {
+                Address target=index==2 ? base.add(2) : base;
+                int width=index==0 ? 8 : index==1 ? 4 : 2;
+                Address origin=ram.getAddress(0x2000+index);
+                Reference ref=proxy(Reference.class,(rm,ra)-> {
+                    if(rm.getName().equals("getToAddress")) return target;
+                    if(rm.getName().equals("getReferenceType")) return ghidra.program.model.symbol.RefType.DATA;
+                    if(rm.getName().equals("getOperandIndex")) return index;
+                    return null;
+                });
+                PcodeOp op=index==1 ? new PcodeOp(origin,0,PcodeOp.COPY,new Varnode[]{new Varnode(unique.getAddress(1),width)},new Varnode(target,width)) :
+                    new PcodeOp(origin,0,PcodeOp.COPY,new Varnode[]{new Varnode(target,width)},new Varnode(unique.getAddress(2),width));
+                items.add(proxy(Instruction.class,(im,ia)-> {
+                    if(im.getName().equals("getAddress")) return origin;
+                    if(im.getName().equals("getPcode")) return new PcodeOp[]{op};
+                    if(im.getName().equals("getReferencesFrom")) return new Reference[]{ref};
+                    return null;
+                }));
+            }
+            if(reverse[0]) Collections.reverse(items);
+            Iterator<Instruction> iterator=items.iterator();
+            return proxy(InstructionIterator.class,(im,ia)->im.getName().equals("hasNext") ? iterator.hasNext() : im.getName().equals("next") ? iterator.next() : null);
+        });
+        field(exporter,"currentProgram",proxy(Program.class,(m,a)-> {
+            if(m.getName().equals("getAddressFactory")) return addresses;
+            if(m.getName().equals("getListing")) return listing;
+            if(m.getName().equals("getMemory")) return proxy(Memory.class,(mm,ma)->null);
+            if(m.getName().equals("getSymbolTable")) return proxy(ghidra.program.model.symbol.SymbolTable.class,(mm,ma)->null);
+            if(m.getName().equals("getFunctionManager")) return proxy(FunctionManager.class,(mm,ma)->null);
+            return null;
+        }));
+        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(first,second));
+        Field field=exporter.getClass().getDeclaredField("referencedByteEvidence");field.setAccessible(true);
+        Map<?,?> original=new TreeMap<>((Map<?,?>)field.get(exporter));
+        check(original.size()==1,"interior references must retain one existing global ID");
+        String wire=original.values().iterator().next().toString();
+        check(wire.contains("\"requestedLength\":8") && wire.contains("\"requestedLength\":4") && wire.contains("\"requestedLength\":2") &&
+            wire.contains("0x1002") && wire.contains("pcode_direct_read") && wire.contains("pcode_direct_write"),"distinct origin/width/interior windows retained");
+        reverse[0]=true;
+        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(second,first));
+        check(original.equals(field.get(exporter)),"function and instruction traversal order must not change canonical windows");
+        stringData[0]=true;
+        invoke(exporter,"collectReferencedByteEvidence",new Class<?>[]{List.class},List.of(first,second));
+        check(((Map<?,?>)field.get(exporter)).isEmpty(),"existing string references must not mint global byte windows");
+    }
+
     public static void main(String[] args) throws Exception {
         AddressSpace ram = new GenericAddressSpace("ram",64,AddressSpace.TYPE_RAM,0);
         AddressSpace constant = new GenericAddressSpace("const",64,AddressSpace.TYPE_CONSTANT,1);
@@ -136,6 +203,16 @@ public class ReferencedBytesProbe {
         Instruction instruction=proxy(Instruction.class,(m,a)->m.getName().equals("getPcode") ? ops[0] : null);
         Class<?>[] widthTypes={Instruction.class,Reference.class};
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{8,1}),"LOAD width");
+        PcodeOp directRead=new PcodeOp(target,3,PcodeOp.COPY,new Varnode[]{new Varnode(target,8)},new Varnode(unique.getAddress(5),8));
+        PcodeOp directWrite=new PcodeOp(target,4,PcodeOp.COPY,new Varnode[]{new Varnode(unique.getAddress(6),4)},new Varnode(target,4));
+        ops[0]=new PcodeOp[]{directRead};
+        check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{8,3}),"direct read width and distinct origin");
+        ops[0]=new PcodeOp[]{directWrite};
+        check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{4,4}),"direct write width and distinct origin");
+        ops[0]=new PcodeOp[]{directRead,directWrite};
+        check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"conflicting direct widths/origins stay unknown");
+        ops[0]=new PcodeOp[]{new PcodeOp(target,5,PcodeOp.INT_ADD,new Varnode[]{new Varnode(target,8),pointer},new Varnode(unique.getAddress(7),8))};
+        check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{0,0}),"unsupported direct operation stays unknown");
         ops[0]=new PcodeOp[]{store};
         check(Arrays.equals((int[])invoke(exporter,"referenceWidth",widthTypes,instruction,reference),new int[]{4,2}),"STORE width");
         ops[0]=new PcodeOp[]{load,store};
@@ -205,6 +282,7 @@ public class ReferencedBytesProbe {
             throw new AssertionError("offset alias in another memory space accepted"); }
         catch(InvocationTargetException expected) { check(expected.getCause().getMessage().contains("unrepresentable"),expected.getCause()); }
         check(invoke(exporter,"byteAddress",new Class<?>[]{Address.class},target).equals("0x1000"),"default address space");
+        sharedGlobalOrigins(exporter,ram,unique,addresses);
         field(exporter,"monitor",proxy(TaskMonitor.class,(m,a)->m.getName().equals("isCancelled")));
         try { invoke(exporter,"readByteSegments",readTypes,target,8); throw new AssertionError("cancellation ignored"); }
         catch (InvocationTargetException expected) { check(expected.getCause() instanceof InterruptedException,expected); }

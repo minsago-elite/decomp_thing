@@ -49,9 +49,20 @@ class GhidraReferencedBytesExporterTest {
         run("compile", listOf(javaBin.resolve("javac").toString(), "-J-Djava.io.tmpdir=$temporary", "-proc:none",
             "-cp", classpath, "-d", classes.toString(),
             repository.resolve("src/main/resources/ghidra_scripts/ExportProgramModel.java").toString(),
-            repository.resolve("src/test/resources/ghidra/ReferencedBytesProbe.java").toString()))
+            repository.resolve("src/test/resources/ghidra/ReferencedBytesProbe.java").toString(),
+            repository.resolve("src/test/resources/ghidra/ControlledByteListingProbe.java").toString()))
         run("probe", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary", "-XX:-UsePerfData",
             "-cp", classpath, "ReferencedBytesProbe"))
         assertTrue(work.resolve("probe.log").readText().contains("referenced byte API probe passed"))
+        val applicationRoots = Files.walk(bundle).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.fileName.toString() == "application.properties" &&
+                it.parent.fileName.toString() == "Ghidra" }.map { it.parent.parent }.toList()
+        }
+        assertEquals(1, applicationRoots.size, "exactly one bundled application root")
+        val home = Files.createDirectory(work.resolve("home"))
+        run("controlled-listing", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary",
+            "-Duser.home=$home", "-Djava.util.prefs.userRoot=$home/prefs", "-Djna.tmpdir=$temporary", "-XX:-UsePerfData",
+            "-cp", classpath, "ControlledByteListingProbe", applicationRoots.single().toString()))
+        assertTrue(work.resolve("controlled-listing.log").readText().contains("controlled real listing passed"))
     }
 }

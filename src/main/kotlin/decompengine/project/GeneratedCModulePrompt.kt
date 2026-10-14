@@ -46,7 +46,7 @@ internal object GeneratedCModulePrompt {
     private fun renderByteEvidence(globals: List<RecoveredGlobal>): Map<String, String> {
         var decodedBytes = 0L
         var renderedBytes = 0L
-        val rendered = linkedMapOf<String, String>()
+
         for (global in globals) {
             val value = global.byteEvidence
             if (value != null) {
@@ -60,18 +60,23 @@ internal object GeneratedCModulePrompt {
                     }
                 }
             }
-            val text = if (value == null) {
-                "recovered input windows: <unavailable in historical model>"
-            } else {
-                "recovered input windows (non-authoritative; no object extent, type or initializer semantics): " +
-                    ReferencedDataByteEvidenceJson.render(value)
-            }
-            renderedBytes = Math.addExact(renderedBytes, text.toByteArray(Charsets.UTF_8).size.toLong())
+            val prefix = if (value == null) HISTORICAL_BYTES else BYTE_PREFIX
+            renderedBytes = Math.addExact(renderedBytes, prefix.length.toLong())
             require(renderedBytes <= ReferencedDataByteEvidenceJson.MAXIMUM_PROMPT_RENDERED_BYTES) {
                 "module referenced byte evidence rendered-text prompt bound exceeded"
             }
-            rendered[global.id] = text
+            if (value != null) {
+                renderedBytes = Math.addExact(renderedBytes, ReferencedDataByteEvidenceJson.renderedLength(
+                    value, ReferencedDataByteEvidenceJson.MAXIMUM_PROMPT_RENDERED_BYTES - renderedBytes,
+                ))
+            }
         }
-        return rendered
+        // No per-global evidence text is constructed until the complete module is admitted.
+        return globals.associate { global ->
+            global.id to (global.byteEvidence?.let { BYTE_PREFIX + ReferencedDataByteEvidenceJson.render(it) } ?: HISTORICAL_BYTES)
+        }
     }
+
+    private const val HISTORICAL_BYTES = "recovered input windows: <unavailable in historical model>"
+    private const val BYTE_PREFIX = "recovered input windows (non-authoritative; no object extent, type or initializer semantics): "
 }

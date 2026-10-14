@@ -183,7 +183,7 @@ class RecoveredCallSitesTest {
             val analyzer = GhidraHeadlessProgramModelAnalyzer(recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
             val first = analyzer.analyzeWithCallSites(binary, root.resolve("first"))
             val second = analyzer.analyzeWithCallSites(binary, root.resolve("second"))
-            assertEquals(2, first.programModel.schemaVersion)
+            assertEquals(3, first.programModel.schemaVersion)
             assertEquals(first.programModel.toJson(), second.programModel.toJson())
             assertEquals(first.callSites.artifactSha256, second.callSites.artifactSha256)
             assertEquals(sha256(Files.readAllBytes(binary)), first.callSites.bindings.inputSha256)

@@ -906,21 +906,34 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
-    // Only a direct constant pointer in the referenced address space establishes association.
-    // Register/dynamic pointers and multiple matching operations deliberately retain unknown width.
+    private boolean referencesMemory(Varnode value, Address target) {
+        return value != null && value.getAddress().isMemoryAddress() && value.getAddress().equals(target);
+    }
+
+    // Width comes only from an exact LOAD/STORE pointer or COPY memory varnode.
+    // Control-flow addresses, unsupported operations, dynamic pointers and multiple associations stay unknown.
     private int[] referenceWidth(Instruction instruction, Reference reference) {
         int width = 0, basis = 0, matches = 0;
+        Address target = reference.getToAddress();
         for (PcodeOp operation : instruction.getPcode()) {
             int opcode = operation.getOpcode();
-            if (opcode != PcodeOp.LOAD && opcode != PcodeOp.STORE) continue;
-            Varnode pointer = operation.getInput(1);
-            Varnode space = operation.getInput(0);
-            if (!pointer.isConstant() || !space.isConstant()) return new int[] {0, 0};
-            if (space.getOffset() != reference.getToAddress().getAddressSpace().getSpaceID() ||
-                pointer.getOffset() != reference.getToAddress().getOffset()) continue;
-            matches++;
-            width = opcode == PcodeOp.LOAD ? operation.getOutput().getSize() : operation.getInput(2).getSize();
-            basis = opcode == PcodeOp.LOAD ? 1 : 2;
+            if (opcode == PcodeOp.LOAD || opcode == PcodeOp.STORE) {
+                Varnode pointer = operation.getInput(1);
+                Varnode space = operation.getInput(0);
+                if (!pointer.isConstant() || !space.isConstant()) return new int[] {0, 0};
+                if (space.getOffset() != target.getAddressSpace().getSpaceID() || pointer.getOffset() != target.getOffset()) continue;
+                matches++;
+                width = opcode == PcodeOp.LOAD ? operation.getOutput().getSize() : operation.getInput(2).getSize();
+                basis = opcode == PcodeOp.LOAD ? 1 : 2;
+            } else if (opcode == PcodeOp.COPY && operation.getNumInputs() == 1 && operation.getOutput() != null) {
+                Varnode input = operation.getInput(0), output = operation.getOutput();
+                if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                if (referencesMemory(output, target)) { matches++; width = output.getSize(); basis = 4; }
+                if (input.getSize() != output.getSize()) return new int[] {0, 0};
+            } else {
+                if (referencesMemory(operation.getOutput(), target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) if (referencesMemory(input, target)) return new int[] {0, 0};
+            }
         }
         return matches == 1 && width > 0 ? new int[] {width, basis} : new int[] {0, 0};
     }
@@ -996,7 +1009,7 @@ public class ExportProgramModel extends GhidraScript {
                     requestedBytes = Math.addExact(requestedBytes, width);
                     if (requestedBytes > MAXIMUM_REQUESTED_BYTES) throw new PlanningIntegrityException("reference model requested-byte bound exceeded");
                     if (width > 0) target.addNoWrap(width - 1L);
-                    String basis = association[1] == 1 ? "pcode_load" : association[1] == 2 ? "pcode_store" : "unknown_width";
+                    String basis = association[1] == 1 ? "pcode_load" : association[1] == 2 ? "pcode_store" : association[1] == 3 ? "pcode_direct_read" : association[1] == 4 ? "pcode_direct_write" : "unknown_width";
                     String origin = "{\"instructionAddress\":" + json(byteAddress(instruction.getAddress())) +
                         ",\"referenceAddress\":" + json(byteAddress(target)) + ",\"operandIndex\":" +
                         (reference.getOperandIndex() < 0 ? "null" : reference.getOperandIndex()) + ",\"widthBasis\":" + json(basis) + "}";

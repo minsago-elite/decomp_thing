@@ -71,6 +71,23 @@ class GeneratedCByteEvidencePromptTest {
         assertContains(error.message.orEmpty(), "rendered-text prompt bound")
     }
 
+    @Test
+    fun `exact rendered length admits boundary and rejects one byte less without global allocation`() {
+        val segments = (0 until 256).map { index ->
+            if (index % 2 == 0) ReferencedDataByteSegment(index, 1, "available", "00", null)
+            else ReferencedDataByteSegment(index, 1, "unavailable", null, "uninitialized")
+        }
+        val value = ReferencedDataByteEvidence(windows = (0 until 32).map { index ->
+            val address = (0x1000 + index * 256).toULong()
+            ReferencedDataByteWindow(address, 256, ReferencedDataByteOrigin(address, address, 0, "pcode_direct_read"), "partial", segments)
+        })
+        val exact = ReferencedDataByteEvidenceJson.render(value).toByteArray(Charsets.UTF_8).size.toLong()
+        assertEquals(exact, ReferencedDataByteEvidenceJson.renderedLength(value, exact))
+        assertFailsWith<IllegalArgumentException> { ReferencedDataByteEvidenceJson.renderedLength(value, exact - 1) }
+        val model = RecoveredProgramModel(3, "fixture", emptyList(), listOf(RecoveredGlobal("g", "value", 0x1000UL, "undefined", byteEvidence = value)))
+        assertContains(assertFailsWith<IllegalArgumentException> { GeneratedCModulePrompt.render(request(model)) }.message.orEmpty(), "rendered-text prompt bound")
+    }
+
     private fun request(model: RecoveredProgramModel) = ModuleReconstructionRequest(
         PlannedModule("m", "src/m.c", "include/m.h", emptyList(), model.globals.map { it.id }, boundaryEvidence = emptyList()),
         model, "", "", "", emptyMap(), Path.of("build"))

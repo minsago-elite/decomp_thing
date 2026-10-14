@@ -8,6 +8,8 @@ import com.fasterxml.jackson.core.StreamReadConstraints
 import com.fasterxml.jackson.core.StreamReadFeature
 import java.io.FilterInputStream
 import java.io.InputStream
+import java.io.Reader
+import java.io.FilterReader
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -18,9 +20,17 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Token and input-chunk checkpoints keep canonical model parsing inside its admitted deadline. */
 internal fun parseCheckpointedProgramModelJson(input: InputStream, checkpoint: (String) -> Unit): JsonObject {
     checkpoint("before opening program model JSON parser")
+    return parseCheckpointedModelParser(MODEL_JSON_FACTORY.createParser(CheckpointedModelInput(input, checkpoint)), checkpoint)
+}
+
+internal fun parseCheckpointedProgramModelJson(input: Reader, checkpoint: (String) -> Unit): JsonObject {
+    checkpoint("before opening program model JSON parser")
+    return parseCheckpointedModelParser(MODEL_JSON_FACTORY.createParser(CheckpointedModelCharacters(input, checkpoint)), checkpoint)
+}
+
+private fun parseCheckpointedModelParser(parser: JsonParser, checkpoint: (String) -> Unit): JsonObject {
     try {
-        val parserInput = CheckpointedModelInput(input, checkpoint)
-        MODEL_JSON_FACTORY.createParser(parserInput).use { parser ->
+        parser.use {
             val reader = CheckpointedModelReader(parser, checkpoint)
             val root = reader.readValue() as? JsonObject
                 ?: throw IllegalArgumentException("program model root must be an object")
@@ -34,9 +44,11 @@ internal fun parseCheckpointedProgramModelJson(input: InputStream, checkpoint: (
 }
 
 private class CheckpointedModelInput(input: InputStream, private val checkpoint: (String) -> Unit) : FilterInputStream(input) {
+    private val admission = ReferencedByteEvidenceAdmission(byteInput = true)
     override fun read(): Int {
         checkpoint("before reading program model JSON chunk")
         val value = super.read()
+        if (value >= 0) admission.accept(value) else admission.finish()
         checkpoint("after reading program model JSON chunk")
         return value
     }
@@ -44,6 +56,18 @@ private class CheckpointedModelInput(input: InputStream, private val checkpoint:
     override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
         checkpoint("before reading program model JSON chunk")
         val count = super.read(bytes, offset, minOf(length, 64 * 1024))
+        if (count < 0) admission.finish() else for (index in offset until offset + count) admission.accept(bytes[index].toInt() and 255)
+        checkpoint("after reading program model JSON chunk")
+        return count
+    }
+}
+
+private class CheckpointedModelCharacters(input: Reader, private val checkpoint: (String) -> Unit) : FilterReader(input) {
+    private val admission = ReferencedByteEvidenceAdmission(byteInput = false)
+    override fun read(chars: CharArray, offset: Int, length: Int): Int {
+        checkpoint("before reading program model JSON chunk")
+        val count = super.read(chars, offset, minOf(length, 64 * 1024))
+        if (count < 0) admission.finish() else for (index in offset until offset + count) admission.accept(chars[index].code)
         checkpoint("after reading program model JSON chunk")
         return count
     }
@@ -60,9 +84,11 @@ private class CheckpointedModelReader(
         return token
     }
 
-    fun readValue(): JsonElement = readValue(nextToken())
+    private val evidenceBudget = ReferencedDataByteEvidenceJson.Budget()
 
-    private fun readValue(token: JsonToken?): JsonElement = when (token) {
+    fun readValue(): JsonElement = readValue(nextToken(), "root")
+
+    private fun readValue(token: JsonToken?, role: String): JsonElement = when (token) {
         JsonToken.START_OBJECT -> {
             val fields = linkedMapOf<String, JsonElement>()
             while (true) {
@@ -71,13 +97,21 @@ private class CheckpointedModelReader(
                     JsonToken.FIELD_NAME -> {
                         val name = readText()
                         require(name !in fields) { "program model has a duplicate JSON field" }
-                        fields[name] = readValue()
+                        val childRole = when {
+                            role == "root" && name == "globals" -> "globals"
+                            role == "global" && name == "byteEvidence" -> "evidence"
+                            else -> "other"
+                        }
+                        fields[name] = readValue(nextToken(), childRole)
                     }
                     else -> throw IllegalArgumentException("program model object has an invalid field")
                 }
             }
             checkpoint("before completing program model JSON object")
-            JsonObject(fields)
+            JsonObject(fields).also { value ->
+                // Reject invalid evidence at the first completed global, before retaining later globals.
+                if (role == "evidence") evidenceBudget.charge(ReferencedDataByteEvidenceJson.parse(value))
+            }
         }
         JsonToken.START_ARRAY -> {
             val values = arrayListOf<JsonElement>()
@@ -85,7 +119,7 @@ private class CheckpointedModelReader(
                 checkpoint("before reading program model JSON array entry")
                 val item = nextToken()
                 if (item == JsonToken.END_ARRAY) break
-                values += readValue(item)
+                values += readValue(item, if (role == "globals") "global" else "other")
             }
             checkpoint("before completing program model JSON array")
             JsonArray(values)

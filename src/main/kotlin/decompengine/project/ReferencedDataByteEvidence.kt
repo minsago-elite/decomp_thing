@@ -43,7 +43,7 @@ object ReferencedDataByteEvidenceJson {
         value.windows.forEach { w ->
             require(w.address == w.origin.referenceAddress) { "byte window must start at reference target" }
             require(w.origin.operandIndex == null || w.origin.operandIndex >= 0) { "invalid operand index" }
-            require(w.origin.widthBasis in setOf("pcode_load", "pcode_store", "unknown_width"))
+            require(w.origin.widthBasis in setOf("pcode_load", "pcode_store", "pcode_direct_read", "pcode_direct_write", "unknown_width"))
             val length = w.requestedLength
             if (length == null) {
                 require(w.origin.widthBasis == "unknown_width" && w.availability == "unknown" && w.segments.isEmpty()) { "invalid unknown-width window" }
@@ -93,18 +93,38 @@ object ReferencedDataByteEvidenceJson {
         }, value.nullString("omissionReason")).also(::validate)
     }
 
+    /** Count canonical bytes without allocating a per-global string or UTF-8 byte array. */
+    internal fun renderedLength(value: ReferencedDataByteEvidence, maximumBytes: Long): Long {
+        var length = 0L
+        renderTo(value) { chunk ->
+            // Every emitted value is validated ASCII (addresses, decimal integers, closed enums, hex).
+            length = Math.addExact(length, chunk.length.toLong())
+            require(length <= maximumBytes) { "module referenced byte evidence rendered-text prompt bound exceeded" }
+        }
+        return length
+    }
+
     /** Compact, deterministic wire form shared by exporter capture and model canonicalization. */
-    fun render(value: ReferencedDataByteEvidence): String {
+    fun render(value: ReferencedDataByteEvidence): String = buildString { renderTo(value) { append(it) } }
+
+    private fun renderTo(value: ReferencedDataByteEvidence, emit: (String) -> Unit) {
         validate(value)
         fun q(s: String?) = s?.let { JsonPrimitive(it).toString() } ?: "null"
         fun address(a: ULong) = q("0x${a.toString(16)}")
-        return ("{\"schemaVersion\": 1, \"windows\": [" + value.windows.sortedWith(windowComparator).joinToString(", ") { w ->
+        emit("{\"schemaVersion\":1,\"windows\":[")
+        value.windows.sortedWith(windowComparator).forEachIndexed { index, w ->
+            if (index != 0) emit(",")
             val o = w.origin
-            "{\"address\": ${address(w.address)}, \"requestedLength\": ${w.requestedLength}, \"origin\": {\"instructionAddress\": ${address(o.instructionAddress)}, \"referenceAddress\": ${address(o.referenceAddress)}, \"operandIndex\": ${o.operandIndex}, \"widthBasis\": ${q(o.widthBasis)}}, \"availability\": ${q(w.availability)}, \"segments\": [" + w.segments.joinToString(", ") { s ->
-                "{\"offset\": ${s.offset}, \"length\": ${s.length}, \"availability\": ${q(s.availability)}, \"hex\": ${q(s.hex)}, \"reason\": ${q(s.reason)}}"
-            } + "]}"
-        } + "], \"omissionReason\": ${q(value.omissionReason)}}").replace(": ", ":").replace(", ", ",")
+            emit("{\"address\":${address(w.address)},\"requestedLength\":${w.requestedLength},\"origin\":{\"instructionAddress\":${address(o.instructionAddress)},\"referenceAddress\":${address(o.referenceAddress)},\"operandIndex\":${o.operandIndex},\"widthBasis\":${q(o.widthBasis)}},\"availability\":${q(w.availability)},\"segments\":[")
+            w.segments.forEachIndexed { segmentIndex, segment ->
+                if (segmentIndex != 0) emit(",")
+                emit("{\"offset\":${segment.offset},\"length\":${segment.length},\"availability\":${q(segment.availability)},\"hex\":${q(segment.hex)},\"reason\":${q(segment.reason)}}")
+            }
+            emit("]}")
+        }
+        emit("],\"omissionReason\":${q(value.omissionReason)}}")
     }
+
 }
 
 class ReferencedDataByteEvidenceBudget {
