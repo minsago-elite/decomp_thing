@@ -69,7 +69,12 @@ internal class GccSourceBuildOwnershipActionReceipt private constructor(
         private val KINDS = setOf("source", "generated", "header", "tool", "runtime", "response", "script", "object", "archive", "other")
         private val AUTHORITY = setOf("sourceAuthenticated", "runtimeAuthenticated", "captureAuthenticated",
             "ownershipComplete", "modelBound", "sealed", "scored", "productionVerified", "releaseEligible")
-        private val SECRET_NAME = Regex("(?i)(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIAL|PRIVATE_KEY)(?:$|_)")
+        // Only reviewed public build configuration belongs in retained canonical observations.
+        // This is not a credential detector; unknown names fail closed before values are retained.
+        private val PUBLIC_BUILD_ENVIRONMENT_KEYS = setOf(
+            "PATH", "LANG", "LC_ALL", "TZ", "SOURCE_DATE_EPOCH",
+            "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+        )
 
         fun parseObservation(
             bytes: ByteArray,
@@ -112,9 +117,9 @@ internal class GccSourceBuildOwnershipActionReceipt private constructor(
             ownershipRequire(argv.first().isNotEmpty(), "argv executable is empty")
             val env = OwnershipJson.obj(root, "environment")
             ownershipRequire(env.size <= limits.maximumEnvironmentEntries, "environment count exceeds bounds")
-            val environment = env.mapValues { (key, value) ->
-                ownershipRequire(key.length <= 256 && key.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) &&
-                    !SECRET_NAME.containsMatchIn(key), "environment name is invalid or secret-bearing")
+            ownershipRequire(env.keys.all { it in PUBLIC_BUILD_ENVIRONMENT_KEYS },
+                "environment name is outside the public build allowlist")
+            val environment = env.mapValues { (_, value) ->
                 OwnershipJson.string(value, "environment value", 65_536, empty = true)
             }
             val inputs = files(root, "inputFiles", limits)

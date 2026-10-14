@@ -493,7 +493,7 @@
       "name": "gcc/source-build-ownership-action-receipt-v1",
       "path": "oracle/gcc/source-build-ownership-action-receipt-v1.schema.json",
       "registration": "shared-kotlin",
-      "schemaSha256": "afb8f983142c6a389e9aec159c1f5d831905032c29d8438a8abfb4d16740427d"
+      "schemaSha256": "c2a4547c7d852e89b84c9aabc9d29b4879330e1638308a7ad2dd796912bf76bf"
     },
     {
       "formatVersions": [

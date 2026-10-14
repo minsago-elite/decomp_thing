@@ -118,6 +118,37 @@ class GccSourceBuildOwnershipActionReceiptTest {
     }
 
     @Test
+    fun `reviewed public build environment preserves path flags and exact canonical bytes`() {
+        val environment = o(
+            "PATH" to p("/oracle/toolchain/bin:/usr/bin"), "LANG" to p("C.UTF-8"),
+            "LC_ALL" to p("C"), "TZ" to p("UTC"), "SOURCE_DATE_EPOCH" to p("1234567890"),
+            "CFLAGS" to p("-O1 -g"), "CXXFLAGS" to p("-O1 -g -std=c++17"),
+            "CPPFLAGS" to p("-DVARIANT=2 -I/oracle/source/include"), "LDFLAGS" to p("-Wl,--build-id"),
+        )
+        val bytes = OracleJson.canonicalBytes(ownershipChanged(fixture(), "environment", environment))
+        val parsed = parse(bytes)
+        assertEquals(environment.mapValues { (it.value as JsonPrimitive).content }, parsed.environment)
+        assertContentEquals(bytes, parsed.canonicalBytes())
+        assertFalse(parsed.captureAuthenticated)
+        assertFalse(parsed.isExecutionReceipt)
+    }
+
+    @Test
+    fun `credential canaries and every unknown environment name refuse without echoing names or values`() {
+        for (key in listOf("GITHUB_PAT", "API_KEY", "DOCKER_AUTH_CONFIG", "AWS_ACCESS_KEY_ID",
+            "ACCESS_TOKEN", "UNREVIEWED_BUILD_OPTION", "cppflags")) {
+            val canary = "private-value-for-$key-must-not-be-retained"
+            val document = ownershipChanged(fixture(), "environment", o("PATH" to p("/usr/bin"), key to p(canary)))
+            val failure = assertFailsWith<GccSourceBuildOwnershipException> {
+                parse(OracleJson.canonicalBytes(document))
+            }
+            assertFalse(failure.toString().contains(canary))
+            assertFalse(failure.toString().contains(key))
+            assertNull(failure.cause)
+        }
+    }
+
+    @Test
     fun `response byte length digest order and exact input binding must all agree`() {
         val root = fixture()
         val responses = root.getValue("responseFiles") as JsonArray

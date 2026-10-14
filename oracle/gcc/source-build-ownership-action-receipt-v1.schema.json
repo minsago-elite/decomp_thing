@@ -88,14 +88,24 @@
       "type": "string"
     },
     "environment": {
+      "$comment": "Only these reviewed public build keys may be retained. Unknown names refuse before canonical retention; this is not a credential-value detector.",
       "additionalProperties": {
         "maxLength": 65536,
         "type": "string"
       },
       "maxProperties": 4096,
       "propertyNames": {
-        "maxLength": 256,
-        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        "enum": [
+          "PATH",
+          "LANG",
+          "LC_ALL",
+          "TZ",
+          "SOURCE_DATE_EPOCH",
+          "CFLAGS",
+          "CXXFLAGS",
+          "CPPFLAGS",
+          "LDFLAGS"
+        ]
       },
       "type": "object"
     },
