@@ -1292,6 +1292,88 @@ def _admit_scope(receipt, launch, bounds, deadline):
         raise
 
 
+def _launch_config_digest(receipt, *, deadline):
+    """Hash only the fixed owned launch file within its existing 64KiB/deadline contract."""
+    _controller_metadata_timely(deadline)
+    directory_fd = descriptor = None
+    primary = None
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+              'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    def identity(metadata):
+        return tuple(getattr(metadata, key) for key in fields)
+    def directory_unchanged():
+        _controller_metadata_timely(deadline)
+        held = os.fstat(directory_fd)
+        _controller_metadata_timely(deadline)
+        named = receipt['directory'].lstat()
+        _controller_metadata_timely(deadline)
+        for metadata in (held, named):
+            if ((metadata.st_dev, metadata.st_ino) != (receipt['directoryDevice'], receipt['directoryInode']) or
+                    not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or
+                    metadata.st_uid != os.getuid()):
+                raise ValueError('launch configuration directory identity changed')
+    try:
+        directory_fd = os.open(receipt['directory'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        directory_unchanged()
+        descriptor = os.open('launch.json', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             dir_fd=directory_fd)
+        _controller_metadata_timely(deadline)
+        before = os.fstat(descriptor)
+        _controller_metadata_timely(deadline)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                not 0 < before.st_size <= 65536):
+            raise ValueError('launch configuration is not a bounded private regular file')
+        version = identity(before)
+        named = os.stat('launch.json', dir_fd=directory_fd, follow_symlinks=False)
+        _controller_metadata_timely(deadline)
+        if identity(named) != version:
+            raise ValueError('launch configuration changed before read')
+        digest_value = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            _controller_metadata_timely(deadline)
+            block = os.read(descriptor, min(65536, remaining))
+            _controller_metadata_timely(deadline)
+            if not block or len(block) > remaining:
+                raise ValueError('launch configuration exact-size read differs')
+            remaining -= len(block)
+            digest_value.update(block)
+        _controller_metadata_timely(deadline)
+        extra = os.read(descriptor, 1)
+        _controller_metadata_timely(deadline)
+        if extra:
+            raise ValueError('launch configuration grew')
+        after = os.fstat(descriptor)
+        _controller_metadata_timely(deadline)
+        named = os.stat('launch.json', dir_fd=directory_fd, follow_symlinks=False)
+        _controller_metadata_timely(deadline)
+        if identity(after) != version or identity(named) != version:
+            raise ValueError('launch configuration changed during read')
+        directory_unchanged()
+        answer = digest_value.hexdigest()
+    except BaseException as failure:
+        primary = failure
+        raise
+    finally:
+        cleanup_failure = None
+        cleanup_count = 0
+        for held in (descriptor, directory_fd):
+            if held is not None:
+                try:
+                    os.close(held)
+                except BaseException as failure:
+                    cleanup_count += 1
+                    if cleanup_failure is None: cleanup_failure = failure
+        if cleanup_failure is not None:
+            if primary is not None:
+                BaseException.add_note(primary, 'launch configuration descriptor cleanup failures: ' + str(cleanup_count))
+            else:
+                raise cleanup_failure
+    _controller_metadata_timely(deadline)
+    return answer
+
+
 def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
     proof = {'protocolVersion': 1, 'status': 'unknown', 'proofSha256': None,
              'fileIdentityVerified': False, 'pinsUnchanged': False, 'reason': 'proof-not-read'}
@@ -1323,7 +1405,7 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
         proof['fileIdentityVerified'] = True
         if descriptor.st_size != len(raw) or len(raw) > maximum:
             raise ValueError('receipt byte bound')
-        if _pin_files(launch['pins'], deadline) != launch['pins'] or digest(receipt['directory'] / 'launch.json') != launch['configSha256']:
+        if _pin_files(launch['pins'], deadline) != launch['pins'] or _launch_config_digest(receipt, deadline=deadline) != launch['configSha256']:
             raise ValueError('launch source/runtime/input pins changed')
         _revalidate_compiler_inputs(launch, deadline)
         proof['pinsUnchanged'] = True

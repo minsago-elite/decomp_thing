@@ -1008,4 +1008,200 @@ class RuntimeWorkerProof(unittest.TestCase):
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))
 
 
+class LaunchConfigCaptureTests(unittest.TestCase):
+    """Authored metadata/bytes only; every filesystem, clock and proof-loading seam is mocked."""
+    def vector(self, mutation=None, *, raw=b'{"fixed":true}', deadline=10, finish=False):
+        directory = Path('/authored/receipt')
+        receipt = {'directory':directory, 'directoryDevice':7, 'directoryInode':8,
+                   'fd':51, 'path':directory/'worker-proof.jsonl', 'device':7, 'inode':9}
+        def metadata(kind, inode, size, mode):
+            return types.SimpleNamespace(st_dev=7, st_ino=inode, st_mode=kind|mode,
+                st_uid=55, st_gid=55, st_nlink=1, st_size=size, st_mtime_ns=1, st_ctime_ns=1)
+        parent = metadata(stat.S_IFDIR,8,0,0o700)
+        config = metadata(stat.S_IFREG,10,len(raw),0o600)
+        report = metadata(stat.S_IFREG,9,5,0o600)
+        if mutation=='fifo':config.st_mode=stat.S_IFIFO|0o600
+        if mutation=='symlink-metadata':config.st_mode=stat.S_IFLNK|0o600
+        if mutation=='uid':config.st_uid=56
+        if mutation=='mode':config.st_mode=stat.S_IFREG|0o644
+        if mutation=='links':config.st_nlink=2
+        if mutation=='empty':config.st_size=0
+        if mutation=='oversize':config.st_size=65537
+        if mutation=='short':config.st_size+=1
+        if mutation=='directory-mode':parent.st_mode=stat.S_IFDIR|0o755
+        if mutation=='directory-uid':parent.st_uid=56
+        if mutation=='directory-kind':parent.st_mode=stat.S_IFREG|0o700
+        if mutation=='directory-device':parent.st_dev=8
+        if mutation=='directory-inode':parent.st_ino=11
+        now=[1]; offset=[0]; fstats={}; stats=[0]
+        handles=set(); opened=[]; closed=[]; reads=[]; events=[]
+        injected=PermissionError('authored launch configuration operation refusal')
+        close_error=OSError('authored launch configuration close refusal')
+        def stage(name):
+            events.append(name)
+            if mutation=='late-'+name:now[0]=10
+            if mutation==name+'-error' or mutation=='read-and-close-errors' and name=='read':raise injected
+        def changed(value, field='st_ino'):
+            result=types.SimpleNamespace(**vars(value));setattr(result,field,getattr(result,field)+1);return result
+        def opening(path, flags, *, dir_fd=None):
+            if dir_fd is None:
+                self.assertEqual(directory,path)
+                self.assertEqual(os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,flags)
+                number=41; name='open-directory'
+            else:
+                self.assertEqual((41,'launch.json'),(dir_fd,path))
+                self.assertEqual(os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,flags)
+                number=42; name='open-file'
+                if mutation=='symlink-open':raise OSError(40,'authored nofollow symlink refusal')
+            # A late successful open still returns an owned FD which must close.
+            stage(name)
+            handles.add(number);opened.append(number)
+            return number
+        def fstat(number):
+            if number==51:return report
+            self.assertIn(number,handles)
+            fstats[number]=fstats.get(number,0)+1
+            if number==41:
+                name='directory-final' if fstats[number]>1 else 'directory-fstat'
+                stage(name)
+                return changed(parent) if mutation=='held-directory-drift' and fstats[number]>1 else parent
+            self.assertEqual(42,number)
+            name='file-final' if fstats[number]>1 else 'file-fstat'
+            stage(name)
+            return changed(config,'st_mtime_ns') if mutation=='held-file-drift' and fstats[number]>1 else config
+        def named_file(name, *, dir_fd, follow_symlinks):
+            self.assertEqual(('launch.json',41,False),(name,dir_fd,follow_symlinks))
+            self.assertIn(41,handles);stats[0]+=1
+            stage('named-file-final' if stats[0]>1 else 'named-file')
+            return changed(config) if mutation=='named-file-drift' and stats[0]>1 or mutation=='named-file-before' else config
+        def named_path(path):
+            if path==receipt['path']:return report
+            self.assertEqual(directory,path)
+            stage('named-directory-final' if fstats.get(41,0)>1 else 'named-directory')
+            return changed(parent) if mutation=='named-directory-drift' and fstats.get(41,0)>1 else parent
+        def reading(number, maximum):
+            self.assertEqual(42,number);self.assertIn(number,handles)
+            self.assertGreater(maximum,0);self.assertLessEqual(maximum,65536)
+            reads.append((number,maximum))
+            if offset[0]>=len(raw):
+                stage('growth')
+                return b'x' if mutation=='growth' else b''
+            stage('read')
+            if mutation=='oversized-read':return b'x'*(maximum+1)
+            count=min(maximum,7) if mutation=='partial' else maximum
+            value=raw[offset[0]:offset[0]+count];offset[0]+=len(value)
+            return value
+        def closing(number):
+            self.assertIn(number,handles,'owned descriptors close once')
+            handles.remove(number);closed.append(number)
+            name='close-file' if number==42 else 'close-directory'
+            events.append(name)
+            if mutation=='late-'+name:now[0]=10
+            if mutation in (name+'-error','both-close-errors','read-and-close-errors'):raise close_error
+        parsed={'status':'verified','proofSha256':hashlib.sha256(b'proof').hexdigest(),
+                'reason':'authored parsed fixture','workerExecVerified':True,'workerTerminationVerified':True,
+                'workerTermination':{'kind':'exit','value':0,'rawWaitStatus':0},'exitCode':0}
+        parser=types.SimpleNamespace(parse_proof=Mock(return_value=parsed))
+        result={'cleanupVerified':True,'finalAbsenceVerified':True,'launcherExitCode':0,
+                'captureComplete':True,'waitComplete':True,'scopeVerified':True,'scopeAdmitted':True,
+                'launcherPidIdentityVerified':True,'timedOut':False,'outputExceeded':False,
+                'infrastructureFailure':False,'workerExecVerified':False,'workerTerminationVerified':False,
+                'workerTermination':None,'exitCode':None}
+        launch={'expected':{'phase':'runtime'},'pins':{},
+                'configSha256':'0'*64 if mutation=='wrong-digest' else hashlib.sha256(raw).hexdigest()}
+        answer=error=None
+        with ExitStack() as stack:
+            for target, name, effect in ((runtime.os,'open',opening),(runtime.os,'fstat',fstat),
+                    (runtime.os,'stat',named_file),(runtime.os,'read',reading),(runtime.os,'close',closing)):
+                stack.enter_context(patch.object(target,name,side_effect=effect))
+            stack.enter_context(patch.object(Path,'lstat',autospec=True,side_effect=named_path))
+            stack.enter_context(patch.object(runtime.os,'getuid',return_value=55))
+            stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]))
+            stack.enter_context(patch.object(runtime.os,'pread',return_value=b'proof'))
+            stack.enter_context(patch.object(runtime,'_pin_files',return_value={}))
+            stack.enter_context(patch.object(runtime,'_revalidate_compiler_inputs'))
+            stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
+            stack.enter_context(patch.object(runtime,'digest',side_effect=AssertionError('fixed config must not use pathname digest')))
+            try:
+                if finish:runtime._finish_worker_proof(result,receipt,launch,{'workerLimits':{'workerProofBytes':1024}},deadline=deadline)
+                else:answer=runtime._launch_config_digest(receipt,deadline=deadline)
+            except BaseException as failure:error=failure
+        return types.SimpleNamespace(answer=answer,error=error,result=result,parser=parser,
+            opened=opened,closed=closed,handles=handles,reads=reads,events=events,
+            injected=injected,close_error=close_error,raw=raw)
+
+    def assert_closed(self, value):
+        self.assertEqual(set(),value.handles)
+        self.assertEqual(sorted(value.opened),sorted(value.closed))
+        self.assertEqual(len(value.closed),len(set(value.closed)))
+
+    def test_fixed_launch_config_exact_cap_partial_reads_and_owned_relative_flags(self):
+        for raw,mutation in ((b'x',None),(b'x'*65536,None),(b'{"fixed":true}','partial')):
+            with self.subTest(size=len(raw),mutation=mutation):
+                value=self.vector(mutation,raw=raw)
+                self.assertIsNone(value.error)
+                self.assertEqual(hashlib.sha256(raw).hexdigest(),value.answer)
+                self.assertEqual(1,value.reads[-1][1]);self.assert_closed(value)
+                self.assertEqual([42,41],value.closed)
+
+    def test_fixed_launch_config_rejects_special_unowned_or_oversize_before_read(self):
+        for mutation in ('fifo','symlink-metadata','symlink-open','uid','mode','links','empty','oversize',
+                         'directory-mode','directory-uid','directory-kind','directory-device','directory-inode','named-file-before'):
+            with self.subTest(mutation=mutation):
+                value=self.vector(mutation)
+                self.assertIsInstance(value.error,(ValueError,OSError));self.assertIsNone(value.answer)
+                self.assertEqual([],value.reads);self.assert_closed(value)
+        for deadline in (None,True,float('inf'),float('nan'),1):
+            with self.subTest(deadline=deadline):
+                value=self.vector(deadline=deadline)
+                self.assertIsInstance(value.error,(ValueError,TimeoutError))
+                self.assertEqual([],value.opened);self.assert_closed(value)
+
+    def test_fixed_launch_config_short_growth_identity_and_late_observations_refuse(self):
+        for mutation in ('short','growth','oversized-read','held-file-drift','named-file-drift',
+                         'held-directory-drift','named-directory-drift','late-open-directory','late-open-file',
+                         'late-directory-fstat','late-file-fstat','late-named-file','late-read','late-growth',
+                         'late-file-final','late-named-file-final','late-directory-final','late-named-directory-final',
+                         'late-close-file','late-close-directory'):
+            with self.subTest(mutation=mutation):
+                value=self.vector(mutation)
+                self.assertIsInstance(value.error,(ValueError,TimeoutError));self.assertIsNone(value.answer)
+                self.assert_closed(value)
+                if mutation.startswith('late-open') or mutation in ('late-directory-fstat','late-file-fstat','late-named-file'):
+                    self.assertEqual([],value.reads)
+
+    def test_fixed_launch_config_operation_and_cleanup_errors_preserve_primary_and_close_both(self):
+        for mutation in ('open-directory-error','open-file-error','directory-fstat-error','file-fstat-error',
+                         'named-directory-error','named-file-error','read-error','growth-error','file-final-error',
+                         'named-file-final-error','directory-final-error','named-directory-final-error',
+                         'close-file-error','close-directory-error','both-close-errors','read-and-close-errors'):
+            with self.subTest(mutation=mutation):
+                value=self.vector(mutation)
+                expected=value.close_error if mutation in ('close-file-error','close-directory-error','both-close-errors') else value.injected
+                self.assertIs(value.error,expected);self.assertIsNone(value.answer);self.assert_closed(value)
+                if mutation=='read-and-close-errors':
+                    self.assertIn('launch configuration descriptor cleanup failures: 2',value.error.__notes__)
+                if mutation in ('close-file-error','close-directory-error','both-close-errors','read-and-close-errors'):
+                    self.assertEqual([42,41],value.closed)
+
+    def test_actual_finish_uses_fixed_capture_and_never_credits_refused_config(self):
+        for mutation in (None,'wrong-digest','fifo','symlink-open','oversize','short','growth',
+                         'held-file-drift','named-directory-drift','late-read','late-close-directory','read-and-close-errors'):
+            with self.subTest(mutation=mutation):
+                value=self.vector(mutation,raw=b'x'*65536 if mutation is None else b'{"fixed":true}',finish=True)
+                self.assertIsNone(value.error);self.assert_closed(value)
+                self.assertEqual(b'proof',value.result['workerProofRaw'])
+                if mutation is None:
+                    self.assertEqual('verified',value.result['workerProof']['status'])
+                    self.assertTrue(value.result['workerProof']['pinsUnchanged'])
+                    self.assertEqual(0,value.result['exitCode'])
+                    value.parser.parse_proof.assert_called_once_with(b'proof',{'phase':'runtime'})
+                else:
+                    self.assertEqual('unknown',value.result['workerProof']['status'])
+                    self.assertFalse(value.result['workerProof']['pinsUnchanged'])
+                    self.assertTrue(value.result['infrastructureFailure']);self.assertIsNone(value.result['exitCode'])
+                    self.assertFalse(value.result['workerExecVerified']);self.assertFalse(value.result['workerTerminationVerified'])
+                    value.parser.parse_proof.assert_not_called()
+
+
 if __name__=='__main__':unittest.main()
