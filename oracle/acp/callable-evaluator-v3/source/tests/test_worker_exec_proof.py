@@ -495,11 +495,24 @@ class ProvisioningTests(unittest.TestCase):
         good.update(provisioningOnly=True, workerExecVerified=False, workerTerminationVerified=False,
                     exitCode=0, timedOut=False, outputExceeded=False, infrastructureFailure=False,
                     stdout=b'', stderr=b'', kernelScope={'finalAbsenceVerified': True})
-        self.assertTrue(self.builder._complete_provisioning(good))
+        import bounded_runtime as runtime
+        profile, profile_sha = runtime.load_profile_with_digest()
+        bounds = runtime.execution_bounds(managed_scope=True, phase='helper-build',
+                                          snapshot=(profile, profile_sha))
+        source = str(ROOT / 'worker_exec_monitor.c')
+        source_pin = self.builder._input_pin(source, 262144)
+        pins = {source: source_pin,
+                str(ROOT / 'contracts/candidate-build-profile.json'):
+                    self.builder._input_pin(ROOT / 'contracts/candidate-build-profile.json', 65536)}
+        argv = self.builder.build_command(Path('/trusted/worker_exec_monitor'))
+        good.update(argv=argv, bounds=bounds, launchInputPins=pins)
+        expected = dict(source_path=source, source_pin=source_pin, expected_bounds=bounds, argv=argv)
+        self.assertTrue(self.builder._complete_provisioning(good, **expected))
+        self.assertFalse(runtime.worker_execution_complete(good))
         for key, value in (('workerExecVerified', True), ('workerTerminationVerified', True),
                            ('provisioningOnly', False), ('stdout', None), ('stderr', None),
                            ('cleanupVerified', False), ('exitCode', 1)):
-            self.assertFalse(self.builder._complete_provisioning({**good, key: value}))
+            self.assertFalse(self.builder._complete_provisioning({**good, key: value}, **expected))
 
     def test_provisioning_paths_do_not_accept_candidate_or_existing_outputs(self):
         for path in (Path('/tmp/worker_exec_monitor'), ROOT / 'worker_exec_monitor.c',
@@ -511,6 +524,302 @@ class ProvisioningTests(unittest.TestCase):
         for relative in ('worker_exec_proof.py', 'toolchain-001/build_worker_monitor.py',
                          'tests/qualify_worker_exec.py'):
             ast.parse((ROOT / relative).read_bytes(), filename=relative)
+
+
+    @staticmethod
+    def _provisioning_facts(pins, bounds, argv):
+        value = {k: True for k in ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified',
+                 'scopeAdmitted', 'captureComplete', 'waitComplete', 'cleanupVerified',
+                 'rootReaped', 'finalAbsenceVerified')}
+        value.update(provisioningOnly=True, workerExecVerified=False, workerTerminationVerified=False,
+                     exitCode=0, timedOut=False, outputExceeded=False, infrastructureFailure=False,
+                     stdout=b'', stderr=b'', kernelScope={'finalAbsenceVerified': True},
+                     launchInputPins=pins, bounds=copy.deepcopy(bounds), argv=list(argv))
+        return value
+
+    def _provisioning_build(self, *, before_pin=None, after_pin=None, edit=None, refusal=None):
+        """Actual builder/readers/predicate; only the native compiler is replaced.
+
+        All files are public synthetic bytes in a fresh registered repository
+        fixture. Controller flags are authored facts, never kernel evidence.
+        """
+        import bounded_runtime as runtime
+        from static_test_support import static_temp
+        profile, profile_sha = runtime.load_profile_with_digest()
+        bounds = runtime.execution_bounds(managed_scope=True, phase='helper-build',
+                                          snapshot=(profile, profile_sha))
+        profile_raw = (ROOT / 'contracts/candidate-build-profile.json').read_bytes()
+        self.assertEqual(profile_sha, hashlib.sha256(profile_raw).hexdigest())
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as directory:
+            root = Path(directory).resolve()
+            (root / 'contracts').mkdir()
+            (root / 'toolchain-001').mkdir()
+            paths = {'sourceSha256': root / 'worker_exec_monitor.c',
+                     'protocolSha256': root / 'contracts/worker-exec-proof-schema.json',
+                     'parserSha256': root / 'worker_exec_proof.py'}
+            for key, path in paths.items():
+                path.write_bytes(('AUTHORED-' + key + '-A\n').encode())
+            profile_path = root / 'contracts/candidate-build-profile.json'
+            profile_path.write_bytes(profile_raw)
+            output_root = root / 'outputs'
+            output = output_root / 'generation/worker_exec_monitor'
+            receipt = output.parent / 'receipt.json'
+            manifest = root / 'toolchain-001/worker-exec-monitor.json'
+            state = {'admissions': []}
+            original_input_pin = self.builder._input_pin
+            def observed_pin(path, maximum):
+                row = original_input_pin(path, maximum)
+                state['admissions'].append((str(path), maximum, dict(row)))
+                return row
+            def provision(actual_output):
+                self.assertEqual(output, actual_output)
+                restore = before_pin(paths, profile_path) if before_pin is not None else None
+                # This is the real runtime launch pinner, not a fabricated B hash.
+                pins = runtime._pin_files([paths['sourceSha256'], profile_path])
+                # Model the runner's unchanged B post-pin before restoring A.
+                self.assertEqual(pins, runtime._pin_files([paths['sourceSha256'], profile_path]))
+                value = self._provisioning_facts(pins, bounds, self.builder.build_command(output))
+                if restore is not None:
+                    restore()
+                if after_pin is not None:
+                    after_pin(paths, profile_path)
+                if edit is not None:
+                    edit(value, paths, profile_path)
+                state['execution'] = value
+                output.write_bytes(b'AUTHORED-NOT-EXECUTABLE-MONITOR-OUTPUT\n')
+                return value
+            with patch.object(self.builder, 'ROOT', root), \
+                    patch.object(self.builder, 'OUTPUT_ROOT', output_root), \
+                    patch.object(self.builder, 'MANIFEST', manifest), \
+                    patch.object(self.builder, 'SOURCES', paths), \
+                    patch.object(self.builder.sys, 'path', list(self.builder.sys.path)), \
+                    patch.object(self.builder, '_input_pin', side_effect=observed_pin), \
+                    patch.object(self.builder, '_hash', wraps=self.builder._hash) as binary_hash, \
+                    patch.object(self.builder, '_complete_provisioning',
+                                 wraps=self.builder._complete_provisioning) as complete, \
+                    patch.object(runtime, 'provision_worker_monitor', side_effect=provision) as launched:
+                if refusal is None:
+                    value = self.builder.build(output, receipt)
+                    self.assertEqual('provisioning-only-unqualified', value['status'])
+                    self.assertEqual([], value['dependencies'])
+                    self.assertEqual(1, value['schemaVersion'])
+                    self.assertFalse(runtime.worker_execution_complete(state['execution']))
+                    self.assertEqual(receipt.read_bytes(), manifest.read_bytes())
+                    self.assertEqual(value, json.loads(receipt.read_bytes()))
+                    binary_hash.assert_called_once_with(output, 16777216)
+                    state['value'] = value
+                else:
+                    with self.assertRaisesRegex(ValueError, refusal) as caught:
+                        self.builder.build(output, receipt)
+                    self.assertIs(state['execution'], caught.exception.bounded_result)
+                    state['error'] = caught.exception
+                    binary_hash.assert_not_called()
+                    self.assertFalse(receipt.exists())
+                    self.assertFalse(manifest.exists())
+                launched.assert_called_once_with(output)
+                complete.assert_called_once()
+                kwargs = complete.call_args.kwargs
+                state['expected'] = copy.deepcopy(kwargs)
+                self.assertEqual(str(paths['sourceSha256']), kwargs['source_path'])
+                self.assertEqual(state['admissions'][0][2], kwargs['source_pin'])
+                self.assertEqual(bounds, kwargs['expected_bounds'])
+                self.assertEqual(self.builder.build_command(output), kwargs['argv'])
+                source_admissions = [item for item in state['admissions'] if item[0] != str(output)]
+                self.assertTrue(all(item[1] == 262144 for item in source_admissions))
+                self.assertEqual([str(path) for path in paths.values()],
+                                 [item[0] for item in source_admissions[:3]])
+            state['source'] = str(paths['sourceSha256'])
+            state['profile'] = str(profile_path)
+            return state
+
+    def test_provisioning_same_descriptor_row_and_original_exact_source_ceiling(self):
+        from static_test_support import static_temp
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as directory:
+            path = Path(directory) / 'public.c'
+            raw = b'a' * 262144
+            path.write_bytes(raw)
+            path.chmod(0o640)
+            metadata = path.stat()
+            row = self.builder._input_pin(path, 262144)
+            self.assertEqual({'device': metadata.st_dev, 'inode': metadata.st_ino, 'mode': 0o640,
+                              'sha256': hashlib.sha256(raw).hexdigest()}, row)
+            self.assertEqual(row['sha256'], self.builder._hash(path, 262144))
+            path.write_bytes(raw + b'b')
+            with patch.object(self.builder.os, 'read', side_effect=AssertionError('over-bound payload read')) as read:
+                with self.assertRaisesRegex(ValueError, 'bounded regular provisioning input required'):
+                    self.builder._input_pin(path, 262144)
+            read.assert_not_called()
+
+    def test_provisioning_complete_real_reader_join_is_unqualified_and_keeps_all_six_source_reads(self):
+        state = self._provisioning_build()
+        self.assertEqual(7, len(state['admissions']))  # Three before/after plus the binary.
+        self.assertEqual([262144] * 6 + [16777216], [item[1] for item in state['admissions']])
+        self.assertEqual(state['admissions'][:3], state['admissions'][3:6])
+        self.assertEqual(state['admissions'][0][2]['sha256'], state['value']['sourceSha256'])
+        self.assertEqual('helper-build', state['expected']['expected_bounds']['phase'])
+        self.assertEqual(60, state['expected']['expected_bounds']['wallSeconds'])
+        self.assertEqual(1048576, state['expected']['expected_bounds']['outputBytesPerStream'])
+
+    def test_provisioning_actual_A_to_B_pin_then_restored_A_has_no_output_credit(self):
+        def substitute(paths, profile):
+            source = paths['sourceSha256']
+            original = source.read_bytes()
+            source.write_bytes(b'AUTHORED-DIFFERENT-SOURCE-B\n')
+            return lambda: source.write_bytes(original)
+        state = self._provisioning_build(before_pin=substitute,
+                                         refusal='incomplete channel-free monitor provisioning')
+        original = state['admissions'][0][2]
+        launched = state['execution']['launchInputPins'][state['source']]
+        self.assertNotEqual(original['sha256'], launched['sha256'])
+        self.assertEqual(original['device'], launched['device'])
+        self.assertEqual(original['inode'], launched['inode'])
+        self.assertEqual(3, len(state['admissions']))
+        self.assertTrue(all(state['execution'][k] is True for k in
+                            ('captureComplete', 'waitComplete', 'cleanupVerified', 'finalAbsenceVerified')))
+
+    def test_provisioning_same_bytes_replaced_inode_and_mode_at_launch_refuse_even_when_restored(self):
+        def replacement(paths, profile):
+            source = paths['sourceSha256']
+            held = source.with_name('held-original.c')
+            source.rename(held)
+            source.write_bytes(held.read_bytes())
+            source.chmod(stat.S_IMODE(held.stat().st_mode))
+            def restore():
+                source.unlink()
+                held.rename(source)
+            return restore
+        def mode(paths, profile):
+            source = paths['sourceSha256']
+            original = stat.S_IMODE(source.stat().st_mode)
+            source.chmod(original ^ 0o100)
+            return lambda: source.chmod(original)
+        for label, substitute, key in (('inode', replacement, 'inode'), ('mode', mode, 'mode')):
+            with self.subTest(case=label):
+                state = self._provisioning_build(before_pin=substitute,
+                                                 refusal='incomplete channel-free monitor provisioning')
+                original = state['admissions'][0][2]
+                launched = state['execution']['launchInputPins'][state['source']]
+                self.assertEqual(original['sha256'], launched['sha256'])
+                self.assertNotEqual(original[key], launched[key])
+                self.assertEqual(3, len(state['admissions']))
+
+    def test_provisioning_fixed_source_and_profile_keys_and_complete_pin_shape_are_mandatory(self):
+        def mutate(label):
+            def edit(value, paths, profile):
+                pins = value['launchInputPins']
+                key = str(paths['sourceSha256'])
+                if label == 'missing-source': pins.pop(key)
+                elif label == 'rekeyed-source': pins[key + '.unrelated'] = pins.pop(key)
+                elif label == 'missing-profile': pins.pop(str(profile))
+                elif label == 'rekeyed-profile': pins[str(profile) + '.unrelated'] = pins.pop(str(profile))
+                elif label == 'wrong-profile': pins[str(profile)]['sha256'] = 'f' * 64
+                elif label == 'extra-row-field': pins[key]['unknown'] = 1
+                elif label == 'missing-row-field': pins[key].pop('mode')
+                elif label == 'boolean-device': pins[key]['device'] = True
+                elif label == 'negative-inode': pins[key]['inode'] = -1
+                elif label == 'overflow-device': pins[key]['device'] = 1 << 64
+                elif label == 'boolean-mode': pins[key]['mode'] = False
+                elif label == 'overflow-mode': pins[key]['mode'] = 0o10000
+                elif label == 'uppercase-sha': pins[key]['sha256'] = 'A' * 64
+                elif label == 'empty-pins': value['launchInputPins'] = {}
+                elif label == 'noncanonical-path': pins['/authored/../alias'] = dict(pins[key])
+                elif label == 'too-many-pins':
+                    pins.update({f'/authored/input-{n}': dict(pins[key]) for n in range(255)})
+                elif label == 'bad-unrelated-row': pins['/authored/unrelated'] = {'sha256': 'a' * 64}
+                else: raise AssertionError(label)
+            return edit
+        for label in ('missing-source', 'rekeyed-source', 'missing-profile', 'rekeyed-profile',
+                      'wrong-profile', 'extra-row-field', 'missing-row-field', 'boolean-device',
+                      'negative-inode', 'overflow-device', 'boolean-mode', 'overflow-mode',
+                      'uppercase-sha', 'empty-pins', 'noncanonical-path', 'too-many-pins', 'bad-unrelated-row'):
+            with self.subTest(case=label):
+                state = self._provisioning_build(edit=mutate(label),
+                                                 refusal='incomplete channel-free monitor provisioning')
+                self.assertEqual(3, len(state['admissions']))
+        def alias(value, paths, profile):
+            value['launchInputPins']['/authored/additional-alias'] = dict(value['launchInputPins'][str(paths['sourceSha256'])])
+        self._provisioning_build(edit=alias)  # Additional valid rows cannot replace the exact keys.
+        def exact_inventory(value, paths, profile):
+            row = value['launchInputPins'][str(paths['sourceSha256'])]
+            value['launchInputPins'].update({f'/authored/input-{n}': dict(row) for n in range(254)})
+            self.assertEqual(256, len(value['launchInputPins']))
+        self._provisioning_build(edit=exact_inventory)
+
+    def test_provisioning_actual_profile_raw_format_and_full_bounds_or_argv_drift_refuse(self):
+        def format_profile(paths, profile):
+            raw = profile.read_bytes()
+            profile.write_bytes(raw + b'\n')
+            return lambda: profile.write_bytes(raw)
+        state = self._provisioning_build(before_pin=format_profile,
+                                         refusal='incomplete channel-free monitor provisioning')
+        self.assertNotEqual(state['expected']['expected_bounds']['profileSha256'],
+                            state['execution']['launchInputPins'][state['profile']]['sha256'])
+        def mutate(label):
+            def edit(value, paths, profile):
+                if label == 'phase': value['bounds']['phase'] = 'compiler'
+                elif label == 'profile': value['bounds']['profileSha256'] = 'f' * 64
+                elif label == 'profile-and-pin':
+                    value['bounds']['profileSha256'] = 'f' * 64
+                    value['launchInputPins'][str(profile)]['sha256'] = 'f' * 64
+                elif label == 'missing-bounds-key': value['bounds'].pop('supervisor')
+                elif label == 'extra-bounds-key': value['bounds']['unknown'] = 1
+                elif label == 'boolean-task-limit': value['bounds']['cgroup']['tasks'] = True
+                elif label == 'changed-task-limit': value['bounds']['cgroup']['tasks'] += 1
+                elif label == 'changed-wall': value['bounds']['wallSeconds'] -= 1
+                elif label == 'changed-output': value['bounds']['outputBytesPerStream'] -= 1
+                elif label == 'changed-rlimit': value['bounds']['perProcessRlimits']['RLIMIT_CPU']['hard'] += 1
+                elif label == 'nonfinite': value['bounds']['wallSeconds'] = float('nan')
+                elif label == 'nonserializable': value['bounds']['workerLimits'] = object()
+                elif label == 'cyclic': value['bounds']['cgroup'] = value['bounds']
+                elif label == 'argv-source': value['argv'][8] += '.other'
+                elif label == 'argv-output': value['argv'][-1] += '.other'
+                elif label == 'argv-flag': value['argv'][3] = '-O0'
+                elif label == 'argv-tuple': value['argv'] = tuple(value['argv'])
+                elif label == 'argv-nonstr': value['argv'][8] = False
+                else: raise AssertionError(label)
+            return edit
+        for label in ('phase', 'profile', 'profile-and-pin', 'missing-bounds-key', 'extra-bounds-key',
+                      'boolean-task-limit', 'changed-task-limit', 'changed-wall', 'changed-output',
+                      'changed-rlimit', 'nonfinite',
+                      'nonserializable', 'cyclic', 'argv-source', 'argv-output', 'argv-flag',
+                      'argv-tuple', 'argv-nonstr'):
+            with self.subTest(case=label):
+                state = self._provisioning_build(edit=mutate(label),
+                                                 refusal='incomplete channel-free monitor provisioning')
+                self.assertEqual(3, len(state['admissions']))
+
+    def test_provisioning_every_incomplete_controller_fact_keeps_receipt_and_refuses_credit(self):
+        cases = [(key, False) for key in ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified',
+                 'scopeAdmitted', 'captureComplete', 'waitComplete', 'cleanupVerified',
+                 'rootReaped', 'finalAbsenceVerified')]
+        cases += [(key, True) for key in ('timedOut', 'outputExceeded', 'infrastructureFailure')]
+        cases += [('provisioningOnly', False), ('workerExecVerified', True),
+                  ('workerTerminationVerified', True), ('exitCode', 1), ('exitCode', False),
+                  ('stdout', None), ('stderr', None), ('kernelScope', {'finalAbsenceVerified': False})]
+        for key, bad in cases:
+            with self.subTest(key=key, value=bad):
+                def edit(value, paths, profile): value[key] = bad
+                state = self._provisioning_build(edit=edit,
+                                                 refusal='incomplete channel-free monitor provisioning')
+                self.assertEqual(3, len(state['admissions']))
+
+    def test_provisioning_post_join_content_inode_or_mode_drift_retains_same_execution(self):
+        def change(label):
+            def after(paths, profile):
+                source = paths['sourceSha256']
+                if label == 'content': source.write_bytes(b'AUTHORED-POST-PIN-B\n')
+                elif label == 'inode':
+                    source.rename(source.with_name('held-original.c'))
+                    source.write_bytes(source.with_name('held-original.c').read_bytes())
+                elif label == 'mode': source.chmod(stat.S_IMODE(source.stat().st_mode) ^ 0o100)
+                else: raise AssertionError(label)
+            return after
+        for label in ('content', 'inode', 'mode'):
+            with self.subTest(case=label):
+                state = self._provisioning_build(after_pin=change(label),
+                                                 refusal='monitor provisioning source changed during build')
+                self.assertEqual(6, len(state['admissions']))
+                self.assertNotEqual(state['admissions'][0][2], state['admissions'][3][2])
 
 
 class QualificationSourceTests(unittest.TestCase):
