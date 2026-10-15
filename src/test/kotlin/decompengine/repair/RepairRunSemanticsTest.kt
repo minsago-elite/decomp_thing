@@ -1134,12 +1134,15 @@ class RepairRunSemanticsTest {
         val corpusMethod = Class.forName("decompengine.repair.ModuleRevisionGraphKt").declaredMethods
             .single { it.name == "regressionCorpusSha256" }.also { it.isAccessible = true }
         val changedDigest = corpusMethod.invoke(null, changedInputs) as String
+        val originalPrompt = Json.parseToJsonElement(marker).jsonObject.getValue("pending").jsonObject
+            .getValue("repairMetadata").jsonObject.getValue("prompt").jsonPrimitive.content
+        assertEquals(sha256("bounded repair".toByteArray()), originalPrompt)
         val corpusMutation = marker.replace("\"args\":[\"arg0\"]", "\"args\":[\"different\"]")
             .replace(run.regressionCorpusSha256, changedDigest)
         val mutations = listOf(
             marker.replace(run.toJson(), run.copy(maximumAttempts = run.maximumAttempts + 1).toJson()),
             marker.replace(run.toJson(), run.copy(expectedObservationsSha256 = "a".repeat(64)).toJson()),
-            marker.replace("\"prompt\":\"bounded repair\"", "\"prompt\":\"changed repair\""),
+            marker.replace("\"prompt\":\"$originalPrompt\"", "\"prompt\":\"${sha256("changed repair".toByteArray())}\""),
             corpusMutation,
         )
         for (mutation in mutations) {

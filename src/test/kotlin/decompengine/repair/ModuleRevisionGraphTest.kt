@@ -6038,11 +6038,14 @@ class ModuleRevisionGraphTest {
         val parsed = Json.parseToJsonElement(original).jsonObject
         val profileId = parsed.getValue("profileId").jsonPrimitive.content
         val profileSha = parsed.getValue("profileSha256").jsonPrimitive.content
+        val originalPrompt = parsed.getValue("pending").jsonObject.getValue("repairMetadata").jsonObject
+            .getValue("prompt").jsonPrimitive.content
+        assertEquals(sha256("short".toByteArray()), originalPrompt)
         val alternatives = listOf(
             original.replace("\"profileId\": \"$profileId\"", "\"profileId\": \"foreign_profile\""),
             original.replace("\"profileSha256\": \"$profileSha\"", "\"profileSha256\": \"${"0".repeat(64)}\""),
             original.replace("\"maximumGraphBytes\":16384", "\"maximumGraphBytes\":16385"),
-            original.replace("\"prompt\":\"short\"", "\"prompt\":\"changed original prompt\""),
+            original.replace("\"prompt\":\"$originalPrompt\"", "\"prompt\":\"${sha256("changed original prompt".toByteArray())}\""),
             original.replace("\"storedBlobBytes\": ", "\"storedBlobBytes\": -"),
         )
         for (alternative in alternatives) {
@@ -6179,7 +6182,7 @@ class ModuleRevisionGraphTest {
         lateinit var finalized: String
         ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, selected).use { graph ->
             val corpus = graph.retainedRegressionCorpus()
-            val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(1, "compile", "PREFIX_PADDING", null,
+            val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(1, "compile", "PREFIX_PADDING", "PREFIX_PADDING",
                 emptyList(), null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
             graph.installCandidate(attempt, mapOf(relative to original + "\n/* original2 */\n".toByteArray()))
             val originalPending = path.readText()
