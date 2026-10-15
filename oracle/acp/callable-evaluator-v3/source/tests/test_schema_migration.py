@@ -24,6 +24,169 @@ def report_fixture():
 
 
 class SchemaMigration(unittest.TestCase):
+    def test_preservation_supported_anchors_ignore_cwd_and_share_relative_absolute_lookup(self):
+        import hashlib
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            repository=Path(temporary)/'relocated checkout';repository.mkdir()
+            retained=repository/'retained';retained.mkdir();file=retained/'historical.c';file.write_bytes(b'authored retained bytes')
+            sha=hashlib.sha256(file.read_bytes()).hexdigest()
+            for suffix in (('oracle','acp','callable-evaluator-v3','source'),
+                           ('build','acp-decomp-effectiveness','callable-library-v3')):
+                base=repository.joinpath(*suffix)
+                for key in ('retained/historical.c',str(file)):
+                    manifest={'schemaVersion':3,'files':{key:sha}}
+                    with self.subTest(suffix=suffix,key=key),patch.object(f,'BASE',base), \
+                            patch.object(Path,'cwd',side_effect=AssertionError('preservation must not use ambient cwd')):
+                        self.assertEqual(repository,f._preservation_repository())
+                        self.assertIsNone(f.verify_preservation(manifest))
+            self.assertEqual(b'authored retained bytes',file.read_bytes())
+
+    def test_preservation_refuses_alias_duplicates_escape_unknown_layout_and_hash_drift(self):
+        import hashlib
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            repository=Path(temporary)/'checkout';repository.mkdir();file=repository/'historical';file.write_bytes(b'authored')
+            sha=hashlib.sha256(b'authored').hexdigest();base=repository/'oracle/acp/callable-evaluator-v3/source'
+            for files,reason in (({'historical':sha,str(file):sha},'duplicate admitted file'),
+                                 ({'../outside':sha},'parent traversal'),
+                                 ({str(repository.parent/'outside'):sha},'outside admitted input scope'),
+                                 ({'historical':'0'*64},'historical source changed')):
+                with self.subTest(files=files),patch.object(f,'BASE',base):
+                    with self.assertRaisesRegex(ValueError,reason):f.verify_preservation({'schemaVersion':3,'files':files})
+            for unsupported in (repository/'source',base/'nested',Path('oracle/acp/callable-evaluator-v3/source')):
+                with self.subTest(base=unsupported),patch.object(f,'BASE',unsupported), \
+                        patch.object(f,'admit_files',side_effect=AssertionError('unknown layout before admission')):
+                    with self.assertRaises(ValueError):f.verify_preservation({'schemaVersion':3,'files':{'historical':sha}})
+            # An old absolute manifest is never rebased into this checkout by basename.
+            with patch.object(f,'BASE',base),patch.object(f,'_open_regular',side_effect=AssertionError('old external root must refuse before open')):
+                with self.assertRaisesRegex(ValueError,'outside admitted input scope'):
+                    f.verify_preservation({'schemaVersion':3,'files':{'/unrelated-original-checkout/historical':sha}})
+
+    def test_preservation_retains_nofollow_type_and_charged_population_controls(self):
+        import hashlib
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            repository=Path(temporary);retained=repository/'retained';retained.mkdir()
+            file=retained/'original';file.write_bytes(b'authored');sha=hashlib.sha256(b'authored').hexdigest()
+            (retained/'leaf-link').symlink_to(file);(repository/'parent-link').symlink_to(retained,target_is_directory=True)
+            base=repository/'build/acp-decomp-effectiveness/callable-library-v3'
+            for key in ('retained/leaf-link','parent-link/original'):
+                with self.subTest(key=key),patch.object(f,'BASE',base):
+                    with self.assertRaises(OSError):f.verify_preservation({'schemaVersion':3,'files':{key:sha}})
+            with patch.object(f,'BASE',base):
+                with self.assertRaisesRegex(ValueError,'regular file required'):
+                    f.verify_preservation({'schemaVersion':3,'files':{'retained':sha}})
+            actual=f.admit_files
+            def charged(paths,budget=None,root=None):
+                # Existing budget only: repository +retained +one file exactly3 nodes.
+                return actual(paths,f.TreeBudget(nodes=3,directories=2,files=1,bytes=8,depth=2),root=root)
+            with patch.object(f,'BASE',base),patch.object(f,'admit_files',side_effect=charged):
+                self.assertIsNone(f.verify_preservation({'schemaVersion':3,'files':{'retained/original':sha}}))
+                second=retained/'second';second.write_bytes(b'x')
+                with self.assertRaisesRegex(ValueError,'node/depth budget'):
+                    f.verify_preservation({'schemaVersion':3,'files':{'retained/original':sha,'retained/second':sha}})
+
+    def test_admitted_json_uses_real_reader_strict_decoder_schema_and_ordinary_api(self):
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            root=Path(temporary);path=root/'document.json'
+            binding={'schemaVersion':3,'sourceCheckpointSha256':'a'*64,'initialSha256':{'synthetic':'b'*64},
+                     'helperCopySha256':'c'*64,'helperSchemaSha256':'d'*64,'helperSchemaVersion':3}
+            path.write_text(json.dumps(binding));record=f.admit_files([path],root=root)['files'][str(path)]
+            with patch.object(f,'read_regular',side_effect=AssertionError('admitted record must not independently re-admit pathname')):
+                self.assertEqual(binding,f._read_admitted_json(record,'execution-bindings'))
+            self.assertEqual(binding,f.read_json(path,'execution-bindings'))
+            for raw in (b'{"schemaVersion":3,"schemaVersion":2}',b'{"x":NaN}',b'{',b'\xff'):
+                path.write_bytes(raw);record=f.admit_files([path],root=root)['files'][str(path)]
+                with self.subTest(raw=raw),self.assertRaises((ValueError,UnicodeError)):
+                    f._read_admitted_json(record)
+            path.write_bytes(b'{}');record=f.admit_files([path],root=root)['files'][str(path)]
+            # Actual pinned schema validation, not a claimed qualified pin or schema stub.
+            with self.assertRaises(Exception):f._read_admitted_json(record,'toolchain-pin')
+            with self.assertRaises(Exception):f._read_admitted_json(record,'execution-bindings')
+
+    def test_admitted_json_retains_original_bytes_or_refuses_changed_original_record(self):
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            root=Path(temporary);path=root/'pin.json';raw=b'{"status":"static-recording-unqualified"}'
+            path.write_bytes(raw);record=f.admit_files([path],root=root)['files'][str(path)]
+            real_read=f.read_admitted;calls=[]
+            def captured(item,maximum):
+                calls.append((item,maximum));result=real_read(item,maximum)
+                path.write_bytes(b'{"status":"invented-qualified","other":true}')
+                return result
+            with patch.object(f,'read_admitted',side_effect=captured), \
+                    patch.object(f,'read_regular',side_effect=AssertionError('no independent pathname re-admission')):
+                value=f._read_admitted_json(record,maximum=8388608)
+            self.assertEqual({'status':'static-recording-unqualified'},value)
+            self.assertEqual([(record,8388608)],calls)
+            with self.assertRaisesRegex(ValueError,'static-only toolchain pin'):f.require_qualified_pin(value)
+            with self.assertRaisesRegex(ValueError,'admitted file changed'):f._read_admitted_json(record)
+            # Restore the original bytes, then re-admit deliberately as a NEW test input.
+            path.write_bytes(raw);record=f.admit_files([path],root=root)['files'][str(path)]
+            path.unlink();path.symlink_to(root/'absent')
+            with self.assertRaises(OSError):f._read_admitted_json(record)
+
+    def test_admitted_json_preservation_exact_cap_and_all_role_overcaps_precede_read(self):
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            root=Path(temporary);path=root/'preservation.json'
+            path.write_bytes(b' '*(1048576-2)+b'{}')
+            record=f.admit_files([path],root=root)['files'][str(path)]
+            self.assertEqual({},f._read_admitted_json(record,maximum=1048576))
+            path.write_bytes(b' '*(1048576-1)+b'{}')
+            record=f.admit_files([path],root=root)['files'][str(path)]
+            with patch.object(f,'_open_regular',side_effect=AssertionError('cap+1 must refuse before payload open')):
+                with self.assertRaisesRegex(ValueError,'admitted read bound'):f._read_admitted_json(record,maximum=1048576)
+                for maximum in (1048576,8388608):
+                    with self.subTest(maximum=maximum),self.assertRaisesRegex(ValueError,'admitted read bound'):
+                        f._read_admitted_json({'size':maximum+1},maximum=maximum)
+
+    def _admitted_checkpoint_fixture(self, root):
+        import hashlib
+        preflight=root/'preflight';preflight.mkdir();output=root/'not-created'
+        files={'synthetic':'a'*64};checkpoint=root/'source.json';checkpoint.write_text(json.dumps({'schemaVersion':3,'files':files}))
+        matrix={'schemaVersion':3,'status':'preflight-only-independent-review-required','freezeCreated':False,
+                'allControlsPassed':True,'executionDependenciesUnchanged':True,
+                'rows':[{'name':'synthetic','expected':'matched','expectedStage':'behavior','passed':True,'receipt':'synthetic',
+                         'receiptSha256':'a'*64,'runtimeRequestCount':24,'completedScenarioProcessCount':24,'unknownScenarioProcessCount':0}]}
+        bindings={'schemaVersion':3,'sourceCheckpointSha256':hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                  'initialSha256':files,'helperCopySha256':'a'*64,'helperSchemaSha256':'a'*64,'helperSchemaVersion':3}
+        (preflight/'matrix.json').write_text(json.dumps(matrix));(preflight/'execution-bindings.json').write_text(json.dumps(bindings))
+        for name in ('toolchain.json','review.md','acceptance.md','qualification.md'):(root/name).write_text('{}')
+        return (preflight,root/'review.md',output,root/'toolchain.json',root/'acceptance.md',checkpoint,root/'qualification.md')
+
+    def test_freeze_checkpoint_composition_uses_original_extra_record_and_never_reopens_json(self):
+        trusted=static_temp('static-process-correction-001')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            outer=Path(temporary)
+            for mutation in (None,'after-capture','after-admission'):
+                root=outer/(mutation or 'unchanged');root.mkdir();args=self._admitted_checkpoint_fixture(root);checkpoint=args[5]
+                real_admit=f.admit_files;real_read=f.read_admitted;reads=[];boundary=ValueError('authored checkpoint boundary reached; never qualified')
+                def admit(paths,*a,**kw):
+                    records=real_admit(paths,*a,**kw)
+                    if mutation=='after-admission' and str(checkpoint) in records['files']:
+                        checkpoint.write_bytes(b'{"schemaVersion":2,"files":{}}')
+                    return records
+                def read(record,maximum):
+                    raw=real_read(record,maximum)
+                    if record['path']==checkpoint:
+                        reads.append((record['sha256'],maximum))
+                        if mutation=='after-capture':checkpoint.write_bytes(b'{"schemaVersion":2,"files":{}}')
+                    return raw
+                with self.subTest(mutation=mutation),patch.object(f,'BASE',root), \
+                        patch.object(f,'admit_files',side_effect=admit),patch.object(f,'read_admitted',side_effect=read), \
+                        patch.object(f,'read_json',side_effect=AssertionError('freeze must decode original admitted record')), \
+                        patch.object(f,'execution_source_paths',side_effect=boundary) as population:
+                    with self.assertRaises(ValueError) as caught:f.freeze(*args)
+                if mutation=='after-admission':
+                    self.assertIn('admitted file changed',str(caught.exception));population.assert_not_called();self.assertEqual([],reads)
+                else:
+                    self.assertIs(caught.exception,boundary);population.assert_called_once_with()
+                    self.assertEqual(1,len(reads));self.assertEqual(8388608,reads[0][1])
+                self.assertFalse(args[2].exists())
+
     def test_closed_report_validates(self):e.validate_exchange('report',report_fixture())
     def test_v2_and_legacy_counter_fields_refuse(self):
         for key,value in (('schemaVersion',2),('candidateCalled',True),('recordedCallCount',32),('behaviorRate',1)):

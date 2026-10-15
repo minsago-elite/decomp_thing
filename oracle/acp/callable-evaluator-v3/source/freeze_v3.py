@@ -213,11 +213,18 @@ def read_regular(path, maximum=8388608):
     return read_admitted(next(iter(snapshot['files'].values())),maximum)
 
 
-def read_json(path, schema=None, maximum=8388608):
-    raw=read_regular(path,maximum)
+def _decode_json(raw, schema=None):
     value=json.loads(raw,object_pairs_hook=_pairs,
                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
     return validate_exchange(schema,value) if schema else value
+
+
+def read_json(path, schema=None, maximum=8388608):
+    return _decode_json(read_regular(path,maximum),schema)
+
+
+def _read_admitted_json(record, schema=None, maximum=8388608):
+    return _decode_json(read_admitted(record,maximum),schema)
 
 
 def inventory(root, budget=None):
@@ -399,12 +406,29 @@ def canonical_digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
+def _preservation_repository():
+    # Lexical layout identifies only a preservation anchor, never sealing authority.
+    base=Path(BASE)
+    if not base.is_absolute():raise ValueError('absolute preservation source layout required')
+    base=_absolute(base)
+    if base.parts[-4:]==('oracle','acp','callable-evaluator-v3','source'):
+        return base.parents[3]
+    if base.parts[-3:]==('build','acp-decomp-effectiveness','callable-library-v3'):
+        return base.parents[2]
+    raise ValueError('unsupported preservation source layout')
+
+
 def verify_preservation(manifest):
     if set(manifest) != {'schemaVersion','files'} or manifest['schemaVersion'] != 3 or not manifest['files']:
         raise ValueError('preservation manifest required')
-    records=admit_files(manifest['files'],root=Path('/home/june/decomp_thing'))['files']
+    repository=_preservation_repository()
+    def normalized(path):
+        path=Path(path)
+        return _absolute(path if path.is_absolute() else repository/path)
+    # Lazy normalization preserves the existing charged admission and duplicate checks.
+    records=admit_files((normalized(path) for path in manifest['files']),root=repository)['files']
     for path,sha in manifest['files'].items():
-        if records[str(_absolute(path))]['sha256']!=sha:raise ValueError('historical source changed:'+path)
+        if records[str(normalized(path))]['sha256']!=sha:raise ValueError('historical source changed:'+path)
 
 
 def revalidate_toolchain(pin, filesystem_root):
@@ -434,16 +458,14 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
         try:return tree['files'][str(path.relative_to(_absolute(preflight)))]
         except (KeyError,ValueError):raise ValueError('path not in admitted preflight')
     def receipt(path,schema=None,maximum=8388608):
-        value=json.loads(read_admitted(record(path),maximum),object_pairs_hook=_pairs,
-                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
-        return validate_exchange(schema,value) if schema else value
+        return _read_admitted_json(record(path),schema,maximum)
     matrix=receipt(preflight/'matrix.json','matrix')
     bindings=receipt(preflight/'execution-bindings.json','execution-bindings')
     if not matrix['allControlsPassed'] or not matrix['executionDependenciesUnchanged']:raise ValueError('preflight not accepted')
     extras=admit_files((source_checkpoint,toolchain_pin,review,acceptance,qualification),root=BASE)['files']
     extra=lambda path:extras[str(_absolute(path))]
     if bindings['sourceCheckpointSha256'] != extra(source_checkpoint)['sha256']:raise ValueError('source checkpoint binding drift')
-    checkpoint=read_json(source_checkpoint)
+    checkpoint=_read_admitted_json(extra(source_checkpoint),maximum=8388608)
     if set(checkpoint) != {'schemaVersion','files'} or checkpoint['schemaVersion'] != 3 or checkpoint['files'] != bindings['initialSha256']:
         raise ValueError('preflight must use exact prior source checkpoint')
     if set(checkpoint['files']) != execution_source_paths():raise ValueError('incomplete execution source checkpoint')
@@ -473,7 +495,7 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
         for name,sha in report['evidenceFiles'].items():
             if record(path.parent/name)['sha256']!=sha:raise ValueError('process evidence drift')
     inventory_hash=canonical_digest(before)
-    pin=read_json(toolchain_pin,'toolchain-pin')
+    pin=_read_admitted_json(extra(toolchain_pin),'toolchain-pin',maximum=8388608)
     require_qualified_pin(pin)  # Currently always refuses; Markdown cannot upgrade it.
     revalidate_toolchain(pin,filesystem_root)
     pins=[extra(toolchain_pin)['sha256'],extra(source_checkpoint)['sha256'],bindings['helperCopySha256'],bindings['helperSchemaSha256'],sources[str(_absolute(BASE/'contracts/candidate-build-profile.json'))]['sha256']]
@@ -485,7 +507,7 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
     if _absolute(acceptance)==_absolute(review) or extra(acceptance)['sha256']==extra(review)['sha256']:raise ValueError('distinct acceptance artifact required')
     text=read_admitted(extra(acceptance),1048576).decode('utf8')
     if 'Verdict: **CLEAR**' not in text or any(pin not in text for pin in required):raise ValueError('independent acceptance binding missing')
-    preservation=read_json(BASE/'preservation-manifest.json',maximum=1048576);verify_preservation(preservation)
+    preservation=_read_admitted_json(sources[str(_absolute(BASE/'preservation-manifest.json'))],maximum=1048576);verify_preservation(preservation)
     # One reservation covers every destination instance, source duplicates,
     # empty directory and final JSON. <=10000 files agrees with the schema.
     plan=CopyPlan();plan.add_tree('artifacts/preflight',tree)
