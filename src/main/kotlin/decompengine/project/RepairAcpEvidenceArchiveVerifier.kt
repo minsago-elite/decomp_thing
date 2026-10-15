@@ -141,7 +141,17 @@ internal object RepairAcpEvidenceArchiveVerifier {
             payloadSizes,
         )
         val graph = parseGraph(graphBytes)
-        requireRepairGraphByteBudget(graphBytes, graph.budget) { consume ->
+        require(graph.nodes.size <= graph.budget.maximumRevisionNodes) {
+            "repair release graph has no bounded revision lineage"
+        }
+        val missingRollbackIds = if (graph.schemaVersion == 4) graph.nodes
+            .filter { it.status == "rejected" && it.rollbackRecord == null }.mapTo(linkedSetOf()) { it.id }
+            else emptySet()
+        val provenLegacyIds = linkedSetOf<String>()
+        var declaredSourcesScanned = false
+        fun scanDeclaredSources(consume: (String, ByteArray) -> Unit) {
+            check(!declaredSourcesScanned) { "repair release declared source inventory was already consumed" }
+            declaredSourcesScanned = true
             // Resource inventory only: include irrelevant files and empty directories. Content
             // authority still comes from manifest-bound descriptor-stable readPayloadFile below.
             val names = Files.newDirectoryStream(projectDir.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
@@ -162,9 +172,17 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 // Exact admitted size closes growth between metadata admission and stable read.
                 val bytes = readPayloadFile(projectDir, path, admitted, payloadSha256, payloadSizes)
                 require(bytes.size.toLong() == admitted)
+                // Preserve existing byte-credit refusal precedence (including its digest diagnostic).
                 consume(path.substringAfterLast('/'), bytes)
+                val source = verifyPreservedLegacyBytes(path, bytes)
+                if (missingRollbackIds.isNotEmpty()) {
+                    collectFinalizedLegacyOrigins(graph, source, bytes, provenLegacyIds)
+                }
             }
         }
+        requireRepairGraphByteBudget(graphBytes, graph.budget) { consume -> scanDeclaredSources(consume) }
+        // Byte-credit admission may return early. Missing-record provenance never does.
+        if (missingRollbackIds.isNotEmpty() && !declaredSourcesScanned) scanDeclaredSources { _, _ -> }
         require(graph.schemaVersion in 3..4) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
@@ -185,14 +203,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
             "repair release evidence contains extra or stale state artifacts: ${unknownRepairPaths.sorted()}"
         }
         repairPaths.filter(REPAIR_LEGACY_PATH::matches).forEach { path ->
-            val digest = requireNotNull(REPAIR_LEGACY_PATH.matchEntire(path)).groupValues[1]
-            val bytes = readPayloadFile(projectDir, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
-                payloadSha256, payloadSizes)
-            require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
-            val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
-            val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 3 else 2
-            require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..maximumSchema) {
-                "preserved legacy repair evidence has an unsupported schema"
+            // A bounded graph scan already authenticated these same bytes; do not reread bodies.
+            if (!declaredSourcesScanned || !REPAIR_LEGACY_GRAPH_PATH.matches(path)) {
+                val bytes = readPayloadFile(projectDir, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
+                    payloadSha256, payloadSizes)
+                verifyPreservedLegacyBytes(path, bytes)
             }
         }
 
@@ -214,6 +229,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
             manifestByPath,
             repairProfile,
         )
+        require(missingRollbackIds.all(provenLegacyIds::contains)) {
+            "schema-4 rejected attempt lacks a finalized rollback record or supported legacy origin"
+        }
         val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
         verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
         verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes, reconstructionProfile)
@@ -519,6 +537,76 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 acceptedRevision,
             )
         }
+    }
+
+    private fun verifyPreservedLegacyBytes(path: String, bytes: ByteArray): JsonObject {
+        val digest = requireNotNull(REPAIR_LEGACY_PATH.matchEntire(path)).groupValues[1]
+        require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
+        val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
+        val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 3 else 2
+        require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..maximumSchema) {
+            "preserved legacy repair evidence has an unsupported schema"
+        }
+        return legacy
+    }
+
+    /** Declared compatibility consistency only: a resealable source is not external chronology. */
+    private fun collectFinalizedLegacyOrigins(
+        graph: ReleaseRepairGraph,
+        document: JsonObject,
+        bytes: ByteArray,
+        provenIds: MutableSet<String>,
+    ) {
+        // Earlier schemas/root-only inputs cannot supply the durable release-run prefix required
+        // here. They remain zero-origin inputs under the existing preserved-evidence checks.
+        if (document["schemaVersion"]?.jsonPrimitive?.intOrNull != 3) return
+        if (document.requiredArray("nodes", "legacy rollback origin").size <= 1) return
+        val source = parseGraph(bytes)
+        // A pending source grants no exemption, even for its eventual recovered node. A separate
+        // closed checkpoint may still prove older finalized nodes in a composed history.
+        if (source.pending != null) return
+        require(source.profileId == graph.profileId && source.profileSha256 == graph.profileSha256 &&
+            source.budget == graph.budget && source.indexSha256 == graph.indexSha256 &&
+            source.editablePaths == graph.editablePaths && source.retainedRegressionInputs == graph.retainedRegressionInputs &&
+            source.regressionCorpusSha256 == graph.regressionCorpusSha256) {
+            "legacy rollback origin has a different recovery context"
+        }
+        require(source.nodes.size <= graph.nodes.size && source.nodes == graph.nodes.take(source.nodes.size)) {
+            "legacy rollback origin is not the exact finalized node prefix"
+        }
+        // No record is erased or status normalized to make a native node match this source.
+        require(source.nodes.all { it.rollbackRecord == null } &&
+            source.nextOrdinal == source.nodes.last().ordinal + 1 &&
+            source.headId == source.nodes.lastOrNull { it.status in setOf("root", "accepted") }?.id &&
+            source.runs.size <= graph.runs.size && source.runs == graph.runs.take(source.runs.size)) {
+            "legacy rollback origin head ordinal or terminal-run prefix is inconsistent"
+        }
+        validateRegressionCorpus(source.retainedRegressionInputs, source.budget)
+        require(source.regressionCorpusSha256 == regressionCorpusSha256(source.retainedRegressionInputs)) {
+            "legacy rollback origin retained regression digest is stale"
+        }
+        // This supported source form is a closed schema3 release checkpoint. A running/pending
+        // legacy source or an unproved nonpending upgrade grants no missing-record exemption.
+        verifyRunContract(source)
+        require(source.acceptedProof == source.nodes.single { it.id == source.headId }.validationProof) {
+            "legacy rollback origin validation proof differs from its finalized head"
+        }
+        val blobs = TreeMap<String, Long>()
+        fun record(digest: String?, size: Long?) {
+            if (digest == null) return
+            require(size != null)
+            val previous = blobs.putIfAbsent(digest, size)
+            require(previous == null || previous == size) { "legacy rollback origin blob sizes conflict" }
+        }
+        source.nodes.forEach { node -> node.changes.forEach { delta ->
+            record(delta.beforeBlobSha256, delta.beforeBytes)
+            record(delta.afterBlobSha256, delta.afterBytes)
+        } }
+        require(blobs.values.fold(0L) { total, size -> Math.addExact(total, size) } == source.storedBlobBytes &&
+            source.storedBlobBytes <= source.budget.maximumStoredBlobBytes) {
+            "legacy rollback origin stored-blob accounting is inconsistent"
+        }
+        source.nodes.filter { it.status == "rejected" }.forEach { provenIds += it.id }
     }
 
     private fun verifyReceipts(
