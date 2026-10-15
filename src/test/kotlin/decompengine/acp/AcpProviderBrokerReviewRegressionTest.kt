@@ -13,6 +13,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Flow
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.*
 import org.apache.hc.core5.http.ContentType
@@ -62,6 +63,7 @@ class AcpProviderBrokerReviewRegressionTest {
                 val backing = byteStreamBacking(event)
                 assertTrue(backing.any { it != 0.toByte() })
                 broker.revoke(kind)
+                assertNull(field(broker, "credentials"), "terminal broker retained credential material for $kind")
                 assertTrue(backing.all { it == 0.toByte() }, "partial backing bytes survived $kind")
                 assertEquals(0, event.size())
                 for (pattern in field(parser, "secretPatterns") as List<*>) {
@@ -270,6 +272,132 @@ class AcpProviderBrokerReviewRegressionTest {
             assertTrue(body.all { it == 0.toByte() })
         } finally { assertTrue((backend as AcpProviderBrokerTestBackend).closeWithin(Duration.ofSeconds(1))) }
     }
+
+    @Test fun `idle revocation and both close outcomes release the broker credential holder`() {
+        for (clean in listOf(true, false)) for (closeFirst in listOf(true, false)) {
+            var closes = 0
+            val backend = object : AcpProviderBrokerTestBackend {
+                override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner =
+                    error("revoked idle broker must not dispatch")
+                override fun closeWithin(timeout: Duration): Boolean { closes++; return clean }
+            }
+            val broker = open(backend)
+            try {
+                broker.bindSession("synthetic-session", "synthetic-turn")
+                val capability = AcpProviderBrokerProtocol.decodeChannelSetupPayload(broker.channelSetupPayload()).capability
+                val before = broker.snapshot()
+                assertNotNull(field(broker, "credentials"))
+                if (!closeFirst) {
+                    broker.revoke()
+                    assertNull(field(broker, "credentials"))
+                }
+                if (clean) broker.close() else assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                assertNull(field(broker, "credentials"))
+                val snapshot = broker.snapshot()
+                assertTrue(snapshot.revoked)
+                assertEquals(if (clean) AcpProviderBrokerCleanup.VERIFIED else AcpProviderBrokerCleanup.UNVERIFIED, snapshot.cleanup)
+                assertEquals(before.invocationBindingSha256, snapshot.invocationBindingSha256)
+                assertEquals(before.requestBindingSha256, snapshot.requestBindingSha256)
+                assertTrue(snapshot.requests.isEmpty())
+                val display = listOf(snapshot.policySha256, snapshot.invocationBindingSha256,
+                    snapshot.requestBindingSha256, snapshot.requests.toString()).joinToString()
+                assertFalse(display.contains("synthetic_token")); assertFalse(display.contains("synthetic_account"))
+                val denied = assertFailsWith<AcpProviderBrokerFailure> { broker.beginRequest(1, capability, credentialRetentionBody()) }
+                assertEquals(AcpProviderTerminalKind.REVOKED, denied.kind)
+                if (clean) broker.close() else assertFailsWith<AcpProviderBrokerCleanupFailure> { broker.close() }
+                assertEquals(1, closes, "retained snapshots must not restart cleanup")
+                assertNull(field(broker, "credentials"))
+            } finally { runCatching { broker.close() } }
+        }
+    }
+
+    @Test fun `revocation during admitted dispatch clears broker but preserves late owner cancellation`() {
+        lateinit var broker: AcpProviderBroker
+        var starts = 0
+        var cancellations = 0
+        val backend = object : AcpProviderBrokerTestBackend {
+            override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
+                starts++
+                assertSame(field(broker, "credentials"), request.credentials)
+                broker.revoke()
+                assertNull(field(broker, "credentials"))
+                // This request was already admitted; revocation must not invent fallback credentials.
+                assertEquals("synthetic_token", request.credentials.accessToken)
+                assertEquals("synthetic_account", request.credentials.accountId)
+                return object : AcpProviderBackendRequestOwner { override fun cancel() { cancellations++ } }
+            }
+            override fun closeWithin(timeout: Duration) = true
+        }
+        broker = open(backend)
+        try {
+            broker.bindSession("synthetic-session", "synthetic-turn")
+            val capability = AcpProviderBrokerProtocol.decodeChannelSetupPayload(broker.channelSetupPayload()).capability
+            val exchange = broker.beginRequest(1, capability, credentialRetentionBody())
+            assertEquals(1, starts); assertEquals(1, cancellations)
+            assertNull(field(broker, "credentials")); assertNull(field(exchange, "owner"))
+            assertFalse(exchange.javaClass.declaredFields.any { it.type == AcpProviderCredentialMaterial::class.java },
+                "exchange constructor must not retain an additional credential holder")
+            assertEquals(AcpProviderTerminalKind.REVOKED, broker.snapshot().requests.single().terminal)
+            assertFailsWith<AcpProviderBrokerFailure> { broker.beginRequest(2, capability, credentialRetentionBody()) }
+            assertEquals(1, starts)
+        } finally { broker.close() }
+    }
+
+    @Test fun `dispatch racing revocation never reacquires a cleared credential holder`() {
+        val starts = AtomicInteger(); val cancellations = AtomicInteger()
+        val backend = object : AcpProviderBrokerTestBackend {
+            override fun start(request: AcpProviderBackendRequest, receiver: AcpProviderBackendReceiver): AcpProviderBackendRequestOwner {
+                assertEquals("synthetic_token", request.credentials.accessToken)
+                assertEquals("synthetic_account", request.credentials.accountId)
+                starts.incrementAndGet()
+                return object : AcpProviderBackendRequestOwner { override fun cancel() { cancellations.incrementAndGet() } }
+            }
+            override fun closeWithin(timeout: Duration) = true
+        }
+        val broker = AcpProviderBroker.openForTesting(policy(),
+            AgentExecutionRequest("inert credential race", listOf(AgentWorkspaceRoot("fixture", Path.of(System.getProperty("user.dir")))),
+                accessPolicy = AgentAccessPolicy(emptyList())), Duration.ofSeconds(10),
+            AcpProviderCredentialMaterial.cachedChatGpt("synthetic_token", "synthetic_account"), backend)
+        val ready = CountDownLatch(2); val release = CountDownLatch(1)
+        val dispatchFailure = AtomicReference<Throwable?>(); val revokeFailure = AtomicReference<Throwable?>()
+        val exchange = AtomicReference<AcpProviderBroker.AcpProviderBrokerExchange?>()
+        lateinit var capability: ByteArray
+        val dispatch = Thread {
+            try {
+                ready.countDown(); check(release.await(2, TimeUnit.SECONDS))
+                exchange.set(broker.beginRequest(1, capability, credentialRetentionBody()))
+            } catch (failure: Throwable) { dispatchFailure.set(failure) }
+        }.also { it.isDaemon = true }
+        val revocation = Thread {
+            try { ready.countDown(); check(release.await(2, TimeUnit.SECONDS)); broker.revoke() }
+            catch (failure: Throwable) { revokeFailure.set(failure) }
+        }.also { it.isDaemon = true }
+        try {
+            broker.bindSession("synthetic-session", "synthetic-turn")
+            capability = AcpProviderBrokerProtocol.decodeChannelSetupPayload(broker.channelSetupPayload()).capability
+            dispatch.start(); revocation.start()
+            assertTrue(ready.await(2, TimeUnit.SECONDS)); release.countDown()
+            dispatch.join(2000); revocation.join(2000)
+            assertFalse(dispatch.isAlive); assertFalse(revocation.isAlive); assertNull(revokeFailure.get())
+            if (exchange.get() == null) {
+                assertEquals(AcpProviderTerminalKind.REVOKED, assertIs<AcpProviderBrokerFailure>(dispatchFailure.get()).kind)
+                assertEquals(0, starts.get())
+            } else {
+                assertNull(dispatchFailure.get()); assertEquals(1, starts.get())
+                assertEquals(AcpProviderTerminalKind.REVOKED, broker.snapshot().requests.single().terminal)
+            }
+            assertEquals(starts.get(), cancellations.get())
+            assertNull(field(broker, "credentials")); assertTrue(broker.snapshot().revoked)
+            assertEquals(AcpProviderTerminalKind.REVOKED,
+                assertFailsWith<AcpProviderBrokerFailure> { broker.beginRequest(2, capability, credentialRetentionBody()) }.kind)
+            assertEquals(if (exchange.get() == null) 0 else 1, starts.get())
+        } finally {
+            release.countDown(); dispatch.join(2000); revocation.join(2000); broker.close()
+        }
+    }
+
+    private fun credentialRetentionBody() =
+        """{"model":"gpt-6.1-sol","input":[{"role":"user","content":"fixture"}],"reasoning":{"effort":"low"},"store":false,"stream":true}""".toByteArray()
 
     private fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).also { it.isAccessible = true }.get(owner)
     private fun byteStreamBacking(stream: ByteArrayOutputStream): ByteArray {
