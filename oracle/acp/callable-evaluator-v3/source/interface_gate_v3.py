@@ -1,5 +1,7 @@
 """Independent export and structural declaration admission; never loads a library."""
 import json
+import math
+import time
 import os
 import shutil
 import tempfile
@@ -8,7 +10,7 @@ from importlib.metadata import version
 import fastjsonschema
 from pathlib import Path
 from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete
-from build_contract import profile, load_profile
+from build_contract import profile, load_profile, load_profile_with_digest
 REQUIRED = {'acp_mix','acp_pair_scale','acp_update','acp_apply','acp_fold','acp_state'}
 # Stable Clang builtin kinds; width alone never identifies a C integer type.
 INTEGER_SPELLINGS = {
@@ -322,28 +324,90 @@ def compare_descriptors(expected, actual):
     accepted = not differences and target_equal
     return {'accepted':accepted, 'status':'passed' if accepted else 'refused', 'differences':differences, 'targetEqual':target_equal}
 
-def probe_command(helper, work, arguments):
+def phase_remaining(deadline, ceiling):
+    """One caller-supplied absolute end; never a new full-duration allowance."""
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ValueError('finite absolute handoff deadline required')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('phase handoff deadline expired')
+    return min(ceiling, remaining)
+
+
+def revalidate_handoff(expected, deadline):
+    from bounded_runtime import _pin_files
+    phase_remaining(deadline, 1)
+    if type(expected) is not dict or not expected:
+        raise ValueError('nonempty expected handoff pins required')
+    if _pin_files(expected, deadline) != expected:
+        raise ValueError('handoff input differs from captured copy')
+    phase_remaining(deadline, 1)
+
+
+def require_handoff_execution(result, expected, deadline, *, phase=None):
+    phase_remaining(deadline, 1)
+    if not _complete_execution(result):
+        raise ValueError('handoff requires complete protected worker execution')
+    if (phase is not None and result.get('bounds',{}).get('phase') != phase or
+            result.get('bounds',{}).get('profileSha256') != load_profile_with_digest()[1]):
+        raise ValueError('handoff consumer phase/profile differs')
+    actual = result.get('launchInputPins') or {}
+    if any(actual.get(name) != pin for name, pin in expected.items()):
+        raise ValueError('consumer launch pins differ from captured copy')
+    revalidate_handoff(expected, deadline)
+
+
+def probe_command(helper, work, arguments, read_only_files=()):
     work=work.resolve(strict=True);helper=helper.resolve(strict=True)
     command=['/usr/bin/bwrap','--unshare-all','--unshare-user','--die-with-parent','--new-session','--disable-userns','--cap-drop','ALL','--clearenv']
     for directory in ('/usr','/lib','/lib64'):
         if Path(directory).exists():command+=['--ro-bind',directory,directory]
-    return command+['--proc','/proc','--dev','/dev','--remount-ro','/dev','--size','16777216','--tmpfs','/tmp','--ro-bind',str(work),'/work','--ro-bind',str(helper),'/probe','--chdir','/work',*sum((['--setenv',k,v] for k,v in profile()['analysisIsolation']['environment'].items()),[]),'/probe',*arguments]
+    command += ['--proc','/proc','--dev','/dev','--remount-ro','/dev','--size','16777216','--tmpfs','/tmp','--ro-bind',str(work),'/work','--ro-bind',str(helper),'/probe']
+    for item in read_only_files:
+        source = Path(item)
+        if source != source.resolve(strict=True) or not source.is_relative_to(work):
+            raise ValueError('probe handoff input outside isolated work')
+        command += ['--ro-bind',str(source),'/work/'+str(source.relative_to(work))]
+    return command+['--chdir','/work',*sum((['--setenv',k,v] for k,v in profile()['analysisIsolation']['environment'].items()),[]),'/probe',*arguments]
 
-def probe(source, helper, work, environment):
+def probe(source, helper, work, environment, *, deadline=None, expected_inputs=None):
+    bounds=load_profile()['bounds']
+    if deadline is not None:
+        phase_remaining(deadline, 1)
+        deadline=min(deadline,time.monotonic()+bounds['probeSeconds'])
     source=source.resolve(strict=True);work=work.resolve(strict=True)
     if not source.is_relative_to(work):
         raise ValueError('probe input outside isolated work root')
     helper=helper.resolve(strict=True)
-    bindings={'sourceSha256':digest(source),'helperSha256':digest(helper)}
+    helper_pin = None
+    if expected_inputs is not None:
+        from bounded_runtime import _pin_files
+        revalidate_handoff(expected_inputs, deadline)
+        if str(source) not in expected_inputs:
+            raise ValueError('probe source lacks captured artifact pin')
+        helper_pin = _pin_files([helper], deadline)[str(helper)]
+        bindings={'sourceSha256':expected_inputs[str(source)]['sha256'],'helperSha256':helper_pin['sha256']}
+    else:
+        bindings={'sourceSha256':digest(source),'helperSha256':digest(helper)}
     argument='/work/'+str(source.relative_to(work))
-    bounds=load_profile()['bounds']
-    result = bounded_run(probe_command(helper,work,[argument]),work,environment,
-                         timeout=bounds['probeSeconds'],output_limit=bounds['helperOutputBytesPerStream'],
-                         managed_scope=True,phase='probe')
+    if expected_inputs is not None:
+        revalidate_handoff(expected_inputs, deadline)
+        if str(source) not in expected_inputs or bindings['sourceSha256'] != expected_inputs[str(source)]['sha256']:
+            raise ValueError('probe source differs from captured artifact')
+    command=(probe_command(helper,work,[argument],read_only_files=expected_inputs) if expected_inputs is not None
+             else probe_command(helper,work,[argument]))
+    result = bounded_run(command,work,environment,
+                         timeout=phase_remaining(deadline,bounds['probeSeconds']) if deadline is not None else bounds['probeSeconds'],output_limit=bounds['helperOutputBytesPerStream'],
+                         managed_scope=True,phase='probe',**({'phase_deadline':deadline} if deadline is not None else {}))
     receipt = public_result(result)
-    bindings['inputsUnchanged']=bindings['sourceSha256']==digest(source) and bindings['helperSha256']==digest(helper)
-    receipt['inputBindings']=bindings
     try:
+        if deadline is not None: phase_remaining(deadline, 1)
+        if expected_inputs is not None:
+            require_handoff_execution(result, {**expected_inputs,str(helper):helper_pin}, deadline, phase='probe')
+            bindings['inputsUnchanged']=True
+        else:
+            bindings['inputsUnchanged']=bindings['sourceSha256']==digest(source) and bindings['helperSha256']==digest(helper)
+        receipt['inputBindings']=bindings
         if not bindings['inputsUnchanged']:
             raise ValueError('probe inputs changed during execution')
         if not _complete_execution(result):
@@ -364,38 +428,75 @@ def probe(source, helper, work, environment):
         raise
     value['inputBindings']=bindings
     value['execution'] = receipt
+    if deadline is not None:
+        try: phase_remaining(deadline, 1)
+        except Exception as error:
+            error.bounded_result=result
+            raise
     return value
 
-def export_inventory(library, expected_state_bytes, work, environment):
-    bounds=load_profile()['bounds']
-    r = bounded_run(contained_command(['/usr/bin/readelf','--dyn-syms','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
-    if not _complete_execution(r):
-        return {'status':'unknown','accepted':False,'reason':'incomplete export inspection','execution':public_result(r)}
-    symbols = []
-    for line in r['stdout'].decode('utf8',errors='strict').splitlines():
-        parts = line.split()
-        if len(parts) == 8 and parts[0].rstrip(':').isdigit():
-            symbols.append(dict(zip(('number','value','size','type','binding','visibility','index','name'),parts)))
-    sections_result=bounded_run(contained_command(['/usr/bin/readelf','--section-headers','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection')
-    if not _complete_execution(sections_result):
-        return {'status':'unknown','accepted':False,'reason':'incomplete section inspection','execution':public_result(r),'sectionsExecution':public_result(sections_result)}
-    section_flags={}
-    for line in sections_result['stdout'].decode('utf8',errors='strict').splitlines():
-        match=re.match(r'\s*\[\s*(\d+)\]\s+(.+)',line)
-        if match:
-            columns=match.group(2).split()
-            if len(columns)==10: section_flags[match.group(1)]=columns[6]
-    reasons = []
-    for name in sorted(REQUIRED):
-        matches = [s for s in symbols if s['name'] == name]
-        expected_type = 'OBJECT' if name == 'acp_state' else 'FUNC'
-        if len(matches) != 1 or any(s['binding'] != 'GLOBAL' or s['visibility'] != 'DEFAULT' or s['index'] == 'UND' or s['type'] != expected_type for s in matches):
-            reasons.append(name+':missing-or-unsupported-export')
-        elif name == 'acp_state' and int(matches[0]['size']) != expected_state_bytes:
-            reasons.append(name+':object-size')
-        elif name == 'acp_state' and 'W' not in section_flags.get(matches[0]['index'],''):
-            reasons.append(name+':object-not-writable')
-    return {'status':'passed' if not reasons and r['exitCode']==0 and sections_result['exitCode']==0 else 'refused','accepted':not reasons and r['exitCode']==0 and sections_result['exitCode']==0,'reasons':reasons,'symbols':symbols,'sectionFlags':section_flags,'sectionsExecution':public_result(sections_result),'execution':public_result(r)}
+def export_inventory(library, expected_state_bytes, work, environment, *, deadline=None, expected_inputs=None):
+    # Retain actual producer records even when a later parse/end check refuses credit.
+    r=sections_result=None
+    pending=None
+    def unknown(reason):
+        value={'status':'unknown','accepted':False,'reason':reason}
+        if r is not None: value['execution']=public_result(r)
+        if sections_result is not None: value['sectionsExecution']=public_result(sections_result)
+        return value
+    try:
+        bounds=load_profile()['bounds']
+        if deadline is not None:
+            phase_remaining(deadline, 1)
+            deadline=min(deadline,time.monotonic()+bounds['elfInspectionSeconds'])
+        if expected_inputs is not None:
+            revalidate_handoff(expected_inputs, deadline)
+            if str(library) not in expected_inputs:
+                raise ValueError('export library lacks captured input pin')
+        pending='exports'
+        r = bounded_run(contained_command(['/usr/bin/readelf','--dyn-syms','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=phase_remaining(deadline,bounds['elfInspectionSeconds']) if deadline is not None else bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection',**({'phase_deadline':deadline} if deadline is not None else {}))
+        pending=None
+        if not _complete_execution(r):
+            return unknown('incomplete export inspection')
+        if expected_inputs is not None: require_handoff_execution(r, expected_inputs, deadline, phase='elf-inspection')
+        if deadline is not None: phase_remaining(deadline, 1)
+        symbols = []
+        for line in r['stdout'].decode('utf8',errors='strict').splitlines():
+            parts = line.split()
+            if len(parts) == 8 and parts[0].rstrip(':').isdigit():
+                symbols.append(dict(zip(('number','value','size','type','binding','visibility','index','name'),parts)))
+        pending='sections'
+        sections_result=bounded_run(contained_command(['/usr/bin/readelf','--section-headers','--wide',str(library)],work,read_only_files=(library,),environment=environment),work,environment,timeout=phase_remaining(deadline,bounds['elfInspectionSeconds']) if deadline is not None else bounds['elfInspectionSeconds'],output_limit=bounds['outputBytesPerStream'],managed_scope=True,phase='elf-inspection',**({'phase_deadline':deadline} if deadline is not None else {}))
+        pending=None
+        if not _complete_execution(sections_result):
+            return unknown('incomplete section inspection')
+        if expected_inputs is not None: require_handoff_execution(sections_result, expected_inputs, deadline, phase='elf-inspection')
+        if deadline is not None: phase_remaining(deadline, 1)
+        section_flags={}
+        for line in sections_result['stdout'].decode('utf8',errors='strict').splitlines():
+            match=re.match(r'\s*\[\s*(\d+)\]\s+(.+)',line)
+            if match:
+                columns=match.group(2).split()
+                if len(columns)==10: section_flags[match.group(1)]=columns[6]
+        reasons = []
+        for name in sorted(REQUIRED):
+            matches = [s for s in symbols if s['name'] == name]
+            expected_type = 'OBJECT' if name == 'acp_state' else 'FUNC'
+            if len(matches) != 1 or any(s['binding'] != 'GLOBAL' or s['visibility'] != 'DEFAULT' or s['index'] == 'UND' or s['type'] != expected_type for s in matches):
+                reasons.append(name+':missing-or-unsupported-export')
+            elif name == 'acp_state' and int(matches[0]['size']) != expected_state_bytes:
+                reasons.append(name+':object-size')
+            elif name == 'acp_state' and 'W' not in section_flags.get(matches[0]['index'],''):
+                reasons.append(name+':object-not-writable')
+        if deadline is not None: phase_remaining(deadline, 1)
+        return {'status':'passed' if not reasons and r['exitCode']==0 and sections_result['exitCode']==0 else 'refused','accepted':not reasons and r['exitCode']==0 and sections_result['exitCode']==0,'reasons':reasons,'symbols':symbols,'sectionFlags':section_flags,'sectionsExecution':public_result(sections_result),'execution':public_result(r)}
+    except Exception as error:
+        # A raised bounded call can still carry its ORIGINAL partial controller result.
+        partial=getattr(error,'bounded_result',None)
+        if pending=='exports' and r is None and partial is not None: r=partial
+        if pending=='sections' and sections_result is None and partial is not None: sections_result=partial
+        return unknown('export inspection unverified: '+type(error).__name__+':'+str(error)[:300])
+
 
 def layout_assertions(source, receipt):
     """Emit GCC assertions using exact builtin kinds and canonical bindings."""

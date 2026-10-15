@@ -1310,14 +1310,17 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
 
 def bounded_run(argv: list[str], cwd: Path, environment: dict[str, str], stdin: bytes = b'',
                 timeout: float | None = None, output_limit: int | None = None,
-                managed_scope: bool = False, phase: str = 'unspecified', runtime_library=None) -> dict:
+                managed_scope: bool = False, phase: str = 'unspecified', runtime_library=None, phase_deadline=None) -> dict:
     """Every worker requires contained admission/proof; launcher exit never substitutes."""
     bounds = execution_bounds(timeout, output_limit, managed_scope, phase)
+    if phase_deadline is not None:
+        _controller_metadata_timely(phase_deadline)
     if type(stdin) is not bytes or len(stdin) > bounds['supervisor']['stdinBytes']:
         raise ValueError('bounded subprocess stdin exceeds profile')
     if managed_scope is not True:
         raise ValueError('unscoped worker execution is forbidden')
-    return _run_scoped(argv, cwd, environment, stdin, bounds, provisioning=False, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
+    return _run_scoped(argv, cwd, environment, stdin, bounds, provisioning=False, **({'runtime_library':runtime_library} if runtime_library is not None else {}),
+                       **({'phase_deadline':phase_deadline} if phase_deadline is not None else {}))
 
 
 def provision_worker_monitor(output: Path) -> dict:
@@ -1334,9 +1337,16 @@ def provision_worker_monitor(output: Path) -> dict:
     return _run_scoped(argv, cwd, environment, b'', execution_bounds(managed_scope=True, phase='helper-build'), provisioning=True)
 
 
-def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_library=None):
+def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_library=None, phase_deadline=None):
     began = time.monotonic()
     supervisor = bounds['supervisor']; timeout = bounds['wallSeconds']; output_limit = bounds['outputBytesPerStream']
+    phase_end = began + timeout
+    if phase_deadline is not None:
+        _controller_metadata_timely(phase_deadline)
+        phase_end = min(phase_end,phase_deadline)
+        timeout = phase_end - began
+        if timeout <= 0: raise TimeoutError('phase expired before controller setup')
+        bounds = {**bounds,'wallSeconds':timeout}
     result = {key: False for key in ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified', 'scopeAdmitted',
                                     'captureComplete', 'waitComplete', 'cleanupVerified', 'rootReaped', 'finalAbsenceVerified',
                                     'timedOut', 'outputExceeded', 'infrastructureFailure', 'workerExecVerified', 'workerTerminationVerified')}
@@ -1356,13 +1366,13 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             # No report descriptor/channel exists for this fixed trusted compiler exception.
             os.close(receipt['fd']); receipt['fd'] = None
             receipt['path'].unlink()
-        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=began + timeout, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
+        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=phase_end, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
         result.update(workerProofBindings=launch['proofBinding'], launchInputPins=launch['pins'])
         host_environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C',
                             'HOME': str(receipt['directory']), 'TMPDIR': str(receipt['directory']),
                             'XDG_CACHE_HOME': str(receipt['directory']),
                             'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{os.getuid()}/bus'}
-        if time.monotonic() - began >= timeout:
+        if time.monotonic() >= phase_end:
             raise TimeoutError('phase expired before launcher creation')
         launch_attempted = True
         process = subprocess.Popen(launch['argv'], cwd=receipt['directory'], env=host_environment,
@@ -1382,15 +1392,15 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, label)
         while selector.get_map():
-            remaining = timeout - (time.monotonic() - began)
+            remaining = phase_end - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('bounded worker phase deadline')
             if scope_evidence is None:
-                scope_evidence = _admit_scope(receipt, launch, bounds, began + timeout)
+                scope_evidence = _admit_scope(receipt, launch, bounds, phase_end)
                 if scope_evidence is not None:
                     result.update(scopeVerified=True, kernelScope={k:v for k,v in scope_evidence.items() if not k.startswith('_')})
                     # State owns cgroup/gate handles before any authenticated release attempt.
-                    _release_scope(scope_evidence, launch, began + timeout)
+                    _release_scope(scope_evidence, launch, phase_end)
                     result.update(scopeVerified=True, scopeAdmitted=True, kernelScope={k:v for k,v in scope_evidence.items() if not k.startswith('_')})
             for key, _ in selector.select(min(remaining, supervisor['selectorPollSeconds'])):
                 block = os.read(key.fileobj.fileno(), supervisor['captureReadBytes'])
@@ -1402,9 +1412,11 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                     result['outputExceeded'] = True
                     raise ValueError('bounded worker output exceeded limit')
         result['captureComplete'] = True
-        remaining = timeout - (time.monotonic() - began)
+        remaining = phase_end - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('phase expired before wrapper wait')
+        if phase_deadline is not None and remaining < supervisor['waitFloorSeconds']:
+            raise TimeoutError('remaining phase interval below existing wait floor')
         result['launcherExitCode'] = process.wait(timeout=max(supervisor['waitFloorSeconds'], remaining))
         result['waitComplete'] = True
         if scope_evidence is None:
@@ -1511,7 +1523,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         result['cleanupElapsedSeconds'] = round(proof_began - cleanup_began, 6)
         if provisioning:
             try:
-                if launch is not None and _pin_files(launch['pins'], time.monotonic() + max(0, timeout - phase_elapsed)) != launch['pins']:
+                if launch is not None and _pin_files(launch['pins'], phase_end if phase_deadline is not None else time.monotonic() + max(0, timeout - phase_elapsed)) != launch['pins']:
                     raise ValueError('provisioning pins changed')
             except Exception:
                 result.update(infrastructureFailure=True, infrastructureReason='provisioning-input-pins-changed')
@@ -1520,7 +1532,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                     result['cleanupVerified'] and not result['outputExceeded'] and not result['timedOut']):
                 result['exitCode'] = result['launcherExitCode']
         else:
-            _finish_worker_proof(result, receipt, launch, bounds, deadline=time.monotonic() + max(0, timeout - phase_elapsed))
+            _finish_worker_proof(result, receipt, launch, bounds, deadline=phase_end if phase_deadline is not None else time.monotonic() + max(0, timeout - phase_elapsed))
         if receipt is not None and receipt.get('librarySnapshotFd') is not None:
             try:
                 os.close(receipt['librarySnapshotFd'])
@@ -1536,7 +1548,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                 cleanup_failure = cleanup_failure or failure
                 result.update(cleanupVerified=False, infrastructureFailure=True, infrastructureReason='receipt-close-failed', exitCode=None)
         result['phaseElapsedSeconds'] = round(phase_elapsed + time.monotonic() - proof_began, 6)
-        if result['phaseElapsedSeconds'] >= timeout:
+        if result['phaseElapsedSeconds'] >= timeout or phase_deadline is not None and time.monotonic() >= phase_end:
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         reclamation_failure = None
         result['_receiptCleanup'] = _reclaim_worker_receipt(receipt, result, provisioning=provisioning)
@@ -1548,7 +1560,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             if primary_failure is not None:
                 primary_failure.receiptCleanup = result['_receiptCleanup']
         result['phaseElapsedSeconds'] = round(phase_elapsed + time.monotonic() - proof_began, 6)
-        if result['phaseElapsedSeconds'] >= timeout:
+        if result['phaseElapsedSeconds'] >= timeout or phase_deadline is not None and time.monotonic() >= phase_end:
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         result['elapsedSeconds'] = round(time.monotonic() - began, 6)
         if cleanup_failure is not None:
