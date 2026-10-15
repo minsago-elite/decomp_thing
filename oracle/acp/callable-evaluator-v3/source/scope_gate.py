@@ -16,7 +16,7 @@ BASE = Path(__file__).resolve().parent
 
 
 def _read_at(directory_fd, name, maximum):
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory_fd)
     try:
         metadata = os.fstat(fd)
         if not (stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()):

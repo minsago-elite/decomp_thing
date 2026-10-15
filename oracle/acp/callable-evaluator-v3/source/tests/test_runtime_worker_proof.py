@@ -415,6 +415,33 @@ class RuntimeWorkerProof(unittest.TestCase):
         exec(compile((SOURCE/'scope_gate.py').read_bytes(),gate.__file__,'exec'),gate.__dict__)
         return gate
 
+    def test_gate_config_open_is_nonblocking_and_special_files_refuse_before_read(self):
+        gate=self.config_gate()
+        for kind in (stat.S_IFIFO,stat.S_IFDIR,stat.S_IFSOCK,stat.S_IFCHR,stat.S_IFBLK):
+            metadata=types.SimpleNamespace(st_mode=kind|0o600,st_uid=101,st_nlink=1)
+            with self.subTest(kind=kind),patch.object(gate.os,'open',return_value=123) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.os,'getuid',return_value=101),patch.object(gate.os,'read') as read,patch.object(gate.os,'close') as close:
+                with self.assertRaisesRegex(ValueError,'check 17'):
+                    gate._read_at(39,'launch.json',4)
+                opened.assert_called_once_with('launch.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=39)
+                read.assert_not_called();close.assert_called_once_with(123)
+
+    def test_gate_config_regular_reader_keeps_exact_bytes_bound_and_error_closure(self):
+        gate=self.config_gate()
+        metadata=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_uid=101,st_nlink=1)
+        cases=(([],b''),( [b'ab',b'cd'],b'abcd'),([b'ab',b'cde'],None))
+        for blocks,expected in cases:
+            with self.subTest(blocks=blocks),patch.object(gate.os,'open',return_value=123),patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.os,'getuid',return_value=101),patch.object(gate.os,'read',side_effect=[*blocks,b'']) as read,patch.object(gate.os,'close') as close:
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError,'bounded file overflow'):
+                        gate._read_at(39,'launch.json',4)
+                else:self.assertEqual(expected,gate._read_at(39,'launch.json',4))
+                self.assertEqual([(123,5),(123,3)] if expected is None else ([(123,5),(123,3),(123,1)] if blocks else [(123,5)]),[call.args for call in read.call_args_list])
+                close.assert_called_once_with(123)
+        failure=OSError('authored read failure')
+        with patch.object(gate.os,'open',return_value=123),patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.os,'getuid',return_value=101),patch.object(gate.os,'read',side_effect=failure),patch.object(gate.os,'close') as close:
+            with self.assertRaises(OSError) as caught:gate._read_at(39,'launch.json',4)
+            self.assertIs(failure,caught.exception);close.assert_called_once_with(123)
+
     def test_config_memory_commitment_and_actual_single_buffer_reader(self):
         gate=self.config_gate();config={'argv':['/usr/bin/bwrap','authored'],'schemaVersion':1}
         raw,sha=runtime._committed_config(config)
