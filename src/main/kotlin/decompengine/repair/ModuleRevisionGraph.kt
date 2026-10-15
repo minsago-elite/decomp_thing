@@ -3234,13 +3234,7 @@ internal class ModuleRevisionGraph private constructor(
                         ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
                         ModuleRevisionStatus.ROOT -> error("repair graph root cannot contain iteration metadata")
                     }
-                    if (node.status == ModuleRevisionStatus.ACCEPTED &&
-                        metadata.publicationMode == RepairPublicationMode.ACP_RELEASE
-                    ) {
-                        requireNotNull(metadata.agentInvocation) {
-                            "accepted agent-driven repair lacks invocation-bound ACP evidence: ${node.id}"
-                        }
-                    }
+                    requireRecordedAcceptedInvocation(node.status, metadata, node.id)
                     metadata.agentInvocation?.let { invocation ->
                         validateAgentInvocationBinding(
                             invocation,
@@ -3250,9 +3244,7 @@ internal class ModuleRevisionGraph private constructor(
                             verifyBlobContents,
                         )
                         if (node.status in setOf(ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.PROVISIONAL)) {
-                            require(invocation.resultChangesSha256 == agentChangeSetSha256(node.changes)) {
-                                "accepted repair changes differ from the bound ACP result: ${node.id}"
-                            }
+                            requireRecordedFinalizedChanges(invocation, node.changes, node.id)
                         }
                     }
                 }
@@ -3389,9 +3381,7 @@ internal class ModuleRevisionGraph private constructor(
                             verifyBlobContents,
                         )
                         if (pending.candidateSourceRevisionSha256 != null) {
-                            require(invocation.resultChangesSha256 == agentChangeSetSha256(pending.candidateChanges)) {
-                                "pending repair changes differ from the bound ACP result: ${pending.id}"
-                            }
+                            requireRecordedPendingChanges(invocation, pending.candidateChanges, pending.id)
                         }
                     }
                 }
@@ -3472,19 +3462,7 @@ internal class ModuleRevisionGraph private constructor(
         expectedAssessment: RepairAgentAssessmentStatus,
         verifyReceiptContents: Boolean,
     ) {
-        require(state.schemaVersion >= 2) { "legacy repair graphs cannot contain ACP receipt bindings" }
-        val expectedName = "$attemptId.acp-receipt.json"
-        require(binding.receiptPath == "reports/repair-revisions/$expectedName") {
-            "repair ACP receipt path is cross-paired with a different attempt: $attemptId"
-        }
-        require(binding.assessmentStatus == expectedAssessment) {
-            "repair ACP assessment status disagrees with graph state: $attemptId"
-        }
-        if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
-            require(binding.receiptReleaseComplete && binding.terminalOutcome == "returned-completed") {
-                "accepted repair lacks release-complete ACP evidence: $attemptId"
-            }
-        }
+        val expectedName = validateRecordedInvocationBinding(state.schemaVersion, binding, attemptId, expectedAssessment)
         if (verifyReceiptContents) {
             val receipt = stateStore.readRevisionFile(expectedName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
             require(receipt.sha256 == binding.receiptSha256) {
@@ -3937,15 +3915,7 @@ internal class ModuleRevisionGraph private constructor(
         agentChangeSetSha256(pending.candidateChanges)
 
     private fun agentChangeSetSha256(changes: List<RevisionFileDelta>): String =
-        agentFileChangeSetSha256(changes.map { change ->
-            AgentFileChange(
-                AgentWorkspacePath("project", change.path),
-                AgentFileChangeKind.MODIFIED,
-                change.beforeSha256,
-                change.afterSha256,
-                change.afterBytes,
-            )
-        })
+        recordedAgentChangeSetSha256(changes)
 
     private fun requireCurrentHead(): List<IndexedSource> {
         val expected = state.nodes.single { it.id == state.headId }.sourceRevisionSha256
@@ -4638,21 +4608,15 @@ private fun validatePendingRollbackRecord(
     }
 }
 
-private fun validateGraphBeforeRecovery(
+private data class RecordedGraphMetadata(
+    val acceptedSources: Map<String, IndexedSource>,
+    val referencedBlobSizes: Map<String, Long>,
+)
+
+private fun validateRecordedGraphHeader(
     state: RevisionGraphState,
-    profile: RepairIndexProfile,
     binding: RepairRecoveryBinding,
-    blobsDir: Path,
-    requestedBudget: RepairResourceBudget,
-): Map<String, IndexedSource> {
-    validateRepairRunContract(state)
-    require(state.budget == requestedBudget) { "revision graph resource budget differs from the requested budget" }
-    require(
-        state.profileId == profile.profileId() &&
-            state.profileSha256 == profile.configurationSha256(requestedBudget),
-    ) {
-        "revision graph repair profile fingerprint differs from the requested profile"
-    }
+): List<String> {
     require(
         binding.profileId == state.profileId &&
             binding.profileSha256 == state.profileSha256 &&
@@ -4688,12 +4652,10 @@ private fun validateGraphBeforeRecovery(
         "revision graph source paths collide with repair-owned state or projections"
     }
     require(state.editablePaths.all { it in rootPaths }) { "revision graph editable path is absent from its root" }
-    if (state.pending?.candidateSourceRevisionSha256 != null) {
-        require(profile.authorizesRecoveryLayout(rootPaths, state.editablePaths, state.budget)) {
-            "repair profile does not authorize the persisted recovery source paths"
-        }
-    }
+    return immutableList(rootPaths)
+}
 
+private fun validateRecordedGraphBody(state: RevisionGraphState, rootPaths: List<String>): RecordedGraphMetadata {
     val referencedSizes = TreeMap<String, Long>()
     fun validatePortableEvidence(kind: String?, summary: String?, artifact: String?) {
         require((kind == null) == (summary == null))
@@ -4890,6 +4852,212 @@ private fun validateGraphBeforeRecovery(
 
     val referencedBytes = referencedSizes.values.fold(0L, Math::addExact)
     require(referencedBytes == state.storedBlobBytes && referencedBytes <= state.budget.maximumStoredBlobBytes)
+    return RecordedGraphMetadata(
+        Collections.unmodifiableMap(TreeMap(accepted)),
+        Collections.unmodifiableMap(TreeMap(referencedSizes)),
+    )
+}
+
+private fun requireRecordedAcceptedInvocation(
+    status: ModuleRevisionStatus,
+    metadata: RevisionRepairMetadata,
+    attemptId: String,
+) {
+    if (status == ModuleRevisionStatus.ACCEPTED && metadata.publicationMode == RepairPublicationMode.ACP_RELEASE) {
+        requireNotNull(metadata.agentInvocation) {
+            "accepted agent-driven repair lacks invocation-bound ACP evidence: $attemptId"
+        }
+    }
+}
+
+private fun validateRecordedInvocationBinding(
+    schemaVersion: Int,
+    binding: RepairAgentInvocationBinding,
+    attemptId: String,
+    expectedAssessment: RepairAgentAssessmentStatus,
+): String {
+    require(schemaVersion >= 2) { "legacy repair graphs cannot contain ACP receipt bindings" }
+    val expectedName = "$attemptId.acp-receipt.json"
+    require(binding.receiptPath == "reports/repair-revisions/$expectedName") {
+        "repair ACP receipt path is cross-paired with a different attempt: $attemptId"
+    }
+    require(binding.assessmentStatus == expectedAssessment) {
+        "repair ACP assessment status disagrees with graph state: $attemptId"
+    }
+    if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
+        require(binding.receiptReleaseComplete && binding.terminalOutcome == "returned-completed") {
+            "accepted repair lacks release-complete ACP evidence: $attemptId"
+        }
+    }
+    return expectedName
+}
+
+private fun requireRecordedFinalizedChanges(binding: RepairAgentInvocationBinding, changes: List<RevisionFileDelta>, attemptId: String) {
+    require(binding.resultChangesSha256 == recordedAgentChangeSetSha256(changes)) {
+        "accepted repair changes differ from the bound ACP result: $attemptId"
+    }
+}
+
+private fun requireRecordedPendingChanges(binding: RepairAgentInvocationBinding, changes: List<RevisionFileDelta>, attemptId: String) {
+    require(binding.resultChangesSha256 == recordedAgentChangeSetSha256(changes)) {
+        "pending repair changes differ from the bound ACP result: $attemptId"
+    }
+}
+
+private fun recordedAgentChangeSetSha256(changes: List<RevisionFileDelta>): String =
+    agentFileChangeSetSha256(changes.map { change ->
+        AgentFileChange(
+            AgentWorkspacePath("project", change.path),
+            AgentFileChangeKind.MODIFIED,
+            change.beforeSha256,
+            change.afterSha256,
+            change.afterBytes,
+        )
+    })
+
+private fun validateRecordedAgentAssociations(state: RevisionGraphState) {
+    state.nodes.forEach { node ->
+        node.repairMetadata?.let { metadata ->
+            if (state.schemaVersion == 1) {
+                require(metadata.agentInvocation == null) { "legacy repair graph contains schema-v2 ACP invocation evidence" }
+            } else {
+                val assessment = when (node.status) {
+                    ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.LEGACY_UNVERIFIED -> RepairAgentAssessmentStatus.ACCEPTED
+                    ModuleRevisionStatus.PROVISIONAL -> RepairAgentAssessmentStatus.PROVISIONAL
+                    ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
+                    ModuleRevisionStatus.ROOT -> error("repair graph root cannot contain iteration metadata")
+                }
+                requireRecordedAcceptedInvocation(node.status, metadata, node.id)
+                metadata.agentInvocation?.let { binding ->
+                    validateRecordedInvocationBinding(state.schemaVersion, binding, node.id, assessment)
+                    if (node.status in setOf(ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.PROVISIONAL)) {
+                        requireRecordedFinalizedChanges(binding, node.changes, node.id)
+                    }
+                }
+            }
+        }
+    }
+    state.pending?.let { pending -> pending.repairMetadata?.let { metadata ->
+        if (state.schemaVersion == 1) {
+            require(metadata.agentInvocation == null) { "legacy pending repair contains schema-v2 ACP invocation evidence" }
+        } else metadata.agentInvocation?.let { binding ->
+            validateRecordedInvocationBinding(state.schemaVersion, binding, pending.id, RepairAgentAssessmentStatus.PENDING)
+            if (pending.candidateSourceRevisionSha256 != null) {
+                requireRecordedPendingChanges(binding, pending.candidateChanges, pending.id)
+            }
+        }
+    } }
+}
+
+/**
+ * In-memory semantic facade only. Caller admission/descriptor continuity is a separate reader layer.
+ * No profile/index/store/recovery/source/blob/receipt operation is reachable from this branch.
+ */
+internal fun recordedRepairHistorySnapshot(
+    graphPayload: ByteArray,
+    recoveryBindingPayload: ByteArray,
+    requestedBudget: RepairResourceBudget,
+    declaredGraphs: List<RepairHistoryDeclaredGraph> = emptyList(),
+): RepairHistorySnapshot = try {
+    require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= revisionGraphReadLimit(requestedBudget))
+    require(recoveryBindingPayload.isNotEmpty() &&
+        recoveryBindingPayload.size.toLong() <= requestedBudget.maximumGraphBytes)
+    val graphBytes = graphPayload.copyOf()
+    val bindingBytes = recoveryBindingPayload.copyOf()
+    val canonical = parseCanonicalGraph(graphBytes, "recorded repair graph")
+    val state = canonical.state
+    require(state.budget == requestedBudget)
+    requireRevisionGraphByteBudget(state, graphBytes.size.toLong(), canonical.nullNodeWire) { consume ->
+        var examined = 0
+        var remaining = requestedBudget.maximumIndexEvidenceBytes
+        val names = HashSet<String>()
+        for (input in declaredGraphs) {
+            examined = Math.addExact(examined, 1)
+            require(examined <= requestedBudget.maximumStateDirectoryEntries)
+            require(DECLARED_LEGACY_GRAPH_NAME.matches(input.name) && names.add(input.name))
+            require(input.bytes.isNotEmpty() &&
+                input.bytes.size.toLong() <= minOf(requestedBudget.maximumGraphBytes, remaining))
+            remaining -= input.bytes.size.toLong()
+            consume(input.name, input.bytes.copyOf())
+        }
+    }
+    val binding = parseCanonicalRecoveryBinding(bindingBytes)
+    validateRepairRunContract(state)
+    val rootPaths = validateRecordedGraphHeader(state, binding)
+    validateRecordedGraphBody(state, rootPaths)
+    validateRecordedAgentAssociations(state)
+    recordedHistoryView(state, sha256(graphBytes), canonical.nullNodeWire)
+} catch (_: Throwable) {
+    // Never retain a private parser message, source path, cause or suppressed exception.
+    throw RepairHistorySnapshotRefusal()
+}
+
+private fun recordedHistoryView(
+    state: RevisionGraphState,
+    graphSha256: String,
+    wire: NullRollbackNodeWire,
+): RepairHistorySnapshot {
+    val identities = RepairHistoryIdentityReferences(state.regressionCorpusSha256)
+    fun identity(value: String?) = value?.let(identities::revision)
+    fun invocation(value: RepairAgentInvocationBinding?) = value?.let {
+        RepairRecordedInvocation(it.receiptSha256, it.requestSha256, it.resultChangesSha256, it.assessmentStatus)
+    }
+    fun rollback(value: RepairRollbackRecord?) = value?.let {
+        RepairRecordedRollback(it.schemaVersion, identities.revision(it.attemptId), identity(it.runId),
+            identities.revision(it.targetRevisionId), it.expectedSourceRevisionSha256, it.state,
+            it.failureStage, it.failureCode, it.observedSourceRevisionSha256, it.legacyPendingStateUnknown,
+            it.candidateSourceInstallStarted)
+    }
+    val attempts = state.nodes.filter { it.status != ModuleRevisionStatus.ROOT }.map { node ->
+        RepairRecordedAttempt(RepairRecordedAttemptKind.FINALIZED, identities.revision(node.id),
+            identity(node.parentId), node.ordinal,
+            if (state.schemaVersion < 3 && node.status == ModuleRevisionStatus.ACCEPTED) ModuleRevisionStatus.LEGACY_UNVERIFIED else node.status,
+            node.sourceRevisionSha256,
+            identity(node.repairMetadata?.runId), node.repairMetadata?.publicationMode, rollback(node.rollbackRecord),
+            invocation(node.repairMetadata?.agentInvocation),
+            node.repairMetadata?.retainedRegressionIds.orEmpty().map(identities::case))
+    }
+    val pending = state.pending?.let {
+        RepairRecordedAttempt(RepairRecordedAttemptKind.PENDING, identities.revision(it.id), identity(it.parentId),
+            it.ordinal, null, it.candidateSourceRevisionSha256, identity(it.repairMetadata?.runId),
+            it.repairMetadata?.publicationMode, rollback(it.rollbackRecord), invocation(it.repairMetadata?.agentInvocation),
+            it.repairMetadata?.retainedRegressionIds.orEmpty().map(identities::case))
+    }
+    val runs = state.runs.map {
+        RepairRecordedRun(it.schemaVersion, identities.revision(it.id), it.status, identities.revision(it.baselineId),
+            identity(it.acceptedHeadId), identity(it.provisionalHeadId), it.regressionCorpusSha256, it.maximumAttempts,
+            it.attemptedCount, it.startedEpochMillis, it.deadlineEpochMillis, identity(it.rollbackFailureAttemptId),
+            it.rollbackResolution)
+    }
+    return RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
+        state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
+        identity(state.fullyAcceptedHeadId), runs, attempts, pending,
+        state.retainedRegressionInputs.map { identities.case(it.id) })
+}
+
+private fun validateGraphBeforeRecovery(
+    state: RevisionGraphState,
+    profile: RepairIndexProfile,
+    binding: RepairRecoveryBinding,
+    blobsDir: Path,
+    requestedBudget: RepairResourceBudget,
+): Map<String, IndexedSource> {
+    validateRepairRunContract(state)
+    require(state.budget == requestedBudget) { "revision graph resource budget differs from the requested budget" }
+    require(
+        state.profileId == profile.profileId() &&
+            state.profileSha256 == profile.configurationSha256(requestedBudget),
+    ) {
+        "revision graph repair profile fingerprint differs from the requested profile"
+    }
+    val rootPaths = validateRecordedGraphHeader(state, binding)
+    if (state.pending?.candidateSourceRevisionSha256 != null) {
+        require(profile.authorizesRecoveryLayout(rootPaths, state.editablePaths, state.budget)) {
+            "repair profile does not authorize the persisted recovery source paths"
+        }
+    }
+
+    val (accepted, referencedSizes) = validateRecordedGraphBody(state, rootPaths)
     referencedSizes.forEach { (digest, expectedBytes) ->
         val blob = readStableRegularFile(blobsDir, digest, state.budget.maximumSourceFileBytes)
         require(blob.sha256 == digest && blob.bytes.size.toLong() == expectedBytes) {
