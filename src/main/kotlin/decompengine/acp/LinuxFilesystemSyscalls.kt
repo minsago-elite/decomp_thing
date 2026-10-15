@@ -316,6 +316,55 @@ internal object LinuxFilesystemSyscalls {
         0L
     }
 
+    /** Owns only eight scratch bytes; the event descriptor remains borrowed from its scope. */
+    class MountMetadataPollScratch(private val handle: LinuxDescriptor) : AutoCloseable {
+        private var closed = false
+        private val descriptorCount = NativeLong(1)
+        // Allocate this callback once, not at each protected checkpoint.
+        private val pollAction: (Int) -> Long = { descriptor -> pollDescriptor(descriptor, null) }
+        // Allocate native storage last: no subsequent callback/object initialization can fail.
+        private val polled = Memory(POLLFD_BYTES.toLong())
+
+        /** Production has no query argument and hardwires the native poll below. */
+        @Synchronized
+        fun poll(): Long {
+            check(!closed) { "mount event poll scratch is closed" }
+            return handle.whileOpen(pollAction)
+        }
+
+        // Private reflection seam mirrors the statx-query controls: never a production permit.
+        @Synchronized
+        private fun pollWith(query: (Memory) -> Int): Long {
+            check(!closed) { "mount event poll scratch is closed" }
+            return handle.whileOpen { descriptor -> pollDescriptor(descriptor, query) }
+        }
+
+        private fun pollDescriptor(descriptor: Int, query: ((Memory) -> Int)?): Long {
+            // These original field writes reset all eight bytes, including prior revents.
+            polled.setInt(0, descriptor)
+            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
+            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            while (true) {
+                val result = if (query == null) libc.poll(polled, descriptorCount, 0) else query(polled)
+                // Capture errno before any other native memory/cleanup operation can alter it.
+                val error = if (result < 0) Native.getLastError() else 0
+                if (result >= 0) {
+                    val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    return (result.toLong() shl 32) or events.toLong()
+                }
+                if (error != EINTR) throw LinuxSyscallException("inspect host mount metadata events", error)
+            }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            polled.close()
+        }
+    }
+
     fun mountMetadataPollChanged(observation: Long): Boolean =
         observation ushr 32 > 0 && observation.toInt() and (POLLPRI or POLLERR) != 0
 

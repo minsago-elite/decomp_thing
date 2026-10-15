@@ -16,6 +16,159 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `owned mount poll scratch resets stale bytes isolates scopes and never caches observations`() {
+        val firstHandle = scriptedMountHandle(-101)
+        val secondHandle = scriptedMountHandle(-102)
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(firstHandle).use { first ->
+            LinuxFilesystemSyscalls.MountMetadataPollScratch(secondHandle).use { second ->
+                var firstBuffer: com.sun.jna.Memory? = null
+                var secondBuffer: com.sun.jna.Memory? = null
+                var calls = 0
+                val changed = listOf(0, 2, 0).map { event ->
+                    val observation = scriptedMountPoll(first) { buffer ->
+                        calls++
+                        assertEquals(8L, buffer.size())
+                        assertEquals(-101, buffer.getInt(0))
+                        assertEquals(10, buffer.getShort(4).toInt()) // POLLPRI | POLLERR
+                        assertEquals(0, buffer.getShort(6).toInt())
+                        if (firstBuffer == null) firstBuffer = buffer else assertTrue(firstBuffer === buffer)
+                        buffer.setShort(6, event.toShort())
+                        1
+                    }
+                    LinuxFilesystemSyscalls.mountMetadataPollChanged(observation)
+                }
+                assertEquals(listOf(false, true, false), changed) // Scope latch is separate; scratch never caches.
+                assertEquals(3, calls)
+                scriptedMountPoll(second) { buffer ->
+                    secondBuffer = buffer
+                    assertEquals(-102, buffer.getInt(0))
+                    assertEquals(0, buffer.getShort(6).toInt())
+                    0
+                }
+                assertTrue(firstBuffer !== secondBuffer)
+                val raw = scriptedMountPoll(first) { buffer -> buffer.setShort(6, 0x8002.toShort()); 1 }
+                assertEquals((1L shl 32) or 0x8002L, raw)
+                assertTrue(LinuxFilesystemSyscalls.mountMetadataPollChanged(raw))
+                val zero = scriptedMountPoll(first) { buffer -> buffer.setShort(6, 8); 0 }
+                assertFalse(LinuxFilesystemSyscalls.mountMetadataPollChanged(zero))
+            }
+        }
+        assertEquals(-101, firstHandle.whileOpen { it }) // Scratch must not close the borrowed descriptors.
+        assertEquals(-102, secondHandle.whileOpen { it })
+    }
+
+    @Test
+    fun `owned mount poll keeps EINTR errno invalid and hangup semantics`() {
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedMountHandle(-103)).use { scratch ->
+            var attempts = 0
+            val observation = scriptedMountPoll(scratch) { buffer ->
+                attempts++
+                if (attempts == 1) { com.sun.jna.Native.setLastError(4); -1 }
+                else { buffer.setShort(6, 2); 1 }
+            }
+            assertEquals(2, attempts)
+            assertTrue(LinuxFilesystemSyscalls.mountMetadataPollChanged(observation))
+            attempts = 0
+            val failure = assertFailsWith<LinuxSyscallException> {
+                scriptedMountPoll(scratch) { _ -> attempts++; com.sun.jna.Native.setLastError(5); -1 }
+            }
+            assertEquals(1, attempts)
+            assertEquals(5, failure.errno)
+            assertEquals("inspect host mount metadata events failed with errno 5", failure.message)
+            for (events in listOf(16, 32)) { // POLLHUP and POLLNVAL remain refused.
+                attempts = 0
+                val invalid = assertFailsWith<IOException> {
+                    scriptedMountPoll(scratch) { buffer -> attempts++; buffer.setShort(6, events.toShort()); 1 }
+                }
+                assertEquals(1, attempts)
+                assertEquals("mountinfo event descriptor is invalid", invalid.message)
+            }
+            assertEquals(0L, scriptedMountPoll(scratch) { buffer ->
+                assertEquals(0, buffer.getShort(6).toInt())
+                0
+            })
+        }
+    }
+
+    @Test
+    fun `owned mount poll close and closed borrowed handle refuse before query`() {
+        val handle = scriptedMountHandle(-104)
+        val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+        var queries = 0
+        scratch.close(); scratch.close()
+        assertFailsWith<IllegalStateException> { scriptedMountPoll(scratch) { queries++; 0 } }
+        assertFailsWith<IllegalStateException> { scratch.poll() } // Must refuse before hardwired native poll.
+        assertEquals(0, queries)
+        assertEquals(-104, handle.whileOpen { it })
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(handle).use { active ->
+            LinuxDescriptor::class.java.getDeclaredField("ownsDescriptor").apply { isAccessible = true }.setBoolean(handle, false)
+            assertFailsWith<IllegalStateException> { scriptedMountPoll(active) { queries++; 0 } }
+            assertEquals(0, queries)
+        }
+    }
+
+    @Test
+    fun `owned mount poll close waits for in flight query before freeing its buffer`() {
+        val handle = scriptedMountHandle(-105)
+        val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+        val memory = CountingMountPollMemory()
+        replaceMountPollMemory(scratch, memory)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val closeStarted = java.util.concurrent.CountDownLatch(1)
+        val closeDone = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val poll = executor.submit<Long> { scriptedMountPoll(scratch) { buffer ->
+                entered.countDown()
+                assertTrue(release.await(2, TimeUnit.SECONDS))
+                assertEquals(0, memory.closes)
+                buffer.setShort(6, 2)
+                1
+            } }
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            val closing = executor.submit { closeStarted.countDown(); scratch.close(); closeDone.countDown() }
+            assertTrue(closeStarted.await(2, TimeUnit.SECONDS))
+            assertFalse(closeDone.await(50, TimeUnit.MILLISECONDS))
+            assertEquals(0, memory.closes)
+            release.countDown()
+            assertTrue(LinuxFilesystemSyscalls.mountMetadataPollChanged(poll.get(2, TimeUnit.SECONDS)))
+            closing.get(2, TimeUnit.SECONDS)
+            assertEquals(1, memory.closes)
+            scratch.close()
+            assertEquals(1, memory.closes)
+            assertEquals(-105, handle.whileOpen { it })
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+            scratch.close()
+        }
+    }
+
+    private fun scriptedMountHandle(fd: Int) = LinuxDescriptor(fd,
+        LinuxFileIdentity(LinuxFileKey(0, 0), 0, 0, 0, 1, 1, false, false, false))
+
+    private fun scriptedMountPoll(
+        scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch,
+        query: (com.sun.jna.Memory) -> Int,
+    ): Long = try {
+        val method = scratch.javaClass.getDeclaredMethod("pollWith", Function1::class.java).apply { isAccessible = true }
+        method.invoke(scratch, query) as Long
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+    private class CountingMountPollMemory : com.sun.jna.Memory(8) {
+        @Volatile var closes = 0
+        override fun close() { closes++; super.close() }
+    }
+
+    private fun replaceMountPollMemory(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("polled").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    @Test
     fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
         var clock = 0L
         val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {
