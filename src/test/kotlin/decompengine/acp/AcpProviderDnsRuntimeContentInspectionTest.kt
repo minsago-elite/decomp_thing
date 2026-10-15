@@ -14,7 +14,8 @@ import kotlin.test.assertTrue
 /** Inert byte fixtures only; no native loading, extraction, approval or runtime assembly. */
 class AcpProviderDnsRuntimeContentInspectionTest {
     private val loader = "native/ld-linux-x86-64.so.2"
-    private fun elf(soname: String? = null, interpreter: Boolean = false, needed: String? = null): ByteArray {
+    private fun elf(soname: String? = null, interpreter: Boolean = false, needed: String? = null,
+        extraDynamicTags: List<Pair<Long, Long>> = emptyList()): ByteArray {
         val bytes = ByteArray(1024)
         val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         byteArrayOf(127, 69, 76, 70, 2, 1, 1).copyInto(bytes)
@@ -30,6 +31,7 @@ class AcpProviderDnsRuntimeContentInspectionTest {
         val tags = mutableListOf(5L to 0x4002bcL, 10L to strings.length.toLong())
         if (soname != null) tags += 14L to 1L
         if (needed != null) tags += 1L to (1 + (soname?.length?.plus(1) ?: 0)).toLong()
+        tags += extraDynamicTags
         tags += 0L to 0L
         ph(120, 2, 512, tags.size * 16L)
         tags.forEachIndexed { i, tag -> b.putLong(512 + i * 16, tag.first); b.putLong(520 + i * 16, tag.second) }
@@ -97,6 +99,48 @@ class AcpProviderDnsRuntimeContentInspectionTest {
                 "$root/native:$root/jdk/lib:$root/jdk/lib/server", "$root/jdk/bin/java").map(::JsonPrimitive)))
         }.toString().toByteArray()
     }
+    @Test fun `every writable executable load is refused independently of read permission`() {
+        for (flags in listOf(3, 7)) {
+            val objectBytes = elf("libextra.so").also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(68, flags) }
+            assertFails { AcpProviderDnsElfInspection.inspect(objectBytes) }
+            val p = payloads().apply { put("jdk/lib/libextra.so", objectBytes) }
+            assertFails { inspect(p) }
+        }
+        for (flags in listOf(0, 1, 2, 4, 5, 6)) {
+            val objectBytes = elf("libextra.so").also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(68, flags) }
+            assertEquals("libextra.so", AcpProviderDnsElfInspection.inspect(objectBytes).soname)
+        }
+    }
+
+    @Test fun `SONAME dependency providers must be ET_DYN while both launcher types remain admissible`() {
+        for (type in listOf(2, 3)) {
+            val p = payloads().apply { put("jdk/bin/java", elf(interpreter = true).also {
+                ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putShort(16, type.toShort())
+            }) }
+            assertTrue(inspect(p).objects.containsKey("jdk/bin/java"))
+        }
+        val provider = elf("libextra.so")
+        assertEquals("libextra.so", AcpProviderDnsElfInspection.inspect(provider).soname)
+        val p = payloads().apply { put("jdk/lib/libextra.so", provider) }
+        assertTrue(inspect(p).objects.containsKey("jdk/lib/libextra.so"))
+        val executableProvider = provider.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putShort(16, 2) }
+        assertFails { AcpProviderDnsElfInspection.inspect(executableProvider) }
+        // Matching path, SONAME and graph edges cannot turn an executable into a provider.
+        p["jdk/lib/libextra.so"] = executableProvider
+        assertFails { inspect(p) }
+    }
+
+    @Test fun `DT_TEXTREL presence and DF_TEXTREL each refuse text relocations`() {
+        for (value in listOf(0L, 1L)) {
+            val objectBytes = elf("libextra.so", extraDynamicTags = listOf(22L to value, 30L to 0L))
+            assertFails { AcpProviderDnsElfInspection.inspect(objectBytes) }
+            val p = payloads().apply { put("jdk/lib/libextra.so", objectBytes) }
+            assertFails { inspect(p) }
+        }
+        assertFails { AcpProviderDnsElfInspection.inspect(elf("libextra.so", extraDynamicTags = listOf(30L to 4L))) }
+        assertEquals("libextra.so", AcpProviderDnsElfInspection.inspect(elf("libextra.so", extraDynamicTags = listOf(30L to 0L))).soname)
+    }
+
     @Test fun `composed parsed manifest ingress inspects all payloads and binds supported extra library`() {
         val p = manifestPayloads(); val bytes = manifest(p); val opened = mutableSetOf<String>()
         assertFails { AcpProviderDnsRuntimeProfiles.validateCandidate("{}".toByteArray()) {

@@ -52,7 +52,7 @@ internal object AcpProviderDnsElfInspection {
             require(alignment == 0L || alignment and (alignment - 1) == 0L && alignment <= 2L * 1024 * 1024 && offset % alignment == address % alignment)
             if (type == 0x6474e551L) require(flags and 1L == 0L)
             when (type) {
-                1L -> { require(flags and 7L != 7L)
+                1L -> { require(flags and 3L != 3L)
                     mappedMemory = dnsCharge(mappedMemory, memory, AcpProviderDnsRuntimeProfiles.MAXIMUM_BYTES)
                     loads += Load(offset, address, size, memory) }
                 2L -> { require(dynamic == null && size in 16..65536 && size % 16 == 0L); dynamic = Triple(offset, address, size) }
@@ -83,6 +83,7 @@ internal object AcpProviderDnsElfInspection {
                 else if (tag == 0L) { require(value == 0L); terminated = true }
                 else {
                     require(tag != 15L && tag != 29L) { "unsupported ELF RPATH/RUNPATH" }
+                    require(tag != 22L) { "unsupported ELF text relocations" }
                     require(tag !in setOf(0x6ffffefaL, 0x6ffffefbL, 0x6ffffefcL, 0x7fffffffL, 0x7ffffffdL)) { "unsupported ELF external loading directive" }
                     require(tag in (1L..14L) || tag in (16L..28L) || tag in (30L..37L) ||
                         tag in setOf(0x6ffffef5L, 0x6ffffff0L, 0x6ffffff9L, 0x6ffffffaL, 0x6ffffffbL, 0x6ffffffcL, 0x6ffffffdL, 0x6ffffffeL, 0x6fffffffL))
@@ -101,6 +102,7 @@ internal object AcpProviderDnsElfInspection {
         fun name(index: Long) = string(index).also { require(it.matches(Regex("[A-Za-z0-9_.+~-]{1,255}"))) }
         val needed = neededOffsets.map(::name); require(needed.distinct().size == needed.size)
         val soname = tags[14L]?.let(::name)
+        require(soname == null || u16(16) == 3) { "ELF SONAME provider must be ET_DYN" }
         val versionIndices = mutableSetOf(0, 1)
         val definitions = linkedSetOf<String>(); val parentVersions = linkedSetOf<String>(); val requirements = linkedMapOf<String, Set<String>>()
         fun records(addressTag: Long, countTag: Long, bytesPerRecord: Long, action: (Int, Long) -> Long) {
