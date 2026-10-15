@@ -254,15 +254,161 @@ def _nonprivileged_executable(path: Path, deadline=None) -> dict:
         os.close(descriptor)
 
 
-def load_worker_monitor_binding() -> dict:
+# Reviewed source expectations, not a mutable manifest or discovered generation.
+# pin_environment must be rebound here after any reviewed injection/loader edit.
+_MONITOR_LOADER_SOURCES = (
+    ('toolchain-001/pin_environment.py', 10310, '3874bc92ba6befb9da9c71a08a21a509ac3c11dc089b3fc1d5ed356dcf7d84a2'),
+    ('toolchain-001/link_inputs.py', 38357, '8e36065f38aed067c758cf7e6b0420228aa8074d023e4ebbf57b3b7ffbea7176'),
+    ('toolchain-001/monitor_inputs.py', 14964, '0cab347a7874162840bdda8b0dc138782657ddaf592b8e3a51b3c59c731838d1'),
+)
+
+
+def _monitor_loader_timely(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('phase expired during authenticated monitor loader')
+
+
+def _capture_monitor_source(path, expected_size, deadline=None):
+    """Stable finite source bytes; checks refuse late completion, not preempt syscalls."""
+    _monitor_loader_timely(deadline)
+    path = Path(path)
+    if (not path.is_absolute() or '..' in path.parts or len(path.parts) > 128 or
+            len(str(path)) > 4096 or not path.name or
+            type(expected_size) is not int or not 0 < expected_size <= 16777216):
+        raise ValueError('fixed monitor loader source bound')
+    # At most root +126 parent components +leaf. Ownership precedes the post-open check.
+    descriptors = [None] * 128
+    count = 0
+    directories = []
+    primary = None
+    def checked(operation, *args, **kwargs):
+        _monitor_loader_timely(deadline)
+        value = operation(*args, **kwargs)
+        _monitor_loader_timely(deadline)
+        return value
+    def opened(name, flags, **kwargs):
+        nonlocal count
+        _monitor_loader_timely(deadline)
+        descriptor = os.open(name, flags, **kwargs)
+        descriptors[count] = descriptor
+        count += 1
+        _monitor_loader_timely(deadline)
+        return descriptor
+    def version(metadata):
+        return tuple(getattr(metadata, key) for key in
+            ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns'))
+    def directory_version(metadata):
+        return tuple(getattr(metadata, key) for key in ('st_dev','st_ino','st_mode','st_uid','st_gid'))
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = opened('/', flags)
+        metadata = checked(os.fstat, descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('loader source parent must be directory')
+        directories.append((descriptor, None, None, directory_version(metadata)))
+        for component in path.parts[1:-1]:
+            parent = descriptor
+            descriptor = opened(component, flags, dir_fd=parent)
+            metadata = checked(os.fstat, descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError('loader source parent must be directory')
+            expected = directory_version(metadata)
+            if directory_version(checked(os.stat, component, dir_fd=parent, follow_symlinks=False)) != expected:
+                raise ValueError('loader source parent changed during admission')
+            directories.append((descriptor, parent, component, expected))
+        parent = descriptor
+        descriptor = opened(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        before = checked(os.fstat, descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+            raise ValueError('loader source exact regular byte length differs')
+        expected = version(before)
+        if version(checked(os.stat, path.name, dir_fd=parent, follow_symlinks=False)) != expected:
+            raise ValueError('loader source changed before read')
+        remaining = expected_size
+        chunks = []
+        while remaining:
+            block = checked(os.read, descriptor, min(65536, remaining))
+            if not block:
+                raise ValueError('loader source truncated')
+            remaining -= len(block)
+            chunks.append(block)
+        if checked(os.read, descriptor, 1):
+            raise ValueError('loader source grew')
+        if (version(checked(os.fstat, descriptor)) != expected or
+                version(checked(os.stat, path.name, dir_fd=parent, follow_symlinks=False)) != expected):
+            raise ValueError('loader source changed during read')
+        for held, ancestor, name, expected in directories:
+            if directory_version(checked(os.fstat, held)) != expected:
+                raise ValueError('loader source held parent changed')
+            named = checked(os.stat, '/', follow_symlinks=False) if ancestor is None else checked(
+                os.stat, name, dir_fd=ancestor, follow_symlinks=False)
+            if directory_version(named) != expected:
+                raise ValueError('loader source named parent changed')
+        raw = b''.join(chunks)
+        _monitor_loader_timely(deadline)
+        return raw
+    except BaseException as failure:
+        primary = failure
+        raise
+    finally:
+        close_failure = None
+        while count:
+            count -= 1
+            descriptor = descriptors[count]
+            descriptors[count] = None
+            try:
+                os.close(descriptor)
+            except BaseException as failure:
+                if close_failure is None:
+                    close_failure = failure
+        if close_failure is not None:
+            if primary is None:
+                raise close_failure
+            if close_failure is not primary:
+                try:
+                    primary.sourceSnapshotCloseFailure = close_failure
+                except BaseException:
+                    pass
+        if primary is None:
+            _monitor_loader_timely(deadline)
+
+
+def _authenticated_monitor_loader(deadline=None):
+    captured = {}
+    for relative, size, expected in _MONITOR_LOADER_SOURCES:
+        _monitor_loader_timely(deadline)
+        raw = _capture_monitor_source(BASE / relative, size, deadline)
+        _monitor_loader_timely(deadline)
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError('authenticated monitor loader source bytes differ')
+        _monitor_loader_timely(deadline)
+        captured[relative] = raw
+    # No module source executes until every expected byte string is authenticated.
+    modules = {}
+    for key, name in (('link_inputs', '_v3_monitor_link_inputs'), ('monitor_inputs', '_v3_monitor_inputs'),
+                      ('pin_environment', '_v3_monitor_pin_environment')):
+        _monitor_loader_timely(deadline)
+        relative = 'toolchain-001/' + key + '.py'
+        module = type(os)(name)
+        module.__file__ = str(BASE / relative)
+        if key == 'pin_environment':
+            module._runtime_dependencies = {'link_inputs':modules['link_inputs'], 'monitor_inputs':modules['monitor_inputs']}
+        _monitor_loader_timely(deadline)
+        code = compile(captured[relative], module.__file__, 'exec')
+        _monitor_loader_timely(deadline)
+        exec(code, module.__dict__)
+        _monitor_loader_timely(deadline)
+        modules[key] = module
+    return modules['pin_environment']
+
+
+def load_worker_monitor_binding(deadline=None) -> dict:
     """Read/revalidate the fixed A3 byte closure; UNQUALIFIED is not production authority."""
     profile, _ = load_profile_with_digest()
-    source = BASE / 'toolchain-001/pin_environment.py'
-    # Compile the fixed source bytes, not a worker-writable sibling bytecode cache.
-    module = type(os)('callable_v3_runtime_monitor_pin')
-    module.__file__ = str(source)
-    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+    module = _authenticated_monitor_loader(deadline)
+    _monitor_loader_timely(deadline)
     binding = module.load_monitor_binding(profile)
+    _monitor_loader_timely(deadline)
     required = {'binaryPath', 'binarySha256', 'sourceSha256', 'protocolSha256', 'parserSha256',
                 'dependencies', 'manifestSha256', 'environmentPinSha256'}
     if not isinstance(binding, dict) or not required <= set(binding) or not binding['dependencies']:
@@ -289,6 +435,7 @@ def load_worker_monitor_binding() -> dict:
                 digest(Path(item['path'])) != item['sha256']):
             raise ValueError('monitor dependency inventory changed')
         paths.add(item['path'])
+    _monitor_loader_timely(deadline)
     return binding
 
 
@@ -303,9 +450,10 @@ def _recorded_compiler_inputs(recipe, target, deadline=None):
         raise ValueError('recorded compiler executable identity changed')
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError('phase expired before compiler recording validation')
-    source = BASE / 'toolchain-001/pin_environment.py'
-    module = _fixed_source_module(source, '_v3_recorded_compiler_pin')
+    module = _authenticated_monitor_loader(deadline)
+    _monitor_loader_timely(deadline)
     binding = module.load_compiler_binding(profile)
+    _monitor_loader_timely(deadline)
     required = {'status', 'scope', 'environmentPinSha256', 'closureSha256', 'driverArgv',
                 'workingDirectory', 'environment', 'dependencies', 'closure'}
     if (type(binding) is not dict or set(binding) != required or
@@ -1081,7 +1229,7 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
         common += [Path('/usr/bin/gcc'), BASE / 'worker_exec_monitor.c']
     else:
         recipe = _contained_recipe(argv, cwd)
-        binding = load_worker_monitor_binding()
+        binding = load_worker_monitor_binding(deadline=deadline)
         target = _nonprivileged_executable(recipe['target'], deadline)
         compiler_recording = _recorded_compiler_inputs(recipe, target, deadline)
         if compiler_recording is not None:
@@ -1140,6 +1288,10 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
             monitor_argv[index:index] = ['--library-device', str(library['device']), '--library-inode', str(library['inode']), '--library-size', str(library['size'])]
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
     pins = _pin_files(common, deadline)
+    if not provisioning:
+        for relative, _, expected in _MONITOR_LOADER_SOURCES:
+            if pins.get(str(BASE / relative), {}).get('sha256') != expected:
+                raise ValueError('authenticated monitor loader source launch pin differs')
     profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
     if type(profile_pin) is not dict or profile_pin.get('sha256') != bounds['profileSha256']:
         raise ValueError('launch profile pin differs from admitted bounds profile')

@@ -111,14 +111,16 @@ class RuntimeWorkerProof(unittest.TestCase):
             for mutation in (None,'missing','wrong','rekeyed'):
                 with self.subTest(provisioning=provisioning,mutation=mutation):
                     pins={key:{'device':70,'inode':71,'mode':0o400,'sha256':profile_sha}}
-                    if mutation=='missing':pins.clear()
+                    pins.update({str(runtime.BASE/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
+                        for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+                    if mutation=='missing':pins.pop(key)
                     if mutation=='wrong':pins[key]['sha256']='f'*64
                     if mutation=='rekeyed':pins['/authored/other-profile.json']=pins.pop(key)
                     receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
                     with ExitStack() as effects:
                         for target_object,name,effect in ((Path,'stat',lambda *a,**k:types.SimpleNamespace(st_dev=5,st_ino=6)),
                                 (Path,'lstat',lambda *a,**k:types.SimpleNamespace(st_dev=1,st_ino=2)),
-                                (runtime,'_contained_recipe',lambda *a:recipe),(runtime,'load_worker_monitor_binding',lambda:binding),
+                                (runtime,'_contained_recipe',lambda *a:recipe),(runtime,'load_worker_monitor_binding',lambda deadline=None:binding),
                                 (runtime,'_nonprivileged_executable',executable),(runtime,'_recorded_compiler_inputs',lambda *a:None),
                                 (runtime,'load_profile_with_digest',lambda:(profile,profile_sha)),
                                 (runtime,'private_directory',lambda path:path),(runtime,'process_identity',lambda pid:{'start':1}),
@@ -150,6 +152,8 @@ class RuntimeWorkerProof(unittest.TestCase):
             receipt['librarySnapshotFd']=5  # mocked descriptor; never opened/closed by this preparation-only control
             snapshot={'device':51,'inode':52,'size':3,'sha256':'0'*64,'sourcePath':str(library)}
             profile_pins={str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':runtime.load_profile_with_digest()[1]}}
+            profile_pins.update({str(base/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
+                for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
             with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value=profile_pins):
                 launch=runtime._prepare_launch(runtime_command(helper,library,2),self.work,
                                                runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':'0'*64})
@@ -301,7 +305,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                  'driverArgv':recipe['worker'],'workingDirectory':'/work','environment':self.env,
                  'dependencies':[{'path':str(self.input),'sha256':runtime.digest(self.input)}],'closure':closure}
         loader=Mock();loader.load_compiler_binding.return_value=binding
-        with patch.object(runtime,'_fixed_source_module',return_value=loader):
+        with patch.object(runtime,'_authenticated_monitor_loader',return_value=loader):
             recording=runtime._recorded_compiler_inputs(recipe,target)
             self.assertTrue(recording['invocationMatched'])
             # Same profile pin and otherwise valid closure must join the actual driver.
@@ -352,6 +356,9 @@ class RuntimeWorkerProof(unittest.TestCase):
             file=base/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(b'authored fixed metadata input')
         # Match the actual admitted profile rather than hashing a generic metadata stub.
         (base/'contracts/candidate-build-profile.json').write_bytes(build_contract.PROFILE_PATH.read_bytes())
+        # The fixed loader rows describe the reviewed bytes that its real admission now requires.
+        for relative,_,_ in runtime._MONITOR_LOADER_SOURCES:
+            (base/relative).write_bytes((SOURCE/relative).read_bytes())
         caller=base/'caller';caller.write_bytes(b'authored inert caller');caller.chmod(0o500)
         library=base/'reference/libcandidate.so';library.parent.mkdir();library.write_bytes(b'authored inert shared object');library.chmod(0o400)
         monitor=base/'monitor';monitor.write_bytes(b'authored inert monitor');monitor.chmod(0o500)
@@ -1056,6 +1063,289 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertTrue(result['cleanupVerified']);self.assertTrue(result['workerTerminationVerified'])
                     self.assertTrue(result['infrastructureFailure']);self.assertIn('secondaryError',result['_receiptCleanup'])
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))
+
+
+    def monitor_source_tree(self):
+        base=Path(self.stack.enter_context(tempfile.TemporaryDirectory(dir=self.directory)))
+        (base/'toolchain-001').mkdir()
+        for relative,_,_ in runtime._MONITOR_LOADER_SOURCES:
+            (base/relative).write_bytes((SOURCE/relative).read_bytes())
+        return base
+
+    def capture_source_vector(self, mutation=None, *, primary=None, close_error=None):
+        # Actual descriptor reader; authored metadata and bounded read results only.
+        events=[];now=[0.0];payload=b'authored';offset=[0];fstats={};stats={};primary_tracebacks=[]
+        def metadata(kind,inode,size=0):
+            return types.SimpleNamespace(st_dev=7,st_ino=inode,st_mode=kind|0o500,
+                st_uid=9,st_gid=9,st_nlink=1,st_size=size,st_mtime_ns=1,st_ctime_ns=1)
+        root=metadata(stat.S_IFDIR,1);parent=metadata(stat.S_IFDIR,2)
+        leaf=metadata(stat.S_IFREG,3,len(payload))
+        if mutation in ('fifo','link','directory'):
+            leaf.st_mode={'fifo':stat.S_IFIFO,'link':stat.S_IFLNK,'directory':stat.S_IFDIR}[mutation]|0o500
+        if mutation=='empty':leaf.st_size=0
+        if mutation=='oversize':leaf.st_size+=1
+        def opened(name,flags,**kwargs):
+            events.append(('open',name,flags,kwargs))
+            if name=='authored' and mutation=='parent-link':raise OSError('authored nofollow refusal')
+            fd={'/':101,'authored':102,'source.py':103}[name]
+            if name=='/' and mutation=='late-open':now[0]=10.0
+            return fd
+        def fstat(fd):
+            fstats[fd]=fstats.get(fd,0)+1
+            if fd==103 and mutation=='descriptor-drift' and fstats[fd]>1:return metadata(stat.S_IFREG,4,len(payload))
+            if fd==102 and mutation=='held-parent-drift' and fstats[fd]>1:return metadata(stat.S_IFDIR,4)
+            return {101:root,102:parent,103:leaf}[fd]
+        def named(name,**kwargs):
+            stats[name]=stats.get(name,0)+1
+            if name=='source.py' and mutation=='path-drift' and stats[name]>1:return metadata(stat.S_IFREG,4,len(payload))
+            if name=='authored' and mutation=='named-parent-drift' and stats[name]>1:return metadata(stat.S_IFDIR,4)
+            return {'/':root,'authored':parent,'source.py':leaf}[name]
+        def read(fd,count):
+            self.assertEqual(103,fd);events.append(('read',count))
+            if primary is not None:raise primary
+            if mutation=='late-read':now[0]=10.0
+            data=payload[:-1] if mutation=='short' else payload+b'X' if mutation=='growth' else payload
+            block=data[offset[0]:offset[0]+count];offset[0]+=len(block);return block
+        def closed(fd):
+            events.append(('close',fd))
+            if fd==103 and primary is not None:primary_tracebacks.append(primary.__traceback__)
+            if fd==103 and close_error is not None:raise close_error
+        caught=raw=None
+        with patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'fstat',side_effect=fstat), \
+                patch.object(runtime.os,'stat',side_effect=named),patch.object(runtime.os,'read',side_effect=read), \
+                patch.object(runtime.os,'close',side_effect=closed),patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]):
+            try:raw=runtime._capture_monitor_source(Path('/authored/source.py'),len(payload),10.0)
+            except BaseException as failure:caught=failure
+        return types.SimpleNamespace(raw=raw,error=caught,events=events,payload=payload,primary_tracebacks=primary_tracebacks)
+
+    def test_monitor_source_capture_exact_payload_eof_flags_and_owned_closure(self):
+        vector=self.capture_source_vector()
+        self.assertIsNone(vector.error);self.assertEqual(vector.payload,vector.raw)
+        self.assertEqual([7,1],[row[1] for row in vector.events if row[0]=='read'])
+        self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+        opens=[row for row in vector.events if row[0]=='open']
+        self.assertTrue(all(row[2]&os.O_NOFOLLOW and row[2]&os.O_CLOEXEC for row in opens))
+        self.assertTrue(opens[-1][2]&os.O_NONBLOCK)
+        self.assertEqual({'dir_fd':102},opens[-1][3])
+
+    def test_monitor_source_capture_refuses_type_size_and_parent_before_payload(self):
+        for mutation in ('fifo','link','directory','empty','oversize','parent-link'):
+            with self.subTest(mutation=mutation):
+                vector=self.capture_source_vector(mutation)
+                self.assertIsNotNone(vector.error);self.assertIsNone(vector.raw)
+                self.assertFalse(any(row[0]=='read' for row in vector.events))
+                self.assertEqual([101] if mutation=='parent-link' else [103,102,101],
+                    [row[1] for row in vector.events if row[0]=='close'])
+        with patch.object(runtime.time,'monotonic',return_value=0), \
+                patch.object(runtime.os,'open',side_effect=AssertionError('path/size bound must precede open')):
+            for path,size in ((Path('relative.py'),1),(Path('/a/../source.py'),1),
+                              (Path('/'+('/'.join(['a']*128))+'/source.py'),1),
+                              (Path('/'+'a'*4096),1),(Path('/source.py'),0),(Path('/source.py'),16777217)):
+                with self.assertRaises(ValueError):runtime._capture_monitor_source(path,size,10)
+
+    def test_monitor_source_capture_refuses_growth_truncation_and_identity_drift(self):
+        for mutation in ('short','growth','descriptor-drift','path-drift','held-parent-drift','named-parent-drift'):
+            with self.subTest(mutation=mutation):
+                vector=self.capture_source_vector(mutation)
+                self.assertIsInstance(vector.error,ValueError);self.assertIsNone(vector.raw)
+                self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+                self.assertLessEqual(sum(row[1] for row in vector.events if row[0]=='read'),9)
+
+    def test_monitor_source_capture_keeps_primary_and_closes_once_when_close_fails(self):
+        class RefusesDiagnostic(ValueError):
+            def __setattr__(self,name,value):
+                if name=='sourceSnapshotCloseFailure':raise RuntimeError('authored metadata failure')
+                super().__setattr__(name,value)
+        for primary in (ValueError('authored read refusal'),RefusesDiagnostic('authored primary')):
+            with self.subTest(primary_type=type(primary).__name__):
+                close_error=OSError('authored close refusal')
+                vector=self.capture_source_vector(primary=primary,close_error=close_error)
+                self.assertIs(primary,vector.error)
+                self.assertIs(vector.primary_tracebacks[0],vector.error.__traceback__.tb_next)
+                self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+                if type(primary) is ValueError:self.assertIs(close_error,primary.sourceSnapshotCloseFailure)
+        close_error=OSError('authored cleanup-only refusal')
+        vector=self.capture_source_vector(close_error=close_error)
+        self.assertIs(close_error,vector.error);self.assertIsNone(vector.raw)
+        self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+
+    def test_monitor_source_capture_expiration_closes_even_just_acquired_descriptor(self):
+        for mutation in ('late-open','late-read'):
+            with self.subTest(mutation=mutation):
+                vector=self.capture_source_vector(mutation)
+                self.assertIsInstance(vector.error,TimeoutError);self.assertIsNone(vector.raw)
+                self.assertEqual([101] if mutation=='late-open' else [103,102,101],
+                    [row[1] for row in vector.events if row[0]=='close'])
+        with patch.object(runtime.time,'monotonic',return_value=10), \
+                patch.object(runtime.os,'open',side_effect=AssertionError('expired must not open')):
+            with self.assertRaises(TimeoutError):runtime._capture_monitor_source(Path('/authored.py'),1,10)
+
+    def test_authenticated_loader_captures_all_sources_before_any_compile_or_exec(self):
+        for index in range(3):
+            for mutation in ('missing','empty','oversize','wrong-hash'):
+                with self.subTest(index=index,mutation=mutation):
+                    base=self.monitor_source_tree();relative,size,_=runtime._MONITOR_LOADER_SOURCES[index];path=base/relative
+                    if mutation=='missing':path.unlink()
+                    else:path.write_bytes(b'' if mutation=='empty' else b'X'*(size+1 if mutation=='oversize' else size))
+                    with patch.object(runtime,'BASE',base), \
+                            patch.object(runtime,'compile',create=True,side_effect=AssertionError('no source may compile')) as compiling, \
+                            patch.object(runtime,'exec',create=True,side_effect=AssertionError('no source may execute')) as executing:
+                        with self.assertRaises((ValueError,OSError)):runtime._authenticated_monitor_loader()
+                    compiling.assert_not_called();executing.assert_not_called()
+
+    def test_authenticated_loader_executes_captured_modules_without_path_cache_or_ambient_modules(self):
+        import importlib.util
+        base=self.monitor_source_tree();cache=base/'toolchain-001/__pycache__';cache.mkdir()
+        for name in ('pin_environment','link_inputs','monitor_inputs'):
+            (cache/(name+'.'+sys.implementation.cache_tag+'.pyc')).write_bytes(b'hostile inert cache')
+        capture=runtime._capture_monitor_source;captures=[]
+        previous=sys.modules.get('_v3_monitor_link_inputs')
+        def captured(path,size,deadline):
+            raw=capture(path,size,deadline);captures.append(Path(path).name)
+            if len(captures)==3:
+                (base/'toolchain-001/pin_environment.py').write_bytes(b'raise AssertionError("mutable replacement must not execute")')
+            return raw
+        ambient={name:types.ModuleType(name) for name in ('_v3_monitor_link_inputs','_v3_monitor_inputs','callable_v3_link_inputs','callable_v3_monitor_inputs')}
+        with patch.object(runtime,'BASE',base),patch.object(runtime,'_capture_monitor_source',side_effect=captured), \
+                patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('no path/pyc loader')), \
+                patch.dict(sys.modules,ambient):
+            module=runtime._authenticated_monitor_loader()
+        self.assertEqual(['pin_environment.py','link_inputs.py','monitor_inputs.py'],captures)
+        self.assertIs(module.link_inputs,module._runtime_dependencies['link_inputs'])
+        self.assertIs(module.monitor_inputs,module._runtime_dependencies['monitor_inputs'])
+        self.assertIsNot(module.link_inputs,ambient['_v3_monitor_link_inputs'])
+        self.assertEqual(hashlib.sha256(b'authored').hexdigest(),module.link_inputs.sha(b'authored'))
+        self.assertIs(sys.modules.get('_v3_monitor_link_inputs'),previous)
+
+    def test_authenticated_loader_partial_or_malformed_injection_never_falls_back(self):
+        import importlib.util
+        raw=(SOURCE/'toolchain-001/pin_environment.py').read_bytes()
+        valid_link=types.ModuleType('_v3_monitor_link_inputs');valid_link.__file__=str(SOURCE/'toolchain-001/link_inputs.py')
+        valid_monitor=types.ModuleType('_v3_monitor_inputs');valid_monitor.__file__=str(SOURCE/'toolchain-001/monitor_inputs.py')
+        for injection in (None,{}, {'link_inputs':valid_link}, {'link_inputs':valid_link,'monitor_inputs':object()},
+                          {'link_inputs':valid_link,'monitor_inputs':valid_monitor,'extra':valid_link}):
+            module=types.ModuleType('_authored_malformed');module.__file__=str(SOURCE/'toolchain-001/pin_environment.py')
+            module._runtime_dependencies=injection
+            with patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('no fallback')) as fallback:
+                with self.assertRaises(ValueError):exec(compile(raw,module.__file__,'exec'),module.__dict__)
+            fallback.assert_not_called()
+        valid_monitor.__name__='_wrong_module_name'
+        wrong_name=types.ModuleType('_authored_wrong_name');wrong_name.__file__=str(SOURCE/'toolchain-001/pin_environment.py')
+        wrong_name._runtime_dependencies={'link_inputs':valid_link,'monitor_inputs':valid_monitor}
+        with self.assertRaises(ValueError):exec(compile(raw,wrong_name.__file__,'exec'),wrong_name.__dict__)
+        valid_monitor.__name__='_v3_monitor_inputs'
+        valid_monitor.__file__='/wrong/monitor_inputs.py'
+        module=types.ModuleType('_authored_wrong_path');module.__file__=str(SOURCE/'toolchain-001/pin_environment.py')
+        module._runtime_dependencies={'link_inputs':valid_link,'monitor_inputs':valid_monitor}
+        with self.assertRaises(ValueError):exec(compile(raw,module.__file__,'exec'),module.__dict__)
+
+    def test_authenticated_loader_expired_capture_hash_compile_and_exec_never_return_module(self):
+        real_capture=runtime._capture_monitor_source;real_compile=compile;real_exec=exec;real_sha256=hashlib.sha256
+        for stage in ('before','capture','hash','compile','exec'):
+            with self.subTest(stage=stage):
+                now=[10.0 if stage=='before' else 0.0];events=[]
+                def capture(path,size,deadline):
+                    events.append(('capture',deadline));raw=real_capture(path,size,deadline)
+                    if stage=='capture':now[0]=10.0
+                    return raw
+                def hashed(*args,**kwargs):
+                    value=real_sha256(*args,**kwargs)
+                    if stage=='hash':now[0]=10.0
+                    return value
+                def compiling(*args):
+                    events.append(('compile',None));code=real_compile(*args)
+                    if stage=='compile':now[0]=10.0
+                    return code
+                def executing(*args):
+                    events.append(('exec',None));real_exec(*args)
+                    if stage=='exec':now[0]=10.0
+                with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime,'_capture_monitor_source',side_effect=capture), \
+                        patch.object(runtime.hashlib,'sha256',side_effect=hashed), \
+                        patch.object(runtime,'compile',create=True,side_effect=compiling), \
+                        patch.object(runtime,'exec',create=True,side_effect=executing):
+                    with self.assertRaises(TimeoutError):runtime._authenticated_monitor_loader(10.0)
+                self.assertTrue(all(value==10.0 for name,value in events if name=='capture'))
+                if stage=='before':self.assertEqual([],events)
+                if stage=='capture':self.assertEqual([('capture',10.0)],events)
+                if stage=='compile':self.assertFalse(any(name=='exec' for name,_ in events))
+                if stage=='hash':self.assertFalse(any(name in ('compile','exec') for name,_ in events))
+
+    def test_actual_authenticated_closure_serves_both_binding_consumers_and_revalidation(self):
+        profile=build_contract.load_profile();sha='a'*64;driver=profile['gccIdentity']
+        monitor_path='/authored/monitor';cache='/authored/cache';library='/authored/lib.so'
+        record={'binaryPath':monitor_path,'cachePath':cache,
+                'sourcePath':str(runtime.BASE/'worker_exec_monitor.c'),'parserPath':str(runtime.BASE/'worker_exec_proof.py'),
+                'protocolPath':str(runtime.BASE/'contracts/worker-exec-proof-schema.json'),
+                'provisioningManifestPath':str(runtime.BASE/'toolchain-001/worker-exec-monitor.json')}
+        files={path:{'realpath':path,'sha256':sha} for path in set(record.values())|{library}}
+        implicit={'status':'static-recording-unqualified','files':{'gcc':{'realpath':driver['realpath'],'sha256':driver['sha256']}},
+                  'manifest':{'tools':{'gcc':'gcc'},'driverArgv':['/usr/bin/gcc','-v'],'workingDirectory':'/work','environment':profile['environment']},
+                  'directories':{'/authored':{}},'selections':[{'authored':True}]}
+        value={'status':'static-recording-unqualified','implicitLinkClosure':implicit,
+               'monitorClosure':{'record':record,'files':files,'elfGraph':{monitor_path:[],library:[]}}}
+        real_loader=runtime._authenticated_monitor_loader;modules=[];deadlines=[]
+        def loaded(deadline=None):
+            deadlines.append(deadline);module=real_loader(deadline);modules.append(module)
+            module._load_operational=Mock(return_value=(value,profile['toolchainEnvironmentPinSha256']))
+            return module
+        recipe={'worker':['/usr/bin/gcc','-v'],'chdir':'/work','environment':profile['environment']}
+        target={'path':driver['realpath'],'sha256':driver['sha256']}
+        with patch.object(runtime,'_authenticated_monitor_loader',side_effect=loaded), \
+                patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'digest',return_value=sha), \
+                patch.object(runtime,'_nonprivileged_executable',return_value={'sha256':sha}):
+            binding=runtime.load_worker_monitor_binding(deadline=10.0)
+            recording=runtime._recorded_compiler_inputs(recipe,target,10.0)
+            runtime._revalidate_compiler_inputs({'compilerRecording':recording,'pins':{driver['realpath']:{'sha256':driver['sha256']}}},10.0)
+        self.assertEqual([10.0,10.0,10.0],deadlines)
+        self.assertEqual(3,len(modules));self.assertTrue(recording['invocationMatched'])
+        self.assertTrue(all(modules[i] is not modules[j] for i in range(3) for j in range(i)))
+        self.assertTrue(all(module.link_inputs is module._runtime_dependencies['link_inputs'] for module in modules))
+        self.assertEqual({cache,library},{item['path'] for item in binding['dependencies']})
+        self.assertEqual('static-recording-unqualified',recording['binding']['status'])
+        # Real loader/consumer with absent environment recording refuses, never native authority.
+        base=self.monitor_source_tree()
+        with patch.object(runtime,'BASE',base):
+            with self.assertRaises(ValueError):runtime.load_worker_monitor_binding()
+
+    def test_monitor_binding_late_gate_keeps_same_deadline_and_refuses(self):
+        real_loader=runtime._authenticated_monitor_loader;now=[0.0];deadlines=[]
+        def loaded(deadline):
+            deadlines.append(deadline);module=real_loader(deadline)
+            def gate(profile):now[0]=10.0;return {}
+            module.load_monitor_binding=gate;module.load_compiler_binding=gate
+            return module
+        profile=build_contract.load_profile();driver=profile['gccIdentity']
+        with patch.object(runtime,'_authenticated_monitor_loader',side_effect=loaded), \
+                patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]):
+            with self.assertRaises(TimeoutError):runtime.load_worker_monitor_binding(deadline=10.0)
+            now[0]=0.0
+            with self.assertRaises(TimeoutError):runtime._recorded_compiler_inputs({}, {'path':driver['realpath'],'sha256':driver['sha256']},10.0)
+        self.assertEqual([10.0,10.0],deadlines)
+
+    def test_prepare_launch_requires_all_three_trusted_source_pins_before_publication(self):
+        profile,profile_sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+        recipe={'target':Path('/authored/target'),'worker':['/target'],'prefix':[],'mounts':[]}
+        binding={'binaryPath':'/authored/monitor','dependencies':[],**{name:'a'*64 for name in
+            ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
+        receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
+        for index in range(3):
+            for mutation in ('missing','wrong'):
+                with self.subTest(index=index,mutation=mutation):
+                    pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'sha256':profile_sha}}
+                    pins.update({str(runtime.BASE/relative):{'sha256':sha} for relative,_,sha in runtime._MONITOR_LOADER_SOURCES})
+                    key=str(runtime.BASE/runtime._MONITOR_LOADER_SOURCES[index][0])
+                    if mutation=='missing':pins.pop(key)
+                    else:pins[key]['sha256']='f'*64
+                    with patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=1,st_ino=2)), \
+                            patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
+                            patch.object(runtime,'load_worker_monitor_binding',return_value=binding) as loader, \
+                            patch.object(runtime,'_recorded_compiler_inputs',return_value=None), \
+                            patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'sha256':'a'*64}), \
+                            patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime,'_publish_config') as published:
+                        with self.assertRaisesRegex(ValueError,'source launch pin differs'):
+                            runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10.0)
+                    loader.assert_called_once_with(deadline=10.0);published.assert_not_called()
 
 
     def cleanup_runner_vector(self, *, cgroup_error=None, launcher_error=None, primary=None,

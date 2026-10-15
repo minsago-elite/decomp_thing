@@ -11,14 +11,28 @@ import json
 import os
 import stat
 
-_spec = importlib.util.spec_from_file_location('callable_v3_link_inputs', Path(__file__).with_name('link_inputs.py'))
-link_inputs = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(link_inputs)
+# The runtime's authenticated closure supplies exactly these private module objects.
+# A malformed/partial injection is a refusal, never permission for a path fallback.
+if '_runtime_dependencies' in globals():
+    if (type(_runtime_dependencies) is not dict or
+            set(_runtime_dependencies) != {'link_inputs', 'monitor_inputs'}):
+        raise ValueError('closed runtime loader dependencies required')
+    for key, name in (('link_inputs', '_v3_monitor_link_inputs'), ('monitor_inputs', '_v3_monitor_inputs')):
+        dependency = _runtime_dependencies[key]
+        if (type(dependency) is not type(os) or dependency.__name__ != name or
+                dependency.__file__ != str(Path(__file__).with_name(key + '.py'))):
+            raise ValueError('runtime loader dependency identity differs')
+    link_inputs = _runtime_dependencies['link_inputs']
+    monitor_inputs = _runtime_dependencies['monitor_inputs']
+else:
+    # Existing direct import/CLI compatibility; this is not runtime authentication.
+    _spec = importlib.util.spec_from_file_location('callable_v3_link_inputs', Path(__file__).with_name('link_inputs.py'))
+    link_inputs = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(link_inputs)
 
-
-_monitor_spec = importlib.util.spec_from_file_location('callable_v3_monitor_inputs', Path(__file__).with_name('monitor_inputs.py'))
-monitor_inputs = importlib.util.module_from_spec(_monitor_spec)
-_monitor_spec.loader.exec_module(monitor_inputs)
+    _monitor_spec = importlib.util.spec_from_file_location('callable_v3_monitor_inputs', Path(__file__).with_name('monitor_inputs.py'))
+    monitor_inputs = importlib.util.module_from_spec(_monitor_spec)
+    _monitor_spec.loader.exec_module(monitor_inputs)
 BASE = Path(__file__).resolve().parent.parent
 
 
