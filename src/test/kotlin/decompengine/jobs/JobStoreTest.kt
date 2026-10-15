@@ -1,5 +1,6 @@
 package decompengine.jobs
 
+import decompengine.repair.open
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlin.io.path.createTempDirectory
