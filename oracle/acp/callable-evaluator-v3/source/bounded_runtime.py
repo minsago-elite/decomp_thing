@@ -1561,6 +1561,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         phase_elapsed = time.monotonic() - began
         cleanup_began = time.monotonic()
         cleanup_failure = None
+        cgroup_kill_failure = launcher_kill_failure = cleanup_block_failure = None
         if selector is not None:
             try:
                 selector.close()
@@ -1569,8 +1570,18 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         try:
             if process is not None:
                 wait_end = cleanup_began + supervisor['cleanupWaitSeconds']
-                _kill_owned_scope(scope_evidence)
-                _kill_launcher(launcher_pidfd)
+                try:
+                    _kill_owned_scope(scope_evidence)
+                except Exception as failure:
+                    cgroup_kill_failure = failure
+                    if cleanup_failure is None:
+                        cleanup_failure = failure
+                try:
+                    _kill_launcher(launcher_pidfd)
+                except Exception as failure:
+                    launcher_kill_failure = failure
+                    if cleanup_failure is None:
+                        cleanup_failure = failure
                 remaining = wait_end - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError('cleanup wait window expired before wait')
@@ -1602,7 +1613,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                 if scope_evidence is not None:
                     scope_evidence['finalAbsenceVerified'] = True
                     result['kernelScope']['finalAbsenceVerified'] = True
-                result.update(rootReaped=True, finalAbsenceVerified=True, cleanupVerified=True)
+                result.update(rootReaped=True, finalAbsenceVerified=True, cleanupVerified=cleanup_failure is None)
                 if result['launcherExitCode'] is None:
                     result['launcherExitCode'] = process.returncode if type(process.returncode) is int else None
             elif not launch_attempted:
@@ -1611,7 +1622,9 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                 # No process handle means no owned PID/cgroup identity to verify safely.
                 result.update(finalAbsenceVerified=False, cleanupVerified=False)
         except Exception as failure:
-            cleanup_failure = failure
+            cleanup_block_failure = failure
+            if cleanup_failure is None:
+                cleanup_failure = failure
             result.update(cleanupVerified=False, infrastructureFailure=True, infrastructureReason='owned-cleanup-unverified')
         if process is not None:
             for label, stream in [('stdout', process.stdout), ('stderr', process.stderr)]:
@@ -1692,9 +1705,27 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         result['elapsedSeconds'] = round(time.monotonic() - began, 6)
         if cleanup_failure is not None:
-            cleanup_failure.bounded_result = result
-            cleanup_failure.receiptCleanup = result['_receiptCleanup']
-            raise cleanup_failure
+            # Fixed three-stage secondary metadata only; never serialize exception objects or
+            # invoke their equality/formatting. Metadata failure cannot replace the primary.
+            try:
+                secondary = []
+                for failure in (cgroup_kill_failure, launcher_kill_failure, cleanup_block_failure):
+                    if (failure is not None and failure is not cleanup_failure and failure is not primary_failure and
+                            all(failure is not previous for previous in secondary)):
+                        secondary.append(failure)
+                cleanup_failure.bounded_result = result
+                cleanup_failure.receiptCleanup = result['_receiptCleanup']
+                if secondary:
+                    cleanup_failure.secondaryCleanupFailures = tuple(secondary)
+            except BaseException:
+                pass
+            if primary_failure is None:
+                raise cleanup_failure
+            if cleanup_failure is not primary_failure:
+                try:
+                    primary_failure.cleanupFailure = cleanup_failure
+                except BaseException:
+                    pass
         if reclamation_failure is not None and primary_failure is None:
             raise reclamation_failure
     return result

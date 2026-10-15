@@ -1056,6 +1056,168 @@ class RuntimeWorkerProof(unittest.TestCase):
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))
 
 
+    def cleanup_runner_vector(self, *, cgroup_error=None, launcher_error=None, primary=None,
+                              invalid_scope=False, clock_case=None):
+        # Actual runner, final-proof refusal and receipt retention; only external
+        # process/kernel/clock interfaces are authored. No child, scope or real FD.
+        events=[]; now=[100.0]; saved_primary_traceback=[]; cleanup_time=[]
+        bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+        receipt={'directory':self.directory/'never-launched-receipt','fd':114}
+        scope={'_directoryFd':112,'_gatePidfd':113,'unit':'authored.scope'}
+        launch={'argv':['never executed'],'pins':{},'proofBinding':{}}
+        class Pipe:
+            def __init__(self,fd):self.fd=fd
+            def fileno(self):return self.fd
+            def write(self,value):pass
+            def close(self):events.append(('close-stream',self.fd))
+        class Selector:
+            def __init__(self):self.entries={}
+            def register(self,stream,event,label):self.entries[stream.fd]=types.SimpleNamespace(fileobj=stream,data=label)
+            def unregister(self,stream):self.entries.pop(stream.fd)
+            def get_map(self):return self.entries
+            def select(self,timeout):
+                if primary is not None:raise primary
+                return [(entry,1) for entry in list(self.entries.values())]
+            def close(self):events.append(('close-selector',None))
+        def kill_scope(acquired):
+            self.assertIs(scope,acquired);events.append(('kill-scope',acquired))
+            cleanup_time.append(now[0])
+            if primary is not None:saved_primary_traceback.append(primary.__traceback__)
+            if clock_case=='expired-before-wait':now[0]+=bounds['supervisor']['cleanupWaitSeconds']
+            if clock_case=='kill-cost':now[0]+=1.0
+            if cgroup_error is not None:raise cgroup_error
+        def kill_launcher(fd):
+            self.assertEqual(111,fd);events.append(('kill-launcher',fd))
+            if launcher_error is not None:raise launcher_error
+        def wait(*,timeout):
+            is_cleanup=bool(cleanup_time)
+            events.append(('cleanup-wait' if is_cleanup else 'phase-wait',timeout))
+            if is_cleanup:
+                if clock_case=='failed-wait':raise TimeoutError('authored wait refusal')
+                now[0]+=timeout if clock_case=='late-wait' else 0.25
+            return 0
+        scope_error=ValueError('authored invalid retained scope')
+        def scoped(acquired):
+            self.assertIs(scope,acquired);events.append(('scope-absence',None))
+            if invalid_scope:raise scope_error
+            return []
+        def owned(pid,start,end):
+            self.assertEqual((123,1),(pid,start));events.append(('session-absence',end))
+            return []
+        process=types.SimpleNamespace(pid=123,stdin=Pipe(900),stdout=Pipe(901),stderr=Pipe(902),wait=wait,returncode=0)
+        caught=None; caught_traceback=None
+        with ExitStack() as effects:
+            for effect in (
+                patch.object(runtime,'_work_directory',return_value=self.work),patch.object(runtime,'_worker_environment'),
+                patch.object(runtime,'_create_worker_receipt',return_value=receipt),patch.object(runtime,'_prepare_launch',return_value=launch),
+                patch.object(runtime.subprocess,'Popen',return_value=process),patch.object(runtime.os,'pidfd_open',return_value=111),
+                patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime.selectors,'DefaultSelector',side_effect=Selector),
+                patch.object(runtime.os,'set_blocking'),patch.object(runtime.os,'read',return_value=b''),
+                patch.object(runtime.os,'close',side_effect=lambda fd:events.append(('close-fd',fd))),
+                patch.object(runtime,'_admit_scope',return_value=scope),patch.object(runtime,'_release_scope'),
+                patch.object(runtime,'_kill_owned_scope',side_effect=kill_scope),patch.object(runtime,'_kill_launcher',side_effect=kill_launcher),
+                patch.object(runtime,'scope_processes',side_effect=scoped),patch.object(runtime,'owned_processes',side_effect=owned),
+                patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]),
+                patch.object(runtime.time,'sleep',side_effect=AssertionError('no retry or sleep expected')),
+            ):effects.enter_context(effect)
+            try:
+                runtime._run_scoped(['authored'],self.work,self.env,b'',bounds,provisioning=False)
+            except Exception as error:
+                caught=error;caught_traceback=error.__traceback__
+        self.assertIsNotNone(caught)
+        result=caught.bounded_result
+        self.assertFalse(result['cleanupVerified']);self.assertTrue(result['infrastructureFailure'])
+        self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
+        self.assertEqual('unknown',result['workerProof']['status'])
+        self.assertEqual('retained',result['_receiptCleanup']['status'])
+        self.assertEqual([111,112,113,114],[value for name,value in events if name=='close-fd'])
+        self.assertEqual([900,900,901,902],[value for name,value in events if name=='close-stream'])
+        self.assertNotIn('cleanupFailure',runtime.public_result(result))
+        self.assertNotIn('secondaryCleanupFailures',runtime.public_result(result))
+        return types.SimpleNamespace(error=caught,result=result,events=events,bounds=bounds,scope_error=scope_error,
+            traceback=caught_traceback,primary_traceback=saved_primary_traceback,cleanup_time=cleanup_time)
+
+    def test_runner_attempts_each_owned_kill_and_keeps_cleanup_failure_sticky(self):
+        for which in ('cgroup','launcher','both'):
+            with self.subTest(which=which):
+                cgroup=OSError('authored cgroup failure') if which!='launcher' else None
+                launcher=RuntimeError('authored pidfd failure') if which!='cgroup' else None
+                vector=self.cleanup_runner_vector(cgroup_error=cgroup,launcher_error=launcher)
+                self.assertIs(cgroup if cgroup is not None else launcher,vector.error)
+                names=[name for name,_ in vector.events]
+                self.assertLess(names.index('kill-scope'),names.index('kill-launcher'))
+                self.assertLess(names.index('kill-launcher'),names.index('cleanup-wait'))
+                self.assertLess(names.index('cleanup-wait'),names.index('scope-absence'))
+                self.assertLess(names.index('scope-absence'),names.index('session-absence'))
+                self.assertTrue(vector.result['rootReaped']);self.assertTrue(vector.result['finalAbsenceVerified'])
+                if which=='both':self.assertIs(launcher,vector.error.secondaryCleanupFailures[0])
+
+    def test_runner_invalid_scope_retains_unknown_absence_after_pidfd_kill_and_reap(self):
+        cgroup=ValueError('authored scope handle refusal');launcher=OSError('authored pidfd refusal')
+        vector=self.cleanup_runner_vector(cgroup_error=cgroup,launcher_error=launcher,invalid_scope=True)
+        self.assertIs(cgroup,vector.error)
+        self.assertEqual(2,len(vector.error.secondaryCleanupFailures))
+        self.assertIs(launcher,vector.error.secondaryCleanupFailures[0])
+        self.assertIs(vector.scope_error,vector.error.secondaryCleanupFailures[1])
+        self.assertTrue(vector.result['rootReaped']);self.assertFalse(vector.result['finalAbsenceVerified'])
+        self.assertNotIn('session-absence',[name for name,_ in vector.events])
+
+    def test_runner_preserves_active_primary_identity_traceback_and_both_cleanup_errors(self):
+        class NoComparisonOrFormatting(ValueError):
+            def __eq__(self,other):raise AssertionError('exception equality must not be called')
+            def __str__(self):raise AssertionError('exception formatting must not be called')
+        primary=NoComparisonOrFormatting();cgroup=NoComparisonOrFormatting();launcher=NoComparisonOrFormatting()
+        vector=self.cleanup_runner_vector(primary=primary,cgroup_error=cgroup,launcher_error=launcher)
+        self.assertIs(primary,vector.error);self.assertIs(cgroup,primary.cleanupFailure)
+        self.assertIs(launcher,cgroup.secondaryCleanupFailures[0])
+        self.assertIs(vector.primary_traceback[0],vector.traceback.tb_next)
+        self.assertFalse(vector.result['captureComplete']);self.assertFalse(vector.result['waitComplete'])
+
+    def test_runner_diagnostic_attribute_failure_cannot_replace_primary(self):
+        class RefusesMetadata(ValueError):
+            def __setattr__(self,name,value):
+                if name=='cleanupFailure':raise RuntimeError('authored diagnostic attachment failure')
+                super().__setattr__(name,value)
+        primary=RefusesMetadata('authored primary')
+        vector=self.cleanup_runner_vector(primary=primary,cgroup_error=OSError('authored cleanup'))
+        self.assertIs(primary,vector.error);self.assertFalse(hasattr(primary,'cleanupFailure'))
+        self.assertIs(vector.primary_traceback[0],vector.traceback.tb_next)
+
+    def test_runner_failed_or_expired_wait_never_opens_verification_window(self):
+        for clock_case in ('expired-before-wait','failed-wait','late-wait'):
+            with self.subTest(clock_case=clock_case):
+                cgroup=OSError('authored kill refusal')
+                vector=self.cleanup_runner_vector(cgroup_error=cgroup,clock_case=clock_case)
+                self.assertIs(cgroup,vector.error)
+                self.assertIsInstance(vector.error.secondaryCleanupFailures[0],TimeoutError)
+                names=[name for name,_ in vector.events]
+                self.assertEqual(0 if clock_case=='expired-before-wait' else 1,names.count('cleanup-wait'))
+                self.assertNotIn('scope-absence',names);self.assertNotIn('session-absence',names)
+                self.assertFalse(vector.result['finalAbsenceVerified'])
+                self.assertEqual(clock_case=='late-wait',vector.result['rootReaped'])
+
+    def test_runner_timely_reap_uses_original_wait_end_then_one_verification_window(self):
+        for clock_case,kill_cost in ((None,0.0),('kill-cost',1.0)):
+            with self.subTest(clock_case=clock_case):
+                vector=self.cleanup_runner_vector(cgroup_error=OSError('authored kill refusal'),clock_case=clock_case)
+                supervisor=vector.bounds['supervisor']
+                self.assertEqual([supervisor['cleanupWaitSeconds']-kill_cost],
+                    [value for name,value in vector.events if name=='cleanup-wait'])
+                self.assertEqual([vector.cleanup_time[0]+kill_cost+0.25+supervisor['cleanupVerificationSeconds']],
+                    [value for name,value in vector.events if name=='session-absence'])
+                self.assertTrue(vector.result['rootReaped']);self.assertTrue(vector.result['finalAbsenceVerified'])
+                self.assertFalse(vector.result['cleanupVerified'])
+
+    def test_runner_repeated_identical_errors_do_not_create_self_links_or_duplicate_metadata(self):
+        repeated=ValueError('authored repeated cleanup')
+        vector=self.cleanup_runner_vector(cgroup_error=repeated,launcher_error=repeated)
+        self.assertIs(repeated,vector.error);self.assertFalse(hasattr(repeated,'secondaryCleanupFailures'))
+        primary=ValueError('authored same primary and cleanup')
+        vector=self.cleanup_runner_vector(primary=primary,cgroup_error=primary,launcher_error=primary)
+        self.assertIs(primary,vector.error);self.assertFalse(hasattr(primary,'cleanupFailure'))
+        self.assertFalse(hasattr(primary,'secondaryCleanupFailures'))
+
+
 class LaunchConfigCaptureTests(unittest.TestCase):
     """Authored metadata/bytes only; every filesystem, clock and proof-loading seam is mocked."""
     def vector(self, mutation=None, *, raw=b'{"fixed":true}', deadline=10, finish=False):
