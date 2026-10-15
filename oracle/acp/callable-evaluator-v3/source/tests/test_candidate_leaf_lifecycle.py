@@ -553,6 +553,9 @@ class PhaseArtifactContinuity(unittest.TestCase):
         caller=self.root/'shared-caller';caller.write_bytes(b'authored caller')
         captured=e.capture_artifact;original_probe=e.probe;original_pin=e._pin_files
         declared=gate.load_profile()
+        contracts=self.root/'contracts';contracts.mkdir()
+        (contracts/'candidate-build-profile.json').write_bytes((e.BASE/'contracts/candidate-build-profile.json').read_bytes())
+        (self.root/'worker_exec_proof.py').write_bytes((e.BASE/'worker_exec_proof.py').read_bytes())
         admitted=[];probe_inputs=[];workers=[];leaves=[];expire_admission=False
         def pin(paths,deadline=None):
             if expire_admission:self.now=deadline
@@ -579,7 +582,8 @@ class PhaseArtifactContinuity(unittest.TestCase):
             value=original_probe(*args,**kwargs)
             if len(probe_inputs)==1:helper.write_bytes(b'authored helper B')
             return value
-        with patch.object(e,'validated_observations',return_value=observations()), \
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root), \
+                patch.object(e,'validated_observations',return_value=observations()), \
                 patch.object(e,'profile',side_effect=e.load_profile),patch.object(gate,'profile',return_value=declared), \
                 patch.object(e,'capture_artifact',side_effect=capture),patch.object(e,'compile_sequence',side_effect=compile_fixture), \
                 patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'_pin_files',side_effect=pin), \
