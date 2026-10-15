@@ -13,6 +13,7 @@ import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentExecutionReceipt
 import decompengine.agent.AgentFailureKind
+import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentMessageEvent
@@ -224,6 +225,344 @@ class AcpAgentHarnessTest {
         execution.get(3, TimeUnit.SECONDS)
         assertNull(cleanup.invoke(running), "the owner eventually relinquishes its stream")
         assertEquals(1, scheduler.snapshot().quarantined, "late completion cannot release a retained slot")
+    }
+
+    @Test
+    fun `stdout refusal preserves skipped EOF operand separately from later observation`() {
+        val control = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        val ownedEof = stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean
+        // This inactive in-memory control has no stdout reader. A skipped operand must
+        // not dereference even a poisoned reference; restore it before later observation.
+        setStdoutControlField(control, "stdoutNaturallyDrained", null)
+        val decision = try { stdoutRefusalDecision(control) as Enum<*> } finally {
+            setStdoutControlField(control, "stdoutNaturallyDrained", ownedEof)
+        }
+        assertEquals("FINISHED_FALSE_EOF_NOT_READ", decision.name)
+        assertTrue(stdoutControlField(control, "stdoutNaturallyDrained") === ownedEof)
+        ownedEof.set(true)
+        recordStdoutSnapshot(control, 0, "WAIT_TIMEOUT")
+        recordStdoutSnapshot(control, 2, decision.name)
+        setStdoutControlField(control, "stdoutFirstWaitMillis", 100L)
+        val record = freezeStdoutFacts(control)
+        assertTrue(record.contains("s3=FINISHED_FALSE_EOF_NOT_READ/UNCLAIMED/false/true/"), record)
+        assertTrue(record.contains("finalMs=NOT_ALLOCATED"), record)
+        assertTrue(record.contains("s2=NOT_REACHED"), record)
+        assertFalse((stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).isDone)
+        @Suppress("UNCHECKED_CAST")
+        val completed = stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<Unit>
+        completed.complete(Unit)
+        ownedEof.set(false)
+        assertEquals("NATURAL_EOF_FALSE", (stdoutRefusalDecision(control) as Enum<*>).name)
+        ownedEof.set(true)
+        assertNull(stdoutRefusalDecision(control))
+    }
+
+    @Test
+    fun `stdout snapshots retain only three owned samples allocations and first IO code`() {
+        val control = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        val produced = stdoutControlField(control, "producedOutput")
+        produced.javaClass.getDeclaredMethod("record", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(produced, 7)
+        setStdoutControlField(control, "stdoutFirstWaitMillis", 100L)
+        setStdoutControlField(control, "stdoutFinalWaitMillis", 41L)
+        recordStdoutSnapshot(control, 0, "WAIT_TIMEOUT")
+        (stdoutControlField(control, "stdoutClosedForUnblocking") as AtomicBoolean).set(true)
+        recordStdoutSnapshot(control, 1, "CLOSE_CLOSED")
+        @Suppress("UNCHECKED_CAST")
+        val completedReader = stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<Unit>
+        completedReader.complete(Unit)
+        recordStdoutSnapshot(control, 2, "NATURAL_EOF_FALSE")
+        val record = freezeStdoutFacts(control)
+        assertTrue(record.startsWith("ACP_STDOUT_SHUTDOWN_V1 firstMs=100 finalMs=41 "), record)
+        assertTrue(record.contains("s1=WAIT_TIMEOUT/UNCLAIMED/false/false/false/NONE/7/4096/false"), record)
+        assertTrue(record.contains("s2=CLOSE_CLOSED/UNCLAIMED/false/false/true/NONE/7/4096/false"), record)
+        assertEquals(3, Regex(" s[123]=").findAll(record).count())
+        assertEquals(record, validatedStdoutFacts(record))
+        (stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).set(true)
+        recordStdoutSnapshot(control, 3, "WAIT_COMPLETED")
+        assertEquals(record, freezeStdoutFacts(control), "frozen facts cannot resample or re-render later state")
+        val invalidSlot = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        recordStdoutSnapshot(invalidSlot, 3, "WAIT_COMPLETED")
+        assertEquals("ACP_STDOUT_SHUTDOWN_V1 DIAGNOSTIC_UNAVAILABLE", freezeStdoutFacts(invalidSlot))
+    }
+
+    @Test
+    fun `stdout wait and close classifications use only existing result types`() {
+        for ((failure, expected) in listOf(
+            null to "WAIT_COMPLETED",
+            java.util.concurrent.TimeoutException("not retained") to "WAIT_TIMEOUT",
+            InterruptedException("not retained") to "WAIT_INTERRUPTED",
+            ExecutionException(IllegalStateException("not retained")) to "WAIT_EXECUTION_ERROR",
+            IllegalStateException("not retained") to "WAIT_OTHER_ERROR",
+        )) assertEquals(expected, (stdoutFactsCall("waitOperation", failure) as Enum<*>).name)
+        for ((closed, failure, expected) in listOf(
+            Triple(true, null, "CLOSE_CLOSED"), Triple(false, null, "CLOSE_NOT_ACQUIRED"),
+            Triple(null, java.io.IOException("not retained"), "CLOSE_IO_ERROR"),
+            Triple(null, IllegalStateException("not retained"), "CLOSE_OTHER_ERROR"),
+        )) assertEquals(expected, (stdoutFactsCall("closeOperation", closed, failure) as Enum<*>).name)
+    }
+
+    @Test
+    fun `stdout physical and guard IO classifications never create EOF or replace original IO`() {
+        val physical = java.io.IOException("untrusted IO text must not enter facts")
+        val directRead = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        val sameRead = assertFailsWith<java.lang.reflect.InvocationTargetException> {
+            directRead.first.declaredMethods.single { it.name == "readStdout" }.apply { isAccessible = true }
+                .invoke(directRead.second, { throw physical })
+        }
+        assertTrue(sameRead.targetException === physical)
+        assertEquals("READ_IO", firstStdoutIOException(directRead))
+        val readControl = newStdoutAccountingControl(object : java.io.InputStream() {
+            override fun read(): Int = throw physical
+        })
+        (stdoutControlField(readControl, "closing") as AtomicBoolean).set(true)
+        collectStdoutControl(readControl)
+        assertEquals("READ_IO", firstStdoutIOException(readControl))
+        assertFalse((stdoutControlField(readControl, "stdoutNaturallyDrained") as AtomicBoolean).get())
+        val closeControl = newStdoutAccountingControl(object : java.io.InputStream() {
+            override fun read(): Int = -1
+            override fun close() { throw physical }
+        })
+        val thrown = assertFailsWith<java.lang.reflect.InvocationTargetException> {
+            closeControl.first.getDeclaredMethod("tryCloseStdout").apply { isAccessible = true }.invoke(closeControl.second)
+        }
+        assertTrue(thrown.targetException === physical, "classification rethrows the same IO object")
+        assertEquals("CLOSE_IO", firstStdoutIOException(closeControl))
+        (stdoutControlField(closeControl, "closing") as AtomicBoolean).set(true)
+        collectStdoutControl(closeControl)
+        assertEquals("CLOSE_IO", firstStdoutIOException(closeControl), "the first code is sticky")
+        assertFalse((stdoutControlField(closeControl, "stdoutNaturallyDrained") as AtomicBoolean).get())
+        val guardControl = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        guardControl.first.getDeclaredMethod("tryCloseStdout").apply { isAccessible = true }.invoke(guardControl.second)
+        (stdoutControlField(guardControl, "closing") as AtomicBoolean).set(true)
+        collectStdoutControl(guardControl)
+        assertEquals("FORCED_CLOSED_GUARD", firstStdoutIOException(guardControl))
+    }
+
+    @Test
+    fun `stdout observations distinguish consumer between reads from delayed raw drainer`() {
+        val bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"authored\",\"params\":{}}\n".toByteArray()
+        val control = newStdoutAccountingControl(java.io.ByteArrayInputStream(bytes))
+        setStdoutControlField(control, "stdoutFirstWaitMillis", 100L)
+        val frames = control.first.getDeclaredMethod("stdoutFrames", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(control.second, 4096, 128)
+        @Suppress("UNCHECKED_CAST")
+        val flow = frames as kotlinx.coroutines.flow.Flow<String>
+        var deliveries = 0
+        kotlinx.coroutines.runBlocking {
+            flow.collect {
+                deliveries++
+                // Collector delivery is between reads, outside the read/publication lock.
+                recordStdoutSnapshot(control, 0, "WAIT_TIMEOUT")
+                (stdoutControlField(control, "closing") as AtomicBoolean).set(true)
+                control.first.getDeclaredMethod("startShutdownStdoutDrain").apply { isAccessible = true }.invoke(control.second)
+                assertEquals("FRAME_CONSUMER", ((stdoutControlField(control, "stdoutOwnership") as java.util.concurrent.atomic.AtomicReference<*>).get() as Enum<*>).name)
+                assertFalse((stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).isDone)
+                assertEquals(true, control.first.getDeclaredMethod("tryCloseStdout").apply { isAccessible = true }.invoke(control.second))
+                recordStdoutSnapshot(control, 1, "CLOSE_CLOSED")
+                assertTrue((stdoutControlField(control, "stdoutClosedForUnblocking") as AtomicBoolean).get())
+                assertFalse((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+            }
+        }
+        assertEquals(1, deliveries)
+        val decision = stdoutRefusalDecision(control) as Enum<*>
+        recordStdoutSnapshot(control, 2, decision.name)
+        val facts = freezeStdoutFacts(control)
+        assertTrue(facts.contains("s1=WAIT_TIMEOUT/FRAME_CONSUMER/false/false/false/NONE/${bytes.size}/4096/false"), facts)
+        assertTrue(facts.contains("s2=CLOSE_CLOSED/FRAME_CONSUMER/false/false/true/NONE/${bytes.size}/4096/false"), facts)
+        assertFalse((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+    }
+
+    @Test
+    fun `stdout lock busy classification keeps returned EOF publication protected`() = withReturnedStdoutEof { control, _, _, _ ->
+        val read = control.first.declaredMethods.single { it.name == "readStdout" }.apply { isAccessible = true }
+        val refused = assertFailsWith<java.lang.reflect.InvocationTargetException> {
+            read.invoke(control.second, { error("busy read must not execute") })
+        }
+        assertIs<java.io.IOException>(refused.targetException)
+        assertEquals("READ_LOCK_BUSY", firstStdoutIOException(control))
+        assertFalse((stdoutControlField(control, "stdoutClosedForUnblocking") as AtomicBoolean).get())
+        assertFalse((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+    }
+
+    @Test
+    fun `stdout facts grammar refuses payloads unknowns overflow and noncanonical numbers`() {
+        val record = authoredStdoutFacts()
+        assertTrue(record.length <= 2048)
+        assertTrue(record.all { it.code in 32..126 })
+        assertEquals(record, validatedStdoutFacts(record))
+        for (invalid in listOf(
+            record + " extra=raw-secret", record + " ", record + "/", record.replace("firstMs=100", "firstMs=0100"),
+            record.replace("finalMs=41", "finalMs=-1"), record.replace("/UNCLAIMED/", "/raw/path/"),
+            record.replace("/NONE/", "/UNKNOWN_IO/"), record.replace("/false/", "/arbitrary/"),
+            record.replace("/4096/", "/9223372036854775808/"), record.replace("s1=WAIT_TIMEOUT", "s1=NATURAL_EOF_FALSE"),
+            record.replace("s3=NATURAL_EOF_FALSE", "s3=WAIT_COMPLETED"), record + "\nraw-secret", "x".repeat(2049),
+        )) assertNull(validatedStdoutFacts(invalid))
+        assertEquals("ACP_STDOUT_SHUTDOWN_V1 DIAGNOSTIC_UNAVAILABLE", validatedStdoutFacts("ACP_STDOUT_SHUTDOWN_V1 DIAGNOSTIC_UNAVAILABLE"))
+        val extreme = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        setStdoutControlField(extreme, "stdoutFirstWaitMillis", Long.MAX_VALUE)
+        setStdoutControlField(extreme, "stdoutFinalWaitMillis", Long.MAX_VALUE)
+        val budget = stdoutControlField(extreme, "producedOutput")
+        (budget.javaClass.getDeclaredField("observed").apply { isAccessible = true }.get(budget) as java.util.concurrent.atomic.AtomicLong).set(Long.MAX_VALUE)
+        (budget.javaClass.getDeclaredField("limitExceeded").apply { isAccessible = true }.get(budget) as AtomicBoolean).set(true)
+        recordStdoutSnapshot(extreme, 0, "WAIT_EXECUTION_ERROR")
+        recordStdoutSnapshot(extreme, 1, "CLOSE_NOT_ACQUIRED")
+        recordStdoutSnapshot(extreme, 2, "FINISHED_FALSE_EOF_NOT_READ")
+        val maximum = freezeStdoutFacts(extreme)
+        assertTrue(maximum.length <= 1530)
+        assertTrue(maximum.contains(Long.MAX_VALUE.toString()))
+        assertEquals(maximum, validatedStdoutFacts(maximum))
+    }
+
+    @Test
+    fun `stdout safe suppression preserves original exception and bounded printed evidence`() {
+        val control = authoredStdoutControl()
+        val record = freezeStdoutFacts(control)
+        val cause = java.io.IOException("authored cause").apply { stackTrace = emptyArray() }
+        val original = AgentExecutionException(AgentFailure(AgentFailureKind.INTERNAL, "authored original"), cause).apply { stackTrace = emptyArray() }
+        val earlier = IllegalStateException("existing cleanup").apply { stackTrace = emptyArray() }
+        original.addSuppressed(earlier)
+        val attach = control.first.getDeclaredMethod("attachStdoutShutdownFacts", Throwable::class.java).apply { isAccessible = true }
+        assertNull(attach.invoke(control.second, original))
+        attach.invoke(control.second, original)
+        assertTrue(original.cause === cause)
+        assertEquals(2, original.suppressed.size)
+        assertTrue(original.suppressed[0] === earlier)
+        assertEquals(record, original.suppressed[1].message)
+        assertEquals(0, original.suppressed[1].stackTrace.size)
+        val printed = StringBuilder()
+        val writer = object : java.io.Writer() {
+            override fun write(chars: CharArray, offset: Int, length: Int) {
+                check(printed.length + length <= 4096) { "bounded synthetic stack output" }
+                printed.append(chars, offset, length)
+            }
+            override fun flush() = Unit
+            override fun close() = Unit
+        }
+        original.printStackTrace(java.io.PrintWriter(writer))
+        assertTrue(printed.toString().contains(record))
+        assertTrue(printed.toString().contains("authored original"))
+        val unavailable = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf()))
+        recordStdoutSnapshot(unavailable, 3, "WAIT_COMPLETED")
+        unavailable.first.getDeclaredMethod("freezeStdoutShutdownFacts").apply { isAccessible = true }.invoke(unavailable.second)
+        val failed = AgentExecutionException(AgentFailure(AgentFailureKind.INTERNAL, "same failure"))
+        unavailable.first.getDeclaredMethod("attachStdoutShutdownFacts", Throwable::class.java).apply { isAccessible = true }.invoke(unavailable.second, failed)
+        assertEquals("ACP_STDOUT_SHUTDOWN_V1 DIAGNOSTIC_UNAVAILABLE", failed.suppressed.single().message)
+    }
+
+    @Test
+    fun `stop refusal assertion keeps closed mode cause phase without arbitrary failure text`() {
+        val record = authoredStdoutFacts()
+        val evidence = AcpInvocationEvidenceSnapshot(
+            null, AcpExecutionLifecyclePhase.PROMPT_COMPLETED, AcpExecutionCleanupDisposition.UNVERIFIED,
+            null, null, null, emptyList(), emptyList(), emptyList(), null,
+            AcpExecutionEvidenceCompleteness(false, false, false), null,
+        )
+        val raw = "UNREGISTERED-SYNTHETIC-SECRET /private/raw/path"
+        for (mode in listOf("stop-max-tokens", "stop-max-turn-requests", "stop-refusal")) {
+            val failure = AgentFailure(AgentFailureKind.RESOURCE_EXHAUSTED, raw,
+                details = mapOf("stdoutShutdownV1" to record, "raw" to raw))
+            val cause = AgentExecutionException(failure, java.io.IOException(raw))
+            val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+                AgentExecutionOutcome.Failed(failure), evidence, cause)
+            val context = safeStopFailureContext(mode, receipt)
+            assertTrue(context.length <= 3072)
+            assertTrue(context.contains("mode=$mode"))
+            assertTrue(context.contains("phase=PROMPT_COMPLETED"))
+            assertTrue(context.contains("cleanup=UNVERIFIED"))
+            assertTrue(context.contains("cause=AGENT_EXECUTION/IO_OTHER"))
+            assertTrue(context.contains(record))
+            assertFalse(context.contains(raw))
+            val asserted = assertFailsWith<AssertionError> { assertIs<AgentExecutionOutcome.Returned>(receipt.outcome, context) }
+            assertTrue(asserted.message.orEmpty().contains("mode=$mode"))
+            assertFalse(asserted.message.orEmpty().contains(raw))
+            assertTrue(receipt.outcome is AgentExecutionOutcome.Failed)
+        }
+        val unknownFailure = AgentFailure(AgentFailureKind.INTERNAL, raw)
+        val opaqueCause = IllegalStateException(raw, java.io.IOException(raw))
+        val opaqueReceipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+            AgentExecutionOutcome.Failed(unknownFailure), failureCause = opaqueCause)
+        assertTrue(safeStopFailureContext("stop-refusal", opaqueReceipt).contains("cause=OTHER/NONE"))
+        for (invalid in listOf(raw, record + " extra=" + raw, "x".repeat(2049))) {
+            val failure = AgentFailure(AgentFailureKind.INTERNAL, raw, details = mapOf("stdoutShutdownV1" to invalid))
+            val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)), AgentExecutionOutcome.Failed(failure))
+            val context = safeStopFailureContext(raw, receipt)
+            assertTrue(context.contains("mode=UNKNOWN"))
+            assertTrue(context.contains("facts=NOT_AVAILABLE"))
+            assertFalse(context.contains(raw))
+        }
+    }
+
+    private fun stdoutFactsCall(name: String, vararg arguments: Any?): Any? {
+        val type = Class.forName("decompengine.acp.StdoutShutdownFacts")
+        val instance = type.getDeclaredField("INSTANCE").apply { isAccessible = true }.get(null)
+        return type.declaredMethods.single { it.name == name && it.parameterCount == arguments.size }
+            .apply { isAccessible = true }.invoke(instance, *arguments)
+    }
+
+    private fun validatedStdoutFacts(value: String?): String? = stdoutFactsCall("validated", value) as String?
+
+    private fun setStdoutControlField(control: Pair<Class<*>, Any>, name: String, value: Any?) {
+        control.first.getDeclaredField(name).apply { isAccessible = true }.set(control.second, value)
+    }
+
+    private fun stdoutRefusalDecision(control: Pair<Class<*>, Any>): Any? =
+        control.first.getDeclaredMethod("stdoutShutdownRefusalDecision").apply { isAccessible = true }.invoke(control.second)
+
+    private fun recordStdoutSnapshot(control: Pair<Class<*>, Any>, slot: Int, operation: String) {
+        val type = Class.forName("decompengine.acp.StdoutShutdownOperation")
+        val value = type.enumConstants.single { (it as Enum<*>).name == operation }
+        control.first.getDeclaredMethod("recordStdoutShutdownSnapshot", Int::class.javaPrimitiveType, type)
+            .apply { isAccessible = true }.invoke(control.second, slot, value)
+    }
+
+    private fun freezeStdoutFacts(control: Pair<Class<*>, Any>): String {
+        control.first.getDeclaredMethod("freezeStdoutShutdownFacts").apply { isAccessible = true }.invoke(control.second)
+        return control.first.getDeclaredMethod("stdoutShutdownFailureFacts").apply { isAccessible = true }.invoke(control.second) as String
+    }
+
+    private fun authoredStdoutControl(): Pair<Class<*>, Any> = newStdoutAccountingControl(java.io.ByteArrayInputStream(byteArrayOf())).also { control ->
+        setStdoutControlField(control, "stdoutFirstWaitMillis", 100L)
+        setStdoutControlField(control, "stdoutFinalWaitMillis", 41L)
+        recordStdoutSnapshot(control, 0, "WAIT_TIMEOUT")
+        recordStdoutSnapshot(control, 1, "CLOSE_NOT_ACQUIRED")
+        @Suppress("UNCHECKED_CAST")
+        val completedReader = stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<Unit>
+        completedReader.complete(Unit)
+        recordStdoutSnapshot(control, 2, "NATURAL_EOF_FALSE")
+    }
+
+    private fun authoredStdoutFacts(): String = freezeStdoutFacts(authoredStdoutControl())
+
+    private fun firstStdoutIOException(control: Pair<Class<*>, Any>): String =
+        ((stdoutControlField(control, "stdoutFirstIOException") as java.util.concurrent.atomic.AtomicReference<*>).get() as Enum<*>).name
+
+    private fun safeStopFailureContext(mode: String, receipt: AgentExecutionReceipt): String {
+        val safeMode = when (mode) { "stop-max-tokens", "stop-max-turn-requests", "stop-refusal" -> mode; else -> "UNKNOWN" }
+        val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
+        val evidence = receipt.providerEvidence as? AcpInvocationEvidenceSnapshot
+        fun causeCode(value: Throwable?): String {
+            if (value == null) return "NONE"
+            if (value is AgentExecutionException) return "AGENT_EXECUTION"
+            val known = listOf("AcpOutputLimitFailure" to "ACP_OUTPUT_LIMIT", "AcpTransportFailure" to "ACP_TRANSPORT", "AcpPhaseTimeout" to "ACP_TIMEOUT", "AcpIdleTimeout" to "ACP_TIMEOUT")
+            for ((name, code) in known) if (runCatching { Class.forName("decompengine.acp.$name").isInstance(value) }.getOrDefault(false)) return code
+            return when (value) { is java.io.IOException -> "IO_OTHER"; is Error -> "ERROR"; else -> "OTHER" }
+        }
+        return runCatching {
+            val facts = validatedStdoutFacts(failure?.details?.get("stdoutShutdownV1")) ?: "NOT_AVAILABLE"
+            val retainedCause = receipt.failureCause
+            // Only the known final wrapper has its direct cause inspected; no foreign getter/graph.
+            val directCause = (retainedCause as? AgentExecutionException)?.cause
+            val fields = listOf("ACP_STOP_V1", "mode=$safeMode", "kind=${failure?.kind?.name ?: "NOT_FAILED"}",
+                "phase=${evidence?.phaseReached?.name ?: "UNKNOWN"}", "cleanup=${evidence?.cleanupDisposition?.name ?: "UNKNOWN"}",
+                "cause=${causeCode(retainedCause)}/${causeCode(directCause)}", "facts=$facts")
+            val output = StringBuilder(512)
+            for ((index, field) in fields.withIndex()) {
+                if (field.any { it.code !in 32..126 } || output.length + field.length + (if (index == 0) 0 else 1) > 3072) return@runCatching "ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE"
+                if (index > 0) output.append(' ')
+                output.append(field)
+            }
+            output.toString()
+        }.getOrDefault("ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE")
     }
 
     private fun stdoutControlField(control: Pair<Class<*>, Any>, name: String): Any =
@@ -466,7 +805,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(88, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -839,7 +1178,7 @@ class AcpAgentHarnessTest {
             val harness = harness(mode)
 
             val receipt = harness.executeReceipt(fixture.request)
-            val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome).result
+            val result = assertIs<AgentExecutionOutcome.Returned>(receipt.outcome, safeStopFailureContext(mode, receipt)).result
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
 
             assertEquals(expected, result.stopReason, mode)
