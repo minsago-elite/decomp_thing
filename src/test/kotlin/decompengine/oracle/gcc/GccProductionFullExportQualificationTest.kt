@@ -64,9 +64,14 @@ class GccProductionFullExportQualificationTest {
             "--output", output.toString(), "--scratch", scratch.toString())
         val options = GccBundledCliOptions.parse(arguments, fullRecoveryExport = true, runtimeDiagnostics = true)
         var exitCode: Int? = null
-        withDiagnosticCapture({ failure ->
-            captureRuntimeDiagnostics(options, arguments, installation, evidence, exitCode, failure)
-        }) {
+        withBootAlignedDiagnosticCapture(
+            expectedReference = { readStable(configuredDiagnosticBootReference(), MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES) },
+            installedReference = { readStable(installation.resolve("lib/kotlin-boot-classpath-reference-v1.json"),
+                MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES) },
+            capture = { failure ->
+                captureRuntimeDiagnostics(options, arguments, installation, evidence, exitCode, failure)
+            },
+        ) {
             exitCode = invokeInstalledGccCli(arguments, launcher, timeoutSeconds = 9900,
                 installation = installation, command = options.commandName)
             assertEquals(0, exitCode, "installed cc1 diagnostic CLI failed; original outcome and bounded diagnostics retained")
@@ -76,6 +81,37 @@ class GccProductionFullExportQualificationTest {
         assertFalse(Files.exists(output.resolve("result.json")))
         assertFalse(Files.exists(output.resolve("structural-full-export-binding.json")))
     }
+
+    /** Byte alignment only; no JAR, runtime, generation or qualification authority. */
+    private inline fun <T> withBootAlignedDiagnosticCapture(expectedReference: () -> ByteArray,
+        installedReference: () -> ByteArray, capture: (Throwable?) -> Unit, operation: () -> T): T =
+        withDiagnosticCapture(capture) {
+            requireDiagnosticBootAlignment(expectedReference(), installedReference())
+            operation()
+        }
+
+    private fun configuredDiagnosticBootReference(): Path =
+        Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathReference")))
+
+    private class DiagnosticBootReferenceMismatch(expected: ByteArray, installed: ByteArray) : IllegalArgumentException(
+        "diagnostic BOOT reference bytes differ") {
+        // Only bounded typed facts survive; never paths, raw reference bytes or parser messages.
+        val facts = JsonObject(mapOf(
+            "reason" to JsonPrimitive("BOOT_REFERENCE_BYTE_MISMATCH"),
+            "expectedBytes" to JsonPrimitive(expected.size), "installedBytes" to JsonPrimitive(installed.size),
+            "expectedSha256" to JsonPrimitive(OracleArtifacts.sha256(expected)),
+            "installedSha256" to JsonPrimitive(OracleArtifacts.sha256(installed)),
+        ))
+    }
+
+    private fun requireDiagnosticBootAlignment(expected: ByteArray, installed: ByteArray) {
+        require(expected.size in 1..MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES &&
+            installed.size in 1..MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES) { "diagnostic BOOT reference exceeds its byte bound" }
+        if (!expected.contentEquals(installed)) throw DiagnosticBootReferenceMismatch(expected, installed)
+    }
+
+    private fun diagnosticBootMismatchFacts(primary: Throwable?, authentication: Throwable?): JsonElement =
+        ((primary as? DiagnosticBootReferenceMismatch) ?: (authentication as? DiagnosticBootReferenceMismatch))?.facts ?: JsonNull
 
     private inline fun <T> withDiagnosticCapture(capture: (Throwable?) -> Unit, operation: () -> T): T {
         var original: Throwable? = null
@@ -119,7 +155,8 @@ class GccProductionFullExportQualificationTest {
         retain("invocation.json", options.output.resolve("invocation.json"), 256 * 1024)
         retain("compiler-engines.json", options.profile, 1024 * 1024)
         retain("gcc-bundled-ghidra-reference-v1.json", installation.resolve("lib/gcc-bundled-ghidra-reference-v1.json"), 8 * 1024 * 1024)
-        retain("kotlin-boot-classpath-reference-v1.json", installation.resolve("lib/kotlin-boot-classpath-reference-v1.json"), 256 * 1024)
+        retain("kotlin-boot-classpath-reference-v1.json", installation.resolve("lib/kotlin-boot-classpath-reference-v1.json"),
+            MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES)
         retain("boot-classpath.json", options.output.resolve("inputs/boot-classpath.json"), 1024 * 1024)
         var operationId: String? = null
         var discoveryFailure: Throwable? = null
@@ -166,6 +203,7 @@ class GccProductionFullExportQualificationTest {
             "journalDiscoveryFailure" to JsonPrimitive(discoveryFailure?.javaClass?.simpleName),
             "provenanceStatus" to JsonPrimitive(if (authentication.isSuccess) "checked-existing-chain" else "unavailable-or-invalid"),
             "provenanceFailure" to JsonPrimitive(authentication.exceptionOrNull()?.message?.take(512)),
+            "bootReferenceMismatch" to diagnosticBootMismatchFacts(originalFailure, authentication.exceptionOrNull()),
             "logCaptureFailure" to JsonPrimitive(logCapture.exceptionOrNull()?.javaClass?.simpleName),
             "logStreams" to JsonObject(listOf("stdout", "stderr").associateWith { name ->
                 JsonPrimitive(if (logCapture.isFailure) "capture-failed" else when (logCapture.getOrNull()?.get(name)?.size) {
@@ -204,9 +242,9 @@ class GccProductionFullExportQualificationTest {
             val bootArtifact = intent.artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH }
             require(records.getValue("boot-classpath.json").size.toLong() == bootArtifact.bytes &&
                 OracleArtifacts.sha256(records.getValue("boot-classpath.json")) == bootArtifact.sha256)
-            val configuredBootReference = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathReference")))
-            require(records.getValue("kotlin-boot-classpath-reference-v1.json")
-                .contentEquals(readStable(configuredBootReference, 256 * 1024)))
+            requireDiagnosticBootAlignment(
+                readStable(configuredDiagnosticBootReference(), MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES),
+                records.getValue("kotlin-boot-classpath-reference-v1.json"))
             require(definition.environment == intent.environment)
             val lease = FullTreeDiskScratchEvidence.parseCanonical(records.getValue("lease-evidence.json"))
             require(lease.operationId == operationId && lease.requestSha256 == intent.requestSha256 &&
@@ -684,6 +722,100 @@ class GccProductionFullExportQualificationTest {
         assertFailsWith<IllegalArgumentException> { verify() }
         Files.write(copiedReference, referenceBytes)
         verify()
+    }
+
+    @Test
+    fun `BOOT generation mismatch prevents launch and preserves preflight primary through capture failure`() {
+        val expected = "generation-A".toByteArray()
+        val installed = "generation-B".toByteArray()
+        val captureFailure = IllegalStateException("injected capture failure")
+        var launches = 0
+        var captures = 0
+        var capturedPrimary: Throwable? = null
+        val mismatch = assertFailsWith<DiagnosticBootReferenceMismatch> {
+            withBootAlignedDiagnosticCapture({ expected }, { installed }, { primary ->
+                captures++; capturedPrimary = primary; throw captureFailure
+            }) { launches++; 0 }
+        }
+        assertEquals(0, launches); assertEquals(1, captures)
+        assertSame(mismatch, capturedPrimary)
+        assertEquals(listOf(captureFailure), mismatch.suppressed.toList())
+        assertEquals(setOf("reason", "expectedBytes", "installedBytes", "expectedSha256", "installedSha256"), mismatch.facts.keys)
+        assertEquals(JsonPrimitive("BOOT_REFERENCE_BYTE_MISMATCH"), mismatch.facts["reason"])
+        assertEquals(JsonPrimitive(expected.size), mismatch.facts["expectedBytes"])
+        assertEquals(JsonPrimitive(installed.size), mismatch.facts["installedBytes"])
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(expected)), mismatch.facts["expectedSha256"])
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(installed)), mismatch.facts["installedSha256"])
+        assertEquals(mismatch.facts, diagnosticBootMismatchFacts(mismatch, captureFailure))
+        assertTrue(OracleJson.canonicalBytes(mismatch.facts).size < 512)
+    }
+
+    @Test
+    fun `equal BOOT reference bytes launch exactly once and retain postcapture comparison`() {
+        val expected = "generation-A".toByteArray()
+        val installed = expected.copyOf()
+        var launches = 0
+        var captures = 0
+        val result = withBootAlignedDiagnosticCapture({ expected }, { installed }, { primary ->
+            captures++; assertTrue(primary == null)
+            requireDiagnosticBootAlignment(expected, installed)
+        }) { launches++; 17 }
+        assertEquals(17, result); assertEquals(1, launches); assertEquals(1, captures)
+        assertEquals(JsonNull, diagnosticBootMismatchFacts(null, null))
+    }
+
+    @Test
+    fun `postlaunch BOOT mutation is still refused by the shared strict comparator`() {
+        val expected = "generation-A".toByteArray()
+        var installed = expected.copyOf()
+        var launches = 0
+        var captures = 0
+        val mismatch = assertFailsWith<DiagnosticBootReferenceMismatch> {
+            withBootAlignedDiagnosticCapture({ expected }, { installed }, { primary ->
+                captures++; assertTrue(primary == null)
+                requireDiagnosticBootAlignment(expected, installed)
+            }) { launches++; installed = "generation-B".toByteArray(); 0 }
+        }
+        assertEquals(1, launches); assertEquals(1, captures)
+        assertEquals(mismatch.facts, diagnosticBootMismatchFacts(null, mismatch))
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(installed)), mismatch.facts["installedSha256"])
+    }
+
+    @Test
+    fun `BOOT alignment keeps each existing byte ceiling and refuses before launch`() {
+        // These are byte-alignment controls, not parsed reference or runtime authority.
+        val exact = ByteArray(MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES)
+        var launches = 0
+        withBootAlignedDiagnosticCapture({ exact }, { exact.copyOf() }, {}) { launches++ }
+        assertEquals(1, launches)
+        val over = ByteArray(MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES + 1)
+        for ((expected, installed) in listOf(over to exact, exact to over, byteArrayOf() to exact, exact to byteArrayOf())) {
+            var captures = 0
+            assertFailsWith<IllegalArgumentException> {
+                withBootAlignedDiagnosticCapture({ expected }, { installed }, { primary ->
+                    captures++; assertTrue(primary is IllegalArgumentException)
+                }) { launches++ }
+            }
+            assertEquals(1, captures)
+        }
+        assertEquals(1, launches)
+    }
+
+    @Test
+    fun `launched primary failure survives a later BOOT mismatch during capture`() {
+        val expected = "generation-A".toByteArray()
+        var installed = expected.copyOf()
+        val original = IllegalStateException("injected command failure")
+        var launches = 0
+        val retained = assertFailsWith<IllegalStateException> {
+            withBootAlignedDiagnosticCapture({ expected }, { installed }, { primary ->
+                assertSame(original, primary)
+                requireDiagnosticBootAlignment(expected, installed)
+            }) { launches++; installed = "generation-B".toByteArray(); throw original }
+        }
+        assertEquals(1, launches); assertSame(original, retained)
+        assertEquals(1, original.suppressed.size)
+        assertTrue(original.suppressed.single() is DiagnosticBootReferenceMismatch)
     }
 
     @Test
@@ -1488,6 +1620,7 @@ class GccProductionFullExportQualificationTest {
         const val MAXIMUM_FAILURE_DIAGNOSTIC_BYTES = 64 * 1024
         const val MAXIMUM_FAILURE_DIAGNOSTIC_TOTAL_BYTES = 8L * 1024 * 1024
         const val MAXIMUM_DIAGNOSTIC_STDOUT_BYTES = 16 * 1024 * 1024
+        const val MAXIMUM_DIAGNOSTIC_BOOT_REFERENCE_BYTES = 256 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
         val RESULT_KEYS = setOf(
             "provider", "schemaVersion", "complete", "releaseEligible", "scored", "operationId", "requestSha256",
