@@ -74,6 +74,10 @@ class LinuxBubblewrapBoundaryTest {
         assertEquals(1, memory.closes)
     }
 
+    private class RootObservationMemory(private val observe: () -> Unit) : com.sun.jna.Memory(256) {
+        override fun clear() { observe(); super.clear() }
+    }
+
     private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
         var closes = 0
         override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
@@ -237,6 +241,355 @@ class LinuxBubblewrapBoundaryTest {
                     LinuxFileKey::class.java, Function0::class.java)
                 val sourceRoot = Files.createDirectory(base.resolve("leased-root"))
                 Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                run {
+                    // Exercise the actual fd-owned body, not a replacement observer result.
+                    val observerField = scopeType.getDeclaredField("rootObserver").apply { isAccessible = true }
+                    val descriptorField = scopeType.getDeclaredField("rootDescriptor").apply { isAccessible = true }
+                    val identityField = scopeType.getDeclaredField("rootIdentity").apply { isAccessible = true }
+                    val currentRoot = scopeType.getDeclaredMethod("currentRoot", Function0::class.java)
+                    val scopeCheckpoint = scopeType.getDeclaredMethod("checkpoint")
+                    val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                    val noCheck = boundaryType.getDeclaredField("NO_SANDBOX_CHECKPOINT").apply { isAccessible = true }.get(null)
+                    fun observeCurrent(scope: Any): Any? = synchronized(registry) { invokePrivate(scope, currentRoot, noCheck) }
+                    val wrapper = boundaryType.getDeclaredMethod("manifestRootPhysicalLocation", LinuxDescriptor::class.java,
+                        LinuxFilesystemSyscalls.StatxIdentityScratch::class.java, List::class.java, Function0::class.java)
+                    fun field(scope: Any, name: String): Any? =
+                        scopeType.getDeclaredField(name).apply { isAccessible = true }.get(scope)
+                    @Suppress("UNCHECKED_CAST")
+                    fun observer(scope: Any) = observerField.get(scope) as (Int) -> Any
+                    val firstScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                    var secondScope: AutoCloseable? = null
+                    var boundAfterScopeClose: (() -> Unit)? = null
+                    try {
+                        val peerScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                        secondScope = peerScope
+                        val retainedObserver = observer(firstScope)
+                        assertTrue(retainedObserver !== observer(peerScope), "observer ownership is per scope")
+                        val descriptor = descriptorField.get(firstScope) as LinuxDescriptor
+                        val scratch = identityField.get(firstScope) as LinuxFilesystemSyscalls.StatxIdentityScratch
+                        val statistics = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+                        (statistics.get(scratch) as com.sun.jna.Memory).close()
+                        val order = mutableListOf<String>()
+                        var duringQuery: (() -> Unit)? = null
+                        statistics.set(scratch, RootObservationMemory {
+                            val ownsDescriptor = Thread.holdsLock(descriptor)
+                            assertTrue(ownsDescriptor || Thread.holdsLock(registry), "body or scope ownership covers each query")
+                            assertTrue(Thread.holdsLock(scratch), "each query retains scratch ownership")
+                            order += if (ownsDescriptor) "query" else "tail-query"
+                            duringQuery?.invoke()
+                        })
+                        var previous: Any? = null
+                        repeat(3) {
+                            order.clear()
+                            val current = requireNotNull(observeCurrent(firstScope))
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order,
+                                "two body queries and the unchanged mount/mode short-circuit queries")
+                            previous?.let { earlier -> assertEquals(earlier, current); assertTrue(earlier !== current) }
+                            previous = current
+                            assertTrue(retainedObserver === observer(firstScope), "observations reuse the same callback")
+                        }
+                        order.clear()
+                        val firstLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(listOf("query", "query"), order)
+                        order.clear()
+                        val secondLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(firstLocation, secondLocation)
+                        assertTrue(firstLocation !== secondLocation, "immutable observations are never cached")
+                        assertEquals(listOf("query", "query"), order)
+                        val check: () -> Unit = {
+                            assertTrue(Thread.holdsLock(descriptor))
+                            order += "check"
+                        }
+                        order.clear()
+                        assertEquals(firstLocation, invokePrivate(null, wrapper, descriptor, scratch,
+                            field(firstScope, "mounts"), check))
+                        val directOrder = listOf("check", "query", "query")
+                        val fallbackOrder = listOf("check", "query") + List(sourceRoot.nameCount) { "check" } + "query"
+                        assertTrue(order == directOrder || order == fallbackOrder,
+                            "original check/query order, including every strict-walk component check: " + order)
+                        order.clear()
+                        assertEquals(firstLocation, synchronized(registry) { invokePrivate(firstScope, currentRoot, check) })
+                        assertTrue(order == directOrder + listOf("tail-query", "tail-query") ||
+                            order == fallbackOrder + listOf("tail-query", "tail-query"), "arbitrary currentRoot checks retain the wrapper route")
+                        val cancellation = IOException("root-observer arbitrary cancellation")
+                        order.clear()
+                        val cancelled = assertFailsWith<IOException> {
+                            invokePrivate(null, wrapper, descriptor, scratch, field(firstScope, "mounts"), {
+                                assertTrue(Thread.holdsLock(descriptor))
+                                order += "cancel"
+                                throw cancellation
+                            })
+                        }
+                        assertTrue(cancelled === cancellation)
+                        assertEquals(listOf("cancel"), order, "cancellation still precedes the first identity query")
+
+                        // A mutation between the two real scratch observations must be rejected.
+                        order.clear()
+                        duringQuery = {
+                            if (order.size == 2) Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                        }
+                        try {
+                            val changed = assertFailsWith<IOException> { descriptor.whileOpen(retainedObserver) }
+                            assertEquals("private-control descriptor changed during inspection", changed.message)
+                            assertEquals(listOf("query", "query"), order)
+                        } finally {
+                            duringQuery = null
+                            Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                        }
+                        val relocated = base.resolve("callback-relocated-root")
+                        Files.move(sourceRoot, relocated)
+                        Files.createDirectory(sourceRoot)
+                        try {
+                            order.clear()
+                            val moved = descriptor.whileOpen(retainedObserver)
+                            assertEquals(relocated, invokePrivate(moved, moved.javaClass.getDeclaredMethod("getNamespacePath")))
+                            assertEquals(listOf("query", "query"), order)
+                            order.clear()
+                            assertFailsWith<IOException> { observeCurrent(firstScope) }
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order)
+                        } finally {
+                            Files.delete(sourceRoot)
+                            Files.move(relocated, sourceRoot)
+                        }
+
+                        // Bind one borrowed file check, then execute the real shared observation body.
+                        val bindDescriptor = scopeType.getDeclaredMethod("descriptorCheck", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        val originalDescriptorCheck = scopeType.getDeclaredMethod("requireDescriptor", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        @Suppress("UNCHECKED_CAST")
+                        fun bind(scope: Any, file: LinuxDescriptor, path: Path): () -> Unit =
+                            invokePrivate(scope, bindDescriptor, file, path, false) as () -> Unit
+                        @Suppress("UNCHECKED_CAST")
+                        fun fileObserver(check: () -> Unit): (Int) -> Any =
+                            check.javaClass.getDeclaredField("observer").apply { isAccessible = true }.get(check) as (Int) -> Any
+                        val boundPath = Files.writeString(sourceRoot.resolve("bound-file"), "borrowed-content\n".repeat(4096))
+                        val peerPath = Files.writeString(sourceRoot.resolve("bound-peer"), "peer-content")
+                        try {
+                            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(boundPath)).use { file ->
+                                requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(peerPath)).use { peer ->
+                                    val borrowedFds = openDescriptorCount()
+                                    val queries = mutableListOf<String>()
+                                    var duringBoundQuery: ((String) -> Unit)? = null
+                                    val previousStorage = statistics.get(scratch) as com.sun.jna.Memory
+                                    val observedStorage = RootObservationMemory {
+                                        assertTrue(Thread.holdsLock(registry), "bound checks retain ACTIVE ownership")
+                                        assertTrue(Thread.holdsLock(scratch), "bound observations retain scratch ownership")
+                                        val label = when {
+                                            Thread.holdsLock(file) -> "file"
+                                            Thread.holdsLock(peer) -> "peer"
+                                            else -> "root"
+                                        }
+                                        queries += label
+                                        duringBoundQuery?.invoke(label)
+                                    }
+                                    statistics.set(scratch, observedStorage)
+                                    try {
+                                        val check = bind(firstScope, file, boundPath)
+                                        val peerCheck = bind(firstScope, peer, peerPath)
+                                        val otherScopeCheck = bind(peerScope, file, boundPath)
+                                        val retainedFileObserver = fileObserver(check)
+                                        assertEquals(emptyList<String>(), queries, "binding performs no observation")
+                                        assertEquals(borrowedFds, openDescriptorCount(), "binding acquires no descriptor")
+                                        assertFalse((check as Any) is AutoCloseable, "the check borrows, never owns close")
+                                        assertTrue(retainedFileObserver !== fileObserver(peerCheck))
+                                        assertTrue(retainedFileObserver !== fileObserver(otherScopeCheck))
+                                        val rootQueries = List(4) { "root" }
+                                        val completeOrder = rootQueries + "file" + rootQueries
+                                        repeat(3) {
+                                            queries.clear(); check()
+                                            assertEquals(completeOrder, queries, "original first/body/final observation order")
+                                            assertTrue(retainedFileObserver === fileObserver(check))
+                                        }
+                                        queries.clear()
+                                        invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
+                                        assertEquals(completeOrder, queries, "the original entry retains the same live observations")
+                                        queries.clear(); peerCheck()
+                                        assertEquals(rootQueries + "peer" + rootQueries, queries, "fixed file/path inputs do not cross-pair")
+                                        queries.clear()
+                                        val firstFileLocation = synchronized(registry) { file.whileOpen(retainedFileObserver) }
+                                        assertEquals(listOf("file"), queries)
+                                        queries.clear()
+                                        val secondFileLocation = synchronized(registry) { file.whileOpen(retainedFileObserver) }
+                                        assertEquals(firstFileLocation, secondFileLocation)
+                                        assertTrue(firstFileLocation !== secondFileLocation, "each shared body invocation constructs a fresh location")
+                                        assertEquals(listOf("file"), queries)
+
+                                        // Both routes drive the existing hash/copy callback cadence, without a replacement query.
+                                        val hash = boundaryType.getDeclaredMethod("sha256", LinuxDescriptor::class.java,
+                                            java.lang.Long.TYPE, Function0::class.java)
+                                        queries.clear()
+                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check)
+                                        val hashOrder = queries.toList()
+                                        queries.clear()
+                                        val originalDigest = invokePrivate(null, hash, file, Files.size(boundPath), {
+                                            invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
+                                            Unit
+                                        })
+                                        assertEquals(originalDigest, boundDigest)
+                                        assertEquals(hashOrder, queries, "all original hash checkpoints still execute")
+                                        assertTrue(hashOrder.count { it == "file" } > 1, "the real multi-chunk hash repeats the bound check")
+
+                                        val permissions = Files.getPosixFilePermissions(boundPath)
+                                        Files.setPosixFilePermissions(boundPath, permissions + PosixFilePermission.OWNER_EXECUTE)
+                                        try {
+                                            val changed = assertFailsWith<IOException> { check() }
+                                            assertEquals("runtime manifest descriptor changed or crossed a mount", changed.message)
+                                        } finally { Files.setPosixFilePermissions(boundPath, permissions) }
+                                        val movedFile = sourceRoot.resolve("bound-file-moved")
+                                        Files.move(boundPath, movedFile)
+                                        Files.writeString(boundPath, "replacement-not-authorized")
+                                        try {
+                                            val changed = assertFailsWith<IOException> { check() }
+                                            assertEquals("runtime manifest descriptor has no authenticated source pathname", changed.message)
+                                            val wrongPath = bind(firstScope, peer, boundPath)
+                                            assertFailsWith<IOException> { wrongPath() }
+                                        } finally {
+                                            Files.delete(boundPath); Files.move(movedFile, boundPath)
+                                        }
+                                        check()
+
+                                        // An actual bound-body failure unwinds the original borrowed descriptor owner.
+                                        val primary = IOException("bound descriptor observation refusal")
+                                        val failingFile = requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(boundPath))
+                                        val failed = try {
+                                            failingFile.use { borrowed ->
+                                                val failedCheck = bind(firstScope, borrowed, boundPath)
+                                                duringBoundQuery = { if (Thread.holdsLock(borrowed)) throw primary }
+                                                failedCheck()
+                                            }
+                                            error("bound observation failure unexpectedly returned")
+                                        } catch (failure: Throwable) { failure }
+                                        finally { duringBoundQuery = null }
+                                        assertTrue(failed === primary)
+                                        assertFailsWith<IllegalStateException> { failingFile.whileOpen { it } }
+                                        assertEquals(borrowedFds, openDescriptorCount(), "failed bound invocation releases only its original owner")
+                                        check()
+
+                                        // Close must wait for the real file-fd observation, not just a mocked result.
+                                        val enteredFile = java.util.concurrent.CountDownLatch(1)
+                                        val releaseFile = java.util.concurrent.CountDownLatch(1)
+                                        val closingThread = AtomicReference<Thread>()
+                                        var heldFile = false
+                                        duringBoundQuery = { label ->
+                                            if (label == "file" && !heldFile) {
+                                                heldFile = true
+                                                enteredFile.countDown()
+                                                assertTrue(releaseFile.await(5, TimeUnit.SECONDS))
+                                            }
+                                        }
+                                        val checkingFile = executor.submit<Unit> { check() }
+                                        var closingFile: java.util.concurrent.Future<*>? = null
+                                        try {
+                                            assertTrue(enteredFile.await(5, TimeUnit.SECONDS))
+                                            closingFile = executor.submit { closingThread.set(Thread.currentThread()); file.close() }
+                                            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                                            while (closingThread.get()?.state != Thread.State.BLOCKED && !closingFile.isDone && System.nanoTime() < end) {
+                                                Thread.onSpinWait()
+                                            }
+                                            assertEquals(Thread.State.BLOCKED, closingThread.get()?.state)
+                                            assertFalse(closingFile.isDone, "borrowed close waits for descriptor ownership")
+                                            releaseFile.countDown()
+                                            checkingFile.get(5, TimeUnit.SECONDS)
+                                            closingFile.get(5, TimeUnit.SECONDS)
+                                        } finally {
+                                            releaseFile.countDown()
+                                            checkingFile.get(5, TimeUnit.SECONDS)
+                                            closingFile?.get(5, TimeUnit.SECONDS)
+                                            duringBoundQuery = null
+                                        }
+                                        queries.clear()
+                                        assertFailsWith<IllegalStateException> { check() }
+                                        assertEquals(rootQueries, queries, "original root checkpoint precedes closed FILE refusal, with no file query")
+                                        boundAfterScopeClose = check // Test-only retention to verify scope refusal takes precedence.
+                                    } finally {
+                                        statistics.set(scratch, previousStorage)
+                                        observedStorage.close()
+                                    }
+                                }
+                            }
+                        } finally {
+                            Files.deleteIfExists(peerPath); Files.deleteIfExists(boundPath)
+                        }
+
+                        // Run the real constructor inside the unchanged scratch admission guard.
+                        val constructor = scopeType.declaredConstructors.single { it.parameterCount == 10 }.apply { isAccessible = true }
+                        val failedMemory = ManifestStatxMemory()
+                        var constructorFailure: Throwable? = null
+                        val failedConstruction = try {
+                            initializeManifestStatxScratch { owned ->
+                                replaceManifestStatxMemory(owned, failedMemory)
+                                try {
+                                    constructor.newInstance(field(firstScope, "mountEvents"), field(firstScope, "mountPoll"),
+                                        owned, emptyList<Any>(), field(firstScope, "controls"), field(firstScope, "generation"),
+                                        descriptor, field(firstScope, "root"), null, {})
+                                } catch (failure: java.lang.reflect.InvocationTargetException) {
+                                    constructorFailure = failure.targetException
+                                    throw failure.targetException
+                                }
+                            }
+                            error("invalid constructor mount admission unexpectedly returned")
+                        } catch (failure: Throwable) { failure }
+                        assertTrue(failedConstruction === constructorFailure)
+                        assertTrue(failedConstruction is NoSuchElementException)
+                        assertEquals(1, failedMemory.closes)
+                        assertTrue(retainedObserver === observer(firstScope))
+                        invokePrivate(firstScope, scopeCheckpoint)
+
+                        // Actual checkpoint ownership serializes close until the callback has finished.
+                        val enteredQuery = java.util.concurrent.CountDownLatch(1)
+                        val releaseQuery = java.util.concurrent.CountDownLatch(1)
+                        val closeThread = AtomicReference<Thread>()
+                        var blocked = false
+                        duringQuery = {
+                            if (!blocked) {
+                                blocked = true
+                                enteredQuery.countDown()
+                                assertTrue(releaseQuery.await(5, TimeUnit.SECONDS))
+                            }
+                        }
+                        val observing = executor.submit { invokePrivate(firstScope, scopeCheckpoint) }
+                        var closing: java.util.concurrent.Future<*>? = null
+                        try {
+                            assertTrue(enteredQuery.await(5, TimeUnit.SECONDS))
+                            closing = executor.submit { closeThread.set(Thread.currentThread()); firstScope.close() }
+                            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                            while (closeThread.get()?.state != Thread.State.BLOCKED && !closing.isDone && System.nanoTime() < deadline) {
+                                Thread.onSpinWait()
+                            }
+                            assertEquals(Thread.State.BLOCKED, closeThread.get()?.state)
+                            assertFalse(closing.isDone, "scope close must not release an in-flight observer's owned inputs")
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing.get(5, TimeUnit.SECONDS)
+                            assertFailsWith<IOException> { invokePrivate(firstScope, scopeCheckpoint) }
+                            assertFailsWith<IllegalStateException> { descriptor.whileOpen(retainedObserver) }
+                            val closedScope = assertFailsWith<IOException> { checkNotNull(boundAfterScopeClose).invoke() }
+                            assertEquals("runtime manifest scope is closed", closedScope.message)
+                        } finally {
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing?.get(5, TimeUnit.SECONDS)
+                            duringQuery = null
+                        }
+                    } finally {
+                        try { secondScope?.close() } finally { firstScope.close() }
+                    }
+                    assertEquals(baseline, openDescriptorCount(), "observer ownership/constructor/close controls release all FDs")
+                    val admissionFailure = IOException("root-observer post-constructor admission failure")
+                    var reachedAdmission = false
+                    val failedAdmission = assertFailsWith<IOException> {
+                        invokePrivate(scopeCompanion, open, sourceRoot, null, {
+                            if (Thread.currentThread().stackTrace.any { it.methodName == "checkpointLocked" }) {
+                                reachedAdmission = true
+                                throw admissionFailure
+                            }
+                        })
+                    }
+                    assertTrue(reachedAdmission)
+                    assertTrue(failedAdmission === admissionFailure)
+                    assertEquals(baseline, openDescriptorCount(), "failed admission unwinds callback-owned scratch and descriptors")
+                }
                 val scopes = mutableListOf<AutoCloseable>()
                 try {
                     repeat(128) {
@@ -993,22 +1346,46 @@ class LinuxBubblewrapBoundaryTest {
                 assertEquals(beforeLease, openDescriptorCount())
                 val disjointSource = Files.writeString(workspace.resolve("cross-mount-refresh-$suffix"), "stable-disjoint-content")
                 val disjointLease = invokePrivate(scopeCompanion, openScope, disjointSource, null, {}) as AutoCloseable
-                val addition = newControl(creationParent = nested)
                 try {
-                    requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(disjointSource)).use { descriptor ->
-                        invokePrivate(disjointLease, scopeType.getDeclaredMethod("requireDescriptor", LinuxDescriptor::class.java,
-                            Path::class.java, Boolean::class.javaPrimitiveType), descriptor, disjointSource, false)
+                    requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(disjointSource)).use { boundDescriptor ->
+                        val bindCheck = scopeType.getDeclaredMethod("descriptorCheck", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        @Suppress("UNCHECKED_CAST")
+                        val boundCheck = invokePrivate(disjointLease, bindCheck, boundDescriptor, disjointSource, false) as () -> Unit
+                        val boundObserver = boundCheck.javaClass.getDeclaredField("observer").apply { isAccessible = true }
+                        val sameObserver = boundObserver.get(boundCheck)
+                        boundCheck()
+                        assertTrue(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                            "the real disjoint lease begins on the fast route before registry addition")
+                        val addition = newControl(creationParent = nested)
+                        try {
+                            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(disjointSource)).use { descriptor ->
+                                invokePrivate(disjointLease, scopeType.getDeclaredMethod("requireDescriptor", LinuxDescriptor::class.java,
+                                    Path::class.java, Boolean::class.javaPrimitiveType), descriptor, disjointSource, false)
+                            }
+                            if (!crossFilesystem) {
+                                assertFalse(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                    "a persistent same-filesystem control through another mount must disable namespace fast translation")
+                            }
+                            assertTrue(calculateAcpRuntimeManifestSha256(disjointSource, AcpRuntimeClosureLimits(64, 4096, 8)).matches(Regex("[0-9a-f]{64}")))
+                            boundCheck()
+                            assertTrue(sameObserver === boundObserver.get(boundCheck), "registry refresh does not replace the bound callback")
+                            if (!crossFilesystem) assertFalse(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                "the same bound check follows actual fast-to-fallback registry reconciliation")
+                        } finally {
+                            invokePrivate(addition, type.getDeclaredMethod("deleteAndProve"))
+                            controls.remove(addition)
+                            try {
+                                boundCheck()
+                                assertTrue(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                    "proved deletion returns the same bound check to the current fast route")
+                                assertTrue(sameObserver === boundObserver.get(boundCheck))
+                            } finally {
+                                disjointLease.close()
+                            }
+                        }
                     }
-                    if (!crossFilesystem) {
-                        assertFalse(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
-                            "a persistent same-filesystem control through another mount must disable namespace fast translation")
-                    }
-                    assertTrue(calculateAcpRuntimeManifestSha256(disjointSource, AcpRuntimeClosureLimits(64, 4096, 8)).matches(Regex("[0-9a-f]{64}")))
-                } finally {
-                    invokePrivate(addition, type.getDeclaredMethod("deleteAndProve"))
-                    controls.remove(addition)
-                    disjointLease.close()
-                }
+                } finally { disjointLease.close() }
                 assertEquals(beforeLease, openDescriptorCount())
             }
             println("private-control-bind-probe: nestedSameAndCrossFilesystemLeasesDenyBothAdmissionOrders=true persistentCrossMountRefreshPassed=true")

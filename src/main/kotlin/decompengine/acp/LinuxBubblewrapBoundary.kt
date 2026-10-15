@@ -1930,6 +1930,16 @@ private fun manifestRootPhysicalLocation(
     mounts: List<HostPhysicalMount>,
     cancellationCheck: () -> Unit,
 ): HostPhysicalLocation = descriptor.whileOpen { fd ->
+    manifestRootPhysicalLocationWhileOpen(descriptor, fd, rootIdentity, mounts, cancellationCheck)
+}
+
+private fun manifestRootPhysicalLocationWhileOpen(
+    descriptor: LinuxDescriptor,
+    fd: Int,
+    rootIdentity: LinuxFilesystemSyscalls.StatxIdentityScratch,
+    mounts: List<HostPhysicalMount>,
+    cancellationCheck: () -> Unit,
+): HostPhysicalLocation {
     cancellationCheck()
     val identity = rootIdentity.identity(fd)
     val mount = mounts.singleOrNull { it.mountId == identity.mountId }
@@ -1988,7 +1998,7 @@ private fun manifestRootPhysicalLocation(
     if (identity.key != after.key || identity.mountId != after.mountId || identity.mode != after.mode) {
         throw IOException("private-control descriptor changed during inspection")
     }
-    HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
+    return HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
         mount.root.resolve(mount.mountPoint.relativize(named)).normalize(), named)
 }
 
@@ -2108,6 +2118,16 @@ private class RuntimePrivateControlScope private constructor(
     private var mountChanged = false
     private var fast = fastEligible(controls)
 
+    private val rootObserver: (Int) -> HostPhysicalLocation = run {
+        val descriptor = rootDescriptor
+        val identity = rootIdentity
+        val physicalMounts = mounts
+        val observe: (Int) -> HostPhysicalLocation = { fd ->
+            manifestRootPhysicalLocationWhileOpen(descriptor, fd, identity, physicalMounts, NO_SANDBOX_CHECKPOINT)
+        }
+        observe
+    }
+
     private fun fastEligible(identities: Map<PinnedControlDirectory, ManifestControlIdentity>): Boolean {
         val mount = mounts.single { it.mountId == rootDescriptor.identity.mountId }
         if (mounts.any { it.mountPoint != root.namespacePath && it.mountPoint.startsWith(root.namespacePath) }) return false
@@ -2126,7 +2146,8 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
-        val current = manifestRootPhysicalLocation(rootDescriptor, rootIdentity, mounts, check)
+        val current = if (check === NO_SANDBOX_CHECKPOINT) rootDescriptor.whileOpen(rootObserver)
+            else manifestRootPhysicalLocation(rootDescriptor, rootIdentity, mounts, check)
         if (current.key != root.key || rootDescriptor.identity.mountId !=
             rootIdentity.identity(rootDescriptor.fd).mountId ||
             rootDescriptor.identity.mode != rootIdentity.identity(rootDescriptor.fd).mode ||
@@ -2199,18 +2220,52 @@ private class RuntimePrivateControlScope private constructor(
 
     fun checkpoint(): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) { checkpointLocked() }
 
+    private fun observeDescriptorWhileOpen(
+        descriptor: LinuxDescriptor,
+        fd: Int,
+        expectedPath: Path,
+    ): HostPhysicalLocation {
+        val identity = rootIdentity.identity(fd)
+        if (identity.key != descriptor.identity.key || identity.mountId != rootDescriptor.identity.mountId ||
+            identity.mode != descriptor.identity.mode) throw IOException("runtime manifest descriptor changed or crossed a mount")
+        val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
+        if (!named.isAbsolute || named != named.normalize() || named != expectedPath || !named.startsWith(root.namespacePath)) {
+            throw IOException("runtime manifest descriptor has no authenticated source pathname")
+        }
+        return root.copy(key = identity.key, path = root.path.resolve(root.namespacePath.relativize(named)), namespacePath = named)
+    }
+
+    /** A repeated check, not admission evidence; borrows its descriptor for one synchronous hash. */
+    private inner class BoundDescriptorCheck(
+        val descriptor: LinuxDescriptor,
+        val expectedPath: Path,
+        val recursive: Boolean,
+    ) : () -> Unit {
+        val observer: (Int) -> HostPhysicalLocation = { fd ->
+            observeDescriptorWhileOpen(descriptor, fd, expectedPath)
+        }
+
+        override fun invoke() = requireDescriptor(descriptor, expectedPath, recursive, this)
+    }
+
+    // Capture only fixed borrowed inputs; construction does not query, admit or retain ownership.
+    fun descriptorCheck(descriptor: LinuxDescriptor, expectedPath: Path, recursive: Boolean = false): () -> Unit =
+        BoundDescriptorCheck(descriptor, expectedPath, recursive)
+
     fun requireDescriptor(descriptor: LinuxDescriptor, expectedPath: Path, recursive: Boolean = false): Unit =
+        requireDescriptor(descriptor, expectedPath, recursive, null)
+
+    private fun requireDescriptor(
+        descriptor: LinuxDescriptor,
+        expectedPath: Path,
+        recursive: Boolean,
+        bound: BoundDescriptorCheck?,
+    ): Unit =
         synchronized(ACTIVE_PRIVATE_CONTROLS) {
             checkpointLocked()
-            val location = if (fast) descriptor.whileOpen { fd ->
-                val identity = rootIdentity.identity(fd)
-                if (identity.key != descriptor.identity.key || identity.mountId != rootDescriptor.identity.mountId ||
-                    identity.mode != descriptor.identity.mode) throw IOException("runtime manifest descriptor changed or crossed a mount")
-                val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
-                if (!named.isAbsolute || named != named.normalize() || named != expectedPath || !named.startsWith(root.namespacePath)) {
-                    throw IOException("runtime manifest descriptor has no authenticated source pathname")
-                }
-                root.copy(key = identity.key, path = root.path.resolve(root.namespacePath.relativize(named)), namespacePath = named)
+            val location = if (fast) {
+                if (bound != null) descriptor.whileOpen(bound.observer)
+                else descriptor.whileOpen { fd -> observeDescriptorWhileOpen(descriptor, fd, expectedPath) }
             } else hostPhysicalLocation(descriptor, mounts, NO_SANDBOX_CHECKPOINT)
             if (location.namespacePath != expectedPath || !expectedPath.startsWith(root.namespacePath)) {
                 throw IOException("runtime manifest descriptor has no authenticated source pathname")
@@ -4777,8 +4832,9 @@ private fun buildRuntimeManifestOwned(
                             authenticated.identity.mountId != identity.mountId || !authenticated.identity.isRegularFile) {
                             throw IOException("sandbox runtime file changed before hashing")
                         }
-                        protection.requireDescriptor(authenticated, path)
-                        sha256(authenticated, identity.size) { protection.requireDescriptor(authenticated, path) }
+                        val check = protection.descriptorCheck(authenticated, path)
+                        check()
+                        sha256(authenticated, identity.size, check)
                     }
                     // Screening must not change an immutable root-owned runtime's provisioning
                     // manifest merely because an unrelated security tool has the same byte size.
