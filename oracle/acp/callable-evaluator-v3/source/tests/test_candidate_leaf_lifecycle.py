@@ -333,6 +333,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
         import interface_gate_v3 as gate
         from test_identity_graph import graph
         from test_process_results import receipt
+        declared_profile=gate.load_profile()
         _,artifact=self.artifact();source=e.copy_input(artifact,self.root/'probe.i',deadline=self.end)
         helper=self.root/'helper';helper.write_bytes(b'authored inert helper')
         helper_pin=e.CopiedInput(helper,e._file_version(helper.stat()),hashlib.sha256(helper.read_bytes()).hexdigest()).pin()
@@ -341,7 +342,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
             pins={**expected,str(helper):helper_pin}
             if wrong:pins[str(source.path)]={**pins[str(source.path)],'sha256':'f'*64}
             raw=receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),caller_sha=sha,input_pins=pins)
-            with patch.object(gate,'bounded_run',return_value=raw) as worker:
+            with patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',return_value=raw) as worker:
                 if wrong:
                     with self.assertRaisesRegex(ValueError,'launch pins differ'):
                         gate.probe(source.path,helper,self.root,{},deadline=self.end,expected_inputs=expected)
@@ -376,6 +377,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
         import interface_gate_v3 as gate
         from test_identity_graph import graph
         from test_process_results import receipt
+        declared_profile=gate.load_profile()
         candidate=self.root/'candidate.c';candidate.write_bytes(b'authored candidate source')
         helper=self.root/'helper';helper.write_bytes(b'authored inert helper')
         caller=self.root/'caller';caller.write_bytes(b'authored inert caller')
@@ -443,7 +445,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
                 return receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),caller_sha=pin(helper)['sha256'],input_pins=pins)
             self.assertEqual(linked,(work/'libcandidate.so').read_bytes());inspections.append(1)
             return self.process(pins,phase='elf-inspection',stdout=symbols if len(inspections)==1 else sections)
-        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verify_visible'),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verify_visible'),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
             report=e.evaluate(candidate,self.root/'output',helper,caller,visible,observations_path)
         diagnostic=json.dumps({
             'phases':{name:{'status':row['status'],'reason':str(row.get('reason',''))[:300]}
