@@ -141,7 +141,59 @@ class AcpInvocationEvidenceSnapshot(
     val completeExecutionEvidence: AcpExecutionEvidenceSnapshot?,
 ) : AgentExecutionProviderEvidence {
     override val providerId: String = ACP_EXECUTION_EVIDENCE_PROVIDER_ID
-    override val schemaVersion: Int = ACP_INVOCATION_EVIDENCE_SCHEMA_VERSION
+    // A receipt reads schemaVersion in its constructor. That first read freezes the optional
+    // attachment, so no callable internal method can change an already published receipt.
+    private var providerAttachmentFrozen: Boolean = false
+    private var boundProviderTransportEvidence: AcpProviderInvocationEvidenceSnapshot? = null
+    override val schemaVersion: Int
+        @Synchronized get() {
+            providerAttachmentFrozen = true
+            return if (boundProviderTransportEvidence == null) ACP_INVOCATION_EVIDENCE_SCHEMA_VERSION
+                else ACP_PROVIDER_INVOCATION_EVIDENCE_SCHEMA_VERSION
+        }
+    val providerTransportEvidence: AcpProviderInvocationEvidenceSnapshot?
+        @Synchronized get() {
+            providerAttachmentFrozen = true
+            return boundProviderTransportEvidence
+        }
+
+    /** Factory-owned attachment, consumed once for this exact snapshot before publication. */
+    @Synchronized
+    internal fun bindProviderExecutionEvidence(
+        permit: AcpProviderQualificationPermit,
+        evidence: AcpProviderInvocationEvidenceSnapshot,
+    ): AcpInvocationEvidenceSnapshot {
+        val profile = AcpHarnessFactory.consumeInvocationEvidenceQualificationPermit(
+            permit, this, evidence.requestBindingSha256,
+        )
+        require(!providerAttachmentFrozen && boundProviderTransportEvidence == null) {
+            "ACP invocation provider attachment is already frozen"
+        }
+        require(completeExecutionEvidence == null) {
+            "ACP provider invocation cannot expose complete archive evidence"
+        }
+        require(factoryProvenance?.configurationSha256 == evidence.descriptors.factoryConfigurationSha256) {
+            "ACP provider evidence differs from factory configuration"
+        }
+        require(evidence.cleanup.disposition != AcpExecutionCleanupDisposition.UNVERIFIED ||
+            cleanupDisposition == AcpExecutionCleanupDisposition.UNVERIFIED
+        ) { "ACP provider unverified cleanup must remain sticky" }
+        require(cleanupDisposition != AcpExecutionCleanupDisposition.NOT_REQUIRED ||
+            (evidence.cleanup.guardian.disposition == AcpExecutionCleanupDisposition.NOT_REQUIRED &&
+                evidence.cleanup.sandbox == AcpExecutionCleanupDisposition.NOT_REQUIRED)
+        ) { "ACP provider process cleanup differs from invocation cleanup" }
+        require(evidence.requests.isEmpty() || phaseReached >= AcpExecutionLifecyclePhase.PROMPT_DISPATCHED) {
+            "ACP provider requests precede invocation prompt dispatch"
+        }
+        require(diagnostics?.stderr.isNullOrEmpty()) {
+            "ACP provider invocation cannot expose raw process diagnostics"
+        }
+        evidence.requireQualificationProfile(profile)
+        boundProviderTransportEvidence = evidence
+        providerAttachmentFrozen = true
+        return this
+    }
+
     val filesystemAudit: List<AcpFilesystemAuditRecord> = immutableEvidenceList(filesystemAudit)
     val terminalAudit: List<AcpTerminalAuditRecord> = immutableEvidenceList(terminalAudit)
     val permissionAudit: List<AcpPermissionAuditRecord> = immutableEvidenceList(permissionAudit)
@@ -214,3 +266,5 @@ private const val MAXIMUM_ARCHIVED_POLICY_AUDIT_RECORDS = 4_096
 private const val ACP_EXECUTION_EVIDENCE_PROVIDER_ID = "acp"
 private const val ACP_EXECUTION_EVIDENCE_SCHEMA_VERSION = 1
 private const val ACP_INVOCATION_EVIDENCE_SCHEMA_VERSION = 2
+
+private const val ACP_PROVIDER_INVOCATION_EVIDENCE_SCHEMA_VERSION = 6

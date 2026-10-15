@@ -44,14 +44,60 @@ fi
 frontend_stage=$(mktemp -d "$frontend_parent/.decomp-frontend-node.XXXXXX")
 trap 'rm -rf -- "$frontend_stage"' EXIT
 
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-  "https://nodejs.org/download/release/v${frontend_node_version}/${frontend_archive}" \
-  --output "$frontend_stage/$frontend_archive"
+# Only archive bytes are cached. Opt-in cache failures never bypass verification
+# or make the default uncached installation depend on another prerequisite.
+frontend_prepare_cache() {
+  [[ "${FRONTEND_NODE_ARCHIVE_CACHE:-}" == /* && ! -L "$FRONTEND_NODE_ARCHIVE_CACHE" ]] || return 1
+  command -v realpath >/dev/null 2>&1 && command -v cp >/dev/null 2>&1 || return 1
+  local frontend_cache_path frontend_physical_repo
+  frontend_cache_path=$(realpath -m -- "$FRONTEND_NODE_ARCHIVE_CACHE") || return 1
+  frontend_physical_repo=$(cd -- "$frontend_repo_root" && pwd -P) || return 1
+  [[ "$frontend_cache_path" == "$frontend_physical_repo/"* ]] || return 1
+  mkdir -p -m 0700 -- "$frontend_cache_path" || return 1
+  [[ -d "$frontend_cache_path" && ! -L "$frontend_cache_path" && -O "$frontend_cache_path" ]] || return 1
+  printf '%s' "$frontend_cache_path"
+}
+frontend_cache=
+if [[ -n "${FRONTEND_NODE_ARCHIVE_CACHE:-}" ]]; then
+  if ! frontend_cache=$(frontend_prepare_cache); then
+    echo "Node archive cache unavailable; using the pinned download" >&2
+    frontend_cache=
+  fi
+fi
+frontend_archive_cached=false
+if [[ -n "$frontend_cache" && -f "$frontend_cache/$frontend_archive" && ! -L "$frontend_cache/$frontend_archive" ]]; then
+  # Authenticate the fresh staged copy, not mutable cache metadata or a cache-hit flag.
+  if cp -- "$frontend_cache/$frontend_archive" "$frontend_stage/$frontend_archive" 2>/dev/null && (
+    cd -- "$frontend_stage"
+    printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict >/dev/null 2>&1
+  ); then
+    frontend_archive_cached=true
+  else
+    rm -f -- "$frontend_stage/$frontend_archive"
+  fi
+fi
+if [[ "$frontend_archive_cached" != true ]]; then
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+    "https://nodejs.org/download/release/v${frontend_node_version}/${frontend_archive}" \
+    --output "$frontend_stage/$frontend_archive"
+fi
 (
   cd -- "$frontend_stage"
   printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict
 )
+# Publish only bytes that passed the unchanged exact checksum above. A private
+# directory inside the owned cache keeps incomplete copies away from readers.
+if [[ -n "$frontend_cache" && "$frontend_archive_cached" != true ]]; then
+  if ! (
+    frontend_cache_stage=$(mktemp -d "$frontend_cache/.publish.XXXXXX") || exit 1
+    trap 'rm -rf -- "$frontend_cache_stage"' EXIT
+    cp -- "$frontend_stage/$frontend_archive" "$frontend_cache_stage/archive" || exit 1
+    mv -T -- "$frontend_cache_stage/archive" "$frontend_cache/$frontend_archive" || exit 1
+  ); then
+    echo "Node archive cache publication failed; verified installation continues" >&2
+  fi
+fi
 tar --extract --gzip --no-same-owner --file "$frontend_stage/$frontend_archive" \
   --directory "$frontend_stage"
 frontend_extracted="$frontend_stage/node-v${frontend_node_version}-linux-${frontend_arch}"

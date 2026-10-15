@@ -31,6 +31,8 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Verify owned JDK fixture controls
+        run: python3 -B -m unittest discover -s scripts/ci-jdk -p 'test_*.py'
       - name: Install sandbox host prerequisites
         run: |
           sudo apt-get update
@@ -39,10 +41,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Prepare required live ACP sandbox host
         run: scripts/ci-prepare-acp-sandbox.sh
+      - name: Verify bounded provider guardian fixtures
+        run: python3 -B scripts/verify-acp-provider-guardian.py --include-v2
       - name: Prepare finite ACP quota fixture
         run: bash scripts/ci-prepare-acp-quota.sh
-      - name: Qualify every required ACP and shared-agent suite
-        run: bash scripts/validate-acp-contract.sh
+      - name: Qualify every required ACP, native DNS and shared-agent suite
+        env:
+          DECOMP_REQUIRE_NATIVE_PROVIDER_DNS: '1'
+        run: python3 -B scripts/ci-owned-jdk.py run --source-profile actions-host-ca-v1 -- bash scripts/validate-acp-contract.sh
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
@@ -54,3 +60,11 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/acp-contract-qualification
+            build/provider-guardian-qualification
+            build/provider-dns-native-qualification
+            build/ci-jdk-*/provision.*
+            build/ci-jdk-*/scratch.json
+            build/ci-jdk-*/final.json
+            build/ci-jdk-*/receipts
+            build/ci-jdk-*/selections
+            build/provider-dns

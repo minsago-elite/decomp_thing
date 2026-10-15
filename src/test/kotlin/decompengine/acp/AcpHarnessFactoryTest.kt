@@ -7,6 +7,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import kotlin.io.path.createTempFile
+import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -20,6 +21,81 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AcpHarnessFactoryTest {
+    @Test
+    fun `schema v2 canonical digest remains the c4 golden and provider transport is disabled`() {
+        val selection = select(writeConfig(Path.of("config/acp-v1.example.json").readText()))
+        assertEquals(
+            "881ed540d5f95ab7c118c1e0a7ebd92f6570b102f6443af2c0548b1a16e12117",
+            selection.provenance.configurationSha256,
+        )
+        assertEquals(AcpProviderTransportPolicy.DISABLED, assertNotNull(selection.configuration).providerTransportPolicy)
+    }
+
+    @Test
+    fun `schema v3 accepts only exact disabled provider transport and containment parsing agrees`() {
+        val payload = providerConfig("""{"mode":"disabled"}""")
+        val selection = select(writeConfig(payload))
+        val configuration = assertNotNull(selection.configuration)
+        assertEquals(AcpProviderTransportPolicy.DISABLED, configuration.providerTransportPolicy)
+        val containment = AcpHarnessProvisioning.parseSandboxConfiguration(payload.toByteArray())
+        assertEquals(configuration.sandboxBoundary?.agentResourceLimits, containment.configuration.agentResourceLimits)
+        assertEquals(selection.provenance.configurationSha256, containment.canonicalSha256)
+        assertNotEquals(
+            select(writeConfig(validConfig())).provenance.configurationSha256,
+            selection.provenance.configurationSha256,
+        )
+    }
+
+    @Test
+    fun `schema v3 rejects caller provider authority before resolving secrets or launching`() {
+        listOf(
+            "{}", "null", "[]", "\"disabled\"",
+            """{"mode":null}""", """{"mode":false}""",
+            """{"mode":"Disabled"}""", """{"mode":" disabled"}""",
+            """{"mode":"disabled "}""", """{"mode":"fixture"}""",
+            """{"mode":"approved"}""", """{"mode":"disabled","endpoint":"https://127.0.0.1"}""",
+            """{"mode":"disabled","model":"fixture"}""",
+            """{"mode":"disabled","credentialReference":"LOCAL_CODEX_CACHED_AUTH"}""",
+            """{"mode":"disabled","backend":true}""",
+            """{"mode":"disabled","mode":"disabled"}""",
+        ).forEach { provider ->
+            val payload = providerConfig(provider)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                AcpHarnessFactory.fromEnvironment(mapOf("ACP_CONFIG_FILE" to writeConfig(payload).toString()))
+            }
+            assertFalse(failure.message.orEmpty().contains("TEST_ACP_SECRET"), failure.message)
+            assertFailsWith<IllegalArgumentException> {
+                AcpHarnessProvisioning.parseSandboxConfiguration(payload.toByteArray())
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(validConfig().replace("\"schemaVersion\": 2", "\"schemaVersion\": 3")))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            select(writeConfig(providerConfig("""{"mode":"disabled"}""")
+                .replace("\"schemaVersion\": 3", "\"schemaVersion\": 2")))
+        }
+    }
+
+    @Test
+    fun `provider qualification declarations enforce the exact resource tuple`() {
+        val profile = AcpProviderQualificationProfile.CREDENTIAL_FREE
+        val exact = AcpSandboxResourceLimits(maximumProcesses = 32, maximumOpenFiles = 128)
+        profile.requireSandboxResourceLimits(exact)
+        listOf(
+            exact.copy(maximumProcesses = 31), exact.copy(maximumProcesses = 33),
+            exact.copy(maximumOpenFiles = 127), exact.copy(maximumOpenFiles = 129),
+            exact.copy(maximumAddressSpaceBytes = 2_147_483_647L),
+            exact.copy(maximumAddressSpaceBytes = 2_147_483_649L),
+        ).forEach { limits ->
+            assertFailsWith<IllegalArgumentException> { profile.requireSandboxResourceLimits(limits) }
+        }
+        assertEquals("acp-fixture-model-v1", profile.model)
+        assertEquals(AcpProviderReasoning.LOW, profile.reasoning)
+        assertEquals(1, profile.bounds.maximumRequests)
+        assertEquals(0, profile.bounds.maximumRetries)
+    }
+
     @Test
     fun `omitted selection defaults to a fully provisioned ACP harness`() {
         val config = writeConfig(validConfig())
@@ -454,6 +530,11 @@ class AcpHarnessFactoryTest {
 
     private fun select(path: Path): AcpHarnessSelection = AcpHarnessFactory.fromEnvironment(
         mapOf("ACP_CONFIG_FILE" to path.toString(), "TEST_ACP_SECRET" to "secret"),
+    )
+
+    private fun providerConfig(provider: String): String = validConfig().replace(
+        "\"schemaVersion\": 2,",
+        "\"schemaVersion\": 3,\n  \"providerTransport\": $provider,",
     )
 
     private fun writeConfig(payload: String): Path =

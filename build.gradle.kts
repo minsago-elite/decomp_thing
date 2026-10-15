@@ -1,3 +1,4 @@
+import java.util.Base64
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -10,10 +11,14 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.Properties
+import java.util.UUID
+import java.nio.charset.StandardCharsets
+import java.nio.file.StandardOpenOption
 import java.util.zip.ZipFile
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
+import java.util.jar.JarOutputStream
 import java.util.jar.Manifest
 import org.gradle.api.tasks.testing.Test
 
@@ -32,6 +37,213 @@ kotlin {
 application {
     mainClass.set("decompengine.MainKt")
     applicationName = "llm_bin_patch"
+}
+
+// Provider DNS has its own credential-free JVM and no application/dependency classpath.
+val providerDnsClasses = layout.buildDirectory.dir("provider-dns/classes")
+val providerDnsFixtureClasses = layout.buildDirectory.dir("provider-dns/fixture-classes")
+val providerDnsProtocolClasses = layout.buildDirectory.dir("provider-dns/protocol-classes")
+val providerDnsResources = layout.buildDirectory.dir("generated/provider-dns-resources")
+val compileProviderDnsWorker = tasks.register<JavaCompile>("compileProviderDnsWorker") {
+    source("src/providerDns/java")
+    classpath = files()
+    destinationDirectory.set(providerDnsClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsWorkerJar = tasks.register<Jar>("providerDnsWorkerJar") {
+    dependsOn(compileProviderDnsWorker)
+    archiveFileName.set("decomp-acp-provider-dns.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsClasses)
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+val generateProviderDnsCommitment = tasks.register("generateProviderDnsCommitment") {
+    dependsOn(providerDnsWorkerJar)
+    inputs.file(providerDnsWorkerJar.flatMap { it.archiveFile })
+    outputs.dir(providerDnsResources)
+    doLast {
+        val jar = providerDnsWorkerJar.get().archiveFile.get().asFile
+        require(jar.length() in 1..65536) { "provider DNS worker exceeds its artifact bound" }
+        JarFile(jar).use { archive ->
+            require(archive.entries().asSequence().filterNot { it.isDirectory }.map { it.name }.toSet() ==
+                setOf("META-INF/MANIFEST.MF", "decompengine/acp/ProviderDnsWorker.class")) {
+                "provider DNS worker contains an unexpected runtime classpath entry"
+            }
+            require(archive.manifest.mainAttributes.keys.map { it.toString() }.toSet() == setOf("Manifest-Version"))
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(jar.readBytes()).joinToString("") { "%02x".format(it) }
+        val target = providerDnsResources.get().file("acp-provider-dns/worker.sha256").asFile
+        target.parentFile.mkdirs()
+        target.writeText("$digest\n", Charsets.US_ASCII)
+    }
+}
+sourceSets.main { resources.srcDir(providerDnsResources) }
+tasks.processResources { dependsOn(generateProviderDnsCommitment) }
+
+val compileProviderDnsFixture = tasks.register<JavaCompile>("compileProviderDnsFixture") {
+    source("src/test/provider-dns/java")
+    classpath = files()
+    destinationDirectory.set(providerDnsFixtureClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsFixtureJar = tasks.register<Jar>("providerDnsFixtureJar") {
+    dependsOn(compileProviderDnsWorker, compileProviderDnsFixture)
+    archiveFileName.set("provider-dns-component-fixture.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsClasses, providerDnsFixtureClasses, "src/test/provider-dns/resources")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+val compileProviderDnsProtocolFixture = tasks.register<JavaCompile>("compileProviderDnsProtocolFixture") {
+    source("src/test/provider-dns/protocol")
+    classpath = files()
+    destinationDirectory.set(providerDnsProtocolClasses)
+    options.release.set(21)
+    options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+}
+val providerDnsProtocolFixtureJar = tasks.register<Jar>("providerDnsProtocolFixtureJar") {
+    dependsOn(compileProviderDnsProtocolFixture)
+    archiveFileName.set("provider-dns-protocol-fixture.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("provider-dns"))
+    from(providerDnsProtocolClasses)
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+val providerDnsNativeDirectory = layout.buildDirectory.dir("provider-dns/native")
+val providerDnsLoopbackHelper = providerDnsNativeDirectory.map { it.file("provider-dns-loopback-fixture") }
+val providerDnsLoopbackReference = providerDnsNativeDirectory.map { it.file("loopback-reference.properties") }
+val providerDnsLoopbackReferenceDigest = providerDnsNativeDirectory.map { it.file("loopback-reference.sha256") }
+val buildProviderDnsLoopbackFixture = tasks.register("buildProviderDnsLoopbackFixture") {
+    description = "Builds the fixed test-only native DNS namespace setup helper"
+    inputs.file("src/test/provider-dns/native/provider_dns_loopback_fixture.c")
+    inputs.files("/usr/bin/cc", "/usr/bin/ld")
+    outputs.files(providerDnsLoopbackHelper, providerDnsLoopbackReference, providerDnsLoopbackReferenceDigest)
+    // Compiler/linker identity upgrades must never reuse a prior authenticated native fixture.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("native DNS helper requires current compiler provenance") { false }
+    doLast {
+        val source = layout.projectDirectory.file("src/test/provider-dns/native/provider_dns_loopback_fixture.c").asFile.toPath().toRealPath()
+        require(Files.size(source) in 1..65536)
+        val compiler = Path.of("/usr/bin/cc").toRealPath()
+        val linker = Path.of("/usr/bin/ld").toRealPath()
+        require(Files.isExecutable(compiler) && Files.isExecutable(linker))
+        fun digest(path: Path): String = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+        val sourceDigest = digest(source)
+        val compilerDigest = digest(compiler)
+        val linkerDigest = digest(linker)
+        val directory = providerDnsNativeDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+        Files.createDirectories(directory)
+        val scratch = directory.resolve("tmp")
+        Files.createDirectories(scratch)
+        val helper = providerDnsLoopbackHelper.get().asFile.toPath().toAbsolutePath().normalize()
+        val argv = listOf(compiler.toString(), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fno-ident", "-Wl,--build-id=none",
+            source.toString(), "-o", helper.toString())
+        val log = directory.resolve("compile.log")
+        val compile = ProcessBuilder(argv).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).also {
+            it.environment().clear()
+            it.environment()["PATH"] = "/usr/bin:/bin"
+            it.environment()["TMPDIR"] = scratch.toString()
+            it.environment()["LC_ALL"] = "C"
+        }.start()
+        compile.outputStream.close()
+        val exited = compile.waitFor(30, TimeUnit.SECONDS)
+        if (!exited) {
+            compile.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+            compile.toHandle().destroyForcibly()
+        }
+        require(compile.waitFor(2, TimeUnit.SECONDS) && exited && compile.exitValue() == 0 && Files.size(log) <= 65536) {
+            "test-only provider DNS loopback helper compilation failed"
+        }
+        require(digest(source) == sourceDigest && digest(compiler) == compilerDigest && digest(linker) == linkerDigest)
+        require(Files.size(helper) in 64..(256 * 1024))
+        Files.setPosixFilePermissions(helper, PosixFilePermissions.fromString("rwxr-xr-x"))
+        val argvBytes = argv.joinToString("\u0000").toByteArray(Charsets.UTF_8)
+        val reference = listOf(
+            "schema=1", "sourceSha256=$sourceDigest", "compilerPath=$compiler", "compilerSha256=$compilerDigest",
+            "linkerPath=$linker", "linkerSha256=$linkerDigest", "helperSha256=${digest(helper)}",
+            "compileArgvSha256=${MessageDigest.getInstance("SHA-256").digest(argvBytes).joinToString("") { "%02x".format(it) }}",
+            "compileArgvBase64=${Base64.getEncoder().encodeToString(argvBytes)}",
+        ).joinToString("\n", postfix = "\n").toByteArray(Charsets.UTF_8)
+        Files.write(providerDnsLoopbackReference.get().asFile.toPath(), reference)
+        val referenceDigest = MessageDigest.getInstance("SHA-256").digest(reference).joinToString("") { "%02x".format(it) }
+        Files.writeString(providerDnsLoopbackReferenceDigest.get().asFile.toPath(), "$referenceDigest\n", Charsets.US_ASCII)
+    }
+}
+tasks.processTestResources {
+    dependsOn(buildProviderDnsLoopbackFixture)
+    from(listOf("src/test/provider-dns/native/provider_dns_loopback_fixture.c", "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+        "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+        "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+        "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+        "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt", "src/main/resources/oracle-native-libraries-v1.properties", "build.gradle.kts")) {
+        into("acp-provider-dns-native")
+    }
+    from(providerDnsLoopbackReferenceDigest) { into("acp-provider-dns-native") }
+}
+tasks.withType<Test>().configureEach {
+    // CI-only explicit executable is configured before javaLauncher is ever realized.
+    val fixtureHome = providers.gradleProperty("ciAcpFixtureJdkHome").orNull
+    if (fixtureHome != null) {
+        val selected = Path.of(fixtureHome).toAbsolutePath().normalize()
+        val ownedBuild = layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()
+        require(selected.startsWith(ownedBuild) && selected.toRealPath() == selected)
+        val receiptPath = Path.of(providers.gradleProperty("ciAcpFixtureJdkReceipt").get())
+        require(receiptPath.parent == selected.parent && receiptPath.toRealPath() == receiptPath)
+        val fixture = Properties().also { values -> Files.newInputStream(receiptPath).use(values::load) }
+        require(fixture.getProperty("home") == selected.toString() && fixture.getProperty("java") == selected.resolve("bin/java").toString())
+        val state = selected.parent
+        val scratch = Path.of(providers.gradleProperty("ciAcpFixtureJvmScratch").get())
+        val repository = rootProject.layout.projectDirectory.asFile.toPath().toRealPath()
+        require(state.fileName.toString().matches(Regex("ci-jdk-[0-9a-f-]{36}")) &&
+            state.parent.fileName.toString() == "build" && state.parent.parent == repository)
+        require(scratch == repository && listOf("TMPDIR", "TMP", "TEMP").all { System.getenv(it) == repository.toString() }) {
+            "CI Test scratch must equal the admitted canonical repository root"
+        }
+        require(scratch.isAbsolute && scratch.toRealPath() == scratch &&
+            scratch.toString().toByteArray(StandardCharsets.UTF_8).size +
+            ("/pinned-docker-runtime-" + "9".repeat(20) + "/runtime/docker.sock").length <= 107)
+        val scratchAttrs = Files.readAttributes(scratch, "unix:uid,mode", LinkOption.NOFOLLOW_LINKS)
+        require(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS) &&
+            scratchAttrs.getValue("uid").toString() == fixture.getProperty("uid") &&
+            (scratchAttrs.getValue("mode") as Number).toInt() and 0x12 == 0)
+        executable = selected.resolve("bin/java").toString()
+        systemProperty("decompengine.ci.fixture.receipt", receiptPath.toString())
+        systemProperty("decompengine.ci.fixture.task", path)
+        jvmArgs("-XX:-UsePerfData", "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=$scratch",
+            "-Djna.tmpdir=$scratch", "-Duser.home=${state.resolve("home")}",
+            "-Djava.util.prefs.userRoot=${state.resolve("preferences")}", "-Djava.util.prefs.systemRoot=${state.resolve("preferences")}")
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("owned fixture requires actual Test JVM identity evidence") { false }
+        doFirst {
+            val launcher = javaLauncher.get()
+            require(launcher.executablePath.asFile.toPath().toRealPath() == selected.resolve("bin/java") &&
+                launcher.metadata.installationPath.asFile.toPath().toRealPath() == selected)
+            val attrs = Files.readAttributes(selected.resolve("bin/java"), "unix:dev,ino,uid,mode,nlink", LinkOption.NOFOLLOW_LINKS)
+            require((attrs.getValue("mode") as Number).toInt() and 0xfff == 0x1ed && (attrs.getValue("nlink") as Number).toLong() == 1L)
+            listOf("dev", "ino", "uid").forEach { key -> require(attrs.getValue(key).toString() == fixture.getProperty(key)) }
+            val selection = state.resolve("selections/selection-${UUID.randomUUID()}.properties")
+            Files.writeString(selection, "task=$path\nhome=$selected\njava=${selected.resolve("bin/java")}\n", StandardCharsets.US_ASCII,
+                StandardOpenOption.CREATE_NEW)
+        }
+    }
+    val nativeDnsRequired = providers.environmentVariable("DECOMP_REQUIRE_NATIVE_PROVIDER_DNS").orElse("")
+    val liveAcpRequired = providers.environmentVariable("DECOMP_REQUIRE_LIVE_ACP_CONTRACT").orElse("")
+    inputs.property("requiredNativeProviderDns", nativeDnsRequired)
+    inputs.property("requiredLiveAcpContract", liveAcpRequired)
+    inputs.property("nativeProviderDnsRunId", providers.environmentVariable("DECOMP_ACP_CONTRACT_RUN_ID").orElse(""))
+    if (nativeDnsRequired.get() == "1" || liveAcpRequired.get() == "1") {
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("native DNS qualification requires fresh execution and receipts") { false }
+    }
+    dependsOn(providerDnsWorkerJar, providerDnsFixtureJar, providerDnsProtocolFixtureJar, buildProviderDnsLoopbackFixture)
+    systemProperty("decompengine.acp.providerDns.workerJar", providerDnsWorkerJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.fixtureJar", providerDnsFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.protocolJar", providerDnsProtocolFixtureJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.loopbackHelper", providerDnsLoopbackHelper.get().asFile.absolutePath)
+    systemProperty("decompengine.acp.providerDns.loopbackReference", providerDnsLoopbackReference.get().asFile.absolutePath)
 }
 
 val frontendDirectory = layout.projectDirectory.dir("frontend")
@@ -339,6 +551,10 @@ val acpGateHelperSource = layout.projectDirectory.file("src/main/c/decomp_acp_ga
 val acpGateHelperBinary = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper")
 val acpGateHelperChecksum = layout.buildDirectory.file("native/acp/decomp-acp-gate-helper.sha256")
 val acpGateHelperCompiler = providers.gradleProperty("acpGateHelperCompiler").orElse("/usr/bin/cc")
+val acpProviderGuardianSource = layout.projectDirectory.file("src/main/c/decomp_acp_provider_guardian.c")
+val acpProviderGuardianBinary = layout.buildDirectory.file("native/acp/decomp-acp-provider-guardian")
+val acpProviderGuardianChecksum = layout.buildDirectory.file("native/acp/decomp-acp-provider-guardian.sha256")
+val acpProviderGuardianCompiler = providers.gradleProperty("acpProviderGuardianCompiler").orElse("/usr/bin/cc")
 val llvmBehaviorHelperSource = layout.projectDirectory.file("src/main/c/decomp_llvm_behavior_helper.c")
 val llvmBehaviorHelperBinary = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper")
 val llvmBehaviorHelperChecksum = layout.buildDirectory.file("native/behavior/decomp-llvm-behavior-helper.sha256")
@@ -1066,6 +1282,140 @@ val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
     }
 }
 
+val buildAcpProviderGuardian = tasks.register<Exec>("buildAcpProviderGuardian") {
+    group = "build"
+    description = "Builds the static ACP provider guardian prerequisite; factory qualification is separate"
+    inputs.file(acpProviderGuardianSource)
+    inputs.property("compiler", acpProviderGuardianCompiler)
+    inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
+    outputs.file(acpProviderGuardianBinary)
+    // A compiler upgrade is not visible to Gradle's path-based inputs.
+    outputs.upToDateWhen { false }
+
+    doFirst {
+        require(System.getProperty("os.name") == "Linux" &&
+            System.getProperty("os.arch") in setOf("amd64", "x86_64", "aarch64")) {
+            "the ACP provider guardian supports only Linux x86-64 or aarch64"
+        }
+        val compiler = file(acpProviderGuardianCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
+        require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
+            "ACP provider-guardian compiler is not an executable regular file"
+        }
+        val output = acpProviderGuardianBinary.get().asFile.toPath()
+        val scratch = layout.buildDirectory.dir("native/acp/provider-guardian-compiler").get().asFile.toPath()
+        listOf(output.parent, scratch.resolve("tmp"), scratch.resolve("home")).forEach { Files.createDirectories(it) }
+        // Compiler subprocesses also stay within the checkout and inherit no caller injection options.
+        environment.clear()
+        environment("PATH", "/usr/bin:/bin")
+        environment("HOME", scratch.resolve("home").toString())
+        listOf("TMPDIR", "TMP", "TEMP").forEach { environment(it, scratch.resolve("tmp").toString()) }
+        commandLine(compiler.toString(), "-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror",
+            "-Wl,--build-id=none", acpProviderGuardianSource.asFile.absolutePath, "-o", output.toString())
+    }
+    doLast {
+        Files.setPosixFilePermissions(acpProviderGuardianBinary.get().asFile.toPath(),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+    }
+}
+
+// Both the producer output and installed output pass the same bounded static-ELF checks.
+fun verifyAcpProviderGuardianArtifact(guardian: Path) {
+    require(Files.isRegularFile(guardian, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(guardian) &&
+        (Files.getAttribute(guardian, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1ed) {
+        "ACP provider guardian must be an executable regular file with mode 0755"
+    }
+    require(Files.size(guardian) in 64L..(4L * 1024 * 1024)) {
+        "ACP provider guardian must be a bounded ELF64 executable"
+    }
+    val bytes = Files.readAllBytes(guardian)
+    require(bytes.size in 64..(4 * 1024 * 1024) && bytes[0] == 0x7f.toByte() &&
+        bytes[1] == 'E'.code.toByte() && bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+        bytes[4] == 2.toByte() && bytes[5] == 1.toByte() && bytes[6] == 1.toByte()) {
+        "ACP provider guardian must be a little-endian ELF64 executable"
+    }
+    val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val expectedMachine = when (System.getProperty("os.arch")) {
+        "amd64", "x86_64" -> 62
+        "aarch64" -> 183
+        else -> error("unsupported ACP provider-guardian architecture")
+    }
+    require(elf.getShort(16).toInt() and 0xffff == 2 && elf.getInt(20) == 1 &&
+        elf.getShort(18).toInt() and 0xffff == expectedMachine && elf.getShort(52).toInt() and 0xffff == 64) {
+        "ACP provider guardian ELF architecture or executable header does not match the build host"
+    }
+    val programOffset = elf.getLong(32)
+    val programEntrySize = elf.getShort(54).toInt() and 0xffff
+    val programCount = elf.getShort(56).toInt() and 0xffff
+    require(programOffset >= 64 && programEntrySize == 56 && programCount in 1..128 &&
+        programOffset <= bytes.size.toLong() - programEntrySize.toLong() * programCount) {
+        "ACP provider guardian has an invalid ELF program-header table"
+    }
+    repeat(programCount) { index ->
+        val offset = (programOffset + index.toLong() * programEntrySize).toInt()
+        val segmentOffset = elf.getLong(offset + 8)
+        val segmentSize = elf.getLong(offset + 32)
+        require(segmentOffset >= 0 && segmentSize >= 0 && segmentOffset <= bytes.size.toLong() - segmentSize) {
+            "ACP provider-guardian segment exceeds the artifact"
+        }
+        when (elf.getInt(offset)) {
+            3 -> error("ACP provider guardian must not contain PT_INTERP")
+            2 -> {
+                require(segmentSize % 16L == 0L) { "ACP provider-guardian dynamic table is malformed" }
+                var cursor = segmentOffset
+                var terminated = false
+                while (cursor < segmentOffset + segmentSize) {
+                    when (elf.getLong(cursor.toInt())) {
+                        0L -> { terminated = true; break }
+                        1L -> error("ACP provider guardian must not contain DT_NEEDED")
+                    }
+                    cursor += 16L
+                }
+                require(terminated) { "ACP provider-guardian dynamic table is unterminated" }
+            }
+            4 -> {
+                var cursor = segmentOffset
+                val end = segmentOffset + segmentSize
+                while (cursor < end) {
+                    require(cursor <= end - 12L) { "ACP provider-guardian note table is malformed" }
+                    val nameSize = elf.getInt(cursor.toInt()).toLong() and 0xffffffffL
+                    val descriptionSize = elf.getInt(cursor.toInt() + 4).toLong() and 0xffffffffL
+                    val noteType = elf.getInt(cursor.toInt() + 8)
+                    val alignedName = (nameSize + 3L) and -4L
+                    val alignedDescription = (descriptionSize + 3L) and -4L
+                    require(alignedName <= end - cursor - 12L &&
+                        alignedDescription <= end - cursor - 12L - alignedName) {
+                        "ACP provider-guardian note exceeds the artifact"
+                    }
+                    if (noteType == 3 && nameSize == 4L && bytes.copyOfRange(cursor.toInt() + 12, cursor.toInt() + 16)
+                            .contentEquals(byteArrayOf('G'.code.toByte(), 'N'.code.toByte(), 'U'.code.toByte(), 0))) {
+                        error("ACP provider guardian must not contain a GNU build ID")
+                    }
+                    cursor += 12L + alignedName + alignedDescription
+                }
+            }
+        }
+    }
+}
+
+val verifyAcpProviderGuardian = tasks.register("verifyAcpProviderGuardian") {
+    group = "verification"
+    description = "Verifies the packaged provider guardian's static ELF and fail-closed contract"
+    dependsOn(buildAcpProviderGuardian)
+    inputs.file(acpProviderGuardianBinary)
+    doLast {
+        val guardian = acpProviderGuardianBinary.get().asFile.toPath()
+        verifyAcpProviderGuardianArtifact(guardian)
+        val probe = ProcessBuilder(guardian.toString()).also { it.environment().clear() }.start()
+        probe.outputStream.close()
+        val exited = probe.waitFor(5, TimeUnit.SECONDS)
+        if (!exited) { probe.destroyForcibly(); probe.waitFor(2, TimeUnit.SECONDS) }
+        require(exited && probe.exitValue() == 120 && probe.inputStream.readBytes().isEmpty() &&
+            probe.errorStream.readBytes().isEmpty()) {
+            "ACP provider guardian did not fail closed on a missing protocol invocation"
+        }
+    }
+}
+
 val buildLlvmBehaviorHelper = tasks.register<JavaExec>("buildLlvmBehaviorHelper") {
     group = "build"
     description = "Runs the bounded Kotlin helper compiler owner and records actual deployment provenance"
@@ -1351,6 +1701,21 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
     }
 }
 
+val generateAcpProviderGuardianChecksum = tasks.register("generateAcpProviderGuardianChecksum") {
+    group = "distribution"
+    description = "Writes the content digest shipped with the verified ACP provider guardian"
+    dependsOn(verifyAcpProviderGuardian)
+    inputs.file(acpProviderGuardianBinary)
+    outputs.file(acpProviderGuardianChecksum)
+    doLast {
+        val digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(acpProviderGuardianBinary.get().asFile.toPath()))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        val checksum = acpProviderGuardianChecksum.get().asFile.toPath()
+        Files.writeString(checksum, "$digest  decomp-acp-provider-guardian\n")
+        Files.setPosixFilePermissions(checksum, PosixFilePermissions.fromString("rw-r--r--"))
+    }
+}
+
 val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHelperChecksum") {
     group = "distribution"
     description = "Writes the digest shipped with the static LLVM behavior helper prerequisite"
@@ -1371,6 +1736,10 @@ val generateLlvmBehaviorHelperChecksum = tasks.register("generateLlvmBehaviorHel
 distributions {
     main {
         contents {
+            from(providerDnsWorkerJar) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
             from(frontendDirectory.file("THIRD_PARTY_NOTICES.txt")) {
                 into("docs")
                 rename { "frontend-THIRD_PARTY_NOTICES.txt" }
@@ -1380,6 +1749,14 @@ distributions {
                 filePermissions { unix("rwxr-xr-x") }
             }
             from(acpGateHelperChecksum) {
+                into("libexec")
+                filePermissions { unix("rw-r--r--") }
+            }
+            from(acpProviderGuardianBinary) {
+                into("libexec")
+                filePermissions { unix("rwxr-xr-x") }
+            }
+            from(acpProviderGuardianChecksum) {
                 into("libexec")
                 filePermissions { unix("rw-r--r--") }
             }
@@ -1463,12 +1840,17 @@ private fun configureOracleTestRuntime(testTask: Test) {
     // Keep the split test tasks on the same staged native/runtime inputs as the regular suite.
     testTask.dependsOn("installDist")
     testTask.dependsOn(stageOracleNativeLibraries)
+    testTask.dependsOn("stageProviderDnsHostRuntime")
+    testTask.inputs.dir(layout.buildDirectory.dir("provider-dns/host-runtime"))
+    testTask.jvmArgs("-Djna.nosys=true", "-Djna.nounpack=true",
+        "-Djna.boot.library.path=" + layout.buildDirectory.dir("provider-dns/host-runtime").get().asFile.absolutePath)
     testTask.dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
+    testTask.dependsOn(generateAcpProviderGuardianChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
     testTask.dependsOn(buildAnalysisIoHelper)
     testTask.inputs.files(analysisIoHelperBinary, analysisIoHelperChecksum)
@@ -1478,6 +1860,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.dependsOn(generateLlvmHostedWorkerClasspathReference)
     testTask.inputs.file(acpGateHelperBinary)
     testTask.inputs.file(acpGateHelperChecksum)
+    testTask.inputs.files(acpProviderGuardianBinary, acpProviderGuardianChecksum)
     testTask.inputs.file(llvmBehaviorHelperBinary)
     testTask.inputs.file(llvmBehaviorHelperChecksum)
     testTask.inputs.files(llvmBehaviorHelperSourceCopy, llvmBehaviorHelperBuildRecord, llvmBehaviorHelperReference)
@@ -1486,6 +1869,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.inputs.file(llvmHostedWorkerClasspathReference)
     testTask.inputs.dir(kotlinBootRuntimeDirectory)
     testTask.doFirst {
+        testTask.systemProperty("decompengine.acp.providerDns.hostRuntime", layout.buildDirectory.dir("provider-dns/host-runtime").get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.testHelper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.helper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.testCompiler", file(analysisIoHelperCompiler.get()).canonicalPath)
@@ -1508,6 +1892,12 @@ private fun configureOracleTestRuntime(testTask: Test) {
             "decompengine.acp.gateHelperChecksum",
             acpGateHelperChecksum.get().asFile.absolutePath,
         )
+        testTask.systemProperty("decompengine.acp.providerGuardianExecutable", acpProviderGuardianBinary.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.acp.providerGuardianChecksum", acpProviderGuardianChecksum.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.acp.providerGuardianExpectedSha256",
+            Files.readString(acpProviderGuardianChecksum.get().asFile.toPath()).also {
+                require(it.matches(Regex("[0-9a-f]{64}  decomp-acp-provider-guardian\n")))
+            }.substring(0, 64))
         testTask.systemProperty(
             "decompengine.oracle.behavior.nativeHelperExecutable",
             llvmBehaviorHelperBinary.get().asFile.absolutePath,
@@ -1543,6 +1933,16 @@ private fun configureOracleTestRuntime(testTask: Test) {
 }
 
 tasks.test {
+    // Required native fixture executor is explicitly serial in this actual task.
+    maxParallelForks = 1
+    forkEvery = 0
+    systemProperty("junit.jupiter.execution.parallel.enabled", "false")
+    doFirst {
+        require(maxParallelForks == 1 && forkEvery == 0L)
+        systemProperty("decompengine.acp.providerDns.testTask", path)
+        systemProperty("decompengine.acp.providerDns.maxParallelForks", maxParallelForks.toString())
+        systemProperty("decompengine.acp.providerDns.forkEvery", forkEvery.toString())
+    }
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
@@ -1618,6 +2018,7 @@ v3BoundaryCensusIsolated.configure { shouldRunAfter(v3BoundaryPublicationIsolate
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")
+    implementation("org.apache.httpcomponents.core5:httpcore5:5.4.4") { version { strictly("5.4.4") } }
     implementation("com.fasterxml.jackson.core:jackson-core:2.21.5")
     implementation("io.github.optimumcode:json-schema-validator:0.5.5")
     implementation("net.java.dev.jna:jna:5.19.1")
@@ -1631,6 +2032,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
+    testImplementation("org.junit.platform:junit-platform-launcher:1.10.1")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("io.airlift:aircompressor:2.0.3")
 }
@@ -1668,6 +2070,7 @@ listOf("installDist", "distZip", "distTar").forEach { taskName ->
         dependsOn(stageOracleNativeLibraries)
         inputs.property("ghidraBundlePermissionsVersion", 2)
         dependsOn(generateAcpGateHelperChecksum)
+        dependsOn(generateAcpProviderGuardianChecksum)
         dependsOn(generateLlvmBehaviorHelperChecksum)
         dependsOn(generateKotlinBootClasspathReference)
         dependsOn(generateGccBundledGhidraReference)
@@ -1811,6 +2214,49 @@ val verifyAcpGateHelperDistribution = tasks.register("verifyAcpGateHelperDistrib
     }
 }
 
+val verifyAcpProviderGuardianDistribution = tasks.register("verifyAcpProviderGuardianDistribution") {
+    group = "verification"
+    description = "Verifies that installDist preserves the authenticated static ACP provider guardian"
+    dependsOn(tasks.named("installDist"))
+    doLast {
+        val root = layout.buildDirectory.dir("install/llm_bin_patch/libexec").get().asFile.toPath()
+        val guardian = root.resolve("decomp-acp-provider-guardian")
+        val checksum = root.resolve("decomp-acp-provider-guardian.sha256")
+        verifyAcpProviderGuardianArtifact(guardian)
+        require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS) && Files.size(checksum) == 95L &&
+            (Files.getAttribute(checksum, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1a4) {
+            "installed ACP provider-guardian checksum is missing or has invalid size or mode"
+        }
+        val installedBytes = Files.readAllBytes(guardian)
+        require(installedBytes.contentEquals(Files.readAllBytes(acpProviderGuardianBinary.get().asFile.toPath()))) {
+            "installDist changed the verified ACP provider guardian"
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(installedBytes)
+            .joinToString("") { byte -> "%02x".format(byte) }
+        require(Files.readString(checksum) == "$digest  decomp-acp-provider-guardian\n" &&
+            Files.readString(checksum) == Files.readString(acpProviderGuardianChecksum.get().asFile.toPath())) {
+            "installed ACP provider-guardian digest does not authenticate the installed bytes"
+        }
+    }
+}
+
+val verifyAcpProviderDnsDistribution = tasks.register("verifyAcpProviderDnsDistribution") {
+    group = "verification"
+    description = "Verifies the isolated provider DNS worker and application-bound commitment in installDist"
+    dependsOn(tasks.named("installDist"), generateProviderDnsCommitment)
+    doLast {
+        val installed = layout.buildDirectory.file("install/llm_bin_patch/libexec/decomp-acp-provider-dns.jar").get().asFile.toPath()
+        require(Files.isRegularFile(installed, LinkOption.NOFOLLOW_LINKS) &&
+            (Files.getAttribute(installed, "unix:mode", LinkOption.NOFOLLOW_LINKS) as Number).toInt() and 0xfff == 0x1a4)
+        require(Files.readAllBytes(installed).contentEquals(providerDnsWorkerJar.get().archiveFile.get().asFile.readBytes()))
+        val appJar = tasks.jar.get().archiveFile.get().asFile
+        JarFile(appJar).use { archive ->
+            val commitment = archive.getInputStream(archive.getJarEntry("acp-provider-dns/worker.sha256")).use { it.readNBytes(66) }
+            require(commitment.contentEquals(providerDnsResources.get().file("acp-provider-dns/worker.sha256").asFile.readBytes()))
+        }
+    }
+}
+
 val verifyLlvmBehaviorHelperDistribution = tasks.register("verifyLlvmBehaviorHelperDistribution") {
     group = "verification"
     description = "Verifies that installDist preserves the static LLVM behavior helper and digest"
@@ -1890,6 +2336,129 @@ tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
+    dependsOn(verifyAcpProviderGuardianDistribution)
+    dependsOn(verifyAcpProviderDnsDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
+}
+
+
+// The dependency resolution and compiled class outputs are trusted gate inputs, not receipt claims.
+// This task never depends on test execution, so testClasses does not form a task cycle.
+
+// Host-only bytecode/native dependency binding. Never mounted into the DNS payload.
+// Compile task dependencies, source digests, bounded class SourceFile checks in
+// the owner/verifier, and current compiled-byte comparisons jointly bind generation.
+val stageProviderDnsHostRuntime = tasks.register("stageProviderDnsHostRuntime") {
+    group = "verification"
+    dependsOn("compileKotlin", "compileTestKotlin", stageOracleNativeLibraries)
+    val destination = layout.buildDirectory.dir("provider-dns/host-runtime")
+    inputs.files("src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+        "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+        "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+        "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+        "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt", "src/main/resources/oracle-native-libraries-v1.properties", "build.gradle.kts")
+    inputs.dir(layout.buildDirectory.dir("classes/kotlin/main"))
+    inputs.dir(layout.buildDirectory.dir("classes/kotlin/test"))
+    inputs.files(configurations.testRuntimeClasspath)
+    outputs.dir(destination)
+    doLast {
+        fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        fun bounded(path: Path, maximum: Int): ByteArray {
+            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path && Files.size(path) in 1..maximum.toLong())
+            return Files.newInputStream(path).use { it.readNBytes(maximum + 1) }.also { require(it.size in 1..maximum) }
+        }
+        val roots = mapOf(
+            "test" to mapOf(
+                "AcpProviderNativeDnsContractTest.kt" to setOf("AcpProviderNativeDnsContractTestKt", "AcpProviderNativeDnsControl", "NativeNamespace", "NativeNamespaceCredentials", "NativeNamespaceWaitFailure", "NativeObserverBudget", "NativeObserverBudgetOwner", "NativeVisibilityAccumulator", "NativeObserverFailure", "NativeDnsOwnedDomainOwner", "NativeDnsOwnedResult", "NativeDnsOwnedLib", "NativeDnsOwnedFd", "AcpProviderNativeDnsContractTest", "NativeDnsOwnedDomainBoundaryTest"),
+                "NativeDnsOwnedDomainContract.kt" to setOf("NativeDnsOwnedDomainContract")
+            ),
+            "main" to mapOf(
+                "LinuxBubblewrapBoundary.kt" to setOf("LinuxBubblewrapBoundaryKt", "SystemdScopeController", "VerifiedScopeManager", "VerifiedSystemdScope", "PinnedSecurityExecutable", "PinnedSystemdBusEndpoint", "PinnedFileIdentity", "AcpSandboxScopeIdentity", "AcpCgroupControllerEvidence", "AcpSandboxRlimitEvidence", "AcpSecurityExecutableEvidence", "AcpCleanupProofFailure", "CommandResult", "TrustedControlProcessOwner", "TrustedControlProcesses"),
+                "LinuxFilesystemSyscalls.kt" to setOf("LinuxFilesystemSyscalls", "LinuxFilesystemSyscallsKt", "LinuxFileKey", "LinuxFileIdentity", "LinuxFilesystemCapacity", "LinuxDescriptor", "LinuxProcessDescriptor", "LinuxDescriptorReserve", "NativeClose", "LinuxSyscallException", "LinuxResourceLimitException", "LinuxNamedRegularFileReplacedException", "RuntimeCopyStatistics"),
+                "AcpSandboxPolicy.kt" to setOf("AcpSandboxPolicyKt", "AcpSandboxResourceLimits")
+            )
+        )
+        val sources = mapOf(
+            "testSourceSha256" to "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+            "ownedContractSourceSha256" to "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+            "scopeBackendSourceSha256" to "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+            "scopeFilesystemSourceSha256" to "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+            "scopePolicySourceSha256" to "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt",
+            "hostNativePolicySourceSha256" to "src/main/resources/oracle-native-libraries-v1.properties",
+            "hostBuildSourceSha256" to "build.gradle.kts"
+        )
+        val sourceHashes = sources.mapValues { (_, path) -> hash(bounded(layout.projectDirectory.file(path).asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)) }
+        val entries = sortedMapOf<String, ByteArray>()
+        for ((set, bySource) in roots) {
+            val directory = layout.buildDirectory.dir("classes/kotlin/" + set + "/decompengine/acp").get().asFile.toPath().toAbsolutePath().normalize()
+            require(directory.toRealPath() == directory)
+            val paths = Files.newDirectoryStream(directory, "*.class").use { it.asSequence().take(8193).toList() }
+            require(paths.size <= 8192)
+            val selected = paths.filter { path -> bySource.values.flatten().any { root -> path.fileName.toString() == root + ".class" || path.fileName.toString().startsWith(root + "$" ) } }
+            for (path in selected) {
+                val key = "decompengine/acp/" + path.fileName
+                require(entries.put(key, bounded(path, 1024 * 1024)) == null)
+            }
+            require(bySource.values.flatten().all { root -> "decompengine/acp/" + root + ".class" in entries })
+        }
+        require(entries.size in 1..256 && entries.values.sumOf { it.size.toLong() } <= 16L * 1024 * 1024)
+        fun artifact(group: String, name: String, version: String): Path {
+            val selected = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+                it.moduleVersion.id.group == group && it.moduleVersion.id.name == name
+            }
+            require(selected.size == 1 && selected.single().moduleVersion.id.version == version)
+            return selected.single().file.toPath().toAbsolutePath().normalize()
+        }
+        val stdlib = bounded(artifact("org.jetbrains.kotlin", "kotlin-stdlib", "2.4.0"), 8 * 1024 * 1024)
+        val jna = bounded(artifact("net.java.dev.jna", "jna", "5.19.1"), 8 * 1024 * 1024)
+        val policy = Properties().apply { Files.newInputStream(oracleNativeLibraryPolicy.asFile.toPath()).use(::load) }
+        require(hash(jna) == policy.getProperty("jna.artifactSha256") && policy.getProperty("jna.artifact") == "jna-5.19.1.jar")
+        val dispatch = bounded(oracleNativeLibraryDirectory.get().file("libjnidispatch.so").asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)
+        require(dispatch.size.toString() == policy.getProperty("jna.bytes") && hash(dispatch) == policy.getProperty("jna.sha256"))
+        val out = destination.get().asFile.toPath().toAbsolutePath().normalize()
+        Files.createDirectories(out); require(out.toRealPath() == out)
+        for (name in listOf("host-control.jar", "kotlin-stdlib.jar", "jna.jar", "libjnidispatch.so", "host-runtime.properties")) require(!Files.isSymbolicLink(out.resolve(name)))
+        JarOutputStream(Files.newOutputStream(out.resolve("host-control.jar"))).use { jar -> entries.forEach { (name, bytes) ->
+            jar.putNextEntry(JarEntry(name).also { it.time = 0 }); jar.write(bytes); jar.closeEntry()
+        } }
+        Files.write(out.resolve("kotlin-stdlib.jar"), stdlib); Files.write(out.resolve("jna.jar"), jna); Files.write(out.resolve("libjnidispatch.so"), dispatch)
+        val metadata = sortedMapOf("schema" to "2", "kotlinCoordinates" to "org.jetbrains.kotlin:kotlin-stdlib:2.4.0",
+            "jnaCoordinates" to "net.java.dev.jna:jna:5.19.1", "stdlibSha256" to hash(stdlib), "jnaJarSha256" to hash(jna),
+            "jniDispatchSha256" to hash(dispatch), "hostClassesSha256" to hash(bounded(out.resolve("host-control.jar"), 16 * 1024 * 1024)),
+            "bytecodeClosureSha256" to hash(entries.entries.joinToString("\u0000") { it.key + ":" + hash(it.value) }.toByteArray(StandardCharsets.UTF_8)),
+            "sourceGenerationSha256" to hash(sourceHashes.toSortedMap().entries.joinToString("\u0000") { it.key + ":" + it.value }.toByteArray(StandardCharsets.UTF_8)))
+        metadata.putAll(sourceHashes)
+        sources.forEach { (key, path) -> require(hash(bounded(layout.projectDirectory.file(path).asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)) == sourceHashes.getValue(key)) }
+        val record = metadata.entries.joinToString("\n", postfix = "\n") { it.key + "=" + it.value }.toByteArray(StandardCharsets.US_ASCII)
+        require(record.size in 1..16384)
+        Files.write(out.resolve("host-runtime.properties"), record)
+        val expected = setOf("host-control.jar", "kotlin-stdlib.jar", "jna.jar", "libjnidispatch.so", "host-runtime.properties")
+        require(Files.newDirectoryStream(out).use { it.asSequence().take(6).map { p -> p.fileName.toString() }.toSet() } == expected)
+        require(entries.size + 4 <= 256 && entries.values.sumOf { it.size.toLong() } + stdlib.size + jna.size + dispatch.size + record.size <= 16L * 1024 * 1024)
+    }
+}
+
+tasks.register<Exec>("verifyProviderDnsNativeQualification") {
+    group = "verification"
+    dependsOn("testClasses", stageProviderDnsHostRuntime)
+    doFirst {
+        val artifacts = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+            it.moduleVersion.id.group == "org.jetbrains.kotlin" && it.moduleVersion.id.name == "kotlin-stdlib"
+        }
+        require(artifacts.size == 1 && artifacts.single().moduleVersion.id.version == "2.4.0") {
+            "Native DNS gate requires the exact resolved org.jetbrains.kotlin:kotlin-stdlib:2.4.0 artifact"
+        }
+        val stdlib = artifacts.single().file.toPath().toAbsolutePath().normalize()
+        val jnaArtifacts = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+            it.moduleVersion.id.group == "net.java.dev.jna" && it.moduleVersion.id.name == "jna"
+        }
+        require(jnaArtifacts.size == 1 && jnaArtifacts.single().moduleVersion.id.version == "5.19.1")
+        val jna = jnaArtifacts.single().file.toPath().toAbsolutePath().normalize()
+        require(Files.isRegularFile(jna, LinkOption.NOFOLLOW_LINKS) && jna.toRealPath() == jna)
+        require(Files.isRegularFile(stdlib, LinkOption.NOFOLLOW_LINKS) && stdlib.toRealPath() == stdlib)
+        val runId = providers.environmentVariable("DECOMP_ACP_CONTRACT_RUN_ID").get()
+        require(runId.matches(Regex("[A-Za-z0-9-]{1,80}")))
+        commandLine("python3", "-B", "scripts/verify-acp-provider-dns.py", runId, stdlib.toString(), jna.toString())
+    }
 }

@@ -70,6 +70,23 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
+    fun `invocation evidence retains the exact historical JVM constructor descriptor`() {
+        val descriptors = AcpInvocationEvidenceSnapshot::class.java.declaredConstructors.map { constructor ->
+            constructor.parameterTypes.joinToString(prefix = "(", postfix = ")V", separator = "") { type ->
+                require(!type.isPrimitive && !type.isArray)
+                "L${type.name.replace('.', '/')};"
+            }
+        }.toSet()
+        assertEquals(setOf(
+            "(Ldecompengine/acp/AcpHarnessProvenance;Ldecompengine/acp/AcpExecutionLifecyclePhase;" +
+                "Ldecompengine/acp/AcpExecutionCleanupDisposition;Ldecompengine/acp/AcpNegotiatedAgentEvidence;" +
+                "Ljava/lang/String;Ldecompengine/acp/AcpProcessDiagnostics;Ljava/util/Collection;" +
+                "Ljava/util/Collection;Ljava/util/Collection;Ldecompengine/acp/AcpSandboxEvidence;" +
+                "Ldecompengine/acp/AcpExecutionEvidenceCompleteness;Ldecompengine/acp/AcpExecutionEvidenceSnapshot;)V",
+        ), descriptors)
+    }
+
+    @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
         val input = object : java.io.InputStream() {
@@ -466,7 +483,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(85, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -854,7 +871,7 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `overlapping receipts retain their own request prompt and provider evidence`() {
-        // This case checks receipt isolation while both callbacks overlap, not timeout policy.
+        // Require both live invocations to remain inside their event callbacks until the test releases them.
         val firstFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
@@ -866,15 +883,22 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000),
         )
         val callbacksEntered = CountDownLatch(2)
+        val releaseCallbacks = CountDownLatch(1)
+        val activeCallbacks = AtomicInteger()
         val executor = Executors.newFixedThreadPool(2)
 
         fun submit(request: AgentExecutionRequest) = executor.submit<AgentExecutionReceipt> {
             val firstCallback = AtomicBoolean(true)
             harness.executeReceipt(request) {
                 if (firstCallback.compareAndSet(true, false)) {
+                    activeCallbacks.incrementAndGet()
                     callbacksEntered.countDown()
-                    check(callbacksEntered.await(20, TimeUnit.SECONDS)) {
-                        "overlapping ACP invocation did not reach its event callback"
+                    try {
+                        check(releaseCallbacks.await(20, TimeUnit.SECONDS)) {
+                            "overlapping ACP invocation callback was not released"
+                        }
+                    } finally {
+                        activeCallbacks.decrementAndGet()
                     }
                 }
             }
@@ -883,6 +907,10 @@ class AcpAgentHarnessTest {
         try {
             val firstFuture = submit(firstRequest)
             val secondFuture = submit(secondRequest)
+            val bothCallbacksEntered = callbacksEntered.await(20, TimeUnit.SECONDS)
+            val heldCallbackCount = activeCallbacks.get()
+            val bothInvocationsHeld = !firstFuture.isDone && !secondFuture.isDone
+            releaseCallbacks.countDown()
             val first = firstFuture.get(75, TimeUnit.SECONDS)
             val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
@@ -900,6 +928,9 @@ class AcpAgentHarnessTest {
                     "cause=${boundedPreparationCauseForTest(receipt.failureCause)}"
             }
 
+            assertTrue(bothCallbacksEntered, "both contained invocations must reach callbacks; $outcomes")
+            assertEquals(2, heldCallbackCount, "both callbacks must remain held simultaneously; $outcomes")
+            assertTrue(bothInvocationsHeld, "neither invocation may finish before callback release; $outcomes")
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding, outcomes)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding, outcomes)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256, outcomes)
@@ -917,7 +948,18 @@ class AcpAgentHarnessTest {
             )
             assertEquals("new source\n", firstFixture.source.readText())
             assertEquals("new source\n", secondFixture.source.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, firstFixture.forbiddenCanary.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, secondFixture.forbiddenCanary.readText())
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, firstEvidence.cleanupDisposition, outcomes)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, secondEvidence.cleanupDisposition, outcomes)
+            listOf("first" to firstEvidence, "second" to secondEvidence).forEach { (label, evidence) ->
+                val diagnostics = assertNotNull(evidence.diagnostics, "$label: $outcomes")
+                assertTrue(diagnostics.remainingProcessIds.isEmpty(), "$label: $outcomes")
+                assertTrue(diagnostics.sandboxCleanupVerified, "$label: $outcomes")
+                assertProcessStopped(diagnostics.pid)
+            }
         } finally {
+            releaseCallbacks.countDown()
             executor.shutdownNow()
         }
     }

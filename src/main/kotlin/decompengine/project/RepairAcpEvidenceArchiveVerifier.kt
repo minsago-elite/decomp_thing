@@ -481,6 +481,13 @@ internal object RepairAcpEvidenceArchiveVerifier {
             require(sha256(bytes) == invocation.receiptSha256) {
                 "repair ACP receipt digest differs from its workflow assessment: ${node.id}"
             }
+            // Rejected nodes may retain non-release v2 receipts. They must not let a
+            // diagnostic-only provider receipt enter an otherwise releasable archive.
+            ReconstructionAcpEvidenceArchiveVerifier.requireV2ReleaseReceiptEnvelope(
+                strictObject(bytes, HISTORY_JSON_LIMITS, "repair ACP execution receipt"),
+                TRACE_REPAIR_ACP_TASK_FIELD,
+                "repair ACP execution receipt: ${node.id}",
+            )
             val verified = verifyAcpExecutionReceiptDocument(
                 bytes,
                 TRACE_REPAIR_ACP_RECEIPT_KIND,
