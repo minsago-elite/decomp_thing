@@ -515,6 +515,27 @@ class RuntimeWorkerProof(unittest.TestCase):
         case.duplicate.assert_called_once_with(12,4,inheritable=True);case.inherit.assert_called_once_with(4,True)
         case.release.assert_called_once_with((1,2,3),6,end)
 
+    def test_helper_gate_closed_role_and_directory_fd5_refuse_before_snapshot_acquisition(self):
+        helper=self._helper_gate_control().record
+        tail=['/_worker_exec_monitor','--attempt','a'*32,'--phase','probe','--report-fd','4',
+              '--report-device','20','--report-inode','21','--reaper-device','30','--reaper-inode','31',
+              '--outer-pidns-device','40','--outer-pidns-inode','41','--','/probe','/work/input.i']
+        command=['/usr/bin/bwrap','--ro-bind-fd','5','/probe','--',*tail]
+        case=self._gate_snapshot_caller_control(5)
+        del case.config['librarySnapshot'];case.config['helperSnapshot']=helper;case.config['argv']=command
+        with patch.object(case.gate,'_acquire_helper_snapshot',side_effect=AssertionError('alias must refuse before acquisition')) as acquired:
+            with self.assertRaisesRegex(ValueError,'snapshot fd aliases gate directory'):case.invoke(9.25)
+        acquired.assert_not_called();case.handoff.assert_not_called();case.sanitize.assert_not_called()
+        self.assertEqual([11,12,7,5],[call.args[0] for call in case.closed.call_args_list])
+        for wrong in ('both','phase','mapping'):
+            case=self._gate_snapshot_caller_control(10);case.config['helperSnapshot']=helper;case.config['argv']=list(command)
+            if wrong!='both':del case.config['librarySnapshot']
+            if wrong=='phase':case.config['argv'][case.config['argv'].index('--phase')+1]='runtime'
+            if wrong=='mapping':case.config['argv'][3]='/other'
+            with self.subTest(wrong=wrong),self.assertRaises(ValueError):case.invoke(9.25)
+            self.assertEqual([10],[call.args[0] for call in case.closed.call_args_list])
+            case.scope.assert_not_called();case.handoff.assert_not_called();case.sanitize.assert_not_called()
+
     def test_gate_main_forwards_existing_clamped_admission_end_without_restarting(self):
         for phase_end,wanted in ((4,4),(10,7)):
             gate=self.config_gate()
@@ -723,6 +744,362 @@ class RuntimeWorkerProof(unittest.TestCase):
         signature=ast.parse((SOURCE/'bounded_runtime.py').read_text())
         public=next(node for node in signature.body if isinstance(node,ast.FunctionDef) and node.name=='bounded_run')
         self.assertNotIn('provisioning',[arg.arg for arg in public.args.args+public.args.kwonlyargs])
+
+    def _helper_capture_control(self, *, fail=None, late=None, late_occurrence=None):
+        self._helper_case_number=getattr(self,'_helper_case_number',0)+1
+        source=self.work/('helper-source-'+str(self._helper_case_number));payload=b'\x7fELF authored inert helper A'
+        source.write_bytes(payload);source.chmod(0o500)
+        with patch.object(runtime.time,'monotonic',return_value=0.0):
+            admitted=runtime._pin_files([source],10.0)
+        case=types.SimpleNamespace(source=source,payload=payload,admitted=admitted,receipt={},data=bytearray(),
+                                   mode=0o777,seals=0,now=0.0,events=[],counts={},closes=[],failure=OSError('authored helper fault'))
+        held=900000
+        native={name:getattr(runtime.os,name) for name in ('open','read','write','pread','fstat','fchmod','getxattr','close')}
+        def effect(stage):
+            case.events.append(stage);case.counts[stage]=case.counts.get(stage,0)+1
+            if late==stage and (late_occurrence is None or case.counts[stage]==late_occurrence):case.now=10.0
+            if fail==stage:raise case.failure
+        def create(name,flags):
+            effect('create');self.assertEqual(('callable-probe-helper',0x13),(name,flags));return held
+        def metadata(fd):
+            if fd!=held:return native['fstat'](fd)
+            effect('fstat')
+            return types.SimpleNamespace(st_dev=91,st_ino=92,st_uid=123,
+                st_mode=stat.S_IFREG|case.mode,st_size=len(case.data))
+        def write(fd,data):
+            self.assertEqual(held,fd);effect('write')
+            count=min(len(data),getattr(case,'write_limit',len(data)))
+            case.data.extend(bytes(data[:count]));return count
+        def pread(fd,size,offset):
+            self.assertEqual(held,fd);effect('pread');return bytes(case.data[offset:offset+size])
+        def mode(fd,value):
+            self.assertEqual((held,0o500),(fd,value));effect('mode');case.mode=value
+        def seals(fd,operation,*args):
+            self.assertEqual(held,fd)
+            if operation==runtime.fcntl.F_ADD_SEALS:
+                effect('seal');self.assertEqual((0x2f,),args);case.seals=0x3f;return 0
+            self.assertEqual(runtime.fcntl.F_GET_SEALS,operation);effect('get-seals');return case.seals
+        def capability(fd,name):
+            self.assertEqual((held,'security.capability'),(fd,name));effect('xattr');raise OSError(runtime.errno.ENODATA,'absent')
+        def close(fd):
+            if fd==held:
+                case.closes.append(fd);effect('object-close');return
+            result=native['close'](fd)
+            if case.data:effect('source-close')
+            return result
+        case.created=Mock(side_effect=create)
+        def owner_identity(*args):effect('owner');return {'pid':123,'start':77}
+        def run(action):
+            with ExitStack() as stack:
+                for target,name,value in (
+                    (runtime.time,'monotonic',Mock(side_effect=lambda:case.now)),
+                    (runtime,'process_identity',Mock(side_effect=owner_identity)),
+                    (runtime.os,'getpid',Mock(return_value=123)),(runtime.os,'getuid',Mock(return_value=123)),
+                    (runtime.os,'memfd_create',case.created),(runtime.os,'fstat',Mock(side_effect=metadata)),
+                    (runtime.os,'write',Mock(side_effect=write)),(runtime.os,'pread',Mock(side_effect=pread)),
+                    (runtime.os,'fchmod',Mock(side_effect=mode)),(runtime.os,'getxattr',Mock(side_effect=capability)),
+                    (runtime.os,'close',Mock(side_effect=close)),(runtime.fcntl,'fcntl',Mock(side_effect=seals))):
+                    stack.enter_context(patch.object(target,name,value))
+                return action()
+        case.run=run
+        case.invoke=lambda:run(lambda:runtime._snapshot_helper(source,admitted,case.receipt,10.0))
+        return case
+
+    def test_helper_snapshot_measures_original_source_and_owned_sealed_object_without_proc_reopen(self):
+        case=self._helper_capture_control();owner=case.invoke()
+        self.assertEqual(case.admitted[str(case.source)],owner.source_pin)
+        self.assertEqual(0x3f,case.seals);self.assertEqual(0o500,case.mode)
+        self.assertLess(case.events.index('mode'),case.events.index('seal'))
+        self.assertEqual(case.payload,bytes(case.data))
+        self.assertNotEqual((owner.helper['device'],owner.helper['inode']),
+                            (owner.source_pin['device'],owner.source_pin['inode']))
+        coordinate='/proc/123/fd/900000';row={'device':91,'inode':92,'mode':0o500,'sha256':hashlib.sha256(case.payload).hexdigest()}
+        launch={'pins':{**case.admitted,coordinate:row}}
+        real=runtime._pin_files
+        with patch.object(runtime,'_pin_files',wraps=real) as ordinary:
+            self.assertEqual(launch['pins'],case.run(lambda:runtime._launch_pins(launch,case.receipt,10.0)))
+        self.assertEqual([(case.admitted,10.0)],[call.args for call in ordinary.call_args_list])
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+        self.assertEqual([900000],case.closes);self.assertIsNone(owner.descriptor)
+        with self.assertRaisesRegex(ValueError,'ownership lost'):
+            case.run(lambda:runtime._launch_pins(launch,case.receipt,10.0))
+
+    def test_helper_snapshot_partial_progress_minimum_seals_and_unsupported_APIs_are_closed(self):
+        case=self._helper_capture_control();case.write_limit=3;owner=case.invoke()
+        self.assertGreater(case.events.count('write'),1);self.assertEqual(case.payload,bytes(case.data))
+        case.seals=0x2f;case.run(lambda:runtime._helper_pin(owner,10.0))
+        owner.helper['size']+=1
+        with self.assertRaises(ValueError):case.run(lambda:runtime._helper_pin(owner,10.0))
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+        case=self._helper_capture_control();case.write_limit=0
+        with self.assertRaisesRegex(ValueError,'short write'):case.invoke()
+        self.assertEqual([900000],case.closes)
+        for unavailable in ('memfd_create','getxattr'):
+            case=self._helper_capture_control()
+            def refuse_api():
+                with patch.object(runtime.os,unavailable,None):runtime._snapshot_helper(case.source,case.admitted,case.receipt,10.0)
+            with self.subTest(api=unavailable),self.assertRaisesRegex(ValueError,'APIs unavailable'):case.run(refuse_api)
+            case.created.assert_not_called();self.assertEqual([],case.closes)
+        case=self._helper_capture_control();owner=case.invoke()
+        def unknown_xattr():
+            with patch.object(runtime.os,'getxattr',side_effect=OSError(runtime.errno.ENOTSUP,'authored unsupported')):
+                runtime._helper_pin(owner,10.0)
+        with self.assertRaises(OSError):case.run(unknown_xattr)
+        def changed_controller():
+            with patch.object(runtime,'process_identity',return_value={'pid':123,'start':78}):
+                runtime._helper_pin(owner,10.0)
+        with self.assertRaisesRegex(ValueError,'owner lifetime'):case.run(changed_controller)
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+
+    def _helper_clocked_hash(self, case, payload, trace, action, *, late_digest=None, late_update=None):
+        # Hash real supplied bytes; only selected terminal-operation timing is authored.
+        original=hashlib.sha256
+        class ObservedHash:
+            def __init__(self,*args,**kwargs):
+                self.real=original(*args,**kwargs);self.data=bytearray(args[0] if args else b'')
+                if not args:trace['emptyConstructors']+=1
+            def update(self,block):
+                self.real.update(block);self.data.extend(block)
+                if bytes(self.data)==payload:
+                    trace['updates']+=1
+                    if trace['updates']==late_update:case.now=10.0
+            def hexdigest(self):
+                value=self.real.hexdigest()
+                if bytes(self.data)==payload:
+                    trace['digests']+=1
+                    if trace['digests']==late_digest:case.now=10.0
+                return value
+        with patch.object(hashlib,'sha256',side_effect=ObservedHash):return action()
+
+    def test_helper_pin_late_bound_owner_and_final_update_cannot_start_next_fstat(self):
+        # Creator observes owner twice; select the third owner in the actual later repin.
+        case=self._helper_capture_control(late='owner',late_occurrence=3);owner=case.invoke()
+        start=len(case.events)
+        with self.assertRaises(TimeoutError):case.run(lambda:runtime._helper_pin(owner,10.0))
+        self.assertEqual(3,case.counts['owner']);self.assertNotIn('fstat',case.events[start:])
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+        case=self._helper_capture_control();owner=case.invoke();start=len(case.events)
+        trace={'updates':0,'digests':0,'emptyConstructors':0}
+        with self.assertRaises(TimeoutError):
+            case.run(lambda:self._helper_clocked_hash(case,case.payload,trace,
+                lambda:runtime._helper_pin(owner,10.0),late_update=1))
+        self.assertEqual(1,trace['updates']);self.assertEqual(0,trace['digests'])
+        self.assertEqual(1,case.events[start:].count('fstat'))  # initial only, no final metadata call
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+
+    def test_helper_copy_terminal_digest_cannot_start_chmod_and_pin_digest_cannot_return(self):
+        case=self._helper_capture_control();trace={'updates':0,'digests':0,'emptyConstructors':0}
+        # First matching digest is ordinary source pinning; second is the copied-H digest.
+        with self.assertRaises(TimeoutError):
+            case.run(lambda:self._helper_clocked_hash(case,case.payload,trace,
+                lambda:runtime._snapshot_helper(case.source,case.admitted,case.receipt,10.0),late_digest=2))
+        self.assertEqual(2,trace['digests']);self.assertNotIn('mode',case.events)
+        self.assertNotIn('seal',case.events);self.assertEqual([900000],case.closes)
+        self.assertIsNone(case.receipt.get('helperSnapshotFd'));self.assertEqual(1,case.events.count('source-close'))
+        case=self._helper_capture_control(fail='object-close');trace={'updates':0,'digests':0,'emptyConstructors':0}
+        with self.assertRaises(TimeoutError) as primary:
+            case.run(lambda:self._helper_clocked_hash(case,case.payload,trace,
+                lambda:runtime._snapshot_helper(case.source,case.admitted,case.receipt,10.0),late_digest=2))
+        self.assertIsNot(case.failure,primary.exception);self.assertEqual(2,trace['digests'])
+        self.assertIs(case.failure,case.receipt['helperSnapshotCloseFailure'])
+        self.assertIn('helper snapshot object cleanup failed',primary.exception.__notes__)
+        self.assertNotIn('mode',case.events);self.assertEqual(1,case.events.count('source-close'))
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+        case=self._helper_capture_control();owner=case.invoke();start=len(case.events)
+        trace={'updates':0,'digests':0,'emptyConstructors':0};returned=[]
+        def repin():returned.append(runtime._helper_pin(owner,10.0))
+        with self.assertRaises(TimeoutError):
+            case.run(lambda:self._helper_clocked_hash(case,case.payload,trace,repin,late_digest=1))
+        self.assertEqual(1,trace['digests']);self.assertEqual([],returned)
+        self.assertEqual(2,case.events[start:].count('fstat'))
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+        case=self._helper_capture_control();owner=case.invoke();coordinate=owner.coordinate()
+        launch={'pins':{**case.admitted,coordinate:{'device':91,'inode':92,'mode':0o500,
+                                                  'sha256':case.admitted[str(case.source)]['sha256']}}}
+        actual_pin=runtime._helper_pin;returned=[]
+        def late_after_pin(held,end):
+            row=actual_pin(held,end);case.now=10.0;return row
+        def union():
+            with patch.object(runtime,'_helper_pin',side_effect=late_after_pin):
+                returned.append(runtime._launch_pins(launch,case.receipt,10.0))
+        with self.assertRaises(TimeoutError):case.run(union)
+        self.assertEqual([],returned)
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+
+    def test_helper_initial_ELF_observation_refuses_before_hash_creation_and_preserves_close(self):
+        case=self._helper_capture_control();owner=case.invoke();trace={'updates':0,'digests':0,'emptyConstructors':0}
+        def repin():
+            reading=runtime.os.pread
+            def late_magic(fd,size,offset):
+                value=reading(fd,size,offset)
+                if size==4 and offset==0:case.now=10.0
+                return value
+            with patch.object(runtime.os,'pread',side_effect=late_magic):runtime._helper_pin(owner,10.0)
+        start=len(case.events)
+        with self.assertRaises(TimeoutError):
+            case.run(lambda:self._helper_clocked_hash(case,case.payload,trace,repin))
+        self.assertEqual(0,trace['emptyConstructors']);self.assertEqual(0,trace['digests'])
+        self.assertEqual(1,case.events[start:].count('pread'));self.assertEqual(1,case.events[start:].count('fstat'))
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+
+    def test_helper_gate_late_terminal_digest_omits_final_owner_and_late_final_owner_omits_fstat(self):
+        case=self._helper_gate_control();trace={'updates':0,'digests':0,'emptyConstructors':0}
+        with self.assertRaises(TimeoutError):
+            self._helper_clocked_hash(case,case.payload,trace,case.invoke,late_digest=1)
+        self.assertEqual(1,trace['digests']);self.assertEqual(1,case.counts['owner'])
+        self.assertEqual(1,case.counts['fstat']);case.duplicate.assert_not_called();self.assertEqual([10],case.closes)
+        # Do not expire the first owner check: target its second, terminal observation.
+        case=self._helper_gate_control(late='owner',late_occurrence=2)
+        with self.assertRaises(TimeoutError):case.invoke()
+        self.assertEqual(2,case.counts['owner']);self.assertEqual(1,case.counts['fstat'])
+        case.duplicate.assert_not_called();self.assertEqual([10],case.closes)
+
+    def test_helper_actual_prepare_substitutes_only_probe_mount_and_commits_source_plus_owned_H(self):
+        case=self._helper_capture_control();profile,profile_sha=build_contract.load_profile_with_digest()
+        bounds=runtime.execution_bounds(managed_scope=True,phase='probe')
+        recipe={'target':case.source,'worker':['/probe','/work/source.i'],
+                'prefix':['--ro-bind',str(case.source),'/probe'],
+                'mounts':[{'source':case.source,'original':case.source,'target':Path('/probe'),'writable':False}]}
+        binding={'binaryPath':'/authored/monitor','dependencies':[],**{k:'a'*64 for k in
+                 ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','manifestSha256')}}
+        binding['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
+        common={**case.admitted,str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':1,'inode':2,'mode':0o400,'sha256':profile_sha},
+                str(runtime.BASE/'worker_exec_proof.py'):{'device':1,'inode':3,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}}
+        common.update({str(runtime.BASE/name):{'device':2,'inode':index,'mode':0o400,'sha256':sha}
+                       for index,(name,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+        case.receipt.update(directory=Path('/authored')/('a'*32),directoryDevice=3,directoryInode=4,device=5,inode=6)
+        real_pin=runtime._pin_files;native_stat=Path.stat;native_lstat=Path.lstat;configs=[]
+        def pin(paths,deadline=None):
+            return real_pin(paths,deadline) if list(paths)==[case.source] else dict(common)
+        def executable(path,deadline=None):
+            return {'path':str(path),**case.admitted[str(case.source)]} if path==case.source else {'path':str(path),'device':7,'inode':8,'mode':0o500,'sha256':'a'*64}
+        def metadata(path,*args,**kwargs):
+            if str(path)=='/proc/self/ns/pid' or path==case.receipt['directory']/'python-cache':return types.SimpleNamespace(st_dev=9,st_ino=10)
+            return native_stat(path,*args,**kwargs)
+        def lmetadata(path,*args,**kwargs):
+            if path==case.receipt['directory']/'python-cache':return types.SimpleNamespace(st_dev=9,st_ino=10)
+            return native_lstat(path,*args,**kwargs)
+        with patch.object(runtime,'_contained_recipe',return_value=recipe),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),                 patch.object(runtime,'_recorded_compiler_inputs',return_value=None),patch.object(runtime,'_nonprivileged_executable',side_effect=executable),                 patch.object(runtime,'_pin_files',side_effect=pin),patch.object(runtime,'private_directory',side_effect=lambda path:path),                 patch.object(Path,'stat',metadata),patch.object(Path,'lstat',lmetadata),                 patch.object(runtime,'_publish_config',side_effect=lambda path,raw:configs.append(json.loads(raw))):
+            launch=case.run(lambda:runtime._prepare_launch(['/authored'],self.work,bounds,case.receipt,False,deadline=10.0,helper_admission=case.admitted))
+        self.assertEqual(case.admitted[str(case.source)],launch['pins'][str(case.source)])
+        self.assertEqual((91,92),(launch['expected']['targetDevice'],launch['expected']['targetInode']))
+        self.assertEqual(case.admitted[str(case.source)]['sha256'],launch['proofBinding']['targetSha256'])
+        self.assertEqual(0o500,launch['pins']['/proc/123/fd/900000']['mode'])
+        self.assertIn(['--ro-bind-fd','5','/probe'],[launch['command'][i:i+3] for i in range(len(launch['command'])-2)])
+        self.assertNotIn(['--ro-bind',str(case.source),'/probe'],[launch['command'][i:i+3] for i in range(len(launch['command'])-2)])
+        self.assertEqual(case.receipt['helperSnapshot'].binding(),configs[0]['helperSnapshot'])
+        self.assertNotIn('librarySnapshot',configs[0]);case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+
+    def test_helper_snapshot_missing_seals_content_mode_and_export_conflicts_refuse(self):
+        for bit in (1,2,4,8,32,64):
+            case=self._helper_capture_control();owner=case.invoke()
+            case.seals=0x3f & ~bit if bit!=64 else 0x7f
+            with self.subTest(bit=bit),self.assertRaises(ValueError):
+                case.run(lambda:runtime._helper_pin(owner,10.0))
+            case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+            self.assertEqual([900000],case.closes)
+        for change in ('mode','bytes'):
+            case=self._helper_capture_control();owner=case.invoke()
+            if change=='mode':case.mode=0o700
+            else:case.data[-1]^=1
+            with self.subTest(change=change),self.assertRaises(ValueError):case.run(lambda:runtime._helper_pin(owner,10.0))
+            case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+        case=self._helper_capture_control()
+        with patch.object(runtime.os,'MFD_EXEC',32,create=True),self.assertRaisesRegex(ValueError,'conflicting'):
+            case.invoke()
+        case.created.assert_not_called()
+        case=self._helper_capture_control();case.admitted[str(case.source)]['sha256']='0'*64
+        with self.assertRaisesRegex(ValueError,'original admission'):case.invoke()
+        case.created.assert_not_called()
+        case=self._helper_capture_control();case.source.chmod(0o700)
+        case.source.write_bytes(b'\x7fELF authored inert helper B');case.source.chmod(0o500)
+        with self.assertRaisesRegex(ValueError,'original admission'):case.invoke()
+        case.created.assert_not_called()
+        case=self._helper_capture_control();case.source.chmod(0o700)
+        case.source.write_bytes(b'not an ELF helper');case.source.chmod(0o500)
+        with patch.object(runtime.time,'monotonic',return_value=0.0):case.admitted=runtime._pin_files([case.source],10.0)
+        # Invoke with the new admission explicitly; the original invoke closure intentionally retains A.
+        with self.assertRaisesRegex(ValueError,'not ELF'):
+            case.run(lambda:runtime._snapshot_helper(case.source,case.admitted,case.receipt,10.0))
+        self.assertNotIn('seal',case.events);self.assertEqual([900000],case.closes)
+
+    def test_helper_snapshot_operation_and_late_refusal_preserve_primary_and_once_cleanup(self):
+        for stage in ('create','write','mode','fstat','xattr','seal','get-seals','pread','source-close'):
+            for late in (False,True):
+                case=self._helper_capture_control(fail=None if late else stage,late=stage if late else None)
+                with self.subTest(stage=stage,late=late):
+                    with self.assertRaises((TimeoutError,OSError)) as observed:case.invoke()
+                    if not late:self.assertIs(case.failure,observed.exception)
+                    self.assertEqual([] if stage=='create' and not late else [900000],case.closes)
+                    self.assertIsNone(case.receipt.get('helperSnapshotFd'))
+        case=self._helper_capture_control(fail='object-close');owner=case.invoke()
+        with self.assertRaises(OSError) as observed:case.run(lambda:runtime._close_helper_snapshot(case.receipt))
+        self.assertIs(case.failure,observed.exception);self.assertTrue(case.receipt['helperSnapshotCloseFailed'])
+        self.assertIs(case.failure,case.receipt['helperSnapshotCloseFailure']);self.assertIsNone(owner.descriptor)
+        case.run(lambda:runtime._close_helper_snapshot(case.receipt));self.assertEqual([900000],case.closes)
+
+    def _helper_gate_control(self, descriptor=10, *, late=None, fail=None, late_occurrence=None):
+        gate=self.config_gate();payload=b'\x7fELF authored immutable helper'
+        helper={'device':91,'inode':92,'size':len(payload),'mode':0o500,'sha256':hashlib.sha256(payload).hexdigest(),
+                'sourcePath':'/authored/helper','sourcePin':{'device':81,'inode':82,'mode':0o500,'sha256':hashlib.sha256(payload).hexdigest()}}
+        record={'ownerPid':123,'ownerStart':77,'descriptor':900000,'helper':helper}
+        fields=['0']*20;fields[19]='77'
+        case=types.SimpleNamespace(gate=gate,record=record,payload=payload,now=0.0,closes=[],events=[],counts={},seals=0x3f,mode=0o500,
+                                   failure=OSError('authored handoff fault'))
+        def effect(stage,value=None):
+            case.events.append(stage);case.counts[stage]=case.counts.get(stage,0)+1
+            if late==stage and (late_occurrence is None or case.counts[stage]==late_occurrence):case.now=10.0
+            if fail==stage:raise case.failure
+            return value
+        def metadata(fd):
+            self.assertEqual(descriptor,fd)
+            return effect('fstat',types.SimpleNamespace(st_dev=91,st_ino=92,st_size=len(payload),st_uid=123,st_mode=stat.S_IFREG|case.mode))
+        def capability(fd,name):
+            self.assertEqual((descriptor,'security.capability'),(fd,name));effect('xattr');raise OSError(gate.errno.ENODATA,'absent')
+        def close(fd):case.closes.append(fd);effect('target-close' if fd==5 else 'source-close')
+        case.opened=Mock(side_effect=lambda *a,**k:effect('open',descriptor))
+        case.duplicate=Mock(side_effect=lambda *a,**k:effect('dup',5));case.inherit=Mock(side_effect=lambda *a,**k:effect('inherit'))
+        def invoke():
+            with ExitStack() as stack:
+                for target,name,value in (
+                    (gate.time,'monotonic',Mock(side_effect=lambda:case.now)),
+                    (Path,'read_text',Mock(side_effect=lambda *a,**k:effect('owner','123 (owner) '+' '.join(fields)))),
+                    (gate.os,'open',case.opened),(gate.os,'fstat',Mock(side_effect=metadata)),
+                    (gate.fcntl,'fcntl',Mock(side_effect=lambda *a:effect('seals',case.seals))),
+                    (gate.os,'getxattr',Mock(side_effect=capability)),
+                    (gate.os,'read',Mock(side_effect=lambda *a:effect('read',payload))),
+                    (gate.os,'lseek',Mock(side_effect=lambda *a:effect('seek',0))),
+                    (gate.os,'dup2',case.duplicate),(gate.os,'set_inheritable',case.inherit),
+                    (gate.os,'close',Mock(side_effect=close))):stack.enter_context(patch.object(target,name,value))
+                return gate._acquire_helper_snapshot(record,1024,10.0,(123,77,123))
+        case.invoke=invoke;return case
+
+    def test_helper_gate_hashes_real_payload_and_transfers_only_exact_owned_fd5(self):
+        for descriptor in (5,10):
+            case=self._helper_gate_control(descriptor);self.assertIsNone(case.invoke())
+            case.opened.assert_called_once_with('/proc/123/fd/900000',case.gate.os.O_RDONLY|case.gate.os.O_NONBLOCK|case.gate.os.O_CLOEXEC)
+            case.duplicate.assert_called_once_with(descriptor,5,inheritable=True);case.inherit.assert_called_once_with(5,True)
+            self.assertEqual([] if descriptor==5 else [10],case.closes)
+            self.assertEqual(2,case.events.count('fstat'));self.assertEqual(2,case.events.count('seals'))
+        for change in ('controller','source','digest','seals','mode'):
+            case=self._helper_gate_control()
+            if change=='controller':case.record['ownerStart']=78
+            elif change=='source':case.record['helper']['sourcePin']['sha256']='0'*64
+            elif change=='digest':case.record['helper']['sha256']=case.record['helper']['sourcePin']['sha256']='0'*64
+            elif change=='seals':case.seals=0x0f
+            else:case.mode=0o700
+            with self.subTest(change=change),self.assertRaises(ValueError):case.invoke()
+            case.duplicate.assert_not_called()
+
+    def test_helper_gate_refuses_late_and_faulted_handoff_without_new_end_or_duplicate_close(self):
+        for stage in ('owner','open','fstat','seals','xattr','read','seek','dup','inherit','source-close'):
+            for late in (False,True):
+                case=self._helper_gate_control(late=stage if late else None,fail=None if late else stage)
+                with self.subTest(stage=stage,late=late),self.assertRaises((TimeoutError,OSError)) as observed:case.invoke()
+                if not late:self.assertIs(case.failure,observed.exception)
+                expected=[] if stage=='owner' or stage=='open' and not late else [10,5] if stage in ('dup','inherit','source-close') and (stage!='dup' or late) else [10]
+                self.assertEqual(expected,case.closes)
 
     def config_gate(self):
         gate=types.ModuleType('_auth_config_gate_control');gate.__file__=str(SOURCE/'scope_gate.py')
@@ -1967,12 +2344,13 @@ class RuntimeWorkerProof(unittest.TestCase):
 
 
     def cleanup_runner_vector(self, *, cgroup_error=None, launcher_error=None, primary=None,
-                              invalid_scope=False, clock_case=None):
+                              invalid_scope=False, clock_case=None, helper=False, helper_close_error=None):
         # Actual runner, final-proof refusal and receipt retention; only external
         # process/kernel/clock interfaces are authored. No child, scope or real FD.
         events=[]; now=[100.0]; saved_primary_traceback=[]; cleanup_time=[]
         bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
         receipt={'directory':self.directory/'never-launched-receipt','fd':114}
+        if helper:receipt['helperSnapshotFd']=115
         scope={'_directoryFd':112,'_gatePidfd':113,'unit':'authored.scope'}
         launch={'argv':['never executed'],'pins':{},'proofBinding':{}}
         class Pipe:
@@ -2016,14 +2394,21 @@ class RuntimeWorkerProof(unittest.TestCase):
             return []
         process=types.SimpleNamespace(pid=123,stdin=Pipe(900),stdout=Pipe(901),stderr=Pipe(902),wait=wait,returncode=0)
         caught=None; caught_traceback=None
+        def close(fd):
+            events.append(('close-fd',fd))
+            if fd==115 and helper_close_error is not None:raise helper_close_error
+        finish=runtime._finish_worker_proof
+        def finish_helper(*args,**kwargs):
+            events.append(('proof-consumed',None));return finish(*args,**kwargs)
         with ExitStack() as effects:
+            if helper:effects.enter_context(patch.object(runtime,'_finish_worker_proof',side_effect=finish_helper))
             for effect in (
                 patch.object(runtime,'_work_directory',return_value=self.work),patch.object(runtime,'_worker_environment'),
                 patch.object(runtime,'_create_worker_receipt',return_value=receipt),patch.object(runtime,'_prepare_launch',return_value=launch),
                 patch.object(runtime.subprocess,'Popen',return_value=process),patch.object(runtime.os,'pidfd_open',return_value=111),
                 patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime.selectors,'DefaultSelector',side_effect=Selector),
                 patch.object(runtime.os,'set_blocking'),patch.object(runtime.os,'read',return_value=b''),
-                patch.object(runtime.os,'close',side_effect=lambda fd:events.append(('close-fd',fd))),
+                patch.object(runtime.os,'close',side_effect=close),
                 patch.object(runtime,'_admit_scope',return_value=scope),patch.object(runtime,'_release_scope'),
                 patch.object(runtime,'_kill_owned_scope',side_effect=kill_scope),patch.object(runtime,'_kill_launcher',side_effect=kill_launcher),
                 patch.object(runtime,'scope_processes',side_effect=scoped),patch.object(runtime,'owned_processes',side_effect=owned),
@@ -2040,12 +2425,32 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertIsNone(result['exitCode']);self.assertFalse(runtime.worker_execution_complete(result))
         self.assertEqual('unknown',result['workerProof']['status'])
         self.assertEqual('retained',result['_receiptCleanup']['status'])
-        self.assertEqual([111,112,113,114],[value for name,value in events if name=='close-fd'])
+        if helper:
+            self.assertEqual([111,112,113,115,114],[value for name,value in events if name=='close-fd'])
+            self.assertIsNone(receipt['helperSnapshotFd'])
+        else:
+            self.assertEqual([111,112,113,114],[value for name,value in events if name=='close-fd'])
         self.assertEqual([900,900,901,902],[value for name,value in events if name=='close-stream'])
         self.assertNotIn('cleanupFailure',runtime.public_result(result))
         self.assertNotIn('secondaryCleanupFailures',runtime.public_result(result))
         return types.SimpleNamespace(error=caught,result=result,events=events,bounds=bounds,scope_error=scope_error,
             traceback=caught_traceback,primary_traceback=saved_primary_traceback,cleanup_time=cleanup_time)
+
+    def test_actual_runner_consumes_proof_before_once_H_close_and_preserves_primary_on_unknown_cleanup(self):
+        for close_failure in (None,OSError('authored H close refusal')):
+            primary=ValueError('authored phase refusal');kill=OSError('authored scope kill refusal')
+            with self.subTest(close_failure=close_failure is not None):
+                vector=self.cleanup_runner_vector(primary=primary,cgroup_error=kill,invalid_scope=True,
+                                                  helper=True,helper_close_error=close_failure)
+                self.assertIs(primary,vector.error);self.assertIs(kill,primary.cleanupFailure)
+                self.assertIs(vector.result,primary.bounded_result)
+                self.assertEqual(b'',vector.result['workerProofRaw'])
+                self.assertFalse(vector.result['cleanupVerified']);self.assertFalse(vector.result['finalAbsenceVerified'])
+                self.assertEqual('retained',vector.result['_receiptCleanup']['status'])
+                proof=vector.events.index(('proof-consumed',None));closed=vector.events.index(('close-fd',115))
+                self.assertLess(proof,closed)
+                self.assertEqual(1,vector.events.count(('close-fd',115)))
+                self.assertNotIn('helperSnapshot',runtime.public_result(vector.result))
 
     def test_runner_attempts_each_owned_kill_and_keeps_cleanup_failure_sticky(self):
         for which in ('cgroup','launcher','both'):

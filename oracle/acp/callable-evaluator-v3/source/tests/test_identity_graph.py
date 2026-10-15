@@ -54,7 +54,7 @@ def remap(value, mapping):
     return value
 
 
-def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
+def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64, phase='runtime'):
     import hashlib
     import bounded_runtime as runtime
     pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':target_sha},
@@ -65,14 +65,22 @@ def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
         'reportInode':2,'reaperDevice':3,'reaperInode':4,'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8},
         **{key:'0'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256')},
         'launchPinsSha256':hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()}
+    if phase == 'probe':
+        pins['/proc/123/fd/40']={'device':90,'inode':93,'mode':0o500,'sha256':target_sha}
+        bindings['expected'].update(targetDevice=90,targetInode=93)
+    bindings['expected']['phase']=phase
+    bindings['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     bindings['targetSha256']=target_sha
     bindings['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
     execution={'v':1,'t':'exec','s':1,'a':'a'*32,'p':'runtime','c':3,'ed':7,'ei':8,'od':7,'oi':8,
                'w':(4<<16)|(5<<8)|127,'cf':1,'dp':0,'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
     termination={'v':1,'t':'term','s':2,'a':'a'*32,'p':'runtime','c':3,
                  'r':exit_code<<8 if exit_code>=0 else -exit_code,'k':'exit' if exit_code>=0 else 'signal','n':abs(exit_code)}
+    for row in (execution,termination):row['p']=phase
+    execution.update(ed=bindings['expected']['targetDevice'],ei=bindings['expected']['targetInode'],
+                     od=bindings['expected']['targetDevice'],oi=bindings['expected']['targetInode'])
     raw=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in (execution,termination))
-    return {'workerProofRaw':raw,'bounds':{'phase':'runtime','profileSha256':'0'*64},'launchInputPins':pins,'workerProofBindings':bindings,'exitCode':exit_code,'stdout':stdout,'stderr':stderr,
+    return {'workerProofRaw':raw,'bounds':{'phase':phase,'profileSha256':'0'*64},'launchInputPins':pins,'workerProofBindings':bindings,'exitCode':exit_code,'stdout':stdout,'stderr':stderr,
             'launcherExitCode':0,'provisioningOnly':False,
             'workerTermination':{'kind':'exit' if exit_code>=0 else 'signal',
                                  'value':abs(exit_code),'rawWaitStatus':exit_code<<8 if exit_code>=0 else -exit_code},
@@ -185,7 +193,7 @@ class IdentityGraph(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(gate.__file__).parent) as directory:
             work=Path(directory);source=work/'public.c';source.write_text('int public_test;')
             helper=work/'not-executed';helper.write_text('inert')
-            result=completed_result(json.dumps(graph()).encode(),target_sha=gate.digest(helper))
+            result=completed_result(json.dumps(graph()).encode(),target_sha=gate.digest(helper),phase='probe')
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 self.assertEqual(gate.probe(source,helper,work,{})['schemaVersion'],3)
                 old=graph();old['schemaVersion']=2;result['stdout']=json.dumps(old).encode()
@@ -475,16 +483,59 @@ class SharedHelperIdentity(unittest.TestCase):
         self.clock.start();self.addCleanup(self.clock.stop)
         self.admitted=runtime._pin_files([self.helper],10.0)
 
-    def enriched(self, admitted, value=None):
+    def enriched(self, admitted, value=None, *, helper_identity=(90,93)):
         from test_process_results import receipt as process_receipt
         name,pin=next(iter(admitted.items()));value=copy.deepcopy(graph() if value is None else value)
         result=process_receipt(stdout=json.dumps(value).encode(),phase='probe',caller=name,
-                               caller_sha=pin['sha256'],input_pins=admitted)
+                               caller_sha=pin['sha256'],input_pins=admitted,helper_identity=helper_identity)
         self.assertTrue(gate._complete_execution(result))
         bindings={'sourceSha256':'a'*64,'helperSha256':pin['sha256'],'inputsUnchanged':True}
         execution=gate.public_result(result);execution['inputBindings']=copy.deepcopy(bindings)
         value.update(execution=execution,inputBindings=bindings)
         return value
+
+    def test_original_helper_A_joins_two_distinct_H_targets_and_rejects_mutable_A_shaped_exec(self):
+        from test_process_results import receipt as process_receipt
+        import hashlib
+        self.helper.write_bytes(b'\x7fELF authored helper A');self.helper.chmod(0o700)
+        self.admitted=self.runtime._pin_files([self.helper],10.0)
+        expected=self.enriched(self.admitted,helper_identity=(90,93))
+        actual=self.enriched(self.admitted,helper_identity=(94,95))
+        self.assertTrue(gate.compare_descriptors(expected,actual,expected_helper=self.admitted)['accepted'])
+        name,pin=next(iter(self.admitted.items()));source=self.helper.read_bytes()
+        # The stronger counterexample retains A rows/SHA and original D/I while B occupies the path.
+        old=process_receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=name,
+                            caller_sha=pin['sha256'],input_pins=self.admitted)
+        old['launchInputPins'].pop('/proc/123/fd/40')
+        target=old['workerProofBindings']['expected'];target.update(targetDevice=pin['device'],targetInode=pin['inode'])
+        records=[json.loads(line) for line in old['workerProofRaw'].splitlines()]
+        records[0].update(ed=pin['device'],ei=pin['inode'],od=pin['device'],oi=pin['inode'])
+        old['workerProofRaw']=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in records)
+        old['workerProof']['proofSha256']=hashlib.sha256(old['workerProofRaw']).hexdigest()
+        old['workerProofBindings']['launchPinsSha256']=self.runtime._canonical_pin_digest(old['launchInputPins'])
+        self.helper.write_bytes(b'\x7fELF authored helper B')
+        try:
+            self.assertEqual('verified',self.runtime._parse_worker_proof(old['workerProofRaw'],target)['status'])
+            # Exact original helper target predicate, retained here as the inert historical counterexample.
+            namespace={}
+            exec("def original_target(execution, helper_sha):\n"
+                 "    binding = execution.get('workerProofBindings') or {}\n"
+                 "    expected = binding.get('expected') or {}\n"
+                 "    pins = execution.get('launchInputPins') or {}\n"
+                 "    if (binding.get('targetSha256') != helper_sha or not any(\n"
+                 "            row.get('sha256') == helper_sha and\n"
+                 "            (row.get('device'),row.get('inode')) == (expected.get('targetDevice'),expected.get('targetInode'))\n"
+                 "            for row in pins.values())):\n"
+                 "        raise ValueError('helper claim differs from monitor-proven executable')\n",namespace)
+            namespace['original_target'](old,pin['sha256'])
+        finally:self.helper.write_bytes(source)
+        self.assertEqual(self.admitted,self.runtime._pin_files([self.helper],10.0))
+        self.assertFalse(gate._complete_execution(old))
+        with self.assertRaises(ValueError):gate._require_helper_target(old,pin['sha256'])
+        # A caller's immutable/SHA declaration is not a substitute for a matching H acquisition.
+        invented=copy.deepcopy(actual);invented['execution']['launchInputPins']['/proc/123/fd/40']['mode']=0o700
+        invented['execution']['workerProofBindings']['launchPinsSha256']=self.runtime._canonical_pin_digest(invented['execution']['launchInputPins'])
+        self.assertEqual('unknown',gate.compare_descriptors(expected,invented,expected_helper=self.admitted)['status'])
 
     def test_shared_helper_real_admission_and_complete_evidence_keep_structural_outcomes(self):
         expected=self.enriched(self.admitted);actual=self.enriched(self.admitted)

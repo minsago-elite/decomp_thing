@@ -35,7 +35,7 @@ class WorkerProofConsumers(unittest.TestCase):
                 helper_sha=gate.digest(helper);calls=[];real_digest=gate.digest
                 def hashing(path,**kwargs):calls.append((path,kwargs));return real_digest(path,**kwargs)
                 refusal={'schemaVersion':3,'status':'refused','diagnostics':['unsupported-integer-builtin-kind']}
-                result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=helper_sha)
+                result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=helper_sha,phase='probe')
                 def run(*args,**kwargs):
                     if mutation is not None:(source if mutation=='source' else helper).write_bytes(b'changed input')
                     return result

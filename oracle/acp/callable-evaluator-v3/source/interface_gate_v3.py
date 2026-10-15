@@ -10,7 +10,7 @@ import re
 from importlib.metadata import version
 import fastjsonschema
 from pathlib import Path
-from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete
+from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete, _helper_execution_pin
 from build_contract import profile, load_profile, load_profile_with_digest, _bounded_json_snapshot
 REQUIRED = {'acp_mix','acp_pair_scale','acp_update','acp_apply','acp_fold','acp_state'}
 # Stable Clang builtin kinds; width alone never identifies a C integer type.
@@ -129,13 +129,8 @@ class owned_worker_leaf:
 def _require_helper_target(execution, helper_sha):
     """Join the controller claim to the executable independently proven by monitor."""
     binding = execution.get('workerProofBindings') or {}
-    expected = binding.get('expected') or {}
-    pins = execution.get('launchInputPins') or {}
-    if (binding.get('targetSha256') != helper_sha or not any(
-            row.get('sha256') == helper_sha and
-            (row.get('device'),row.get('inode')) == (expected.get('targetDevice'),expected.get('targetInode'))
-            for row in pins.values())):
-        raise ValueError('helper claim differs from monitor-proven executable')
+    if binding.get('targetSha256') != helper_sha or _helper_execution_pin(execution,helper_sha) is None:
+        raise ValueError('helper claim differs from monitor-proven immutable executable')
 
 
 def _shared_helper_pin(expected_helper):
@@ -158,10 +153,10 @@ def _require_shared_helper(execution, expected_helper):
     if not _complete_execution(execution):
         raise ValueError('shared helper requires complete protected execution')
     binding = execution.get('workerProofBindings') or {}
-    target = binding.get('expected') or {}
+    held = _helper_execution_pin(execution,pin['sha256'])
     if ((execution.get('launchInputPins') or {}).get(name) != pin or
-            binding.get('targetSha256') != pin['sha256'] or
-            (target.get('targetDevice'),target.get('targetInode')) != (pin['device'],pin['inode'])):
+            binding.get('targetSha256') != pin['sha256'] or held is None or held[0] == name or
+            (held[1]['device'],held[1]['inode']) == (pin['device'],pin['inode'])):
         raise ValueError('execution differs from independently admitted helper')
 
 
@@ -446,7 +441,8 @@ def probe(source, helper, work, environment, *, deadline=None, expected_inputs=N
              else probe_command(helper,work,[argument]))
     result = bounded_run(command,work,environment,
                          timeout=phase_remaining(deadline,bounds['probeSeconds']) if deadline is not None else bounds['probeSeconds'],output_limit=bounds['helperOutputBytesPerStream'],
-                         managed_scope=True,phase='probe',**({'phase_deadline':deadline} if deadline is not None else {}))
+                         managed_scope=True,phase='probe',**({'phase_deadline':deadline} if deadline is not None else {}),
+                          **({'helper_admission':{str(helper):dict(helper_pin)}} if expected_helper is not None else {}))
     receipt = public_result(result)
     try:
         if deadline is not None: phase_remaining(deadline, 1)

@@ -33,6 +33,22 @@
 #define BARRIER_ATTEMPTS 100
 #define BARRIER_NS UINT64_C(1000000000)
 #define POLL_NS 10000000L
+/* Fixed Linux UAPI045958acaa75205b31578cb22c4345e28dd2e4bf; no weak fallback. */
+#ifndef F_SEAL_EXEC
+#define F_SEAL_EXEC 0x0020
+#elif F_SEAL_EXEC != 0x0020
+#error conflicting F_SEAL_EXEC UAPI
+#endif
+#if F_SEAL_SEAL != 0x0001 || F_SEAL_SHRINK != 0x0002 || F_SEAL_GROW != 0x0004 || F_SEAL_WRITE != 0x0008
+#error conflicting helper seal UAPI
+#endif
+#ifdef F_SEAL_FUTURE_WRITE
+#if F_SEAL_FUTURE_WRITE != 0x0010
+#error conflicting F_SEAL_FUTURE_WRITE UAPI
+#endif
+#endif
+#define HELPER_REQUIRED_SEALS 0x002f
+#define HELPER_KNOWN_SEALS 0x003f
 #define RECORD_LIMIT 512
 #define PROOF_LIMIT 1024
 
@@ -376,9 +392,19 @@ static int nonprivileged_elf(int fd, struct identity *out) {
     unsigned char magic[4];
     if (fstat(fd,&st)<0) return -1;
     if (!S_ISREG(st.st_mode) || st.st_mode&(S_ISUID|S_ISGID)) { errno=EPERM; return -1; }
+    bool helper=!strcmp(cfg.phase,"probe");
+    if (helper) {
+        int seals=fcntl(fd,F_GET_SEALS);
+        /* Content/size and execute bits are sealed; full mode is only observed. */
+        if (st.st_size<=0 || (uint64_t)st.st_size>16777216 || (st.st_mode&07777)!=0500 ||
+            seals<0 || (seals&HELPER_REQUIRED_SEALS)!=HELPER_REQUIRED_SEALS || (seals&~HELPER_KNOWN_SEALS)) {
+            if (seals>=0) errno=EPERM;
+            return -1;
+        }
+    }
     ssize_t cap=fgetxattr(fd,"security.capability",NULL,0);
     if (cap>=0) { errno=EPERM; return -1; }
-    if (errno!=ENODATA && errno!=ENOTSUP) return -1;
+    if (errno!=ENODATA && (helper || errno!=ENOTSUP)) return -1;
     ssize_t n;
     do { n=pread(fd,magic,sizeof(magic),0); } while (n<0 && errno==EINTR);
     if (n<0) return -1;

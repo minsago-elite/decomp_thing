@@ -96,6 +96,53 @@ class SealedRuntimeLibraryProof(unittest.TestCase):
         self.assertFalse(parse_proof(wire(event,terminal()),binding())['workerExecVerified'])
 
 
+class ImmutableHelperProof(unittest.TestCase):
+    """Real wire replay plus authored controller rows; never native qualification."""
+    def test_probe_keeps_old_wire_and_requires_one_distinct_measured_H_row(self):
+        import bounded_runtime as runtime
+        from test_identity_graph import completed_result
+        value=completed_result(target_sha='c'*64,phase='probe')
+        expected=value['workerProofBindings']['expected']
+        parsed=proof_parser.parse_proof(value['workerProofRaw'],expected)
+        self.assertEqual('verified',parsed['status'])
+        self.assertLessEqual(len(value['workerProofRaw']),MAX_PROOF_BYTES)
+        self.assertNotIn('l',json.loads(value['workerProofRaw'].splitlines()[0]))
+        self.assertTrue(runtime.worker_execution_complete(value))
+        original=copy.deepcopy(value)
+        for mutation in ('missing','ordinary-path','mode','target','sha','duplicate','noncanonical-owner','noncanonical-fd'):
+            changed=copy.deepcopy(original);pins=changed['launchInputPins'];row=pins.pop('/proc/123/fd/40')
+            if mutation=='missing':pass
+            elif mutation=='ordinary-path':pins['/authored/executed-helper']=row
+            else:
+                if mutation=='mode':row['mode']=0o700
+                if mutation=='target':row['inode']+=1
+                if mutation=='sha':row['sha256']='d'*64
+                name='/proc/0123/fd/40' if mutation=='noncanonical-owner' else '/proc/123/fd/040' if mutation=='noncanonical-fd' else '/proc/123/fd/40'
+                pins[name]=row
+                if mutation=='duplicate':pins['/proc/123/fd/41']=dict(row)
+            changed['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(pins)
+            with self.subTest(mutation=mutation):
+                # The unchanged genuine-format event alone cannot supply H ownership.
+                self.assertEqual('verified',proof_parser.parse_proof(changed['workerProofRaw'],expected)['status'])
+                self.assertFalse(runtime.worker_execution_complete(changed))
+        self.assertTrue(runtime.worker_execution_complete(completed_result()))
+
+    def test_C_probe_policy_is_separate_from_unchanged_library_and_exec_barriers(self):
+        source=(ROOT/'worker_exec_monitor.c').read_text()
+        target=source[source.index('static int nonprivileged_elf('):source.index('static int nonprivileged_elf(')+2500]
+        self.assertIn('!strcmp(cfg.phase,"probe")',target)
+        self.assertIn('F_GET_SEALS',target)
+        self.assertIn('HELPER_REQUIRED_SEALS',target);self.assertIn('HELPER_KNOWN_SEALS',target)
+        self.assertIn('(st.st_mode&07777)!=0500',target)
+        self.assertIn('errno!=ENODATA && (helper || errno!=ENOTSUP)',target)
+        self.assertIn('#define HELPER_REQUIRED_SEALS 0x002f',source)
+        self.assertIn('#define HELPER_KNOWN_SEALS 0x003f',source)
+        self.assertLess(source.index('nonprivileged_elf(target_fd,&target)'),source.index('owned_child=fork()'))
+        self.assertIn('PTRACE_EVENT_EXEC',source)
+        self.assertIn('same(target,observed)',source)
+        self.assertIn('execve(cfg.worker[0],cfg.worker,environ)',source)
+
+
 class ProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

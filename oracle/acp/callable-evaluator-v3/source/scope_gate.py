@@ -2,6 +2,7 @@
 import json
 import hashlib
 import fcntl
+import errno
 import math
 import select
 import signal
@@ -65,6 +66,123 @@ def _close_nonstandard(keep):
                 if not (failure.errno == 9):
                     raise ValueError("scope gate policy refusal at check 49")
 
+
+
+# Reviewed Linux UAPI045958acaa75205b31578cb22c4345e28dd2e4bf; no reduced-policy fallback.
+_HELPER_REQUIRED_SEALS = 0x2f
+_HELPER_KNOWN_SEALS = 0x3f
+
+
+def _helper_policy():
+    for module, values in ((os, {'MFD_CLOEXEC':1, 'MFD_ALLOW_SEALING':2, 'MFD_EXEC':16}),
+                           (fcntl, {'F_SEAL_SEAL':1, 'F_SEAL_SHRINK':2, 'F_SEAL_GROW':4,
+                                    'F_SEAL_WRITE':8, 'F_SEAL_FUTURE_WRITE':16, 'F_SEAL_EXEC':32})):
+        for name, expected in values.items():
+            if hasattr(module, name) and (type(getattr(module, name)) is not int or getattr(module, name) != expected):
+                raise ValueError('conflicting executable snapshot UAPI')
+    if (any(not callable(getattr(os,name,None)) for name in ('fstat','read','getxattr','dup2','set_inheritable')) or
+            not callable(getattr(fcntl,'fcntl',None)) or
+            any(type(getattr(fcntl,name,None)) is not int for name in ('F_ADD_SEALS','F_GET_SEALS'))):
+        raise ValueError('executable snapshot APIs unavailable')
+
+
+def _helper_record(record, maximum, controller):
+    if (type(record) is not dict or set(record) != {'ownerPid','ownerStart','descriptor','helper'} or
+            any(type(record[k]) is not int or not 0 < record[k] <= (1 << 63)-1 for k in ('ownerPid','ownerStart')) or
+            type(record['descriptor']) is not int or not 0 <= record['descriptor'] <= (1 << 31)-1 or
+            (record['ownerPid'],record['ownerStart']) != controller[:2]):
+        raise ValueError('invalid held helper controller binding')
+    helper = record['helper']
+    if (type(helper) is not dict or set(helper) != {'device','inode','size','mode','sha256','sourcePath','sourcePin'} or
+            any(type(helper[k]) is not int or not 0 <= helper[k] <= (1 << 64)-1 for k in ('device','inode')) or
+            type(helper['size']) is not int or not 0 < helper['size'] <= maximum or
+            type(helper['mode']) is not int or helper['mode'] != 0o500 or
+            type(helper['sha256']) is not str or len(helper['sha256']) != 64 or
+            any(c not in '0123456789abcdef' for c in helper['sha256']) or
+            type(helper['sourcePath']) is not str or not helper['sourcePath'].startswith('/') or
+            '\0' in helper['sourcePath'] or helper['sourcePath'].startswith('//') or len(helper['sourcePath'].encode()) > 4096 or
+            '..' in Path(helper['sourcePath']).parts or str(Path(helper['sourcePath'])) != helper['sourcePath']):
+        raise ValueError('invalid sealed helper binding')
+    pin = helper['sourcePin']
+    if (type(pin) is not dict or set(pin) != {'device','inode','mode','sha256'} or
+            any(type(pin[k]) is not int or not 0 <= pin[k] <= (1 << 64)-1 for k in ('device','inode')) or
+            type(pin['mode']) is not int or not 0 <= pin['mode'] <= 0o7777 or
+            type(pin['sha256']) is not str or pin['sha256'] != helper['sha256'] or
+            (pin['device'],pin['inode']) == (helper['device'],helper['inode'])):
+        raise ValueError('helper source and execution identities differ from admission')
+    return helper
+
+
+def _acquire_helper_snapshot(record, maximum, deadline, controller):
+    _helper_policy()
+    helper = _helper_record(record,maximum,controller)
+    def timely():
+        if time.monotonic() >= deadline: raise TimeoutError('helper snapshot handoff deadline')
+    def owner_alive():
+        value = Path('/proc/' + str(record['ownerPid']) + '/stat').read_text()
+        return int(value[value.rfind(')')+2:].split()[19]) == record['ownerStart']
+    def metadata_matches(fd):
+        metadata = os.fstat(fd); timely()
+        seals = fcntl.fcntl(fd,fcntl.F_GET_SEALS); timely()
+        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o500 or
+                metadata.st_uid != controller[2] or
+                (metadata.st_dev,metadata.st_ino,metadata.st_size) != (helper['device'],helper['inode'],helper['size']) or
+                seals & _HELPER_REQUIRED_SEALS != _HELPER_REQUIRED_SEALS or seals & ~_HELPER_KNOWN_SEALS):
+            raise ValueError('held helper identity mode size or seals differ')
+        try:
+            os.getxattr(fd,'security.capability')
+        except OSError as failure:
+            if failure.errno != errno.ENODATA: raise
+        else: raise ValueError('helper has capability metadata')
+        timely()
+    fd = None; source_owned = target_owned = False
+    try:
+        timely()
+        alive = owner_alive()
+        timely()
+        if not alive: raise ValueError('helper snapshot owner lifetime changed')
+        fd = os.open('/proc/' + str(record['ownerPid']) + '/fd/' + str(record['descriptor']),
+                     os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd == 5: target_owned = True
+        else: source_owned = True
+        timely(); metadata_matches(fd)
+        value = hashlib.sha256(); count = 0; magic = b''
+        while count < helper['size']:
+            timely()
+            block = os.read(fd,min(65536,helper['size']-count)); timely()
+            if not block: raise ValueError('helper snapshot handoff truncated')
+            if count < 4: magic += block[:4-count]
+            count += len(block); value.update(block); timely()
+        if magic != b'\x7fELF': raise ValueError('helper snapshot content or owner differs')
+        actual_sha = value.hexdigest(); timely()
+        if actual_sha != helper['sha256']:
+            raise ValueError('helper snapshot content or owner differs')
+        alive = owner_alive(); timely()
+        if not alive: raise ValueError('helper snapshot content or owner differs')
+        metadata_matches(fd)
+        os.lseek(fd,0,os.SEEK_SET); timely()
+        os.dup2(fd,5,inheritable=True)
+        target_owned = True
+        timely(); os.set_inheritable(5,True); timely()
+        if source_owned:
+            source_owned = False
+            os.close(fd)
+        timely()
+        target_owned = False
+    except BaseException as primary:
+        if source_owned:
+            source_owned = False
+            try: os.close(fd)
+            except BaseException:
+                try: primary.add_note('helper snapshot source descriptor cleanup failed')
+                except BaseException: pass
+        if target_owned:
+            target_owned = False
+            try: os.close(5)
+            except BaseException:
+                try: primary.add_note('helper snapshot target descriptor cleanup failed')
+                except BaseException: pass
+        raise
 
 
 def _acquire_library_snapshot(record, maximum, deadline):
@@ -304,7 +422,7 @@ def _main(config_sha, controller, controller_fd, deadline):
         if not (metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o700):
             raise ValueError("scope gate policy refusal at check 59")
         config = _authenticated_config(directory_fd,config_sha)
-        if not (set(config) in ({'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode','scope'}, {'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode','scope', 'librarySnapshot'})):
+        if not (set(config) in ({'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode','scope'}, {'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode','scope', 'librarySnapshot'}, {'schemaVersion', 'directoryDevice', 'directoryInode', 'mode', 'argv', 'report', 'outerPidNsDevice', 'outerPidNsInode','scope', 'helperSnapshot'})):
             raise ValueError("scope gate policy refusal at check 61")
         if not (config['schemaVersion'] == 1 and type(config['schemaVersion']) is int):
             raise ValueError("scope gate policy refusal at check 62")
@@ -329,6 +447,16 @@ def _main(config_sha, controller, controller_fd, deadline):
             if not (command == ['/usr/bin/gcc', '-D_GNU_SOURCE', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                                '-Wl,-z,relro,-z,now,-z,noexecstack', str(BASE / 'worker_exec_monitor.c'), '-o', str(output)]):
                 raise ValueError("scope gate policy refusal at check 74")
+        if 'helperSnapshot' in config:
+            marker = command.index('--') if '--' in command else -1
+            tail = command[marker+1:] if marker >= 0 else []
+            if (config['mode'] != 'worker' or len(tail) < 21 or tail[0] != '/_worker_exec_monitor' or
+                    tail[3:5] != ['--phase','probe'] or tail[19:21] != ['--','/probe'] or
+                    command[:marker].count('--ro-bind-fd') != 1):
+                raise ValueError('helper snapshot requires fixed probe command')
+            bind = command.index('--ro-bind-fd')
+            if command[bind:bind+3] != ['--ro-bind-fd','5','/probe']:
+                raise ValueError('helper snapshot fd mount missing')
         bounds = _contract()['bounds']
         if not (resource.getrlimit(resource.RLIMIT_NOFILE) == (bounds['openFiles'], bounds['openFiles'])):
             raise ValueError("scope gate policy refusal at check 77")
@@ -377,11 +505,15 @@ def _main(config_sha, controller, controller_fd, deadline):
                 if directory_fd == 5: raise ValueError('snapshot fd aliases gate directory')
                 _acquire_library_snapshot(config['librarySnapshot'], bounds['workerLaunchPinFileBytes'], deadline)
                 _close_nonstandard({4,5,controller_fd,directory_fd,scope['fd']})
+            elif 'helperSnapshot' in config:
+                if directory_fd == 5: raise ValueError('snapshot fd aliases gate directory')
+                _acquire_helper_snapshot(config['helperSnapshot'],bounds['workerLaunchPinFileBytes'],deadline,controller)
+                _close_nonstandard({4,5,controller_fd,directory_fd,scope['fd']})
             else:
                 if '--ro-bind-fd' in command: raise ValueError('unowned snapshot mount')
                 _close_nonstandard({4,controller_fd,directory_fd,scope['fd']})
         else:
-            if 'librarySnapshot' in config: raise ValueError('provisioning snapshot forbidden')
+            if 'librarySnapshot' in config or 'helperSnapshot' in config: raise ValueError('provisioning snapshot forbidden')
             _close_nonstandard({controller_fd,directory_fd,scope['fd']})
         _check_scope(scope,deadline)
         return command

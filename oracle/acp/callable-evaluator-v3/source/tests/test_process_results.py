@@ -13,7 +13,7 @@ import build_contract as contract
 from static_test_support import historical_namespace, static_temp
 
 
-def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/caller',caller_sha='a'*64,attempt='a'*32,input_pins=None):
+def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/caller',caller_sha='a'*64,attempt='a'*32,input_pins=None,helper_identity=(90,93)):
     """Authored inert protocol records; no assertion of a real launch."""
     import hashlib
     from test_identity_graph import completed_result
@@ -23,6 +23,7 @@ def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/
     expected=raw['workerProofBindings']['expected'];expected.update(phase=phase,attempt=attempt)
     if input_pins is not None:
         target=input_pins[caller];expected.update(targetDevice=target['device'],targetInode=target['inode'])
+    if phase=='probe':expected.update(targetDevice=helper_identity[0],targetInode=helper_identity[1])
     rows=[json.loads(line) for line in raw['workerProofRaw'].splitlines()]
     for row in rows:row.update(p=phase,a=attempt)
     rows[0].update(ed=expected['targetDevice'],ei=expected['targetInode'],od=expected['targetDevice'],oi=expected['targetInode'])
@@ -36,6 +37,7 @@ def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/
     pins=raw['launchInputPins'];target=pins.pop('/authored/worker');target['sha256']=caller_sha;pins[caller]=target
     pins['/synthetic/libcandidate.so']={'device':9,'inode':10,'mode':256,'sha256':'c'*64}
     if input_pins is not None:pins.update(deepcopy(input_pins))
+    if phase=='probe':pins['/proc/123/fd/40']={'device':helper_identity[0],'inode':helper_identity[1],'mode':0o500,'sha256':caller_sha}
     pins[str(runtime.BASE/'contracts/candidate-build-profile.json')]['sha256']=raw['bounds']['profileSha256']
     raw['workerProofBindings']['targetSha256']=caller_sha
     raw['workerProofBindings']['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()

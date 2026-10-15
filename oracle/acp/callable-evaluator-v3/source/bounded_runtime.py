@@ -99,6 +99,28 @@ def _parse_worker_proof(raw, expected, *, deadline=None):
     return parsed
 
 
+def _helper_execution_pin(result, helper_sha):
+    """Historical acquired-H row only; never reopen the serialized coordinate."""
+    binding = result.get('workerProofBindings') or {}
+    expected = binding.get('expected') or {}
+    if expected.get('phase') != 'probe' or result.get('bounds', {}).get('phase') != 'probe':
+        return None
+    found = []
+    for name, row in (result.get('launchInputPins') or {}).items():
+        if type(name) is not str or type(row) is not dict:
+            return None
+        parts = Path(name).parts
+        if (len(parts) == 5 and parts[:2] == ('/', 'proc') and parts[3] == 'fd' and
+                0 < len(parts[2]) <= 19 and 0 < len(parts[4]) <= 10 and
+                parts[2].isascii() and parts[2].isdecimal() and parts[4].isascii() and parts[4].isdecimal() and
+                str(int(parts[2])) == parts[2] and 0 < int(parts[2]) <= (1 << 63) - 1 and
+                str(int(parts[4])) == parts[4] and 0 <= int(parts[4]) <= (1 << 31) - 1 and
+                (row.get('device'), row.get('inode')) == (expected.get('targetDevice'), expected.get('targetInode')) and
+                type(row.get('mode')) is int and row['mode'] == 0o500 and row.get('sha256') == helper_sha):
+            found.append((name, row))
+    return found[0] if len(found) == 1 else None
+
+
 def _valid_worker_bindings(result: dict) -> bool:
     binding, pins, bounds = result.get('workerProofBindings'), result.get('launchInputPins'), result.get('bounds')
     hashes = {'launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256',
@@ -140,6 +162,8 @@ def _valid_worker_bindings(result: dict) -> bool:
         return any((row['device'], row['inode']) == (expected[prefix+'Device'], expected[prefix+'Inode']) and
                    (digest is None or row['sha256'] == digest) for row in pins.values())
     if not matches('target', binding['targetSha256']) or not matches('reaper'):
+        return False
+    if expected['phase'] == 'probe' and _helper_execution_pin(result, binding['targetSha256']) is None:
         return False
     report = (expected['reportDevice'], expected['reportInode'])
     return report not in ((expected['targetDevice'], expected['targetInode']),
@@ -1191,6 +1215,227 @@ def _snapshot_library(path, receipt, deadline=None):
 
 
 
+# Fixed Linux UAPI: upstream045958acaa75205b31578cb22c4345e28dd2e4bf.
+_HELPER_CREATE_FLAGS = 0x13  # CLOEXEC | ALLOW_SEALING | EXEC
+_HELPER_REQUIRED_SEALS = 0x2f  # SEAL | SHRINK | GROW | WRITE | EXEC
+_HELPER_KNOWN_SEALS = 0x3f  # additionally FUTURE_WRITE
+
+
+def _helper_policy():
+    for module, values in ((os, {'MFD_CLOEXEC':1, 'MFD_ALLOW_SEALING':2, 'MFD_EXEC':16}),
+                           (fcntl, {'F_SEAL_SEAL':1, 'F_SEAL_SHRINK':2, 'F_SEAL_GROW':4,
+                                    'F_SEAL_WRITE':8, 'F_SEAL_FUTURE_WRITE':16, 'F_SEAL_EXEC':32})):
+        for name, expected in values.items():
+            if hasattr(module, name) and (type(getattr(module, name)) is not int or getattr(module, name) != expected):
+                raise ValueError('conflicting executable snapshot UAPI')
+    if (any(not callable(getattr(os, name, None)) for name in ('memfd_create','fchmod','fstat','pread','read','write','getxattr')) or
+            not callable(getattr(fcntl, 'fcntl', None)) or
+            any(type(getattr(fcntl, name, None)) is not int for name in ('F_ADD_SEALS','F_GET_SEALS'))):
+        raise ValueError('executable snapshot APIs unavailable')
+
+
+def _helper_no_capability(descriptor):
+    try:
+        capability = os.getxattr(descriptor, 'security.capability')
+    except OSError as failure:
+        if failure.errno != errno.ENODATA:
+            raise
+    else:
+        raise ValueError('executable snapshot has capability metadata')
+
+
+class _OwnedHelperSnapshot:
+    """Private phase owner. A serialized proc-FD coordinate is not this handle."""
+    __slots__ = ('descriptor','owner_pid','owner_start','source_path','source_pin','helper')
+
+    def __init__(self, descriptor, owner, source_path, source_pin, helper):
+        self.descriptor = descriptor
+        self.owner_pid, self.owner_start = owner['pid'], owner['start']
+        self.source_path, self.source_pin = str(source_path), dict(source_pin)
+        self.helper = dict(helper)
+
+    def coordinate(self):
+        return '/proc/' + str(self.owner_pid) + '/fd/' + str(self.descriptor)
+
+    def binding(self):
+        return {'ownerPid':self.owner_pid, 'ownerStart':self.owner_start, 'descriptor':self.descriptor,
+                'helper':{**self.helper, 'sourcePath':self.source_path, 'sourcePin':dict(self.source_pin)}}
+
+
+def _helper_pin(owner, deadline):
+    """Observe only the exact still-owned H descriptor, never a proc pathname."""
+    _controller_metadata_timely(deadline)
+    _helper_policy()
+    _controller_metadata_timely(deadline)
+    if type(owner) is not _OwnedHelperSnapshot or type(owner.descriptor) is not int or owner.descriptor < 0:
+        raise ValueError('owned executable snapshot unavailable')
+    live = process_identity(os.getpid())
+    _controller_metadata_timely(deadline)
+    if live is None or (live['pid'], live['start']) != (owner.owner_pid, owner.owner_start):
+        raise ValueError('executable snapshot owner lifetime changed')
+    metadata = os.fstat(owner.descriptor)
+    _controller_metadata_timely(deadline)
+    seals = fcntl.fcntl(owner.descriptor, fcntl.F_GET_SEALS)
+    _controller_metadata_timely(deadline)
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o500 or
+            metadata.st_uid != os.getuid() or
+            (metadata.st_dev,metadata.st_ino,metadata.st_size) !=
+            (owner.helper['device'],owner.helper['inode'],owner.helper['size']) or
+            not 0 < metadata.st_size <= load_profile_with_digest()[0]['bounds']['workerLaunchPinFileBytes'] or
+            seals & _HELPER_REQUIRED_SEALS != _HELPER_REQUIRED_SEALS or seals & ~_HELPER_KNOWN_SEALS):
+        raise ValueError('executable snapshot identity mode size or seals differ')
+    _controller_metadata_timely(deadline)
+    _helper_no_capability(owner.descriptor)
+    _controller_metadata_timely(deadline)
+    magic = os.pread(owner.descriptor, 4, 0)
+    _controller_metadata_timely(deadline)
+    if magic != b'\x7fELF':
+        raise ValueError('executable snapshot is not ELF')
+    value = hashlib.sha256(); count = 0
+    while count < metadata.st_size:
+        _controller_metadata_timely(deadline)
+        block = os.pread(owner.descriptor, min(65536,metadata.st_size-count), count)
+        _controller_metadata_timely(deadline)
+        if not block: raise ValueError('executable snapshot truncated')
+        value.update(block)
+        _controller_metadata_timely(deadline)
+        count += len(block)
+    after = os.fstat(owner.descriptor)
+    _controller_metadata_timely(deadline)
+    if (stat.S_IMODE(after.st_mode) != 0o500 or
+            (after.st_dev,after.st_ino,after.st_size) != (metadata.st_dev,metadata.st_ino,metadata.st_size)):
+        raise ValueError('executable snapshot changed or differs from admitted helper')
+    actual_sha = value.hexdigest()
+    _controller_metadata_timely(deadline)
+    if actual_sha != owner.helper['sha256'] or actual_sha != owner.source_pin['sha256']:
+        raise ValueError('executable snapshot changed or differs from admitted helper')
+    pin = {'device':metadata.st_dev, 'inode':metadata.st_ino, 'mode':0o500, 'sha256':actual_sha}
+    _controller_metadata_timely(deadline)
+    return pin
+
+
+def _close_helper_snapshot(receipt):
+    descriptor = receipt.get('helperSnapshotFd')
+    if descriptor is None: return
+    receipt['helperSnapshotFd'] = None  # A failed close must never be retried.
+    owner = receipt.get('helperSnapshot')
+    if type(owner) is _OwnedHelperSnapshot: owner.descriptor = None
+    try:
+        os.close(descriptor)
+    except BaseException as failure:
+        receipt['helperSnapshotCloseFailed'] = True
+        receipt['helperSnapshotCloseFailure'] = failure
+        raise
+
+
+def _snapshot_helper(path, admitted, receipt, deadline):
+    _controller_metadata_timely(deadline)
+    _helper_policy()
+    _controller_metadata_timely(deadline)
+    if type(admitted) is not dict or set(admitted) != {str(path)}:
+        raise ValueError('one original helper admission required')
+    pin = admitted[str(path)]
+    if (type(pin) is not dict or set(pin) != {'device','inode','mode','sha256'} or
+            any(type(pin[k]) is not int or not 0 <= pin[k] <= (1 << 64)-1 for k in ('device','inode')) or
+            type(pin['mode']) is not int or not 0 <= pin['mode'] <= 0o7777 or
+            type(pin['sha256']) is not str or len(pin['sha256']) != 64 or any(c not in '0123456789abcdef' for c in pin['sha256'])):
+        raise ValueError('invalid original helper admission')
+    actual = _pin_files([path], deadline)[str(path)]
+    _controller_metadata_timely(deadline)
+    if pin != actual:
+        raise ValueError('helper snapshot source differs from original admission')
+    maximum = load_profile_with_digest()[0]['bounds']['workerLaunchPinFileBytes']
+    _controller_metadata_timely(deadline)
+    source = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    primary = None; owner = None
+    try:
+        _controller_metadata_timely(deadline)
+        metadata = os.fstat(source)
+        _controller_metadata_timely(deadline)
+        if (not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= maximum or
+                (metadata.st_dev,metadata.st_ino,stat.S_IMODE(metadata.st_mode)) !=
+                (actual['device'],actual['inode'],actual['mode'])):
+            raise ValueError('helper snapshot source identity differs')
+        descriptor = os.memfd_create('callable-probe-helper', _HELPER_CREATE_FLAGS)
+        receipt['helperSnapshotFd'] = descriptor
+        _controller_metadata_timely(deadline)
+        count = 0; value = hashlib.sha256()
+        while count < metadata.st_size:
+            _controller_metadata_timely(deadline)
+            block = os.read(source,min(65536,metadata.st_size-count))
+            _controller_metadata_timely(deadline)
+            if not block: raise ValueError('helper snapshot source truncated')
+            value.update(block)
+            _controller_metadata_timely(deadline)
+            count += len(block)
+            view = memoryview(block)
+            while view:
+                _controller_metadata_timely(deadline)
+                written = os.write(descriptor,view)
+                _controller_metadata_timely(deadline)
+                if written <= 0: raise ValueError('helper snapshot short write')
+                view = view[written:]
+        copied_sha = value.hexdigest()
+        _controller_metadata_timely(deadline)
+        if copied_sha != actual['sha256']: raise ValueError('helper snapshot copy digest differs')
+        os.fchmod(descriptor,0o500)
+        _controller_metadata_timely(deadline)
+        before = os.fstat(descriptor)
+        _controller_metadata_timely(deadline)
+        if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_size != count or
+                (before.st_dev,before.st_ino) == (actual['device'],actual['inode'])):
+            raise ValueError('helper snapshot creation mode or identity differs')
+        _helper_no_capability(descriptor)
+        _controller_metadata_timely(deadline)
+        magic = os.pread(descriptor,4,0)
+        _controller_metadata_timely(deadline)
+        if magic != b'\x7fELF': raise ValueError('helper snapshot is not ELF')
+        fcntl.fcntl(descriptor,fcntl.F_ADD_SEALS,_HELPER_REQUIRED_SEALS)
+        _controller_metadata_timely(deadline)
+        identity = process_identity(os.getpid())
+        _controller_metadata_timely(deadline)
+        if identity is None: raise ValueError('helper snapshot owner unavailable')
+        owner = _OwnedHelperSnapshot(descriptor,identity,path,actual,
+                    {'device':before.st_dev,'inode':before.st_ino,'size':count,'mode':0o500,'sha256':actual['sha256']})
+        _helper_pin(owner,deadline)
+        receipt['helperSnapshot'] = owner
+    except BaseException as failure:
+        primary = failure
+    try:
+        os.close(source)
+    except BaseException as cleanup:
+        if primary is None: primary = cleanup
+        else:
+            try: primary.add_note('helper snapshot source cleanup failed')
+            except BaseException: pass
+    if primary is None:
+        try: _controller_metadata_timely(deadline)
+        except BaseException as failure: primary = failure
+    if primary is not None:
+        try: _close_helper_snapshot(receipt)
+        except BaseException:
+            try: primary.add_note('helper snapshot object cleanup failed')
+            except BaseException: pass
+        raise primary
+    return owner
+
+
+def _launch_pins(launch, receipt, deadline):
+    """Reconstruct the exact ordinary+owned-H union without proc reopening."""
+    owner = receipt.get('helperSnapshot')
+    if owner is None: return _pin_files(launch['pins'],deadline)
+    if type(owner) is not _OwnedHelperSnapshot or owner.descriptor is None:
+        raise ValueError('helper snapshot ownership lost before pin validation')
+    _controller_metadata_timely(deadline)
+    coordinate = owner.coordinate()
+    regular = {name:row for name,row in launch['pins'].items() if name != coordinate}
+    if len(regular) + 1 != len(launch['pins']): raise ValueError('helper snapshot pin missing')
+    _controller_metadata_timely(deadline)
+    pins = {**_pin_files(regular,deadline),coordinate:_helper_pin(owner,deadline)}
+    _controller_metadata_timely(deadline)
+    return pins
+
+
 def _committed_config(config):
     raw = (json.dumps(config, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
     if not 0 < len(raw) <= 65536:
@@ -1286,12 +1531,14 @@ def _release_scope(evidence, launch, deadline):
     if time.monotonic() >= deadline: raise TimeoutError('scope release returned after deadline')
 
 
-def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, runtime_library=None):
+def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, runtime_library=None, helper_admission=None):
     outer = Path('/proc/self/ns/pid').stat()
     common = [Path(__file__), BASE / 'scope_gate.py', BASE / 'build_contract.py',
               BASE / 'contracts/candidate-build-profile.json', Path('/usr/bin/python3'), Path('/usr/bin/systemd-run')]
     expected = binding = target = compiler_recording = None
-    library = library_pin = None
+    library = library_pin = helper = helper_request = None
+    if provisioning and helper_admission is not None: raise ValueError('provisioning helper snapshot forbidden')
+    if helper_admission is not None and bounds['phase'] != 'probe': raise ValueError('helper snapshot is probe-only')
     if provisioning:
         command = list(argv)
         common += [Path('/usr/bin/gcc'), BASE / 'worker_exec_monitor.c']
@@ -1316,10 +1563,22 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
         common += [mount['source'] for mount in recipe['mounts']
                    if mount['source'] != cwd and str(mount['original']) not in system_roots]
         prefix = list(recipe['prefix'])
+        if bounds['phase'] == 'probe':
+            if runtime_library is not None: raise ValueError('helper and library snapshots are exclusive')
+            mappings = [m for m in recipe['mounts'] if m['source'] == Path(target['path']) and m['target'] == Path('/probe')]
+            if recipe['worker'][0] != '/probe' or len(mappings) != 1 or mappings[0]['writable'] or '--ro-bind-fd' in prefix:
+                raise ValueError('probe requires one explicit read-only helper mapping')
+            admitted = helper_admission if helper_admission is not None else {target['path']:{k:target[k] for k in ('device','inode','mode','sha256')}}
+            helper_request = (Path(target['path']), admitted)
+            old = ['--ro-bind',str(mappings[0]['original']),'/probe']
+            positions = [i for i in range(len(prefix)-2) if prefix[i:i+3] == old]
+            if len(positions) != 1: raise ValueError('helper snapshot mount substitution ambiguous')
+            prefix[positions[0]:positions[0]+3] = ['--ro-bind-fd','5','/probe']
         library_mounts = [m for m in recipe['mounts'] if m['target'] == Path('/library.so')]
         if library_mounts:
             if len(library_mounts) != 1 or library_mounts[0]['writable'] or bounds['phase'] != 'runtime':
                 raise ValueError('closed runtime library mapping required')
+            if helper_request is not None: raise ValueError('helper and library snapshots are exclusive')
             mount = library_mounts[0]
             if (type(runtime_library) is not dict or set(runtime_library) != {'path','sha256'} or
                     runtime_library['path'] != str(mount['source']) or
@@ -1355,7 +1614,22 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
             index = monitor_argv.index('--')
             monitor_argv[index:index] = ['--library-device', str(library['device']), '--library-inode', str(library['inode']), '--library-size', str(library['size'])]
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
+    if helper_request is not None:
+        limits = load_profile_with_digest()[0]['bounds']
+        if len(common) + 1 > limits['workerLaunchPinEntries']:
+            raise ValueError('helper snapshot exceeds complete launch pin inventory')
     pins = _pin_files(common, deadline)
+    if helper_request is not None:
+        helper = _snapshot_helper(helper_request[0],helper_request[1],receipt,deadline)
+        coordinate = helper.coordinate()
+        if coordinate in pins or len(pins) >= limits['workerLaunchPinEntries']:
+            raise ValueError('helper snapshot pin identity aliases an ordinary input')
+        # Each ordinary input and H is capped by the same per-file ceiling;
+        # len(common)+1 admission bounds their total by the existing product.
+        pins[coordinate] = _helper_pin(helper,deadline)
+        if pins.get(helper.source_path) != helper.source_pin:
+            raise ValueError('helper source changed during preparation')
+        expected.update(targetDevice=helper.helper['device'],targetInode=helper.helper['inode'])
     if not provisioning:
         for relative, _, source_sha in _MONITOR_LOADER_SOURCES:
             if pins.get(str(BASE / relative), {}).get('sha256') != source_sha:
@@ -1382,6 +1656,7 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
         if owner is None: raise ValueError('snapshot owner lifetime unavailable')
         config['librarySnapshot'] = {'ownerPid':os.getpid(), 'ownerStart':owner['start'],
                                      'descriptor':receipt['librarySnapshotFd'], 'library':library}
+    if helper is not None: config['helperSnapshot'] = helper.binding()
     raw_config, config_sha = _committed_config(config)
     _publish_config(receipt['directory'] / 'launch.json', raw_config)
     cache = private_directory(receipt['directory'] / 'python-cache')
@@ -1634,7 +1909,7 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
         proof['fileIdentityVerified'] = True
         if descriptor.st_size != len(raw) or len(raw) > maximum:
             raise ValueError('receipt byte bound')
-        if _pin_files(launch['pins'], deadline) != launch['pins'] or _launch_config_digest(receipt, deadline=deadline) != launch['configSha256']:
+        if _launch_pins(launch, receipt, deadline) != launch['pins'] or _launch_config_digest(receipt, deadline=deadline) != launch['configSha256']:
             raise ValueError('launch source/runtime/input pins changed')
         _revalidate_compiler_inputs(launch, deadline)
         proof['pinsUnchanged'] = True
@@ -1660,7 +1935,7 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
 
 def bounded_run(argv: list[str], cwd: Path, environment: dict[str, str], stdin: bytes = b'',
                 timeout: float | None = None, output_limit: int | None = None,
-                managed_scope: bool = False, phase: str = 'unspecified', runtime_library=None, phase_deadline=None) -> dict:
+                managed_scope: bool = False, phase: str = 'unspecified', runtime_library=None, phase_deadline=None, helper_admission=None) -> dict:
     """Every worker requires contained admission/proof; launcher exit never substitutes."""
     bounds = execution_bounds(timeout, output_limit, managed_scope, phase)
     if phase_deadline is not None:
@@ -1670,7 +1945,8 @@ def bounded_run(argv: list[str], cwd: Path, environment: dict[str, str], stdin: 
     if managed_scope is not True:
         raise ValueError('unscoped worker execution is forbidden')
     return _run_scoped(argv, cwd, environment, stdin, bounds, provisioning=False, **({'runtime_library':runtime_library} if runtime_library is not None else {}),
-                       **({'phase_deadline':phase_deadline} if phase_deadline is not None else {}))
+                       **({'phase_deadline':phase_deadline} if phase_deadline is not None else {}),
+                       **({'helper_admission':helper_admission} if helper_admission is not None else {}))
 
 
 def provision_worker_monitor(output: Path) -> dict:
@@ -1687,7 +1963,7 @@ def provision_worker_monitor(output: Path) -> dict:
     return _run_scoped(argv, cwd, environment, b'', execution_bounds(managed_scope=True, phase='helper-build'), provisioning=True)
 
 
-def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_library=None, phase_deadline=None):
+def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_library=None, phase_deadline=None, helper_admission=None):
     began = time.monotonic()
     supervisor = bounds['supervisor']; timeout = bounds['wallSeconds']; output_limit = bounds['outputBytesPerStream']
     phase_end = began + timeout
@@ -1716,7 +1992,8 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
             # No report descriptor/channel exists for this fixed trusted compiler exception.
             os.close(receipt['fd']); receipt['fd'] = None
             receipt['path'].unlink()
-        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=phase_end, **({'runtime_library':runtime_library} if runtime_library is not None else {}))
+        launch = _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=phase_end, **({'runtime_library':runtime_library} if runtime_library is not None else {}),
+                                 **({'helper_admission':helper_admission} if helper_admission is not None else {}))
         result.update(workerProofBindings=launch['proofBinding'], launchInputPins=launch['pins'])
         host_environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C',
                             'HOME': str(receipt['directory']), 'TMPDIR': str(receipt['directory']),
@@ -1896,6 +2173,13 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                 result['exitCode'] = result['launcherExitCode']
         else:
             _finish_worker_proof(result, receipt, launch, bounds, deadline=phase_end if phase_deadline is not None else time.monotonic() + max(0, timeout - phase_elapsed))
+        if receipt is not None and ('helperSnapshotFd' in receipt or receipt.get('helperSnapshotCloseFailed')):
+            try:
+                _close_helper_snapshot(receipt)
+                if receipt.get('helperSnapshotCloseFailed'): raise receipt['helperSnapshotCloseFailure']
+            except BaseException as failure:
+                cleanup_failure = cleanup_failure or failure
+                result.update(cleanupVerified=False, infrastructureFailure=True, infrastructureReason='helper-snapshot-close-failed', exitCode=None)
         if receipt is not None and receipt.get('librarySnapshotFd') is not None:
             try:
                 os.close(receipt['librarySnapshotFd'])
