@@ -715,7 +715,9 @@ private fun nativeBwrapBase(bwrap: Path, javaHome: Path, input: Path, output: Pa
     // Fixed read-only loader/library directories contain no host home or credentials. Paths are
     // mounted canonically, with the host's verified FHS aliases recreated in the empty root.
     val runtimeRoots = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64").map(Path::of).filter(Files::isDirectory)
-    runtimeRoots.map { it.toRealPath() }.distinct().sortedBy(Path::toString).forEach {
+    runtimeRoots.map { it.toRealPath() }.distinct().sortedWith(object : Comparator<Path> {
+        override fun compare(a: Path, b: Path): Int = a.toString().compareTo(b.toString())
+    }).forEach {
         command += listOf("--ro-bind", it.toString(), it.toString())
     }
     runtimeRoots.filter(Files::isSymbolicLink).forEach {
@@ -751,7 +753,9 @@ private fun nativeHostClasses(): java.util.SortedMap<String, ByteArray> {
         check(directory.toRealPath() == directory)
         val paths = Files.newDirectoryStream(directory, "*.class").use { it.asSequence().take(8193).toList() }
         check(paths.size <= 8192)
-        for (path in paths.sortedBy { it.fileName.toString() }) {
+        for (path in paths.sortedWith(object : Comparator<Path> {
+            override fun compare(a: Path, b: Path): Int = a.fileName.toString().compareTo(b.fileName.toString())
+        })) {
             nativeObserverBudgetOwner.current?.operation()
             val name = path.fileName.toString()
             if (NativeDnsOwnedDomainContract.hostClassSource(sourceSet, name) == null) continue
@@ -1211,7 +1215,10 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
         }
         check(Files.readSymbolicLink(Path.of("/proc/" + pid + "/root/proc/1/ns/pid")).toString() ==
             "pid:[" + namespaces.getValue("pid").inode + "]")
-        facts["mountClosureSha256"] = nativeSha(mounts.sortedBy { it.first }.joinToString("\n").toByteArray())
+        facts["mountClosureSha256"] = nativeSha(mounts.sortedWith(object : Comparator<Triple<String, Set<String>, String>> {
+            override fun compare(a: Triple<String, Set<String>, String>, b: Triple<String, Set<String>, String>): Int =
+                a.first.compareTo(b.first)
+        }).joinToString("\n").toByteArray())
         facts["privateProcBound"] = true; facts["nonEscapeVerified"] = true
     }
 

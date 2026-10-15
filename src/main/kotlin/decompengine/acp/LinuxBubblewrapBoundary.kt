@@ -5488,7 +5488,10 @@ private fun requireCandidateWritableMountClosure(
         if (mode and 0xf000 != 0x2000) null else linuxDeviceMajor(device) to linuxDeviceMinor(device)
     }
     val digest = CanonicalMetadataDigest(MAXIMUM_SANDBOX_EVIDENCE_BYTES, cancellationCheck)
-    mounts.sortedBy { it.mountPoint.toString() }.forEachIndexed { index, mount ->
+    mounts.sortedWith(object : Comparator<SandboxVisibleMount> {
+        override fun compare(a: SandboxVisibleMount, b: SandboxVisibleMount): Int =
+            a.mountPoint.toString().compareTo(b.mountPoint.toString())
+    }).forEachIndexed { index, mount ->
         cancellationCheck()
         digest.field("mount[$index].path", mount.mountPoint)
         digest.field("mount[$index].id", mount.mountId)
@@ -5637,7 +5640,10 @@ private fun buildRuntimeManifestOwned(
                         }
                     }
                 }
-            }.sortedBy { source.relativize(it).toString() }
+            }.sortedWith(object : Comparator<Path> {
+                override fun compare(a: Path, b: Path): Int =
+                    source.relativize(a).toString().compareTo(source.relativize(b).toString())
+            })
         } else listOf(source)
         val entries = paths.map { path ->
             cancellationCheck()
