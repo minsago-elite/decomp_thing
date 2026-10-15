@@ -388,6 +388,10 @@ class LinuxBubblewrapBoundaryTest {
         assertEquals(1, memory.closes)
     }
 
+    private class RootObservationMemory(private val observe: () -> Unit) : com.sun.jna.Memory(256) {
+        override fun clear() { observe(); super.clear() }
+    }
+
     private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
         var closes = 0
         override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
@@ -551,6 +555,192 @@ class LinuxBubblewrapBoundaryTest {
                     LinuxFileKey::class.java, Function0::class.java)
                 val sourceRoot = Files.createDirectory(base.resolve("leased-root"))
                 Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                run {
+                    // Exercise the actual fd-owned body, not a replacement observer result.
+                    val observerField = scopeType.getDeclaredField("rootObserver").apply { isAccessible = true }
+                    val descriptorField = scopeType.getDeclaredField("rootDescriptor").apply { isAccessible = true }
+                    val identityField = scopeType.getDeclaredField("rootIdentity").apply { isAccessible = true }
+                    val currentRoot = scopeType.getDeclaredMethod("currentRoot", Function0::class.java)
+                    val scopeCheckpoint = scopeType.getDeclaredMethod("checkpoint")
+                    val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                    val noCheck = boundaryType.getDeclaredField("NO_SANDBOX_CHECKPOINT").apply { isAccessible = true }.get(null)
+                    fun observeCurrent(scope: Any): Any? = synchronized(registry) { invokePrivate(scope, currentRoot, noCheck) }
+                    val wrapper = boundaryType.getDeclaredMethod("manifestRootPhysicalLocation", LinuxDescriptor::class.java,
+                        LinuxFilesystemSyscalls.StatxIdentityScratch::class.java, List::class.java, Function0::class.java)
+                    fun field(scope: Any, name: String): Any? =
+                        scopeType.getDeclaredField(name).apply { isAccessible = true }.get(scope)
+                    @Suppress("UNCHECKED_CAST")
+                    fun observer(scope: Any) = observerField.get(scope) as (Int) -> Any
+                    val firstScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                    var secondScope: AutoCloseable? = null
+                    try {
+                        val peerScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                        secondScope = peerScope
+                        val retainedObserver = observer(firstScope)
+                        assertTrue(retainedObserver !== observer(peerScope), "observer ownership is per scope")
+                        val descriptor = descriptorField.get(firstScope) as LinuxDescriptor
+                        val scratch = identityField.get(firstScope) as LinuxFilesystemSyscalls.StatxIdentityScratch
+                        val statistics = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+                        (statistics.get(scratch) as com.sun.jna.Memory).close()
+                        val order = mutableListOf<String>()
+                        var duringQuery: (() -> Unit)? = null
+                        statistics.set(scratch, RootObservationMemory {
+                            val ownsDescriptor = Thread.holdsLock(descriptor)
+                            assertTrue(ownsDescriptor || Thread.holdsLock(registry), "body or scope ownership covers each query")
+                            assertTrue(Thread.holdsLock(scratch), "each query retains scratch ownership")
+                            order += if (ownsDescriptor) "query" else "tail-query"
+                            duringQuery?.invoke()
+                        })
+                        var previous: Any? = null
+                        repeat(3) {
+                            order.clear()
+                            val current = requireNotNull(observeCurrent(firstScope))
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order,
+                                "two body queries and the unchanged mount/mode short-circuit queries")
+                            previous?.let { earlier -> assertEquals(earlier, current); assertTrue(earlier !== current) }
+                            previous = current
+                            assertTrue(retainedObserver === observer(firstScope), "observations reuse the same callback")
+                        }
+                        order.clear()
+                        val firstLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(listOf("query", "query"), order)
+                        order.clear()
+                        val secondLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(firstLocation, secondLocation)
+                        assertTrue(firstLocation !== secondLocation, "immutable observations are never cached")
+                        assertEquals(listOf("query", "query"), order)
+                        val check: () -> Unit = {
+                            assertTrue(Thread.holdsLock(descriptor))
+                            order += "check"
+                        }
+                        order.clear()
+                        assertEquals(firstLocation, invokePrivate(null, wrapper, descriptor, scratch,
+                            field(firstScope, "mounts"), check))
+                        val directOrder = listOf("check", "query", "query")
+                        val fallbackOrder = listOf("check", "query") + List(sourceRoot.nameCount) { "check" } + "query"
+                        assertTrue(order == directOrder || order == fallbackOrder,
+                            "original check/query order, including every strict-walk component check: " + order)
+                        order.clear()
+                        assertEquals(firstLocation, synchronized(registry) { invokePrivate(firstScope, currentRoot, check) })
+                        assertTrue(order == directOrder + listOf("tail-query", "tail-query") ||
+                            order == fallbackOrder + listOf("tail-query", "tail-query"), "arbitrary currentRoot checks retain the wrapper route")
+                        val cancellation = IOException("root-observer arbitrary cancellation")
+                        order.clear()
+                        val cancelled = assertFailsWith<IOException> {
+                            invokePrivate(null, wrapper, descriptor, scratch, field(firstScope, "mounts"), {
+                                assertTrue(Thread.holdsLock(descriptor))
+                                order += "cancel"
+                                throw cancellation
+                            })
+                        }
+                        assertTrue(cancelled === cancellation)
+                        assertEquals(listOf("cancel"), order, "cancellation still precedes the first identity query")
+
+                        // A mutation between the two real scratch observations must be rejected.
+                        order.clear()
+                        duringQuery = {
+                            if (order.size == 2) Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                        }
+                        try {
+                            val changed = assertFailsWith<IOException> { descriptor.whileOpen(retainedObserver) }
+                            assertEquals("private-control descriptor changed during inspection", changed.message)
+                            assertEquals(listOf("query", "query"), order)
+                        } finally {
+                            duringQuery = null
+                            Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                        }
+                        val relocated = base.resolve("callback-relocated-root")
+                        Files.move(sourceRoot, relocated)
+                        Files.createDirectory(sourceRoot)
+                        try {
+                            order.clear()
+                            val moved = descriptor.whileOpen(retainedObserver)
+                            assertEquals(relocated, invokePrivate(moved, moved.javaClass.getDeclaredMethod("getNamespacePath")))
+                            assertEquals(listOf("query", "query"), order)
+                            order.clear()
+                            assertFailsWith<IOException> { observeCurrent(firstScope) }
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order)
+                        } finally {
+                            Files.delete(sourceRoot)
+                            Files.move(relocated, sourceRoot)
+                        }
+
+                        // Run the real constructor inside the unchanged scratch admission guard.
+                        val constructor = scopeType.declaredConstructors.single { it.parameterCount == 10 }.apply { isAccessible = true }
+                        val failedMemory = ManifestStatxMemory()
+                        var constructorFailure: Throwable? = null
+                        val failedConstruction = try {
+                            initializeManifestStatxScratch { owned ->
+                                replaceManifestStatxMemory(owned, failedMemory)
+                                try {
+                                    constructor.newInstance(field(firstScope, "mountEvents"), field(firstScope, "mountPoll"),
+                                        owned, emptyList<Any>(), field(firstScope, "controls"), field(firstScope, "generation"),
+                                        descriptor, field(firstScope, "root"), null, {})
+                                } catch (failure: java.lang.reflect.InvocationTargetException) {
+                                    constructorFailure = failure.targetException
+                                    throw failure.targetException
+                                }
+                            }
+                            error("invalid constructor mount admission unexpectedly returned")
+                        } catch (failure: Throwable) { failure }
+                        assertTrue(failedConstruction === constructorFailure)
+                        assertTrue(failedConstruction is NoSuchElementException)
+                        assertEquals(1, failedMemory.closes)
+                        assertTrue(retainedObserver === observer(firstScope))
+                        invokePrivate(firstScope, scopeCheckpoint)
+
+                        // Actual checkpoint ownership serializes close until the callback has finished.
+                        val enteredQuery = java.util.concurrent.CountDownLatch(1)
+                        val releaseQuery = java.util.concurrent.CountDownLatch(1)
+                        val closeThread = AtomicReference<Thread>()
+                        var blocked = false
+                        duringQuery = {
+                            if (!blocked) {
+                                blocked = true
+                                enteredQuery.countDown()
+                                assertTrue(releaseQuery.await(5, TimeUnit.SECONDS))
+                            }
+                        }
+                        val observing = executor.submit { invokePrivate(firstScope, scopeCheckpoint) }
+                        var closing: java.util.concurrent.Future<*>? = null
+                        try {
+                            assertTrue(enteredQuery.await(5, TimeUnit.SECONDS))
+                            closing = executor.submit { closeThread.set(Thread.currentThread()); firstScope.close() }
+                            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                            while (closeThread.get()?.state != Thread.State.BLOCKED && !closing.isDone && System.nanoTime() < deadline) {
+                                Thread.onSpinWait()
+                            }
+                            assertEquals(Thread.State.BLOCKED, closeThread.get()?.state)
+                            assertFalse(closing.isDone, "scope close must not release an in-flight observer's owned inputs")
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing.get(5, TimeUnit.SECONDS)
+                            assertFailsWith<IOException> { invokePrivate(firstScope, scopeCheckpoint) }
+                            assertFailsWith<IllegalStateException> { descriptor.whileOpen(retainedObserver) }
+                        } finally {
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing?.get(5, TimeUnit.SECONDS)
+                            duringQuery = null
+                        }
+                    } finally {
+                        try { secondScope?.close() } finally { firstScope.close() }
+                    }
+                    assertEquals(baseline, openDescriptorCount(), "observer ownership/constructor/close controls release all FDs")
+                    val admissionFailure = IOException("root-observer post-constructor admission failure")
+                    var reachedAdmission = false
+                    val failedAdmission = assertFailsWith<IOException> {
+                        invokePrivate(scopeCompanion, open, sourceRoot, null, {
+                            if (Thread.currentThread().stackTrace.any { it.methodName == "checkpointLocked" }) {
+                                reachedAdmission = true
+                                throw admissionFailure
+                            }
+                        })
+                    }
+                    assertTrue(reachedAdmission)
+                    assertTrue(failedAdmission === admissionFailure)
+                    assertEquals(baseline, openDescriptorCount(), "failed admission unwinds callback-owned scratch and descriptors")
+                }
                 val scopes = mutableListOf<AutoCloseable>()
                 try {
                     repeat(128) {

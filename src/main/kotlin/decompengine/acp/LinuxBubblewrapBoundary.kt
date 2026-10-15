@@ -1930,6 +1930,16 @@ private fun manifestRootPhysicalLocation(
     mounts: List<HostPhysicalMount>,
     cancellationCheck: () -> Unit,
 ): HostPhysicalLocation = descriptor.whileOpen { fd ->
+    manifestRootPhysicalLocationWhileOpen(descriptor, fd, rootIdentity, mounts, cancellationCheck)
+}
+
+private fun manifestRootPhysicalLocationWhileOpen(
+    descriptor: LinuxDescriptor,
+    fd: Int,
+    rootIdentity: LinuxFilesystemSyscalls.StatxIdentityScratch,
+    mounts: List<HostPhysicalMount>,
+    cancellationCheck: () -> Unit,
+): HostPhysicalLocation {
     cancellationCheck()
     val identity = rootIdentity.identity(fd)
     val mount = mounts.singleOrNull { it.mountId == identity.mountId }
@@ -1988,7 +1998,7 @@ private fun manifestRootPhysicalLocation(
     if (identity.key != after.key || identity.mountId != after.mountId || identity.mode != after.mode) {
         throw IOException("private-control descriptor changed during inspection")
     }
-    HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
+    return HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
         mount.root.resolve(mount.mountPoint.relativize(named)).normalize(), named)
 }
 
@@ -2146,6 +2156,16 @@ private class RuntimePrivateControlScope private constructor(
     private var closed = false
     private val mountEventCheck = MountEventCheck(mountPoll)
     private var fast = fastEligible(controls)
+    // Captures only fixed owned inputs; construction performs no observation or publication.
+    private val rootObserver: (Int) -> HostPhysicalLocation = run {
+        val descriptor = rootDescriptor
+        val identity = rootIdentity
+        val physicalMounts = mounts
+        val observe: (Int) -> HostPhysicalLocation = { fd ->
+            manifestRootPhysicalLocationWhileOpen(descriptor, fd, identity, physicalMounts, NO_SANDBOX_CHECKPOINT)
+        }
+        observe
+    }
 
     private fun fastEligible(identities: Map<PinnedControlDirectory, ManifestControlIdentity>): Boolean {
         val mount = mounts.single { it.mountId == rootDescriptor.identity.mountId }
@@ -2234,7 +2254,8 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
-        val current = manifestRootPhysicalLocation(rootDescriptor, rootIdentity, mounts, check)
+        val current = if (check === NO_SANDBOX_CHECKPOINT) rootDescriptor.whileOpen(rootObserver)
+            else manifestRootPhysicalLocation(rootDescriptor, rootIdentity, mounts, check)
         if (current.key != root.key || rootDescriptor.identity.mountId !=
             rootIdentity.identity(rootDescriptor.fd).mountId ||
             rootDescriptor.identity.mode != rootIdentity.identity(rootDescriptor.fd).mode ||
