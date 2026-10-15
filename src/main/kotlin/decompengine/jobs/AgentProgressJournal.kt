@@ -459,6 +459,10 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
 
     private fun redact(source: String): String {
         var safe = source
+        // Consume both Basic scheme and credential before the generic field rule can remove
+        // just the scheme and leave an unregistered encoded credential behind. Do this before
+        // configured replacements too: a secret can itself match a header or scheme fragment.
+        safe = safe.replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")
         secrets.forEach { safe = safe.replace(it, "[redacted]") }
         safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
         safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")

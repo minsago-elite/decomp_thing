@@ -326,6 +326,56 @@ class AgentProgressJournalTest {
     }
 
     @Test
+    fun `basic authorization credentials are removed without a configured token`() {
+        val token = "c3ludGhldGljOnNlbnRpbmVsIQ=="
+        val redactor = ProgressRedactor(emptyList())
+        for (prefix in listOf("Authorization: ", "aUtHoRiZaTiOn :\t", "Proxy-Authorization\t=\t")) {
+            for (scheme in listOf("Basic ", "bAsIc\t")) {
+                val input = "before; " + prefix + scheme + token + "; after"
+                assertEquals("before; " + prefix + "[redacted]; after", redactor.text(input))
+                assertFalse(redactor.text(input).contains(token))
+            }
+        }
+        for (secret in listOf("Basic", "Authorization", token.take(8))) {
+            val safe = ProgressRedactor(listOf(secret)).text("Authorization: Basic $token")
+            assertFalse(safe.contains(token))
+            assertFalse(safe.contains(token.drop(8)))
+        }
+        val publicText = "Basic examples use placeholders; authorization policy remains public."
+        assertEquals(publicText, redactor.text(publicText))
+        val markerSecrets = listOf("[redacted]", "[unredactable text omitted]")
+        assertEquals("", ProgressRedactor(markerSecrets).text("Authorization: Basic $token"))
+    }
+
+    @Test
+    fun `split basic authorization is never previewed raw or persisted with its token`() {
+        val root = Files.createTempDirectory(
+            Files.createDirectories(java.nio.file.Path.of("build", "progress-basic-authorization-tests")), "journal-",
+        )
+        val tokenPrefix = "c3ludGhl"
+        val tokenSuffix = "dGljOnNlbnRpbmVs"
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("task", request(root))
+            task.event(AgentMessageEvent(0, "basic", AgentMessageRole.ASSISTANT, "Authorization: Ba", false))
+            task.event(AgentMessageEvent(1, "basic", AgentMessageRole.ASSISTANT, "sic $tokenPrefix", false))
+            task.event(AgentMessageEvent(2, "basic", AgentMessageRole.ASSISTANT, tokenSuffix, true))
+        }
+        val messages = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }
+            .filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3, messages.size)
+        messages.take(2).forEach {
+            assertFalse(it.getValue("completed").jsonPrimitive.boolean)
+            assertFalse("text" in it)
+        }
+        val completed = messages.last()
+        assertTrue(completed.getValue("completed").jsonPrimitive.boolean)
+        assertFalse(completed.getValue("textOmitted").jsonPrimitive.boolean)
+        assertEquals("Authorization: [redacted]", completed.getValue("text").jsonPrimitive.content)
+        val persisted = Files.readString(root.resolve(AgentProgressJournal.FILE_NAME))
+        listOf(tokenPrefix, tokenSuffix, tokenPrefix + tokenSuffix).forEach { assertFalse(persisted.contains(it)) }
+    }
+
+    @Test
     fun `replacement output cannot synthesize a reordered secret`() {
         val redactor = ProgressRedactor(listOf("foo", "[redacted]X"))
         assertEquals("[redacted]", redactor.text("fooX"))

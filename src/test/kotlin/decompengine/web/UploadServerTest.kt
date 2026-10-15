@@ -837,12 +837,15 @@ class UploadServerTest {
 
     @Test
     fun `background diagnostics are redacted in storage and withheld from public rendering`() {
-        val dataDir = createTempDirectory("web-private-diagnostic-")
+        val dataDir = Files.createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-basic-authorization-tests")), "web-",
+        )
         val configured = "configured-provider-credential"
         val bearer = "synthetic-bearer-value"
         val password = "synthetic-password-value"
+        val basicToken = "c3ludGhldGljOnNlbnRpbmVs" // Deliberately absent from sensitiveValues.
         val server = UploadServer("127.0.0.1", 0, dataDir,
-            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password <script>bad</script>") },
+            analyzer = JobAnalyzer { _, _ -> error("Provider refused $configured; Bearer $bearer; password=$password; pRoXy-AuThOrIzAtIoN: bAsIc $basicToken <script>bad</script>") },
             reconstructor = JobReconstructor { _, _ -> error("z".repeat(17000) + configured) },
             executor = Executor { it.run() }, sensitiveValues = listOf(configured))
         server.start()
@@ -858,14 +861,14 @@ class UploadServerTest {
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
             listOf(persisted).forEach { text ->
-                listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
+                listOf(configured, bearer, password, basicToken).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
-            listOf(configured, bearer, password, "status_message", "binary_path").forEach {
+            listOf(configured, bearer, password, basicToken, "status_message", "binary_path").forEach {
                 assertTrue(!api.contains(it))
             }
             assertTrue(page.contains("Stored diagnostic details are withheld"))
-            listOf(configured, bearer, password, "Provider refused", "[redacted]", "bad</script>").forEach {
+            listOf(configured, bearer, password, basicToken, "Provider refused", "[redacted]", "bad</script>").forEach {
                 assertTrue(!page.contains(it))
             }
             assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
