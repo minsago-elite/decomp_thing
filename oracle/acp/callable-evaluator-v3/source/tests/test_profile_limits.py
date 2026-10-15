@@ -220,10 +220,11 @@ class ProfileLimits(unittest.TestCase):
             return _READ_OWNED_FILE(fd,size)
         stack.enter_context(patch.object(runtime.os,'read',side_effect=read))
         stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock if clock is not None else lambda:now[0]))
-        stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
+        stack.enter_context(patch.object(runtime,'_worker_proof_parser',return_value=parser.parse_proof))
         pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
               '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64},
               str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':declared_profile_sha}}
+        pins[str(base/'worker_exec_proof.py')]={'device':70,'inode':72,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
         stack.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
         def prepare(argv,cwd,bounds,receipt,provisioning,deadline=None):
             self.last_receipt=receipt
@@ -239,6 +240,7 @@ class ProfileLimits(unittest.TestCase):
                      **{key:'0'*64 for key in ('environmentPinSha256','monitorBinarySha256','monitorSourceSha256',
                                                'protocolSha256','parserSha256','manifestSha256','targetSha256')},
                      'launchPinsSha256':runtime._canonical_pin_digest(pins)}
+            binding['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
             return {'argv':['mock-no-execution'],'unit':'mock.scope','expected':expected,'pins':pins,
                     'configSha256':config_sha,'proofBinding':None if provisioning else binding}
         stack.enter_context(patch.object(runtime,'_prepare_launch',side_effect=prepare))

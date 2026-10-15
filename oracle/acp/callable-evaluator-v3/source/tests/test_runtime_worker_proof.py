@@ -102,7 +102,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         key=str(runtime.BASE/'contracts/candidate-build-profile.json')
         target=Path('/authored/worker');monitor=Path('/authored/monitor')
         recipe={'target':target,'worker':['/worker'],'prefix':[],'mounts':[]}
-        binding={'binaryPath':str(monitor),'dependencies':[],**{name:'0'*64 for name in
+        binding={'binaryPath':str(monitor),'dependencies':[],**{name:runtime._WORKER_PROOF_PARSER_SHA256 if name=='parserSha256' else '0'*64 for name in
             ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
         def executable(path,deadline=None):
             device,inode=(3,4) if str(path)=='/usr/bin/bwrap' else (11,12) if path==monitor else (7,8)
@@ -113,6 +113,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                     pins={key:{'device':70,'inode':71,'mode':0o400,'sha256':profile_sha}}
                     pins.update({str(runtime.BASE/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
                         for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+                    pins[str(runtime.BASE/'worker_exec_proof.py')]={'device':70,'inode':80,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
                     if mutation=='missing':pins.pop(key)
                     if mutation=='wrong':pins[key]['sha256']='f'*64
                     if mutation=='rekeyed':pins['/authored/other-profile.json']=pins.pop(key)
@@ -147,13 +148,14 @@ class RuntimeWorkerProof(unittest.TestCase):
             receipt=runtime._create_worker_receipt()
             self.addCleanup(os.close,receipt['fd'])
             binding={'binaryPath':str(helper),'dependencies':[{'path':'/etc/ld.so.cache','sha256':'0'*64}],
-                     **{key:'0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
+                     **{key:runtime._WORKER_PROOF_PARSER_SHA256 if key=='parserSha256' else '0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
             identity=lambda p,deadline=None:{'path':str(p),'device':7,'inode':8,'mode':0o755,'sha256':'0'*64}
             receipt['librarySnapshotFd']=5  # mocked descriptor; never opened/closed by this preparation-only control
             snapshot={'device':51,'inode':52,'size':3,'sha256':'0'*64,'sourcePath':str(library)}
             profile_pins={str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':runtime.load_profile_with_digest()[1]}}
             profile_pins.update({str(base/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
                 for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+            profile_pins[str(base/'worker_exec_proof.py')]={'device':70,'inode':80,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
             with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value=profile_pins):
                 launch=runtime._prepare_launch(runtime_command(helper,library,2),self.work,
                                                runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':'0'*64})
@@ -359,6 +361,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         # The fixed loader rows describe the reviewed bytes that its real admission now requires.
         for relative,_,_ in runtime._MONITOR_LOADER_SOURCES:
             (base/relative).write_bytes((SOURCE/relative).read_bytes())
+        (base/'worker_exec_proof.py').write_bytes((SOURCE/'worker_exec_proof.py').read_bytes())
         caller=base/'caller';caller.write_bytes(b'authored inert caller');caller.chmod(0o500)
         library=base/'reference/libcandidate.so';library.parent.mkdir();library.write_bytes(b'authored inert shared object');library.chmod(0o400)
         monitor=base/'monitor';monitor.write_bytes(b'authored inert monitor');monitor.chmod(0o500)
@@ -378,7 +381,7 @@ class RuntimeWorkerProof(unittest.TestCase):
             path=reaper if Path(path)==Path('/usr/bin/bwrap') else Path(path)
             return {'path':str(path),**real_pin_reader([path],deadline)[str(path)]}
         binding={'binaryPath':str(monitor),'dependencies':[{'path':str(cache),'sha256':runtime.digest(cache)}],
-                 **{key:'0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
+                 **{key:runtime._WORKER_PROOF_PARSER_SHA256 if key=='parserSha256' else '0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
         with patch.object(runtime,'BASE',base),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=executable),patch.object(runtime,'_pin_files',side_effect=producer_pins):
             receipt=runtime._create_worker_receipt();self.addCleanup(os.close,receipt['fd'])
             launch=runtime._prepare_launch(consumer.runtime_command(caller,library,0),self.work,
@@ -1065,6 +1068,322 @@ class RuntimeWorkerProof(unittest.TestCase):
                 self.assertNotIn('_receiptCleanup',runtime.public_result(result))
 
 
+    def parser_lock(self, *, available=True, release=None):
+        # No thread, wait, retry or scheduler. Test the actual loader's lock calls.
+        return types.SimpleNamespace(acquire=Mock(return_value=available),release=Mock(side_effect=release))
+
+    def test_authenticated_parser_executes_captured_bytes_and_reuses_private_success_only_handle(self):
+        from test_identity_graph import completed_result
+        value=completed_result();raw=value['workerProofRaw'];expected=value['workerProofBindings']['expected']
+        base=self.directory/'parser-source';base.mkdir();path=base/'worker_exec_proof.py'
+        original=(SOURCE/'worker_exec_proof.py').read_bytes();path.write_bytes(original)
+        capture=runtime._capture_monitor_source;lock=self.parser_lock();captured=[]
+        ambient=types.ModuleType('_v3_authenticated_worker_proof')
+        def admitted(source,size,deadline):
+            data=capture(source,size,deadline);captured.append((source,size,deadline))
+            path.write_bytes(b'raise AssertionError("mutable parser must not execute")')
+            return data
+        with patch.object(runtime,'BASE',base),patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None), \
+                patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock),patch.object(runtime.time,'monotonic',return_value=0), \
+                patch.object(runtime,'_capture_monitor_source',side_effect=admitted), \
+                patch.object(runtime,'_fixed_source_module',side_effect=AssertionError('no pathname parser loader')), \
+                patch.dict(sys.modules,{'_v3_authenticated_worker_proof':ambient}):
+            first=runtime._parse_worker_proof(raw,expected,deadline=10)
+            selected=runtime._WORKER_PROOF_PARSER_CACHE
+            path.write_bytes(original)  # Restore A only after captured A executed while the path held B.
+            second=runtime._parse_worker_proof(raw,expected,deadline=10)
+            self.assertEqual(first,second);self.assertEqual('verified',first['status'])
+            self.assertIs(selected,runtime._WORKER_PROOF_PARSER_CACHE)
+            self.assertEqual(runtime._WORKER_PROOF_PARSER_VERSION,selected[0]);self.assertTrue(callable(selected[1]))
+            self.assertIs(ambient,sys.modules['_v3_authenticated_worker_proof'])
+            self.assertIsNot(selected[1].__globals__,ambient.__dict__)
+        self.assertEqual([(path,10003,10)],captured)
+        lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+
+    def test_authenticated_parser_mismatch_capture_compile_exec_or_release_failure_publishes_nothing(self):
+        raw=(SOURCE/'worker_exec_proof.py').read_bytes();real_compile=compile
+        for stage in ('short','oversize','hash','capture','compile','exec','release'):
+            with self.subTest(stage=stage):
+                error=ValueError('authored '+stage);lock=self.parser_lock(release=error if stage=='release' else None)
+                data=raw[:-1] if stage=='short' else raw+b'X' if stage=='oversize' else b'X'*len(raw) if stage=='hash' else raw
+                with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                        patch.object(runtime,'_capture_monitor_source',side_effect=error if stage=='capture' else lambda *a:data), \
+                        patch.object(runtime,'compile',create=True,side_effect=error if stage=='compile' else real_compile) as compiling, \
+                        patch.object(runtime,'exec',create=True,side_effect=error if stage=='exec' else exec) as executing:
+                    with self.assertRaises(ValueError) as caught:runtime._worker_proof_parser()
+                    self.assertIsNone(runtime._WORKER_PROOF_PARSER_CACHE)
+                    if stage not in ('short','oversize','hash'):self.assertIs(error,caught.exception)
+                    if stage in ('short','oversize','hash','capture'):compiling.assert_not_called();executing.assert_not_called()
+                lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+        # A separate request can initialize after a refusal; no failed handle is cached.
+        lock=self.parser_lock()
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                patch.object(runtime,'_capture_monitor_source',side_effect=[b'bad',raw]):
+            with self.assertRaises(ValueError):runtime._worker_proof_parser()
+            self.assertTrue(callable(runtime._worker_proof_parser()))
+            self.assertEqual(2,lock.acquire.call_count);self.assertEqual(2,lock.release.call_count)
+
+    def test_authenticated_parser_busy_refuses_without_capture_or_release_and_rechecks_cache_after_acquire(self):
+        lock=self.parser_lock(available=False)
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                patch.object(runtime,'_capture_monitor_source',side_effect=AssertionError('busy must not read')) as capture:
+            with self.assertRaisesRegex(ValueError,'initialization is busy'):runtime._worker_proof_parser()
+            self.assertIsNone(runtime._WORKER_PROOF_PARSER_CACHE)
+        lock.acquire.assert_called_once_with(False);lock.release.assert_not_called();capture.assert_not_called()
+        # Author an already initialized selected handle through the real loader first.
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None):
+            selected=(runtime._WORKER_PROOF_PARSER_VERSION,runtime._worker_proof_parser())
+        lock=self.parser_lock()
+        def acquired(blocking):runtime._WORKER_PROOF_PARSER_CACHE=selected;return True
+        lock.acquire.side_effect=acquired
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                patch.object(runtime,'_capture_monitor_source',side_effect=AssertionError('must recheck selected handle')):
+            self.assertIs(selected[1],runtime._worker_proof_parser())
+        lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+
+    def test_authenticated_parser_cold_and_warm_deadlines_keep_original_end(self):
+        raw=(SOURCE/'worker_exec_proof.py').read_bytes();real_compile=compile;real_exec=exec;real_hash=hashlib.sha256
+        for stage in ('before','capture','hash','compile','exec','release'):
+            with self.subTest(stage=stage):
+                now=[10.0 if stage=='before' else 0.0];lock=self.parser_lock(release=lambda:now.__setitem__(0,10.0) if stage=='release' else None)
+                def captured(*args):
+                    self.assertEqual(10,args[2])
+                    if stage=='capture':now[0]=10.0
+                    return raw
+                def hashed(*args):
+                    value=real_hash(*args)
+                    if stage=='hash':now[0]=10.0
+                    return value
+                def compiling(*args):
+                    value=real_compile(*args)
+                    if stage=='compile':now[0]=10.0
+                    return value
+                def executing(*args):
+                    real_exec(*args)
+                    if stage=='exec':now[0]=10.0
+                with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                        patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]),patch.object(runtime,'_capture_monitor_source',side_effect=captured), \
+                        patch.object(runtime.hashlib,'sha256',side_effect=hashed),patch.object(runtime,'compile',create=True,side_effect=compiling), \
+                        patch.object(runtime,'exec',create=True,side_effect=executing):
+                    with self.assertRaises(TimeoutError):runtime._worker_proof_parser(10)
+                    self.assertIsNone(runtime._WORKER_PROOF_PARSER_CACHE)
+                self.assertEqual(0 if stage=='before' else 1,lock.acquire.call_count)
+                self.assertEqual(0 if stage=='before' else 1,lock.release.call_count)
+        # The post-release check passes, then the EXACT final cold admission
+        # expires. Old001 retained its own new tuple at this point.
+        released=[False];post_release_checks=[]
+        lock=self.parser_lock(release=lambda:released.__setitem__(0,True))
+        def last_admission_clock():
+            if released[0]:
+                value=0.0 if not post_release_checks else 10.0
+                post_release_checks.append(value)
+                return value
+            return 0.0
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock), \
+                patch.object(runtime.time,'monotonic',side_effect=last_admission_clock), \
+                patch.object(runtime,'_capture_monitor_source',return_value=raw):
+            with self.assertRaises(TimeoutError):runtime._worker_proof_parser(10)
+            self.assertIsNone(runtime._WORKER_PROOF_PARSER_CACHE)
+        self.assertEqual([0.0,10.0],post_release_checks)
+        lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+        from test_identity_graph import completed_result
+        value=completed_result();now=[0.0]
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None):
+            parser=runtime._worker_proof_parser();selected=runtime._WORKER_PROOF_PARSER_CACHE
+            def late(raw,expected):
+                parsed=parser(raw,expected);now[0]=10.0;return parsed
+            with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                    patch.object(runtime,'_capture_monitor_source',side_effect=AssertionError('warm must not capture')):
+                now[0]=10.0
+                with self.assertRaises(TimeoutError):runtime._worker_proof_parser(10)
+                self.assertIs(selected,runtime._WORKER_PROOF_PARSER_CACHE)
+                now[0]=0.0;runtime._WORKER_PROOF_PARSER_CACHE=(runtime._WORKER_PROOF_PARSER_VERSION,late)
+                with self.assertRaises(TimeoutError):runtime._parse_worker_proof(value['workerProofRaw'],value['workerProofBindings']['expected'],deadline=10)
+
+    def test_authenticated_parser_wrapper_keeps_local_selected_callable_if_cache_reference_changes(self):
+        from test_identity_graph import completed_result
+        value=completed_result()
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None):
+            parser=runtime._worker_proof_parser()
+            def selected(raw,expected):
+                runtime._WORKER_PROOF_PARSER_CACHE=None
+                return parser(raw,expected)
+            runtime._WORKER_PROOF_PARSER_CACHE=(runtime._WORKER_PROOF_PARSER_VERSION,selected)
+            with patch.object(runtime,'_capture_monitor_source',side_effect=AssertionError('no cold/warm handle mixing')):
+                parsed=runtime._parse_worker_proof(value['workerProofRaw'],value['workerProofBindings']['expected'])
+            self.assertEqual('verified',parsed['status']);self.assertIsNone(runtime._WORKER_PROOF_PARSER_CACHE)
+
+    def test_parser_binding_requires_independent_sha_and_canonical_row_even_after_forged_aggregate(self):
+        import copy
+        from test_identity_graph import completed_result
+        good=completed_result();self.assertTrue(runtime._valid_worker_bindings(good))
+        key=str(runtime.BASE/'worker_exec_proof.py')
+        for mutation in ('missing','rekeyed','row','binding','both'):
+            with self.subTest(mutation=mutation):
+                value=copy.deepcopy(good);pins=value['launchInputPins'];bound=value['workerProofBindings']
+                if mutation=='missing':pins.pop(key)
+                if mutation=='rekeyed':pins['/authored/other-parser.py']=pins.pop(key)
+                if mutation in ('row','both'):pins[key]['sha256']='f'*64
+                if mutation in ('binding','both'):bound['parserSha256']='f'*64
+                bound['launchPinsSha256']=runtime._canonical_pin_digest(pins)
+                with patch.object(runtime,'_parse_worker_proof',side_effect=AssertionError('refuse before parser use')) as parsing, \
+                        patch.object(runtime.os,'open',side_effect=AssertionError('bindings are data-only')):
+                    self.assertFalse(runtime._valid_worker_bindings(value));self.assertFalse(runtime.worker_execution_complete(value))
+                parsing.assert_not_called()
+
+    def test_actual_finish_completion_and_evaluator_share_authenticated_parser_under_path_replacement(self):
+        import evaluate_candidate_v3 as evaluator
+        lock=self.parser_lock()
+        with patch.object(runtime,'_WORKER_PROOF_PARSER_CACHE',None),patch.object(runtime,'_WORKER_PROOF_PARSER_LOCK',lock):
+            base,receipt,result=self.receipt_fixture(close=False)
+            launch={'expected':result['workerProofBindings']['expected'],'pins':result['launchInputPins'],
+                    'configSha256':runtime.digest(receipt['directory']/'launch.json')}
+            # Isolate executable-byte selection from separate ordinary filesystem pin drift.
+            (base/'worker_exec_proof.py').write_bytes(b'raise AssertionError("not the selected parser")')
+            with patch.object(runtime,'BASE',base),patch.object(runtime.time,'monotonic',return_value=0), \
+                    patch.object(runtime,'_pin_files',return_value=launch['pins']), \
+                    patch.object(runtime,'_fixed_source_module',side_effect=AssertionError('path loader forbidden')):
+                runtime._finish_worker_proof(result,receipt,launch,{'workerLimits':{'workerProofBytes':1024}},deadline=10)
+                self.assertEqual('verified',result['workerProof']['status']);self.assertEqual(0,result['exitCode'])
+                self.assertTrue(runtime.worker_execution_complete(result))
+                self.assertTrue(evaluator._proof_replays(result));self.assertTrue(evaluator.process_observation(result)['completed'])
+            lock.acquire.assert_called_once_with(False);lock.release.assert_called_once_with()
+
+    def test_evaluator_preserves_strict_hex_subclass_raw_type_ambiguity_and_terminal_replays(self):
+        import copy
+        import evaluate_candidate_v3 as evaluator
+        from test_identity_graph import completed_result
+        class Hex(str):pass
+        class Raw(bytes):pass
+        good=completed_result();self.assertTrue(evaluator._proof_replays(good))
+        public=runtime.public_result(good);public['workerProofRawHex']=Hex(public['workerProofRawHex'])
+        self.assertTrue(runtime.worker_execution_complete(public));self.assertFalse(evaluator._proof_replays(public))
+        for mutation in ('bytes-subclass','ambiguous','overbound','exit','termination','sha','partial'):
+            with self.subTest(mutation=mutation):
+                value=copy.deepcopy(good)
+                if mutation=='bytes-subclass':value['workerProofRaw']=Raw(value['workerProofRaw'])
+                if mutation=='ambiguous':value['workerProofRawHex']=value['workerProofRaw'].hex()
+                if mutation=='overbound':value['workerProofRaw']=b'x'*1025
+                if mutation=='exit':value['exitCode']=1
+                if mutation=='termination':value['workerTermination']={'kind':'exit','value':1,'rawWaitStatus':256}
+                if mutation=='sha':value['workerProof']['proofSha256']='f'*64
+                if mutation=='partial':
+                    value['workerProofRaw']=value['workerProofRaw'].splitlines(keepends=True)[0]
+                    value['workerProof']['proofSha256']=hashlib.sha256(value['workerProofRaw']).hexdigest()
+                self.assertFalse(evaluator._proof_replays(value))
+        self.assertEqual(1024,runtime._WORKER_PROOF_MAX_BYTES)
+        parsed=runtime._parse_worker_proof(b'x'*1025,good['workerProofBindings']['expected'])
+        self.assertFalse(parsed['workerExecVerified']);self.assertFalse(parsed['workerTerminationVerified'])
+        for exit_code in (42,-11):self.assertTrue(evaluator._proof_replays(completed_result(exit_code=exit_code)))
+
+    def test_actual_qualifier_partial_consumer_uses_shared_parser_without_completion_authority(self):
+        import test_worker_exec_proof as fixtures
+        spec=importlib.util.spec_from_file_location('_authored_parser_qualifier',SOURCE/'tests/qualify_worker_exec.py')
+        qualifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(qualifier)
+        value=fixtures.fault_receipt('kill-monitor')
+        real_parse=runtime._parse_worker_proof;deadlines=[]
+        def parsing(raw,expected,*,deadline=None):deadlines.append(deadline);return real_parse(raw,expected,deadline=deadline)
+        with patch.object(runtime,'_parse_worker_proof',side_effect=parsing), \
+                patch.object(runtime,'_fixed_source_module',side_effect=AssertionError('no path parser')):
+            parsed=qualifier._initial_exec(value)
+        self.assertTrue(parsed['workerExecVerified']);self.assertFalse(parsed['workerTerminationVerified'])
+        self.assertFalse(runtime.worker_execution_complete(value));self.assertEqual([None],deadlines)
+
+    def test_actual_prepare_preserves_expected_identity_dict_after_all_trusted_source_pins(self):
+        profile,profile_sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+        target=Path('/authored/target');monitor=Path('/authored/monitor')
+        recipe={'target':target,'worker':['/target'],'prefix':[],'mounts':[]}
+        binding={'binaryPath':str(monitor),'dependencies':[],**{name:'a'*64 for name in
+            ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','manifestSha256')}}
+        binding['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
+        pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':profile_sha},
+              str(runtime.BASE/'worker_exec_proof.py'):{'device':70,'inode':80,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}}
+        pins.update({str(runtime.BASE/name):{'device':70,'inode':81+i,'mode':0o400,'sha256':sha}
+            for i,(name,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+        receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
+        def executable(path,deadline=None):
+            dev,ino=(3,4) if str(path)=='/usr/bin/bwrap' else (11,12) if path==monitor else (7,8)
+            return {'path':str(path),'device':dev,'inode':ino,'mode':0o500,'sha256':'a'*64}
+        with patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=5,st_ino=6)), \
+                patch.object(Path,'lstat',return_value=types.SimpleNamespace(st_dev=1,st_ino=2)), \
+                patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
+                patch.object(runtime,'load_worker_monitor_binding',return_value=binding), \
+                patch.object(runtime,'_recorded_compiler_inputs',return_value=None),patch.object(runtime,'_nonprivileged_executable',side_effect=executable), \
+                patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime,'_publish_config') as published, \
+                patch.object(runtime,'private_directory',side_effect=lambda path:path),patch.object(runtime,'process_identity',return_value={'start':1}), \
+                patch.object(runtime.os,'getpid',return_value=123),patch.object(runtime.os,'getuid',return_value=55), \
+                patch.object(runtime,'load_profile_with_digest',return_value=(profile,profile_sha)), \
+                patch.object(runtime.os,'open',side_effect=AssertionError('authored preparation never launches or opens tools')):
+            launch=runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10)
+        self.assertIs(type(launch['expected']),dict)
+        self.assertEqual('a'*32,launch['expected']['attempt'])
+        self.assertEqual((7,8),(launch['expected']['targetDevice'],launch['expected']['targetInode']))
+        self.assertIs(launch['expected'],launch['proofBinding']['expected'])
+        published.assert_called_once()
+
+    def test_prepare_launch_refuses_untrusted_monitor_or_canonical_parser_row_before_publication(self):
+        profile,sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+        recipe={'target':Path('/authored/target'),'worker':['/target'],'prefix':[],'mounts':[]}
+        receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
+        for mutation in ('binding','missing','rekeyed','row','both'):
+            with self.subTest(mutation=mutation):
+                binding={'binaryPath':'/authored/monitor','dependencies':[],'parserSha256':runtime._WORKER_PROOF_PARSER_SHA256}
+                pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'sha256':sha}}
+                pins.update({str(runtime.BASE/name):{'sha256':digest} for name,_,digest in runtime._MONITOR_LOADER_SOURCES})
+                key=str(runtime.BASE/'worker_exec_proof.py');pins[key]={'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
+                if mutation in ('binding','both'):binding['parserSha256']='f'*64
+                if mutation=='missing':pins.pop(key)
+                if mutation=='rekeyed':pins['/authored/other-parser.py']=pins.pop(key)
+                if mutation in ('row','both'):pins[key]['sha256']='f'*64
+                with patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=1,st_ino=2)), \
+                        patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
+                        patch.object(runtime,'load_worker_monitor_binding',return_value=binding), \
+                        patch.object(runtime,'_recorded_compiler_inputs',return_value=None), \
+                        patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'sha256':'a'*64}), \
+                        patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime,'_publish_config') as published:
+                    with self.assertRaisesRegex(ValueError,'worker proof parser launch binding differs'):
+                        runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10)
+                published.assert_not_called()
+
+    def test_actual_surrogate_proof_stage_uses_existing_cleanup_end_and_failed_cleanup_cannot_pass(self):
+        # Existing definition-only qualifier seam, selecting the ACTUAL proof/final
+        # blocks. All process/descriptor effects are inert; no surrogate is run.
+        from test_identity_graph import completed_result
+        tree=ast.parse((SOURCE/'tests/qualify_worker_exec.py').read_bytes())
+        surrogate=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='surrogate')
+        proof_stage=next(n for n in surrogate.body if isinstance(n,ast.Try) and any(isinstance(x,ast.For) for x in n.finalbody))
+        final=next(n for n in surrogate.body if isinstance(n,ast.If) and isinstance(n.test,ast.Name) and n.test.id=='cleanup')
+        result_node=next(n for n in surrogate.body if isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id=='value' for x in n.targets))
+        code=compile(ast.fix_missing_locations(ast.Module(body=[proof_stage,final,result_node],type_ignores=[])),
+                     '<actual-surrogate-proof-parser-stage>','exec')
+        raw=completed_result()['workerProofRaw'];real_parse=runtime._parse_worker_proof
+        for cleanup,late in ((True,False),(False,False),(True,True)):
+            with self.subTest(cleanup=cleanup,late=late):
+                now=[0.0];deadlines=[];closed=[]
+                def parsing(data,expected,*,deadline=None):
+                    deadlines.append(deadline);parsed=real_parse(data,expected,deadline=deadline)
+                    if late:now[0]=10.0
+                    return parsed
+                metadata=types.SimpleNamespace(st_dev=1,st_ino=2,st_size=len(raw),st_mode=stat.S_IFREG|0o600,st_nlink=1)
+                worker=Path('/authored/worker');harness=Path('/authored/harness')
+                namespace={'_parse_worker_proof':parsing,'os':types.SimpleNamespace(lseek=lambda *a:None,SEEK_SET=0,
+                    read=lambda fd,count:raw,fstat=lambda fd:metadata,close=lambda fd:closed.append(fd)),
+                    'time':types.SimpleNamespace(monotonic=lambda:now[0]),'stat':stat,
+                    '_json':lambda *a:{'pidns':[5,6]},'_devino':lambda p:[7,8] if p==worker else [3,4],
+                    'directory':self.directory,'report':4,'report_id':[1,2],'scope':{'directoryFd':41},
+                    'worker':worker,'harness':harness,'mode':'release','attempt':'a'*32,
+                    'cleanup':cleanup,'cleanup_failure':None,'cleanup_wait_end':5,'cleanup_verification_end':10,
+                    'failure':None,'launcher_exit':0,'samples':[{'ack':'H'},{'ack':'HA'}],'actions':['A','B'],
+                    'admitted':True,'capture':True,'streams':{'stdout':bytearray(b'DESCENDANT-CHANNEL-DENIED\n'),'stderr':bytearray()}}
+                with patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime,'_fixed_source_module',side_effect=AssertionError('no path parser')):
+                    exec(code,namespace)
+                self.assertEqual([10 if cleanup else None],deadlines)
+                self.assertEqual([4,41],closed)
+                self.assertEqual(cleanup and not late,namespace['value']['passed'])
+                self.assertEqual(10,namespace['value']['cleanupDeadlines']['verification'])
+
+
     def monitor_source_tree(self):
         base=Path(self.stack.enter_context(tempfile.TemporaryDirectory(dir=self.directory)))
         (base/'toolchain-001').mkdir()
@@ -1326,7 +1645,7 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_prepare_launch_requires_all_three_trusted_source_pins_before_publication(self):
         profile,profile_sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
         recipe={'target':Path('/authored/target'),'worker':['/target'],'prefix':[],'mounts':[]}
-        binding={'binaryPath':'/authored/monitor','dependencies':[],**{name:'a'*64 for name in
+        binding={'binaryPath':'/authored/monitor','dependencies':[],**{name:runtime._WORKER_PROOF_PARSER_SHA256 if name=='parserSha256' else 'a'*64 for name in
             ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
         receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
         for index in range(3):
@@ -1622,7 +1941,7 @@ class LaunchConfigCaptureTests(unittest.TestCase):
             stack.enter_context(patch.object(runtime.os,'pread',return_value=b'proof'))
             stack.enter_context(patch.object(runtime,'_pin_files',return_value={}))
             stack.enter_context(patch.object(runtime,'_revalidate_compiler_inputs'))
-            stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
+            stack.enter_context(patch.object(runtime,'_worker_proof_parser',return_value=parser.parse_proof))
             stack.enter_context(patch.object(runtime,'digest',side_effect=AssertionError('fixed config must not use pathname digest')))
             try:
                 if finish:runtime._finish_worker_proof(result,receipt,launch,{'workerLimits':{'workerProofBytes':1024}},deadline=deadline)

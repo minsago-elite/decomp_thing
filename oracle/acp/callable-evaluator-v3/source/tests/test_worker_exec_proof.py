@@ -405,7 +405,7 @@ class QualificationSourceTests(unittest.TestCase):
         self.assertIn("'deny-trace','bind-failure','chdir-failure'", source)
         self.assertIn("'scopeAdmitted') is True", source)
         self.assertIn("load_worker_monitor_binding()", source)
-        self.assertLess(source.index('cleanup=True'), source.index('proof = parse_proof(raw, expected)'))
+        self.assertLess(source.index('cleanup=True'), source.index('proof = _parse_worker_proof(raw, expected, deadline=cleanup_verification_end if cleanup else None)'))
         self.assertNotIn("qualificationComplete'] = False", source)
 
     def test_native_entrypoints_require_explicit_invocation(self):
@@ -427,9 +427,10 @@ def fault_receipt(name, *, descendant_complete=False):
     pins={'/public/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'c'*64},
           '/public/reaper':{'device':3,'inode':4,'mode':0o755,'sha256':'d'*64},
           str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':'b'*64}}
+    pins[str(runtime.BASE/'worker_exec_proof.py')]={'device':70,'inode':72,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
     bound={key:'b'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256',
         'monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256','launchPinsSha256')}
-    bound.update(protocolVersion=1,expected=binding(),targetSha256='c'*64,
+    bound.update(protocolVersion=1,expected=binding(),targetSha256='c'*64,parserSha256=runtime._WORKER_PROOF_PARSER_SHA256,
         launchPinsSha256=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':')).encode()).hexdigest())
     result={k:True for k in ('launcherCreated','launcherPidIdentityVerified','scopeVerified','scopeAdmitted',
                              'cleanupVerified','rootReaped','finalAbsenceVerified')}

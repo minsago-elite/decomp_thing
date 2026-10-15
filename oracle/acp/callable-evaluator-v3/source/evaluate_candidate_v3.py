@@ -12,7 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from bounded_runtime import (bounded_run, digest, private_directory, public_result, write_json,
                              worker_execution_complete, contained_command)
-from worker_exec_proof import parse_proof, MAX_PROOF_BYTES
+from bounded_runtime import _parse_worker_proof, _WORKER_PROOF_MAX_BYTES as MAX_PROOF_BYTES
 from build_contract import (profile, load_profile, load_profile_with_digest,
                             verified_visible_snapshot, profile_scope, _read_json)
 from interface_gate_v3 import (compare_descriptors, probe, export_inventory, layout_assertions, resolve_declaration,
@@ -87,7 +87,7 @@ def _proof_replays(result):
         return False
     try:
         raw = _proof_bytes(result)
-        parsed = parse_proof(raw, result['workerProofBindings']['expected'])
+        parsed = _parse_worker_proof(raw, result['workerProofBindings']['expected'])
         return (parsed['status'] == 'verified' and parsed['proofSha256'] == result['workerProof']['proofSha256']
                 and parsed['workerTermination'] == result['workerTermination']
                 and parsed['exitCode'] == result['exitCode'])

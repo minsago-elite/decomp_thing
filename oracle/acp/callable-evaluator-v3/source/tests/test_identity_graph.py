@@ -60,11 +60,13 @@ def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
     pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':target_sha},
           '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64},
           str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':256,'sha256':'0'*64}}
+    pins[str(runtime.BASE/'worker_exec_proof.py')]={'device':70,'inode':72,'mode':256,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
     bindings={'protocolVersion':1,'expected':{'attempt':'a'*32,'phase':'runtime','reportDevice':1,
         'reportInode':2,'reaperDevice':3,'reaperInode':4,'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8},
         **{key:'0'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256')},
         'launchPinsSha256':hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()}
     bindings['targetSha256']=target_sha
+    bindings['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
     execution={'v':1,'t':'exec','s':1,'a':'a'*32,'p':'runtime','c':3,'ed':7,'ei':8,'od':7,'oi':8,
                'w':(4<<16)|(5<<8)|127,'cf':1,'dp':0,'rd':3,'ri':4,'b':[1,100,5,9,1,3]}
     termination={'v':1,'t':'term','s':2,'a':'a'*32,'p':'runtime','c':3,

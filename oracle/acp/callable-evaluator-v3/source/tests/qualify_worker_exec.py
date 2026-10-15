@@ -438,7 +438,7 @@ def surrogate(work, output, monitor, harness, worker, mode):
     """Bounded authored schedule fixture, distinct from ordinary production route."""
     from bounded_runtime import process_limits
     from build_contract import load_profile
-    from worker_exec_proof import parse_proof
+    from bounded_runtime import _parse_worker_proof
     bounds = load_profile()['bounds']
     directory = output / 'surrogate-gates' / (mode + '-' + uuid.uuid4().hex)
     directory.mkdir(parents=True, mode=0o700)
@@ -603,7 +603,7 @@ def surrogate(work, output, monitor, harness, worker, mode):
         expected = {'attempt':attempt, 'phase':'runtime', 'reportDevice':report_id[0], 'reportInode':report_id[1],
                     'targetDevice':target[0], 'targetInode':target[1], 'reaperDevice':reaper[0],
                     'reaperInode':reaper[1], 'outerPidNsDevice':outer['pidns'][0], 'outerPidNsInode':outer['pidns'][1]}
-        proof = parse_proof(raw, expected)
+        proof = _parse_worker_proof(raw, expected, deadline=cleanup_verification_end if cleanup else None)
         released = actions==['A','B'] and {x['ack'] for x in samples}=={'H','HA'}
         if mode == 'release':
             complete = (proof['status']=='verified' and proof['exitCode']==0 and launcher_exit==0 and released and
@@ -657,7 +657,7 @@ def surrogate(work, output, monitor, harness, worker, mode):
 def _initial_exec(result):
     """Authenticated partial exec only, with no process/API acceptance authority."""
     from bounded_runtime import _valid_worker_bindings
-    from worker_exec_proof import parse_proof
+    from bounded_runtime import _parse_worker_proof
     if type(result) is not dict:
         return None
     raw=result.get('workerProofRaw')
@@ -685,7 +685,7 @@ def _initial_exec(result):
     if actual_term is not None and (type(actual_term) is not dict or set(actual_term)!={'kind','value','rawWaitStatus'} or
             type(actual_term['kind']) is not str or type(actual_term['value']) is not int or type(actual_term['rawWaitStatus']) is not int):
         return None
-    parsed = parse_proof(raw,result['workerProofBindings']['expected'])
+    parsed = _parse_worker_proof(raw,result['workerProofBindings']['expected'])
     if (parsed['workerExecVerified'] is not True or proof.get('proofSha256')!=parsed['proofSha256'] or
             proof.get('status')!=parsed['status'] or proof.get('reason')!=parsed['reason'] or
             any(result.get(k)!=parsed[k] for k in ('workerExecVerified','workerTerminationVerified','workerTermination'))):

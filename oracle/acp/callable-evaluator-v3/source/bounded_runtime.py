@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import time
+from threading import Lock
 import uuid
 
 BASE = Path(__file__).resolve().parent
@@ -31,6 +32,71 @@ from build_contract import load_profile_with_digest, enforced_process_limits
 
 def _canonical_pin_digest(pins: dict) -> str:
     return hashlib.sha256(json.dumps(pins, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+# Independent reviewed parser version, not a result/profile-provided digest.
+_WORKER_PROOF_PARSER_BYTES = 10003
+_WORKER_PROOF_PARSER_SHA256 = '7174d956dbb2cb69c46b34847dc1a0505e8cd9993e8cbc26377d2889cd863bec'
+_WORKER_PROOF_MAX_BYTES = 1024
+_WORKER_PROOF_PARSER_VERSION = (_WORKER_PROOF_PARSER_BYTES, _WORKER_PROOF_PARSER_SHA256, _WORKER_PROOF_MAX_BYTES)
+_WORKER_PROOF_PARSER_CACHE = None
+_WORKER_PROOF_PARSER_LOCK = Lock()
+
+
+def _worker_proof_parser(deadline=None):
+    """Select a private fixed-version callable; busy initialization refuses, never waits."""
+    global _WORKER_PROOF_PARSER_CACHE
+    _monitor_loader_timely(deadline)
+    selected = _WORKER_PROOF_PARSER_CACHE
+    published = None
+    try:
+        if selected is None:
+            if not _WORKER_PROOF_PARSER_LOCK.acquire(False):
+                raise ValueError('authenticated proof parser initialization is busy')
+            try:
+                selected = _WORKER_PROOF_PARSER_CACHE
+                if selected is None:
+                    path = BASE / 'worker_exec_proof.py'
+                    raw = _capture_monitor_source(path, _WORKER_PROOF_PARSER_BYTES, deadline)
+                    _monitor_loader_timely(deadline)
+                    if len(raw) != _WORKER_PROOF_PARSER_BYTES or hashlib.sha256(raw).hexdigest() != _WORKER_PROOF_PARSER_SHA256:
+                        raise ValueError('authenticated proof parser source bytes differ')
+                    _monitor_loader_timely(deadline)
+                    module = type(os)('_v3_authenticated_worker_proof')
+                    module.__file__ = str(path)
+                    code = compile(raw, str(path), 'exec')
+                    _monitor_loader_timely(deadline)
+                    exec(code, module.__dict__)
+                    _monitor_loader_timely(deadline)
+                    parser = module.parse_proof
+                    if not callable(parser) or module.MAX_PROOF_BYTES != _WORKER_PROOF_MAX_BYTES:
+                        raise ValueError('authenticated proof parser interface differs')
+                    selected = (_WORKER_PROOF_PARSER_VERSION, parser)
+                    _monitor_loader_timely(deadline)
+                    _WORKER_PROOF_PARSER_CACHE = selected
+                    published = selected
+            finally:
+                _WORKER_PROOF_PARSER_LOCK.release()
+            _monitor_loader_timely(deadline)
+        # Final admission/first callable return remain in this invocation's
+        # publication rollback guard; warm refusal owns no publication to clear.
+        _monitor_loader_timely(deadline)
+        if (type(selected) is not tuple or len(selected) != 2 or selected[0] != _WORKER_PROOF_PARSER_VERSION or
+                not callable(selected[1])):
+            raise ValueError('authenticated proof parser cache version differs')
+        return selected[1]
+    except BaseException:
+        if published is not None and _WORKER_PROOF_PARSER_CACHE is published:
+            _WORKER_PROOF_PARSER_CACHE = None
+        raise
+
+
+def _parse_worker_proof(raw, expected, *, deadline=None):
+    parser = _worker_proof_parser(deadline)
+    _monitor_loader_timely(deadline)
+    parsed = parser(raw, expected)
+    _monitor_loader_timely(deadline)
+    return parsed
 
 
 def _valid_worker_bindings(result: dict) -> bool:
@@ -63,6 +129,10 @@ def _valid_worker_bindings(result: dict) -> bool:
             return False
     profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
     if profile_pin is None or profile_pin['sha256'] != bounds['profileSha256']:
+        return False
+    parser_pin = pins.get(str(BASE / 'worker_exec_proof.py'))
+    if (binding['parserSha256'] != _WORKER_PROOF_PARSER_SHA256 or parser_pin is None or
+            parser_pin['sha256'] != _WORKER_PROOF_PARSER_SHA256):
         return False
     if _canonical_pin_digest(pins) != binding['launchPinsSha256']:
         return False
@@ -139,8 +209,7 @@ def worker_execution_complete(result: object) -> bool:
     if not isinstance(raw, bytes) or not 0 < len(raw) <= 1024 or hashlib.sha256(raw).hexdigest() != sha:
         return False
     try:
-        parser = _fixed_source_module(BASE / 'worker_exec_proof.py', '_v3_completion_proof_parser')
-        parsed = parser.parse_proof(raw, result['workerProofBindings']['expected'])
+        parsed = _parse_worker_proof(raw, result['workerProofBindings']['expected'])
     except Exception:
         return False
     return (parsed['status'] == 'verified' and parsed['workerExecVerified'] is True and
@@ -1289,12 +1358,15 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
     pins = _pin_files(common, deadline)
     if not provisioning:
-        for relative, _, expected in _MONITOR_LOADER_SOURCES:
-            if pins.get(str(BASE / relative), {}).get('sha256') != expected:
+        for relative, _, source_sha in _MONITOR_LOADER_SOURCES:
+            if pins.get(str(BASE / relative), {}).get('sha256') != source_sha:
                 raise ValueError('authenticated monitor loader source launch pin differs')
     profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
     if type(profile_pin) is not dict or profile_pin.get('sha256') != bounds['profileSha256']:
         raise ValueError('launch profile pin differs from admitted bounds profile')
+    if not provisioning and (binding['parserSha256'] != _WORKER_PROOF_PARSER_SHA256 or
+            pins.get(str(BASE / 'worker_exec_proof.py'), {}).get('sha256') != _WORKER_PROOF_PARSER_SHA256):
+        raise ValueError('authenticated worker proof parser launch binding differs')
     _check_compiler_input_pins(compiler_recording, pins)
     if library is not None and pins.get(library['sourcePath']) != library_pin:
         raise ValueError('runtime library input changed during preparation')
@@ -1567,8 +1639,7 @@ def _finish_worker_proof(result, receipt, launch, bounds, deadline=None):
             raise ValueError('launch source/runtime/input pins changed')
         _revalidate_compiler_inputs(launch, deadline)
         proof['pinsUnchanged'] = True
-        parser = _fixed_source_module(BASE / 'worker_exec_proof.py', '_v3_worker_exec_proof')
-        parsed = parser.parse_proof(raw, launch['expected'])
+        parsed = _parse_worker_proof(raw, launch['expected'], deadline=deadline)
         proof.update(status=parsed['status'], proofSha256=parsed['proofSha256'], reason=parsed['reason'])
         result.update(workerExecVerified=parsed['workerExecVerified'],
                       workerTerminationVerified=parsed['workerTerminationVerified'], workerTermination=parsed['workerTermination'])
