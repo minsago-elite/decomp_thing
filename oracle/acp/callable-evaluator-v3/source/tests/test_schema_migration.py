@@ -94,8 +94,14 @@ class SchemaMigration(unittest.TestCase):
             binding={'schemaVersion':3,'sourceCheckpointSha256':'a'*64,'initialSha256':{'synthetic':'b'*64},
                      'helperCopySha256':'c'*64,'helperSchemaSha256':'d'*64,'helperSchemaVersion':3}
             path.write_text(json.dumps(binding));record=f.admit_files([path],root=root)['files'][str(path)]
-            with patch.object(f,'read_regular',side_effect=AssertionError('admitted record must not independently re-admit pathname')):
+            real_read_regular=f.read_regular;schema_path=e.BASE/'contracts/execution-bindings-schema.json'
+            def schema_only(candidate,maximum):
+                self.assertEqual(schema_path,candidate,'admitted record must not independently re-admit pathname')
+                self.assertEqual(1048576,maximum)
+                return real_read_regular(candidate,maximum)
+            with patch.object(f,'read_regular',side_effect=schema_only) as schema_read:
                 self.assertEqual(binding,f._read_admitted_json(record,'execution-bindings'))
+            schema_read.assert_called_once_with(schema_path,1048576)
             self.assertEqual(binding,f.read_json(path,'execution-bindings'))
             for raw in (b'{"schemaVersion":3,"schemaVersion":2}',b'{"x":NaN}',b'{',b'\xff'):
                 path.write_bytes(raw);record=f.admit_files([path],root=root)['files'][str(path)]

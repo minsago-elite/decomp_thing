@@ -418,7 +418,43 @@ class RuntimeWorkerProof(unittest.TestCase):
                 'outerPidNsDevice':30,'outerPidNsInode':31,'scope':{},'librarySnapshot':snapshot}
         directory_stat=types.SimpleNamespace(st_uid=123,st_mode=stat.S_IFDIR|0o700,st_dev=10,st_ino=11)
         report_stat=types.SimpleNamespace(st_uid=123,st_mode=stat.S_IFREG|0o600,st_dev=20,st_ino=21,st_size=0,st_nlink=1)
-        case=types.SimpleNamespace(gate=gate,config=config,snapshot=snapshot,handoff=Mock(),closed=Mock(),sanitize=Mock())
+        case=types.SimpleNamespace(gate=gate,config=config,snapshot=snapshot,handoff=Mock(),sanitize=Mock(),
+                                   owned={},events=[],release=Mock(),inherit=Mock())
+        def acquire_scope(*args):
+            self.assertNotIn(7,case.owned)
+            case.owned[7]='scope';case.events.append(('acquire-scope',7))
+            return {'fd':7}
+        def open_owned(path,*args,**kwargs):
+            if path==directory:
+                self.assertEqual((gate.os.O_RDONLY|gate.os.O_DIRECTORY|gate.os.O_NOFOLLOW|gate.os.O_CLOEXEC,),args)
+                self.assertEqual({},kwargs)
+                descriptor,label=directory_fd,'directory'
+            elif path=='gate.tmp':
+                self.assertEqual((gate.os.O_CREAT|gate.os.O_EXCL|gate.os.O_NOFOLLOW|gate.os.O_CLOEXEC|gate.os.O_WRONLY,0o600),args)
+                self.assertEqual({'dir_fd':directory_fd},kwargs)
+                self.assertEqual('directory',case.owned.get(directory_fd))
+                descriptor,label=11,'ready'
+            elif path=='worker-proof.jsonl':
+                self.assertEqual((gate.os.O_WRONLY|gate.os.O_APPEND|gate.os.O_NOFOLLOW|gate.os.O_CLOEXEC,),args)
+                self.assertEqual({'dir_fd':directory_fd},kwargs)
+                self.assertEqual('directory',case.owned.get(directory_fd))
+                descriptor,label=12,'report'
+            else:self.fail('unexpected gate fixture open')
+            self.assertNotIn(descriptor,case.owned,'independent acquired descriptors cannot alias')
+            case.owned[descriptor]=label;case.events.append(('open',label,descriptor))
+            return descriptor
+        def close_owned(descriptor):
+            self.assertIn(descriptor,case.owned,'close requires one still-owned acquisition')
+            label=case.owned.pop(descriptor);case.events.append(('close',label,descriptor))
+        def duplicate_report(source,target,*,inheritable):
+            self.assertEqual((12,4,True),(source,target,inheritable))
+            self.assertEqual('report',case.owned.get(source))
+            self.assertNotIn(target,case.owned)
+            case.owned[target]='inherited-report';case.events.append(('dup-report',source,target))
+        case.scope=Mock(side_effect=acquire_scope)
+        case.opened=Mock(side_effect=open_owned)
+        case.closed=Mock(side_effect=close_owned)
+        case.duplicate=Mock(side_effect=duplicate_report)
         def proc_text(path,*args,**kwargs):
             if str(path)=='/proc/self/status':return '\n'.join(key+': 00000000' for key in ('CapInh','CapPrm','CapEff','CapAmb'))
             return '12 (gate) S '+' '.join(['1']*19)+' 123 0'
@@ -429,15 +465,15 @@ class RuntimeWorkerProof(unittest.TestCase):
                     (gate.sys,'flags',types.SimpleNamespace(isolated=True)),(gate.sys,'dont_write_bytecode',True),
                     (gate.sys,'pycache_prefix',str(directory/'python-cache')),
                     (gate,'_contract',Mock(return_value=build_contract.load_profile())),
-                    (gate,'_authenticated_config',Mock(return_value=config)),(gate,'_acquire_scope',Mock(return_value={'fd':7})),
-                    (gate,'_check_scope',Mock()),(gate,'_wait_release',Mock()),(gate.time,'monotonic',Mock(return_value=0)),
-                    (gate.os,'open',Mock(side_effect=lambda path,*a,**k:directory_fd if path==directory else 11)),
+                    (gate,'_authenticated_config',Mock(return_value=config)),(gate,'_acquire_scope',case.scope),
+                    (gate,'_check_scope',Mock()),(gate,'_wait_release',case.release),(gate.time,'monotonic',Mock(return_value=0)),
+                    (gate.os,'open',case.opened),
                     (gate.os,'fstat',Mock(side_effect=[directory_stat,report_stat])),(gate.os,'close',case.closed),
                     (gate.os,'write',Mock(side_effect=lambda fd,raw:len(raw))),(gate.os,'rename',Mock()),
                     (gate.os,'getpid',Mock(return_value=12)),(gate.os,'getuid',Mock(return_value=123)),
                     (gate.resource,'getrlimit',Mock(return_value=(64,64))),
                     (Path,'read_text',proc_text),(Path,'stat',Mock(return_value=types.SimpleNamespace(st_dev=30,st_ino=31))),
-                    (gate.os,'dup2',Mock()),(gate.os,'set_inheritable',Mock()),
+                    (gate.os,'dup2',case.duplicate),(gate.os,'set_inheritable',case.inherit),
                     (gate,'_acquire_library_snapshot',case.handoff),(gate,'_close_nonstandard',case.sanitize)):
                     stack.enter_context(patch.object(target,name,value))
                 return gate._main('0'*64,(1,2,3),6,end)
@@ -450,16 +486,34 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertEqual(case.config['argv'],case.invoke(end))
         case.handoff.assert_called_once_with(case.snapshot,build_contract.load_profile()['bounds']['workerLaunchPinFileBytes'],end)
         case.sanitize.assert_called_once_with({4,5,6,10,7})
-        self.assertEqual([11,7,10],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([11,12,7,10],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([('open','directory',10),('acquire-scope',7),('open','ready',11),('close','ready',11),
+                          ('open','report',12),('dup-report',12,4),('close','report',12),
+                          ('close','scope',7),('close','directory',10)],case.events)
+        self.assertEqual({4:'inherited-report'},case.owned)
+        case.duplicate.assert_called_once_with(12,4,inheritable=True);case.inherit.assert_called_once_with(4,True)
+        case.release.assert_called_once_with((1,2,3),6,end)
         case=self._gate_snapshot_caller_control(5)
         with self.assertRaisesRegex(ValueError,'snapshot fd aliases gate directory'):case.invoke(end)
         case.handoff.assert_not_called();case.sanitize.assert_not_called()
-        self.assertEqual([11,7,5],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([11,12,7,5],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([('open','directory',5),('acquire-scope',7),('open','ready',11),('close','ready',11),
+                          ('open','report',12),('dup-report',12,4),('close','report',12),
+                          ('close','scope',7),('close','directory',5)],case.events)
+        self.assertEqual({4:'inherited-report'},case.owned)
+        case.duplicate.assert_called_once_with(12,4,inheritable=True);case.inherit.assert_called_once_with(4,True)
+        case.release.assert_called_once_with((1,2,3),6,end)
         case=self._gate_snapshot_caller_control(5)
         del case.config['librarySnapshot'];case.config['argv']=['/usr/bin/bwrap','authored-no-library']
         self.assertEqual(case.config['argv'],case.invoke(end))
         case.handoff.assert_not_called();case.sanitize.assert_called_once_with({4,6,5,7})
-        self.assertEqual([11,7,5],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([11,12,7,5],[call.args[0] for call in case.closed.call_args_list])
+        self.assertEqual([('open','directory',5),('acquire-scope',7),('open','ready',11),('close','ready',11),
+                          ('open','report',12),('dup-report',12,4),('close','report',12),
+                          ('close','scope',7),('close','directory',5)],case.events)
+        self.assertEqual({4:'inherited-report'},case.owned)
+        case.duplicate.assert_called_once_with(12,4,inheritable=True);case.inherit.assert_called_once_with(4,True)
+        case.release.assert_called_once_with((1,2,3),6,end)
 
     def test_gate_main_forwards_existing_clamped_admission_end_without_restarting(self):
         for phase_end,wanted in ((4,4),(10,7)):
