@@ -30,7 +30,7 @@ def build_command(output):
 
 
 def _hash(path, maximum):
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:

@@ -363,6 +363,125 @@ class ProvisioningTests(unittest.TestCase):
         cls.builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.builder)
 
+    @staticmethod
+    def _provisioning_hash_metadata(mode=stat.S_IFREG | 0o600, size=6, inode=17):
+        return SimpleNamespace(st_dev=9, st_ino=inode, st_mode=mode, st_size=size,
+                               st_mtime_ns=31, st_ctime_ns=41)
+
+    def test_provisioning_hash_nonblocking_open_precedes_descriptor_and_exact_bound_read(self):
+        metadata = self._provisioning_hash_metadata()
+        events = []
+        flags = (self.builder.os.O_RDONLY | self.builder.os.O_NOFOLLOW |
+                 self.builder.os.O_NONBLOCK | self.builder.os.O_CLOEXEC)
+        def opened(path, actual_flags):
+            events.append(('open', path, actual_flags))
+            self.assertEqual(flags, actual_flags)
+            return 71
+        def stated(descriptor):
+            events.append(('fstat', descriptor))
+            return metadata
+        chunks = iter((b'ab', b'cdef', b''))
+        def read(descriptor, maximum):
+            events.append(('read', descriptor, maximum))
+            return next(chunks)
+        def close(descriptor):
+            events.append(('close', descriptor))
+        with patch.object(self.builder.os, 'open', side_effect=opened), \
+                patch.object(self.builder.os, 'fstat', side_effect=stated), \
+                patch.object(self.builder.os, 'read', side_effect=read), \
+                patch.object(self.builder.os, 'close', side_effect=close):
+            actual = self.builder._hash(Path('/authored/input'), 6)
+        self.assertEqual(hashlib.sha256(b'abcdef').hexdigest(), actual)
+        self.assertEqual([('open', Path('/authored/input'), flags), ('fstat', 71),
+                          ('read', 71, 7), ('read', 71, 5), ('read', 71, 1),
+                          ('fstat', 71), ('close', 71)], events)
+
+    def test_provisioning_hash_special_or_size_refusal_never_reads_payload(self):
+        for metadata in (self._provisioning_hash_metadata(stat.S_IFIFO | 0o600),
+                         self._provisioning_hash_metadata(stat.S_IFCHR | 0o600),
+                         self._provisioning_hash_metadata(stat.S_IFDIR | 0o700),
+                         self._provisioning_hash_metadata(size=0),
+                         self._provisioning_hash_metadata(size=7)):
+            events = []
+            def opened(path, flags):
+                self.assertEqual(self.builder.os.O_NONBLOCK,
+                                 flags & self.builder.os.O_NONBLOCK)
+                events.append('nonblocking-open')
+                return 71
+            def stated(descriptor):
+                self.assertEqual(['nonblocking-open'], events)
+                self.assertEqual(71, descriptor)
+                events.append('fstat')
+                return metadata
+            with self.subTest(mode=metadata.st_mode, size=metadata.st_size), \
+                    patch.object(self.builder.os, 'open', side_effect=opened), \
+                    patch.object(self.builder.os, 'fstat', side_effect=stated) as fstat, \
+                    patch.object(self.builder.os, 'read', side_effect=AssertionError('payload must not be read')) as read, \
+                    patch.object(self.builder.os, 'close') as close:
+                with self.assertRaisesRegex(ValueError, 'bounded regular provisioning input required'):
+                    self.builder._hash(Path('/authored/input'), 6)
+                fstat.assert_called_once_with(71)
+                read.assert_not_called()
+                close.assert_called_once_with(71)
+
+    def test_provisioning_hash_growth_truncation_and_identity_drift_remain_refused(self):
+        for label, before, after, chunks, message, expected_reads in (
+                ('growth', self._provisioning_hash_metadata(size=4),
+                 self._provisioning_hash_metadata(size=4), (b'abcde',),
+                 'provisioning byte bound', [5]),
+                ('truncation', self._provisioning_hash_metadata(size=6),
+                 self._provisioning_hash_metadata(size=6), (b'ab', b''),
+                 'provisioning input changed', [7, 5]),
+                ('identity', self._provisioning_hash_metadata(size=6),
+                 self._provisioning_hash_metadata(size=6, inode=18), (b'abcdef', b''),
+                 'provisioning input changed', [7, 1])):
+            sizes = []
+            stream = iter(chunks)
+            def read(descriptor, maximum):
+                self.assertEqual(71, descriptor)
+                sizes.append(maximum)
+                return next(stream)
+            with self.subTest(case=label), \
+                    patch.object(self.builder.os, 'open', return_value=71), \
+                    patch.object(self.builder.os, 'fstat', side_effect=(before, after)) as fstat, \
+                    patch.object(self.builder.os, 'read', side_effect=read), \
+                    patch.object(self.builder.os, 'close') as close:
+                maximum = 4 if label == 'growth' else 6
+                with self.assertRaisesRegex(ValueError, message):
+                    self.builder._hash(Path('/authored/input'), maximum)
+                self.assertEqual(expected_reads, sizes)
+                self.assertEqual(1 if label == 'growth' else 2, fstat.call_count)
+                close.assert_called_once_with(71)
+
+    def test_provisioning_hash_error_identity_and_existing_close_priority_are_preserved(self):
+        metadata = self._provisioning_hash_metadata()
+        for stage in ('open', 'fstat', 'read', 'close', 'read-and-close'):
+            primary = OSError('authored primary')
+            closing = OSError('authored close')
+            with self.subTest(stage=stage), \
+                    patch.object(self.builder.os, 'open', side_effect=primary if stage == 'open' else None,
+                                 return_value=71) as opened, \
+                    patch.object(self.builder.os, 'fstat', side_effect=primary if stage == 'fstat' else None,
+                                 return_value=metadata) as fstat, \
+                    patch.object(self.builder.os, 'read', side_effect=primary if stage in ('read', 'read-and-close')
+                                 else (b'abcdef', b'')) as read, \
+                    patch.object(self.builder.os, 'close', side_effect=closing if stage in ('close', 'read-and-close')
+                                 else None) as close:
+                with self.assertRaises(OSError) as caught:
+                    self.builder._hash(Path('/authored/input'), 6)
+                opened.assert_called_once()
+                self.assertIs(closing if stage in ('close', 'read-and-close') else primary,
+                              caught.exception)
+                if stage == 'open':
+                    fstat.assert_not_called()
+                    read.assert_not_called()
+                    close.assert_not_called()
+                else:
+                    close.assert_called_once_with(71)
+                    if stage == 'fstat': read.assert_not_called()
+                if stage == 'read-and-close':
+                    self.assertIs(primary, caught.exception.__context__)
+
     def test_imports_inert_and_fixed_command_source_only(self):
         command = self.builder.build_command(Path('/trusted/worker_exec_monitor'))
         self.assertEqual(command[:8], ['/usr/bin/gcc', '-D_GNU_SOURCE', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wl,-z,relro,-z,now,-z,noexecstack'])
