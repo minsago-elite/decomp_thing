@@ -2105,7 +2105,7 @@ private class RuntimePrivateControlScope private constructor(
     private val cancellationCheck: () -> Unit,
 ) : AutoCloseable {
     private var closed = false
-    private var mountChanged = false
+    private val mountEventCheck = MountEventCheck(mountPoll)
     private var fast = fastEligible(controls)
 
     private fun fastEligible(identities: Map<PinnedControlDirectory, ManifestControlIdentity>): Boolean {
@@ -2118,11 +2118,80 @@ private class RuntimePrivateControlScope private constructor(
         }
     }
 
-    private fun requireMountsUnchanged() {
-        if (mountChanged || LinuxFilesystemSyscalls.mountMetadataPollChanged(mountPoll.poll())) {
-            mountChanged = true
-            throw IOException("host mounts changed during runtime manifest")
+    private enum class MountEventPhase { CHECKPOINT, CONTROL_ADMISSION, REFRESH }
+    private enum class MountEventOutcome { EVENT, INVALID_DESCRIPTOR, SYSCALL_ERROR }
+
+    /** One scope's original event latch, with failure-only diagnostics and no query injection. */
+    private class MountEventCheck(private val poll: LinuxFilesystemSyscalls.MountMetadataPollScratch) {
+        private var mountChanged = false
+        private var firstEventPhase: MountEventPhase? = null
+        private var firstEventObservation = 0L
+        private var firstEventDiagnostic: MountEventDiagnostic? = null
+
+        fun requireUnchanged(phase: MountEventPhase) {
+            if (mountChanged) throw eventFailure()
+            val observation = try {
+                poll.poll()
+            } catch (failure: Throwable) {
+                attachPollFailure(failure, phase)
+                throw failure
+            }
+            requireObservation(observation, phase)
         }
+
+        // Private fixed-result seam: production always obtains this value from poll.poll().
+        private fun requireObservation(observation: Long, phase: MountEventPhase) {
+            if (mountChanged) throw eventFailure()
+            if (LinuxFilesystemSyscalls.mountMetadataPollChanged(observation)) {
+                firstEventPhase = phase
+                firstEventObservation = observation
+                mountChanged = true
+                throw eventFailure()
+            }
+        }
+
+        private fun eventFailure(): IOException {
+            val failure = IOException("host mounts changed during runtime manifest")
+            try {
+                val diagnostic = firstEventDiagnostic ?: MountEventDiagnostic(
+                    checkNotNull(firstEventPhase), MountEventOutcome.EVENT,
+                    (firstEventObservation ushr 32).toInt(), firstEventObservation.toInt() and 0xffff, null,
+                ).also { firstEventDiagnostic = it }
+                // This exact local IOException is fresh: no graph lookup or existing-list growth.
+                failure.addSuppressed(diagnostic)
+            } catch (_: Throwable) { /* Diagnostic failure cannot replace the original refusal. */ }
+            return failure
+        }
+
+        private fun attachPollFailure(failure: Throwable, phase: MountEventPhase) {
+            try {
+                // Claim before construction/attachment; no retries even if diagnostics fail.
+                val observation = poll.claimFailureObservation(failure) ?: return
+                val outcome = if (observation.events != null) MountEventOutcome.INVALID_DESCRIPTOR
+                    else MountEventOutcome.SYSCALL_ERROR
+                // Only the exact scratch-created, not-yet-annotated exception can reach this line.
+                failure.addSuppressed(MountEventDiagnostic(phase, outcome,
+                    observation.result, observation.events, observation.error))
+            } catch (_: Throwable) { /* Keep the exact query/closed-handle/native primary. */ }
+        }
+    }
+
+    /** Closed scalar vocabulary: ASCII, under 512 bytes, no stack/cause/suppression authority. */
+    private class MountEventDiagnostic(
+        phase: MountEventPhase,
+        outcome: MountEventOutcome,
+        result: Int?,
+        events: Int?,
+        error: Int?,
+    ) : Throwable(
+        "mount-event-v1 phase=${phase.name} generation=" +
+            (if (phase == MountEventPhase.REFRESH) "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED") +
+            " outcome=${outcome.name} rc=${result ?: "NA"} revents=${events ?: "NA"} errno=${error ?: "NA"}",
+        null, false, false,
+    )
+
+    private fun requireMountsUnchanged(phase: MountEventPhase) {
+        mountEventCheck.requireUnchanged(phase)
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
@@ -2137,7 +2206,7 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     fun requireCreationUnexposed(candidate: HostPhysicalLocation, currentMounts: List<HostPhysicalMount>) {
-        requireMountsUnchanged()
+        requireMountsUnchanged(MountEventPhase.CONTROL_ADMISSION)
         if (mounts != currentMounts) throw IOException("host mounts changed during control admission")
         val current = currentRoot(NO_SANDBOX_CHECKPOINT)
         (recursivePhysicalCoverage(root, mounts, NO_SANDBOX_CHECKPOINT) +
@@ -2161,7 +2230,7 @@ private class RuntimePrivateControlScope private constructor(
         if (closed) throw IOException("runtime manifest scope is closed")
         cancellationCheck()
         requirePrivateControlRegistryHealthy()
-        requireMountsUnchanged()
+        requireMountsUnchanged(MountEventPhase.CHECKPOINT)
         if (generation != privateControlGeneration) {
             val replacement = LinkedHashMap<PinnedControlDirectory, ManifestControlIdentity>()
             val newlyRetained = mutableListOf<ManifestControlIdentity>()
@@ -2182,7 +2251,7 @@ private class RuntimePrivateControlScope private constructor(
                     }
                 }
                 requireRootUnexposed(replacement)
-                requireMountsUnchanged()
+                requireMountsUnchanged(MountEventPhase.REFRESH)
             } catch (failure: Throwable) {
                 newlyRetained.asReversed().forEach { it.close() }
                 throw failure
