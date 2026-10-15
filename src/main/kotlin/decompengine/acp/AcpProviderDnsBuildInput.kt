@@ -171,7 +171,10 @@ internal object AcpProviderDnsBuildInputs {
                         require(dnsBlock(stream, 512)?.all { it == 0.toByte() } == true)
                         // Every expanded padding byte is charged and must be zero.
                         val padding = ByteArray(BLOCK)
-                        while (true) { val n = stream.read(padding); if (n < 0) break; require(padding.take(n).all { it == 0.toByte() }) }
+                        while (true) {
+                            val n = stream.read(padding); if (n < 0) break
+                            for (index in 0 until n) require(padding[index] == 0.toByte())
+                        }
                         ended = true; break
                     }
                     require(++entries <= limits.entries)
@@ -222,7 +225,15 @@ internal object AcpProviderDnsBuildInputs {
                 require(bounded.count == layer.size && "sha256:" + dnsHex(compressedHash.digest()) == layer.digest)
                 // Keep tar insertion order in additions, with a separate bounded prefix index.
                 val additionPaths = TreeSet<String>()
-                additions.keys.forEach { progress(); additionPaths.add(it) }
+                additions.values.forEach { member ->
+                    progress(); additionPaths.add(member.path)
+                    // Replace existing non-directory ancestors before opaque/whiteout validation.
+                    // Missing upper directories still enter in the normal bounded merge below.
+                    val lower = namespace[member.path]
+                    if (member.kind == Kind.DIRECTORY && lower != null && lower.kind != Kind.DIRECTORY) {
+                        namespace[member.path] = member
+                    }
+                }
                 fun parents(path: String) {
                     progress()
                     val parts = path.split('/')
@@ -250,7 +261,7 @@ internal object AcpProviderDnsBuildInputs {
                 (removals + opaque.filter(String::isNotEmpty)).forEach { parents(it) }
                 removals.forEach { p -> removeNamespace(p, includeSelf = true) }
                 opaque.forEach { p ->
-                    require(p.isEmpty() || namespace[p]?.kind in listOf(null, Kind.DIRECTORY))
+                    require(p.isEmpty() || (additions[p] ?: namespace[p])?.kind in listOf(null, Kind.DIRECTORY))
                     removeNamespace(p, includeSelf = false)
                     if (p.isNotEmpty() && namespace[p] == null) {
                         namespace[p] = Member(p, Kind.DIRECTORY, 0, 0, 0, 0, null, null, layerNumber, 0, false)
@@ -364,10 +375,13 @@ internal object AcpProviderDnsBuildInputs {
             } else { require(obj["linkTarget"] == JsonNull); null }
             LockedObject(path, kind, layer, diff, offset, size, hash, target, mode, uid, gid)
         }
-        require(tools.count { it.path.endsWith("/jmods/java.base.jmod") && it.kind == Kind.REGULAR } == 1)
         val recipe = doc.getValue("recipe").jsonObject
         recipe.dnsKeys("jlinkPath", "engineIdentitySha256", "engineImageBindingSha256", "reservationPolicySha256", "argv", "workingDirectory", "environment", "network", "laneCeilings")
         val jlink = dnsRelativePath(recipe.dnsText("jlinkPath"))
+        require(jlink == "bin/jlink" || jlink.endsWith("/bin/jlink"))
+        val javaBaseJmod = jlink.removeSuffix("bin/jlink") + "jmods/java.base.jmod"
+        val jmods = tools.filter { (it.path == "jmods/java.base.jmod" || it.path.endsWith("/jmods/java.base.jmod")) && it.kind == Kind.REGULAR }
+        require(jmods.singleOrNull()?.let { it.path == javaBaseJmod && it.kind == Kind.REGULAR } == true)
         require(tools.singleOrNull { it.path == jlink }?.let { it.kind == Kind.REGULAR && it.mode == 493L } == true)
         val argv = recipe.getValue("argv").jsonArray.map { it.dnsString() }
         require(argv == listOf("/$jlink", "--add-modules", "java.base", "--no-header-files", "--no-man-pages", "--strip-debug", "--output", "/workspace/provider-dns-build/image") &&
@@ -378,7 +392,7 @@ internal object AcpProviderDnsBuildInputs {
         lane.dnsKeys(*maxima.keys.toTypedArray()); maxima.forEach { (key, maximum) -> require(lane.dnsLong(key) in 1..maximum) }
         require(doc.dnsHash("toolClosureSha256") == dnsDomainHash("provider-dns-tool-inputs-v1", buildJsonObject { put("inputs", rawTools) }))
         require(doc.dnsHash("jmodsSha256") == dnsDomainHash("provider-dns-jmods-v1", buildJsonObject {
-            put("inputs", JsonArray(rawTools.filter { it.jsonObject.dnsText("path").endsWith("/jmods/java.base.jmod") })) }))
+            put("inputs", JsonArray(rawTools.filter { it.jsonObject.dnsText("path") == javaBaseJmod })) }))
         require(doc.dnsHash("recipeSha256") == dnsDomainHash("provider-dns-build-recipe-v1", recipe))
         val recipeIdentity = Recipe(jlink, recipe.dnsHash("engineIdentitySha256"), recipe.dnsHash("engineImageBindingSha256"),
             recipe.dnsHash("reservationPolicySha256"), maxima.keys.associateWith { lane.dnsLong(it) })

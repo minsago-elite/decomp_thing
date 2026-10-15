@@ -75,6 +75,36 @@ class AcpProviderDnsBuildInputTest {
         assertEquals(setOf("tree", "tree/new"), result.members.keys)
         assertEquals(dnsSha(byteArrayOf(3)), result.members.getValue("tree/new").sha256)
     }
+    @Test fun `opaque upper directory replaces a lower regular file in every tar order`() {
+        val directory = Entry("tree/", type = '5', mode = 456, uid = 14, gid = 15)
+        val marker = Entry("tree/.wh..wh..opq")
+        val child = Entry("tree/new", byteArrayOf(9))
+        for (upper in listOf(listOf(directory, marker, child), listOf(directory, child, marker),
+            listOf(marker, directory, child), listOf(marker, child, directory),
+            listOf(child, directory, marker), listOf(child, marker, directory))) {
+            val result = graph(tar(Entry("tree", byteArrayOf(1))), tar(*upper.toTypedArray())).inspect()
+            assertEquals(setOf("tree", "tree/new"), result.members.keys)
+            val observed = result.members.getValue("tree")
+            assertEquals(AcpProviderDnsBuildInputs.Kind.DIRECTORY, observed.kind)
+            assertEquals(listOf(456L, 14L, 15L), listOf(observed.mode, observed.uid, observed.gid))
+            assertTrue(observed.explicitMetadata); assertEquals(1, observed.layer)
+            assertEquals(dnsSha(byteArrayOf(9)), result.members.getValue("tree/new").sha256)
+        }
+        val nested = graph(tar(Entry("tree", byteArrayOf(1))), tar(
+            Entry("tree/sub/.wh..wh..opq"), Entry("tree/sub/new", byteArrayOf(2)), directory)).inspect()
+        assertEquals(setOf("tree", "tree/sub", "tree/sub/new"), nested.members.keys)
+        assertEquals(14L, nested.members.getValue("tree").uid)
+        assertFalse(nested.members.getValue("tree/sub").explicitMetadata)
+    }
+    @Test fun `opaque marker cannot turn a lower or explicit upper non directory into an implicit directory`() {
+        assertFails { graph(tar(Entry("tree", byteArrayOf(1))), tar(Entry("tree/.wh..wh..opq"))).inspect() }
+        for (replacement in listOf(Entry("tree", byteArrayOf(2)), Entry("tree", type = '2', target = "other"))) {
+            for (upper in listOf(listOf(replacement, Entry("tree/.wh..wh..opq")),
+                listOf(Entry("tree/.wh..wh..opq"), replacement))) {
+                assertFails { graph(tar(Entry("tree", type = '5')), tar(*upper.toTypedArray())).inspect() }
+            }
+        }
+    }
     @Test fun `directory and regular replacement are explicit virtual type transitions`() {
         val result = graph(tar(Entry("one", type = '5'), Entry("one/child", byteArrayOf(1)), Entry("two", byteArrayOf(2))),
             tar(Entry("one", byteArrayOf(3)), Entry("two", type = '5'), Entry("two/child", byteArrayOf(4)))).inspect()
@@ -209,6 +239,18 @@ class AcpProviderDnsBuildInputTest {
         assertFails { graph(raw, gzip = true, encodedTransform = { it.copyOf().also { b -> b[b.size - 8] = (b[b.size - 8].toInt() xor 1).toByte() } }).inspect() }
     }
 
+    @Test fun `tar zero tail checks partial blocks directly with unchanged expanded ceilings`() {
+        val raw = tar(Entry("file", byteArrayOf(1))) + ByteArray(2 * AcpProviderDnsBuildInputs.BLOCK + 17)
+        val result = graph(raw).inspect(AcpProviderDnsBuildInputs.Limits(expanded = raw.size.toLong(), layerExpanded = raw.size.toLong()))
+        assertEquals(raw.size.toLong(), result.expandedBytes)
+        assertEquals(setOf("file"), result.members.keys)
+        assertFails { graph(raw).inspect(AcpProviderDnsBuildInputs.Limits(expanded = raw.size - 1L)) }
+        assertFails { graph(raw).inspect(AcpProviderDnsBuildInputs.Limits(layerExpanded = raw.size - 1L)) }
+        val nonzero = raw.copyOf().also { it[it.lastIndex] = 1 }
+        assertFails { graph(nonzero).inspect() } // correct descriptors/diffID cannot make tail data padding
+        assertFails { graph(nonzero, gzip = true).inspect() }
+        assertEquals(raw.size.toLong(), graph(raw, gzip = true).inspect().expandedBytes)
+    }
     @Test fun `inspection cancellation closes the current blob and never publishes a partial map`() {
         val g = graph(tar(Entry("file", ByteArray(1024))))
         var opened = 0; var closed = 0; var checks = 0
@@ -330,6 +372,35 @@ class AcpProviderDnsBuildInputTest {
         put("recipeSha256", dnsDomainHash("provider-dns-build-recipe-v1", recipe))
         put("sourceRelationshipSha256", "6".repeat(64)); put("authenticationReceiptSha256", "6".repeat(64))
     }
+    private fun lockWithToolPaths(jlink: String, jmod: String): JsonObject {
+        val original = lockDocument()
+        val tools = JsonArray(original.getValue("toolInputs").jsonArray.mapIndexed { index, raw ->
+            JsonObject(raw.jsonObject + ("path" to JsonPrimitive(if (index == 0) jlink else jmod)))
+        })
+        val oldRecipe = original.getValue("recipe").jsonObject
+        val recipe = JsonObject(oldRecipe + mapOf("jlinkPath" to JsonPrimitive(jlink),
+            "argv" to JsonArray(listOf(JsonPrimitive("/$jlink")) + oldRecipe.getValue("argv").jsonArray.drop(1))))
+        return JsonObject(original + mapOf(
+            "toolInputs" to tools, "recipe" to recipe,
+            "toolClosureSha256" to JsonPrimitive(dnsDomainHash("provider-dns-tool-inputs-v1", buildJsonObject { put("inputs", tools) })),
+            "jmodsSha256" to JsonPrimitive(dnsDomainHash("provider-dns-jmods-v1", buildJsonObject { put("inputs", JsonArray(listOf(tools[1]))) })),
+            "recipeSha256" to JsonPrimitive(dnsDomainHash("provider-dns-build-recipe-v1", recipe)),
+        ))
+    }
+    @Test fun `candidate java base jmod must belong to the selected jlink installation`() {
+        for ((jlink, jmod) in listOf("opt/jdk/bin/jlink" to "opt/jdk/jmods/java.base.jmod",
+            "vendor/java/bin/jlink" to "vendor/java/jmods/java.base.jmod", "bin/jlink" to "jmods/java.base.jmod")) {
+            val lock = AcpProviderDnsBuildInputs.parseLockCandidate(bytes(lockWithToolPaths(jlink, jmod)))
+            assertEquals(jlink, lock.recipe.jlinkPath)
+            assertEquals(jmod, lock.toolInputs.single { it.path != jlink }.path)
+        }
+        for ((jlink, jmod) in listOf("opt/jdk/bin/jlink" to "decoy/jmods/java.base.jmod",
+            "vendor/java/bin/jlink" to "opt/jdk/jmods/java.base.jmod", "opt/jdk/jlink" to "opt/jdk/jmods/java.base.jmod")) {
+            assertFails { AcpProviderDnsBuildInputs.parseLockCandidate(bytes(lockWithToolPaths(jlink, jmod))) }
+        }
+        val correct = lockWithToolPaths("opt/jdk/bin/jlink", "opt/jdk/jmods/java.base.jmod")
+        assertFails { AcpProviderDnsBuildInputs.parseLockCandidate(bytes(JsonObject(correct + ("jmodsSha256" to JsonPrimitive("0".repeat(64)))))) }
+    }
     @Test fun `typed proposed locks retain direct regular coordinates without authenticating observations`() {
         val lock = AcpProviderDnsBuildInputs.parseLockCandidate(bytes(lockDocument()))
         assertEquals(512L, lock.payloads.single().coordinate.contentOffset)
@@ -388,6 +459,30 @@ class AcpProviderDnsBuildInputTest {
         val envelope = buildJsonObject { put("schema", "provider-dns-approval-envelope-v2"); put("A", a.sha256); put("I", i.sha256); put("M", m.sha256); put("P", p.sha256)
             putJsonObject("receipts") { receipts.forEach { put(it.kind, it.sha256) } } }
         return Dag(a, i, m, p, receipts, envelope, roots)
+    }
+    @Test fun `forged receipt subject sets cannot borrow declared receipt hashes for any kind`() {
+        val d = dag()
+        val refs = mapOf(AcpProviderDnsApprovalCandidates.Node.A to d.a.sha256,
+            AcpProviderDnsApprovalCandidates.Node.I to d.i.sha256, AcpProviderDnsApprovalCandidates.Node.M to d.m.sha256,
+            AcpProviderDnsApprovalCandidates.Node.P to d.p.sha256)
+        fun envelope(receipts: List<AcpProviderDnsApprovalCandidates.Receipt>) = AcpProviderDnsApprovalCandidates.envelope(
+            bytes(d.envelope), d.a, d.i, d.m, d.p, receipts, d.roots)
+        val original = envelope(d.receipts)
+        assertEquals(setOf("source", "provisioning", "policy-decision", "independent-review"), d.receipts.map { it.kind }.toSet())
+        for (receipt in d.receipts) {
+            val subjects = receipt.subjects
+            val extra = refs.keys.first { it !in subjects }
+            val invalid = listOf(emptyMap(), subjects + (extra to refs.getValue(extra))) +
+                subjects.keys.map { subjects - it } +
+                subjects.keys.map { subjects + (it to "0".repeat(64)) }
+            for (forgedSubjects in invalid) {
+                val forged = AcpProviderDnsApprovalCandidates.Receipt(receipt.sha256, receipt.kind, receipt.root, forgedSubjects)
+                assertFailsWith<IllegalArgumentException>(receipt.kind) {
+                    envelope(d.receipts.map { if (it.kind == receipt.kind) forged else it })
+                }
+            }
+        }
+        assertEquals(original.sha256, envelope(d.receipts).sha256)
     }
     @Test fun `parsed receipt subjects reject mutation without changing digest or envelope binding`() {
         val d = dag()

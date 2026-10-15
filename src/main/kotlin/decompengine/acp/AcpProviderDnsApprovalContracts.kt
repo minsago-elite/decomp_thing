@@ -148,8 +148,10 @@ internal object AcpProviderDnsApprovalCandidates {
         val declarations = obj.getValue("receipts").jsonObject
         declarations.dnsKeys(*receiptSubjects.keys.toTypedArray())
         receipts.forEach { receipt ->
+            val required = requireNotNull(receiptSubjects[receipt.kind])
+            require(receipt.subjects.keys == required)
             require(recognizedRootCandidates[receipt.kind] == receipt.root && declarations.dnsHash(receipt.kind) == receipt.sha256 &&
-                receipt.subjects.all { refs[it.key] == it.value })
+                required.all { receipt.subjects[it] == refs[it] })
         }
         return candidate(Node.E, obj, refs)
     }
