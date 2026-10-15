@@ -5032,6 +5032,233 @@ internal fun recordedRepairHistorySnapshot(
     throw RepairHistorySnapshotRefusal()
 }
 
+/** Compare only to these already semantically validated G1 bytes; not a standalone graph validator.
+ * The reader must still complete all final declared/G2/B2 checks before publishing this diagnostic.
+ */
+internal fun compareCapturedRepairHistoryProjection(
+    graphPayload: ByteArray,
+    historyPayload: ByteArray,
+    requestedBudget: RepairResourceBudget,
+): RepairHistoryProjectionDiagnostic {
+    val state = try {
+        require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= revisionGraphReadLimit(requestedBudget))
+        parseCanonicalGraph(graphPayload, "captured projection graph").state.also {
+            require(it.budget == requestedBudget)
+            requireBoundedIterationProjection(it.nodes, requestedBudget) // Pure feasibility only; never derive/readBlob.
+        }
+    } catch (_: Throwable) {
+        return RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.UNAVAILABLE, RepairHistoryProjectionReason.CANONICAL)
+    }
+    if (historyPayload.isEmpty() || historyPayload.size.toLong() > requestedBudget.maximumProjectionBytes) {
+        return RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.UNAVAILABLE, RepairHistoryProjectionReason.CAPTURE)
+    }
+    var version: Int? = null
+    var digest: String? = null
+    var completeEncoding = false
+    fun diagnostic(status: RepairHistoryProjectionStatus, reason: RepairHistoryProjectionReason) =
+        RepairHistoryProjectionDiagnostic(status, reason, version, historyPayload.size.toLong(), digest)
+    return try {
+        digest = sha256(historyPayload)
+        val text = decodeUtf8Strict(historyPayload, "captured history projection")
+        UniqueJsonObjectKeyValidator(text).validate()
+        val root = Json.parseToJsonElement(text) as? JsonObject ?: error("history root type")
+        version = root["schemaVersion"]?.let { historyInteger(it).also { value -> require(value in 1..3) }.toInt() } ?: 1
+        val wireVersion = requireNotNull(version)
+        val rootFields = setOf("regressionInputs", "iterations") +
+            (if (wireVersion >= 2) setOf("schemaVersion") else emptySet()) +
+            (if (wireVersion >= 3) setOf("runs") else emptySet())
+        // Explicit schema1 is accepted by old permissive loaders, not an emitted complete wire.
+        if (wireVersion == 1 && "schemaVersion" in root) throw HistoryProjectionEncodingRefusal()
+        historyFields(root, rootFields, wireVersion)
+        val inputsJson = historyArray(root.getValue("regressionInputs"))
+        val iterationsJson = historyArray(root.getValue("iterations"))
+        require(inputsJson.size <= requestedBudget.maximumRegressionInputs)
+        require(iterationsJson.size <= requestedBudget.maximumRevisionNodes)
+        val expectedNodes = state.nodes.filter { it.repairMetadata != null }
+        historySame(inputsJson.size == state.retainedRegressionInputs.size, RepairHistoryProjectionReason.CORPUS)
+        historySame(iterationsJson.size == expectedNodes.size, RepairHistoryProjectionReason.ITERATIONS)
+        val work = HistoryProjectionDecodedWork(requestedBudget.maximumProjectionBytes)
+        var inputBytes = 0L
+        var argumentCount = 0L
+        val inputs = inputsJson.mapIndexed { inputIndex, element ->
+            val row = historyObject(element)
+            historyFields(row, setOf("id", "args", "stdinHex"), wireVersion)
+            val id = historyString(row.getValue("id"))
+            val arguments = historyArray(row.getValue("args"))
+            argumentCount = Math.addExact(argumentCount, arguments.size.toLong())
+            require(argumentCount <= requestedBudget.maximumRegressionArguments)
+            val args = arguments.map(::historyString)
+            val hex = historyString(row.getValue("stdinHex"))
+            val size = historyHexSize(hex)
+            inputBytes = Math.addExact(inputBytes, id.toByteArray(Charsets.UTF_8).size.toLong())
+            args.forEach { inputBytes = Math.addExact(inputBytes, it.toByteArray(Charsets.UTF_8).size.toLong()) }
+            inputBytes = Math.addExact(inputBytes, size)
+            require(inputBytes <= requestedBudget.maximumRegressionInputBytes)
+            val expected = state.retainedRegressionInputs[inputIndex]
+            historySame(id == expected.id && args == expected.args && size == expected.stdin.size.toLong(), RepairHistoryProjectionReason.CORPUS)
+            ProcessInput(id, args, work.decode(hex))
+        }
+        val iterations = iterationsJson.mapIndexed { index, element -> historyIteration(element, wireVersion, requestedBudget, work, expectedNodes[index]) }
+        val runs = if (wireVersion >= 3) {
+            val rows = historyArray(root.getValue("runs"))
+            require(rows.size <= requestedBudget.maximumRevisionNodes)
+            rows.map { element ->
+                val row = historyObject(element)
+                val runVersion = historyInteger(row.getValue("schemaVersion")).also { require(it in 1..2) }.toInt()
+                val fields = setOf("schemaVersion", "id", "status", "baselineId", "acceptedHeadId", "provisionalHeadId",
+                    "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
+                    "expectedObservationsSha256", "originalBinarySha256", "lastEvidence") +
+                    (if (runVersion == 2) setOf("rollbackFailureAttemptId", "rollbackResolution") else emptySet())
+                historyFields(row, fields, runVersion)
+                val numeric = setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis")
+                numeric.forEach { historyInteger(row.getValue(it)) }
+                val nullable = setOf("acceptedHeadId", "provisionalHeadId", "expectedObservationsSha256", "originalBinarySha256",
+                    "rollbackFailureAttemptId", "rollbackResolution")
+                (fields - numeric - "lastEvidence").forEach { field ->
+                    if (field in nullable) historyNullableString(row.getValue(field)) else historyString(row.getValue(field))
+                }
+                historyEvidence(row.getValue("lastEvidence"), runVersion)
+                parseRepairRunState(row.toString())
+            }
+        } else emptyList()
+        val rendered = renderRepairHistoryProjection(iterations, inputs, requestedBudget.maximumProjectionBytes, wireVersion, runs)
+        if (!rendered.toByteArray(Charsets.UTF_8).contentEquals(historyPayload)) throw HistoryProjectionEncodingRefusal()
+        completeEncoding = true
+        historySame(wireVersion == minOf(state.schemaVersion, 3), RepairHistoryProjectionReason.VERSION)
+        historySame(inputs.size == state.retainedRegressionInputs.size, RepairHistoryProjectionReason.CORPUS)
+        inputs.zip(state.retainedRegressionInputs).forEach { (actual, expected) ->
+            historySame(actual.id == expected.id && actual.args == expected.args && actual.stdin.contentEquals(expected.stdin),
+                RepairHistoryProjectionReason.CORPUS)
+        }
+        val nodes = expectedNodes
+        historySame(iterations.size == nodes.size, RepairHistoryProjectionReason.ITERATIONS)
+        iterations.zip(nodes).forEach { (actual, node) ->
+            val metadata = requireNotNull(node.repairMetadata)
+            val summary = metadata.summary ?: if (node.recoveredAfterCrash)
+                "repair attempt interrupted before the agent summary was durably recorded" else "repair attempt "+node.id
+            val after = node.evidenceKind?.let { RepairEvidence(it, node.evidenceSummary.orEmpty(), node.evidenceArtifact) }
+            historySame(actual.index == metadata.iterationIndex && actual.failureKind == metadata.failureKind &&
+                actual.prompt == metadata.prompt && actual.summary == summary && actual.retainedRegressionIds == metadata.retainedRegressionIds &&
+                actual.before == metadata.before && actual.after == after &&
+                actual.succeeded == (node.status == ModuleRevisionStatus.ACCEPTED && node.evidenceKind == "valid"),
+                RepairHistoryProjectionReason.METADATA)
+            if (wireVersion >= 2) historySame(actual.agentInvocation == metadata.agentInvocation &&
+                actual.publicationMode == metadata.publicationMode, RepairHistoryProjectionReason.METADATA)
+            if (wireVersion >= 3) {
+                val disposition = when (node.status) {
+                    ModuleRevisionStatus.ACCEPTED -> RepairAttemptDisposition.FULLY_ACCEPTED
+                    ModuleRevisionStatus.PROVISIONAL -> RepairAttemptDisposition.PROVISIONAL
+                    ModuleRevisionStatus.REJECTED -> RepairAttemptDisposition.REJECTED
+                    else -> RepairAttemptDisposition.LEGACY_UNVERIFIED
+                }
+                historySame(actual.disposition == disposition && actual.revisionId == node.id &&
+                    actual.parentRevisionId == node.parentId && actual.runId == metadata.runId, RepairHistoryProjectionReason.METADATA)
+            }
+            historySame(actual.patches.size == node.changes.size, RepairHistoryProjectionReason.PATCH)
+            actual.patches.zip(node.changes).forEach { (patch, change) ->
+                val content = patch.replacementBytes
+                historySame(patch.relativePath == change.path && content.size.toLong() == change.afterBytes,
+                    RepairHistoryProjectionReason.PATCH)
+                val patchDigest = sha256(content)
+                historySame(patchDigest == change.afterBlobSha256 && patchDigest == change.afterSha256, RepairHistoryProjectionReason.PATCH)
+            }
+        }
+        historySame(runs.size == state.runs.size, RepairHistoryProjectionReason.RUNS)
+        runs.zip(state.runs).forEach { (actual, expected) -> historySame(actual.toJson() == expected.toJson(), RepairHistoryProjectionReason.RUNS) }
+        diagnostic(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, RepairHistoryProjectionReason.NONE)
+    } catch (difference: HistoryProjectionDifference) {
+        if (completeEncoding) diagnostic(RepairHistoryProjectionStatus.DOES_NOT_MATCH_CAPTURED_GRAPH, difference.reason)
+        else diagnostic(RepairHistoryProjectionStatus.UNVERIFIABLE_ENCODING, RepairHistoryProjectionReason.ENCODING)
+    } catch (_: HistoryProjectionEncodingRefusal) {
+        diagnostic(RepairHistoryProjectionStatus.UNVERIFIABLE_ENCODING, RepairHistoryProjectionReason.ENCODING)
+    } catch (_: RepairBudgetExceededException) {
+        diagnostic(RepairHistoryProjectionStatus.UNVERIFIABLE_ENCODING, RepairHistoryProjectionReason.ENCODING)
+    } catch (_: Exception) {
+        diagnostic(RepairHistoryProjectionStatus.INVALID, RepairHistoryProjectionReason.ENCODING)
+    } catch (_: Throwable) {
+        diagnostic(RepairHistoryProjectionStatus.UNAVAILABLE, RepairHistoryProjectionReason.ENCODING)
+    }
+}
+
+private class HistoryProjectionDifference(val reason: RepairHistoryProjectionReason) : RuntimeException(null, null, false, false)
+private class HistoryProjectionEncodingRefusal : RuntimeException(null, null, false, false)
+private fun historySame(matches: Boolean, reason: RepairHistoryProjectionReason) { if (!matches) throw HistoryProjectionDifference(reason) }
+private fun historyObject(value: JsonElement): JsonObject = value as? JsonObject ?: error("history object type")
+private fun historyArray(value: JsonElement): JsonArray = value as? JsonArray ?: error("history array type")
+private fun historyString(value: JsonElement): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: error("history string type")
+private fun historyNullableString(value: JsonElement): String? = if (value === JsonNull) null else historyString(value)
+private fun historyInteger(value: JsonElement): Long = (value as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull ?: error("history integer type")
+private fun historyBoolean(value: JsonElement): Boolean = (value as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull ?: error("history boolean type")
+private fun historyFields(value: JsonObject, fields: Set<String>, version: Int) {
+    require(value.keys.all { it in fields })
+    if (value.keys != fields) {
+        if (version < 3) throw HistoryProjectionEncodingRefusal()
+        error("incomplete history record")
+    }
+}
+private fun historyHexSize(value: String): Long {
+    require(value.length % 2 == 0 && value.all { it in '0'..'9' || it in 'a'..'f' })
+    return value.length.toLong() / 2L
+}
+private class HistoryProjectionDecodedWork(private val limit: Long) {
+    private var used = 0L
+    fun decode(value: String): ByteArray {
+        val next = Math.addExact(used, historyHexSize(value))
+        require(next <= limit)
+        used = next // BEFORE decoded allocation; no refunds/retries.
+        return value.hexToByteArrayStrict()
+    }
+}
+private fun historyEvidence(value: JsonElement, version: Int): RepairEvidence? {
+    if (value === JsonNull) return null
+    val row = historyObject(value)
+    historyFields(row, setOf("kind", "summary", "artifactPath"), version)
+    return RepairEvidence(historyString(row.getValue("kind")), historyString(row.getValue("summary")), historyNullableString(row.getValue("artifactPath")))
+}
+private fun historyIteration(value: JsonElement, version: Int, budget: RepairResourceBudget, work: HistoryProjectionDecodedWork, node: ModuleRevisionNode): RepairIteration {
+    val row = historyObject(value)
+    val fields = setOf("index", "failureKind", "prompt", "summary", "succeeded", "retainedRegressionIds", "before", "after", "patches") +
+        (if (version >= 2) setOf("agentInvocation", "publicationMode") else emptySet()) +
+        (if (version >= 3) setOf("disposition", "revisionId", "parentRevisionId", "runId") else emptySet())
+    historyFields(row, fields, version)
+    val index = historyInteger(row.getValue("index")); require(index in 1..Int.MAX_VALUE.toLong())
+    val retained = historyArray(row.getValue("retainedRegressionIds")); require(retained.size <= budget.maximumRegressionInputs)
+    val patches = historyArray(row.getValue("patches")); require(patches.size <= budget.maximumSourceFiles)
+    historySame(patches.size == node.changes.size, RepairHistoryProjectionReason.PATCH)
+    val parsedPatches = patches.mapIndexed { index, element ->
+        val patch = historyObject(element)
+        if (patch.keys == setOf("relativePath", "replacement")) {
+            historyString(patch.getValue("relativePath")); historyString(patch.getValue("replacement"))
+            throw HistoryProjectionEncodingRefusal()
+        }
+        historyFields(patch, setOf("relativePath", "replacementHex"), version)
+        val path = historyString(patch.getValue("relativePath"))
+        val hex = historyString(patch.getValue("replacementHex"))
+        val expected = node.changes[index]
+        historySame(path == expected.path && historyHexSize(hex) == expected.afterBytes, RepairHistoryProjectionReason.PATCH)
+        RepairPatch(path, work.decode(hex))
+    }
+    val invocation = if (version >= 2 && row.getValue("agentInvocation") !== JsonNull) {
+        val item = historyObject(row.getValue("agentInvocation"))
+        historyFields(item, setOf("receiptPath", "receiptSha256", "receiptSchemaVersion", "requestSha256", "resultChangesSha256",
+            "terminalOutcome", "receiptReleaseComplete", "assessmentStatus"), version)
+        val schema = historyInteger(item.getValue("receiptSchemaVersion")); require(schema in 1..Int.MAX_VALUE.toLong())
+        RepairAgentInvocationBinding(historyString(item.getValue("receiptPath")), historyString(item.getValue("receiptSha256")), schema.toInt(),
+            historyString(item.getValue("requestSha256")), historyString(item.getValue("resultChangesSha256")),
+            historyString(item.getValue("terminalOutcome")), historyBoolean(item.getValue("receiptReleaseComplete")),
+            RepairAgentAssessmentStatus.valueOf(historyString(item.getValue("assessmentStatus")).uppercase()))
+    } else null
+    return RepairIteration(index.toInt(), historyString(row.getValue("failureKind")), historyString(row.getValue("prompt")),
+        historyString(row.getValue("summary")), parsedPatches, retained.map(::historyString),
+        historyEvidence(row.getValue("before"), version), historyEvidence(row.getValue("after"), version),
+        historyBoolean(row.getValue("succeeded")), invocation,
+        if (version >= 2) RepairPublicationMode.valueOf(historyString(row.getValue("publicationMode")).uppercase()) else RepairPublicationMode.TEST_ONLY_NON_RELEASE,
+        if (version >= 3) RepairAttemptDisposition.valueOf(historyString(row.getValue("disposition")).uppercase()) else RepairAttemptDisposition.LEGACY_UNVERIFIED,
+        if (version >= 3) historyNullableString(row.getValue("revisionId")) else null,
+        if (version >= 3) historyNullableString(row.getValue("parentRevisionId")) else null,
+        if (version >= 3) historyNullableString(row.getValue("runId")) else null)
+}
+
 private fun recordedHistoryView(
     state: RevisionGraphState,
     graphSha256: String,

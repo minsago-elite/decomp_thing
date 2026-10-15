@@ -133,3 +133,29 @@ internal class RepairHistoryIdentityReferences internal constructor(private val 
         val PUBLIC_RECORDED_ID = Regex("(?:root_[0-9a-f]{24}|revision_[0-9]{8}_[0-9a-f]{16}|run_[0-9]{8})")
     }
 }
+
+/** Correlation of a captured derived projection only; never canonical or execution authority. */
+internal enum class RepairHistoryProjectionStatus {
+    NOT_INSPECTED, MISSING, EMPTY, UNAVAILABLE, CHANGED_DURING_CAPTURE, INVALID,
+    UNVERIFIABLE_ENCODING, DOES_NOT_MATCH_CAPTURED_GRAPH, MATCHED_CAPTURED_PROJECTION,
+}
+internal enum class RepairHistoryProjectionReason { NONE, CAPTURE, ENCODING, VERSION, CORPUS, ITERATIONS, METADATA, PATCH, RUNS, CANONICAL }
+internal enum class RepairHistoryProjectionCoverage { NOT_INSPECTED, LEGACY_FINALIZED_AND_CORPUS, FINALIZED_CORPUS_AND_RUNS }
+internal data class RepairHistoryProjectionDiagnostic(
+    val status: RepairHistoryProjectionStatus,
+    val reason: RepairHistoryProjectionReason = RepairHistoryProjectionReason.NONE,
+    val schemaVersion: Int? = null,
+    val admittedBytes: Long? = null,
+    val capturedSha256: String? = null,
+) {
+    val coverage: RepairHistoryProjectionCoverage get() = when (schemaVersion) {
+        1, 2 -> RepairHistoryProjectionCoverage.LEGACY_FINALIZED_AND_CORPUS
+        3 -> RepairHistoryProjectionCoverage.FINALIZED_CORPUS_AND_RUNS
+        else -> RepairHistoryProjectionCoverage.NOT_INSPECTED
+    }
+    init {
+        require(schemaVersion == null || schemaVersion in 1..3)
+        require(admittedBytes == null || admittedBytes in 0..MAXIMUM_REPAIR_PROJECTION_BYTES)
+        require(capturedSha256 == null || capturedSha256.matches(Regex("[0-9a-f]{64}")))
+    }
+}

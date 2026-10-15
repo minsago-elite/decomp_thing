@@ -14,15 +14,18 @@ internal enum class RepairHistoryReadStatus { RECORDED, NOT_RECORDED, UNAVAILABL
 internal class RepairHistoryReadResult private constructor(
     val status: RepairHistoryReadStatus,
     val snapshot: RepairHistorySnapshot?,
+    val projection: RepairHistoryProjectionDiagnostic = RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED),
 ) {
     companion object {
-        internal fun recorded(snapshot: RepairHistorySnapshot) = RepairHistoryReadResult(RepairHistoryReadStatus.RECORDED, snapshot)
+        internal fun recorded(snapshot: RepairHistorySnapshot, projection: RepairHistoryProjectionDiagnostic =
+            RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED)) =
+            RepairHistoryReadResult(RepairHistoryReadStatus.RECORDED, snapshot, projection)
         internal fun absent() = RepairHistoryReadResult(RepairHistoryReadStatus.NOT_RECORDED, null)
         internal fun unavailable() = RepairHistoryReadResult(RepairHistoryReadStatus.UNAVAILABLE, null)
     }
 }
 
-/** This phase deliberately does not read/reconcile derived history H or publish public output. */
+/** Reads the fixed diagnostic H leaf, never reconstructs history or publishes public output. */
 internal fun readProjectRecordedRepairHistory(
     projectRoot: Path,
     cancel: () -> Unit = {},
@@ -59,6 +62,24 @@ internal fun readRecordedRepairHistorySnapshot(
     RepairHistoryReadResult.unavailable()
 }
 
+/** Both descriptors are borrowed from the SAME fixed adapter chain, never returned to a caller. */
+private fun readRecordedRepairHistorySnapshotWithHistory(
+    revisions: LinuxDescriptor,
+    reports: LinuxDescriptor,
+    revalidateDirectory: () -> Unit,
+    cancel: () -> Unit,
+): RepairHistoryReadResult = try {
+    reports.whileOpen {
+        revisions.whileOpen {
+            requireHistoryDirectory(reports.identity, reports.identity)
+            requireHistoryDirectory(revisions.identity, reports.identity)
+            HistoryCaptureSession(revisions, revalidateDirectory, cancel).readWithHistory(reports)
+        }
+    }
+} catch (_: Throwable) {
+    RepairHistoryReadResult.unavailable()
+}
+
 private const val HISTORY_E = 2_147_483_646L
 private const val HISTORY_Q = 16_384L // Existing LinuxFilesystemSyscalls.read growth chunk, not a new quota.
 private val HISTORY_DECLARED_NAME = Regex("legacy-graph-([0-9a-f]{64})\\.json")
@@ -80,7 +101,7 @@ private class HistoryReadLedger {
     fun bind(graphBytes: Long, budget: RepairResourceBudget) {
         var bound = Math.multiplyExact(2L, graphBytes)
         bound = Math.addExact(bound, Math.multiplyExact(2L, budget.maximumGraphBytes))
-        bound = Math.addExact(bound, budget.maximumProjectionBytes) // H allowance unused in this core phase.
+        bound = Math.addExact(bound, budget.maximumProjectionBytes) // At most one diagnostic H capture; core-only leaves this unused.
         bound = Math.addExact(bound, Math.multiplyExact(2L, budget.maximumIndexEvidenceBytes))
         // Two existing Q growth reserves are separate from successful admitted payload credits.
         val workBound = Math.addExact(bound, growthReserve)
@@ -106,7 +127,11 @@ private class HistoryCaptureSession(
         cancel()
     }
 
-    fun read(): RepairHistoryReadResult {
+    fun read(): RepairHistoryReadResult = readCaptured(null)
+
+    fun readWithHistory(reports: LinuxDescriptor): RepairHistoryReadResult = readCaptured(reports)
+
+    private fun readCaptured(reports: LinuxDescriptor?): RepairHistoryReadResult {
         check()
         val graph = capture("graph.json", HISTORY_E) ?: run {
             requireMissing("recovery-binding.json")
@@ -136,6 +161,9 @@ private class HistoryCaptureSession(
                 consume(name, input.bytes) // No pathname reread; body lifetime ends after this iteration.
             }
         }
+        // H is diagnostic only and remains LOCAL until all original final continuity checks succeed.
+        val projection = if (reports == null) RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED)
+            else inspectHistory(reports, graph.bytes, budget)
         declarationNames?.let { firstNames ->
             require(names(budget) == firstNames)
             var remaining = budget.maximumIndexEvidenceBytes
@@ -151,7 +179,40 @@ private class HistoryCaptureSession(
         val bindingAgain = requireNotNull(capture("recovery-binding.json", binding.bytes.size.toLong()))
         requireSame(binding, bindingAgain)
         check()
-        return RepairHistoryReadResult.recorded(snapshot)
+        return RepairHistoryReadResult.recorded(snapshot, projection)
+    }
+
+    private fun inspectHistory(reports: LinuxDescriptor, graphBytes: ByteArray, budget: RepairResourceBudget): RepairHistoryProjectionDiagnostic {
+        check() // Canonical-chain/cancellation failures are NEVER inside the leaf-diagnostic catch.
+        val transaction = HistoryProjectionCapture(cancel)
+        val diagnostic = transaction.inspect {
+            val authorized = LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, "repair_history.json")
+            if (authorized == null) RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.MISSING)
+            else transaction.owned(authorized) { held ->
+                requireHistoryRegular(held.identity, reports.identity)
+                val path = LinuxFilesystemSyscalls.descriptorPath(held)
+                val before = Files.readAttributes(path, BasicFileAttributes::class.java)
+                val size = before.size()
+                require(before.isRegularFile && size in 0..budget.maximumProjectionBytes)
+                val captured = if (size == 0L) null else {
+                    ledger.reserve(size) // Failed H captures are NEVER refunded/retried.
+                    readStableRegularFile(LinuxFilesystemSyscalls.descriptorPath(reports), "repair_history.json", size,
+                        cancellationCheck = transaction::checkCancellation)
+                }
+                val after = Files.readAttributes(path, BasicFileAttributes::class.java)
+                val unchanged = after.isRegularFile && before.fileKey() == after.fileKey() && before.size() == after.size() &&
+                    before.lastModifiedTime() == after.lastModifiedTime() && LinuxFilesystemSyscalls.identity(held.fd) == held.identity &&
+                    (captured == null || captured.identity == held.identity && captured.bytes.size.toLong() == size)
+                val named = LinuxFilesystemSyscalls.openPathAtOrNull(reports.fd, "repair_history.json")
+                val sameName = if (named == null) false else transaction.owned(named) { it.identity == held.identity }
+                if (!unchanged || !sameName) RepairHistoryProjectionDiagnostic(
+                    RepairHistoryProjectionStatus.CHANGED_DURING_CAPTURE, RepairHistoryProjectionReason.CAPTURE, admittedBytes = size)
+                else if (captured == null) RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.EMPTY, admittedBytes = 0)
+                else compareCapturedRepairHistoryProjection(graphBytes, captured.bytes, budget)
+            }
+        }
+        check() // Also catches a reports/ancestor change hidden by a generic old stable-reader failure.
+        return diagnostic
     }
 
     private fun names(budget: RepairResourceBudget): List<String> {
@@ -189,6 +250,45 @@ private class HistoryCaptureSession(
             withHistoryOwned(named) { require(it.identity == held.identity) }
             check()
             captured
+        }
+    }
+}
+
+
+/** H-leaf errors may be diagnostic; independently observed owned-close uncertainty is fatal.
+ * Kept private so inert controls exercise the SAME catch/resource composition as actual H capture.
+ */
+private class HistoryProjectionCapture(private val cancel: () -> Unit) {
+    private var cancelled: Throwable? = null
+    private var cleanupFailed = false
+
+    fun checkCancellation() {
+        try { cancel() } catch (failure: Throwable) {
+            if (cancelled == null) cancelled = failure
+            throw failure
+        }
+    }
+
+    fun inspect(body: () -> RepairHistoryProjectionDiagnostic): RepairHistoryProjectionDiagnostic = try {
+        body()
+    } catch (failure: Throwable) {
+        cancelled?.let { throw it } // Exact first caller failure, even if a lower reader wrapped it.
+        if (cleanupFailed) throw failure // Whole-read boundary withholds the snapshot, not just H.
+        RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.UNAVAILABLE, RepairHistoryProjectionReason.CAPTURE)
+    }
+
+    fun <R : AutoCloseable, T> owned(resource: R, body: (R) -> T): T {
+        var primary: Throwable? = null
+        try {
+            return body(resource)
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally {
+            try { resource.close() } catch (cleanup: Throwable) {
+                cleanupFailed = true // BEFORE a body primary can suppress this observable failure.
+                if (primary == null) throw cleanup
+            }
         }
     }
 }
@@ -235,7 +335,7 @@ private fun readFixedHistoryDirectory(root: Path, components: List<String>, canc
     val base = root.toAbsolutePath().normalize()
     withHistoryOwned(HistoryDirectoryChain(base, components, cancel)) { chain ->
         chain.open()?.let { revisions ->
-            readRecordedRepairHistorySnapshot(revisions, chain::revalidate, cancel)
+            chain.readWithHistory(revisions)
         } ?: RepairHistoryReadResult.absent()
     }
 } catch (_: Throwable) {
@@ -273,6 +373,12 @@ private class HistoryDirectoryChain(
         }
         revalidate()
         return held.last()
+    }
+
+    fun readWithHistory(revisions: LinuxDescriptor): RepairHistoryReadResult {
+        require(held.size == components.size + 1 && held.last() === revisions &&
+            components.takeLast(2) == listOf("reports", "repair-revisions"))
+        return readRecordedRepairHistorySnapshotWithHistory(revisions, held[held.lastIndex - 1], this::revalidate, cancel)
     }
 
     private fun retain(descriptor: LinuxDescriptor) {

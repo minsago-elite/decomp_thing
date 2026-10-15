@@ -356,6 +356,66 @@ class JobStoreTest {
         assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, store.readRecordedRepairHistory(id, null).status)
     }
 
+
+    @Test
+    fun `recorded projection uses only selected source tree reports without outer fallback`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val run = historyProject(root.resolve("$id/reports/runs/selected-run/source-tree"), "run-base")
+        val store = JobStore(root)
+        val outer = root.resolve("$id/reports/repair_history.json")
+        outer.writeText("PRIVATE-outer-history-must-not-be-selected")
+        val legacyH = legacy.resolve("reports/repair_history.json")
+        val runH = run.resolve("reports/repair_history.json")
+        java.nio.file.Files.deleteIfExists(legacyH)
+        java.nio.file.Files.deleteIfExists(runH)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MISSING,
+            store.readRecordedRepairHistory(id, null).projection.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MISSING,
+            store.readRecordedRepairHistory(id, "selected-run").projection.status)
+        runH.writeText("")
+        legacyH.writeText("PRIVATE-corrupt-legacy-only")
+        val selected = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, selected.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.EMPTY, selected.projection.status)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.INVALID,
+            store.readRecordedRepairHistory(id, null).projection.status)
+        val profile = decompengine.repair.DeclarativeRepairIndexProfile("job-history-reader",
+            decompengine.repair.RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        decompengine.repair.ModuleRevisionGraph.open(run, profile).use { it.synchronizeRepairHistory() }
+        val beforeH = runH.readBytes()
+        val beforeG = run.resolve("reports/repair-revisions/graph.json").readBytes()
+        val beforeSource = run.resolve("code.c").readBytes()
+        val matched = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, matched.projection.status)
+        assertEquals(decompengine.project.sha256(beforeH), matched.projection.capturedSha256)
+        kotlin.test.assertContentEquals(beforeH, runH.readBytes())
+        kotlin.test.assertContentEquals(beforeG, run.resolve("reports/repair-revisions/graph.json").readBytes())
+        kotlin.test.assertContentEquals(beforeSource, run.resolve("code.c").readBytes())
+        assertEquals("PRIVATE-outer-history-must-not-be-selected", outer.readText())
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+            store.readRecordedRepairHistory(id, "not-selected").status)
+    }
+
+    @Test
+    fun `selected projection cannot turn cancellation or absent selected run into recorded credit`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val project = historyProject(root.resolve("$id/reports/source-tree"))
+        project.resolve("reports/repair_history.json").writeText("PRIVATE-malformed")
+        val store = JobStore(root)
+        val cancelled = store.readRecordedRepairHistory(id, null) { throw IllegalStateException("PRIVATE-cancel") }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, cancelled.status)
+        kotlin.test.assertNull(cancelled.snapshot)
+        assertEquals(decompengine.repair.RepairHistoryProjectionStatus.NOT_INSPECTED, cancelled.projection.status)
+        val missing = root.resolve("$id/reports/runs/missing-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+            store.readRecordedRepairHistory(id, "missing-run").status)
+        assertTrue(!java.nio.file.Files.exists(missing))
+        assertEquals("base", project.resolve("code.c").readText())
+    }
+
     private fun historyTestRoot(): java.nio.file.Path {
         val parent = java.nio.file.Path.of("build/test-tmp").toAbsolutePath().normalize()
         java.nio.file.Files.createDirectories(parent)

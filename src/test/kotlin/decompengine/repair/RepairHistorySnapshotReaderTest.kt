@@ -311,6 +311,279 @@ class RepairHistorySnapshotReaderTest {
         assertFalse(Files.exists(absent))
     }
 
+
+    @Test
+    fun fixedReaderInspectsMissingEmptyAndActualProducerHistoryButCoreBorrowDoesNot() {
+        val root = producer()
+        val reports = root.resolve("reports")
+        val history = reports.resolve("repair_history.json")
+        Files.deleteIfExists(history)
+        val missing = readProjectRecordedRepairHistory(root)
+        assertEquals(RepairHistoryReadStatus.RECORDED, missing.status)
+        assertEquals(RepairHistoryProjectionStatus.MISSING, missing.projection.status)
+        history.writeBytes(byteArrayOf())
+        val empty = readProjectRecordedRepairHistory(root)
+        assertEquals(RepairHistoryReadStatus.RECORDED, empty.status)
+        assertEquals(RepairHistoryProjectionStatus.EMPTY, empty.projection.status)
+        assertEquals(0L, empty.projection.admittedBytes)
+        ModuleRevisionGraph.open(root, profile).use { it.synchronizeRepairHistory() } // Producer only, before reader.
+        val beforeSource = root.resolve("code.c").readBytes()
+        val beforeGraph = reports.resolve("repair-revisions/graph.json").readBytes()
+        val beforeBinding = reports.resolve("repair-revisions/recovery-binding.json").readBytes()
+        val beforeHistory = history.readBytes()
+        val result = readProjectRecordedRepairHistory(root)
+        assertEquals(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION, result.projection.status)
+        assertEquals(sha256(beforeHistory), result.projection.capturedSha256)
+        assertEquals(missing.snapshot?.attempts?.last()?.rollback, result.snapshot?.attempts?.last()?.rollback)
+        LinuxFilesystemSyscalls.openRoot(reports.resolve("repair-revisions")).use { revisions ->
+            val core = readRecordedRepairHistorySnapshot(revisions, {}, {})
+            assertEquals(RepairHistoryReadStatus.RECORDED, core.status)
+            assertEquals(RepairHistoryProjectionStatus.NOT_INSPECTED, core.projection.status)
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        assertContentEquals(beforeSource, root.resolve("code.c").readBytes())
+        assertContentEquals(beforeGraph, reports.resolve("repair-revisions/graph.json").readBytes())
+        assertContentEquals(beforeBinding, reports.resolve("repair-revisions/recovery-binding.json").readBytes())
+        assertContentEquals(beforeHistory, history.readBytes())
+    }
+
+    @Test
+    fun historyAdmissionCountsActualSizeOnceAndNeverRefundsOrRetriesFailedBody() {
+        val selected = budget.copy(maximumProjectionBytes = 1024)
+        val root = root()
+        ModuleRevisionGraph.open(root, profile, selected).close()
+        val reports = root.resolve("reports")
+        val path = reports.resolve("repair-revisions")
+        val history = reports.resolve("repair_history.json")
+        val canonical = Files.size(path.resolve("graph.json")) + Files.size(path.resolve("recovery-binding.json"))
+        LinuxFilesystemSyscalls.openRoot(reports).use { parent ->
+            LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+                history.writeBytes(ByteArray(1024) { 'x'.code.toByte() })
+                val exact = session(revisions)
+                val result = call(exact, "readWithHistory", parent) as RepairHistoryReadResult
+                assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+                assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
+                assertEquals(1024L, result.projection.admittedBytes)
+                assertEquals(2L * canonical + 1024L, field(field(exact, "ledger")!!, "used"))
+                history.writeBytes(ByteArray(1025))
+                val oversized = session(revisions)
+                val refused = call(oversized, "readWithHistory", parent) as RepairHistoryReadResult
+                assertEquals(RepairHistoryReadStatus.RECORDED, refused.status)
+                assertEquals(RepairHistoryProjectionStatus.UNAVAILABLE, refused.projection.status)
+                assertEquals(2L * canonical, field(field(oversized, "ledger")!!, "used"))
+                for (mutation in listOf("growth", "short", "replacement")) {
+                    history.writeText("abc")
+                    var checks = 0
+                    val changed = session(revisions, cancel = {
+                        if (++checks == 3) when (mutation) {
+                            "growth" -> history.writeText("abcd")
+                            "short" -> history.writeText("ab")
+                            else -> { Files.move(history, reports.resolve("retained-old-history")); history.writeText("abc") }
+                        }
+                    })
+                    val diagnostic = call(changed, "inspectHistory", parent, path.resolve("graph.json").readBytes(), selected) as RepairHistoryProjectionDiagnostic
+                    assertTrue(diagnostic.status in setOf(RepairHistoryProjectionStatus.UNAVAILABLE, RepairHistoryProjectionStatus.CHANGED_DURING_CAPTURE), mutation)
+                    assertEquals(3L, field(field(changed, "ledger")!!, "used"))
+                    assertTrue(checks >= 3)
+                }
+                assertEquals(parent.fd, parent.whileOpen { it }); assertEquals(revisions.fd, revisions.whileOpen { it })
+            }
+        }
+    }
+
+    @Test
+    fun historySpecialLinkWritableAndMalformedLeavesNeverWashCanonicalRestoration() {
+        for (kind in listOf("directory", "symlink", "hardlink", "writable", "corrupt")) {
+            val root = producer()
+            val reports = root.resolve("reports")
+            val history = reports.resolve("repair_history.json")
+            Files.deleteIfExists(history)
+            when (kind) {
+                "directory" -> Files.createDirectory(history)
+                "symlink" -> Files.createSymbolicLink(history, Path.of("repair-revisions/graph.json"))
+                "hardlink" -> Files.createLink(history, root.resolve("code.c"))
+                "writable" -> { history.writeText("private"); Files.setPosixFilePermissions(history,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-rw----")) }
+                else -> history.writeText("PRIVATE-not-json")
+            }
+            val result = readProjectRecordedRepairHistory(root)
+            assertEquals(RepairHistoryReadStatus.RECORDED, result.status, kind)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state, kind)
+            assertEquals(if (kind == "corrupt") RepairHistoryProjectionStatus.INVALID else RepairHistoryProjectionStatus.UNAVAILABLE,
+                result.projection.status, kind)
+            assertFalse(result.projection.toString().contains("PRIVATE-"))
+            assertEquals("base", root.resolve("code.c").readText())
+        }
+    }
+
+    @Test
+    fun historyCancellationPreservesPrimaryAndFinalCanonicalChangeDiscardsLocalMatch() {
+        val root = producer()
+        ModuleRevisionGraph.open(root, profile).use { it.synchronizeRepairHistory() }
+        val reports = root.resolve("reports")
+        val path = reports.resolve("repair-revisions")
+        val primary = IllegalStateException("PRIVATE-cancel")
+        LinuxFilesystemSyscalls.openRoot(reports).use { parent ->
+            LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+                var checks = 0
+                val cancelled = session(revisions, cancel = { if (++checks == 3) throw primary })
+                assertSame(primary, assertFails { call(cancelled, "inspectHistory", parent, path.resolve("graph.json").readBytes(), budget) })
+                assertEquals(parent.fd, parent.whileOpen { it }); assertEquals(revisions.fd, revisions.whileOpen { it })
+                var checkpoints = 0
+                var changed = false
+                val read = session(revisions, revalidate = {
+                    // Existing session checks: initial; G pre/post; B pre/post; H pre/post; G2 pre.
+                    if (++checkpoints == 8) {
+                        val graph = path.resolve("graph.json")
+                        val bytes = graph.readBytes()
+                        Files.move(graph, root.resolve("retained-before-final-graph"))
+                        graph.writeBytes(bytes)
+                        changed = true
+                    }
+                })
+                assertFails { call(read, "readWithHistory", parent) }
+                assertTrue(changed)
+                assertTrue(checkpoints >= 8)
+            }
+        }
+        unavailable(readProjectRecordedRepairHistory(root) { throw primary })
+    }
+
+    @Test
+    fun migrationStillStreamsTwoDeclaredPassesWithOnlyOneDiagnosticHistoryCredit() {
+        val root = migrated()
+        val reports = root.resolve("reports")
+        val path = reports.resolve("repair-revisions")
+        val history = reports.resolve("repair_history.json").also { it.writeText("PRIVATE-corrupt") }
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        val declaredBytes = Files.newDirectoryStream(path, "legacy-graph-*.json").use { stream -> stream.sumOf { Files.size(it) } }
+        LinuxFilesystemSyscalls.openRoot(reports).use { parent ->
+            LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+                val session = session(revisions)
+                val result = call(session, "readWithHistory", parent) as RepairHistoryReadResult
+                assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+                assertEquals(true, result.snapshot?.pending?.rollback?.legacyPendingStateUnknown)
+                assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
+                assertEquals(2L * graph.size + 2L * binding.size + 2L * declaredBytes + Files.size(history),
+                    field(field(session, "ledger")!!, "used"))
+            }
+        }
+    }
+
+
+    @Test
+    fun actualHistoryCatchRejectsAuthorizedNamedAndNestedCloseOnlyFailures() {
+        for ((failAuthorized, failNamed) in listOf(true to false, false to true, true to true)) {
+            val authorizedFailure = IllegalStateException("PRIVATE-authorized-close")
+            val namedFailure = IllegalStateException("PRIVATE-named-close")
+            val closed = mutableListOf<String>()
+            val authorized = AutoCloseable { closed += "authorized"; if (failAuthorized) throw authorizedFailure }
+            val named = AutoCloseable { closed += "named"; if (failNamed) throw namedFailure }
+            val transaction = construct("HistoryProjectionCapture", {})
+            var returned: RepairHistoryProjectionDiagnostic? = null
+            var reachedMatch = false
+            val failure = assertFails {
+                returned = call(transaction, "inspect", {
+                    call(transaction, "owned", authorized, { _: AutoCloseable ->
+                        call(transaction, "owned", named, { _: AutoCloseable ->
+                            reachedMatch = true
+                            RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION)
+                        }) as RepairHistoryProjectionDiagnostic
+                    }) as RepairHistoryProjectionDiagnostic
+                }) as RepairHistoryProjectionDiagnostic
+            }
+            assertTrue(reachedMatch) // A computed local match must NOT survive observable cleanup uncertainty.
+            assertNull(returned)
+            assertSame(if (failNamed) namedFailure else authorizedFailure, failure)
+            assertEquals(listOf("named", "authorized"), closed)
+            assertEquals(true, field(transaction, "cleanupFailed"))
+        }
+    }
+
+    @Test
+    fun actualHistoryCatchKeepsBodyPrimaryWhileEachAcquiredCloseIsAttemptedOnce() {
+        for ((failAuthorized, failNamed) in listOf(true to false, false to true, true to true)) {
+            val primary = IllegalStateException("PRIVATE-malformed-body")
+            val authorizedFailure = IllegalStateException("PRIVATE-authorized-close")
+            val namedFailure = IllegalStateException("PRIVATE-named-close")
+            val closed = mutableListOf<String>()
+            val authorized = AutoCloseable { closed += "authorized"; if (failAuthorized) throw authorizedFailure }
+            val named = AutoCloseable { closed += "named"; if (failNamed) throw namedFailure }
+            val transaction = construct("HistoryProjectionCapture", {})
+            var returned: RepairHistoryProjectionDiagnostic? = null
+            val failure = assertFails {
+                returned = call(transaction, "inspect", {
+                    call(transaction, "owned", authorized, { _: AutoCloseable ->
+                        call(transaction, "owned", named, { _: AutoCloseable -> throw primary }) as RepairHistoryProjectionDiagnostic
+                    }) as RepairHistoryProjectionDiagnostic
+                }) as RepairHistoryProjectionDiagnostic
+            }
+            assertSame(primary, failure)
+            assertNull(returned)
+            assertEquals(listOf("named", "authorized"), closed)
+            assertEquals(true, field(transaction, "cleanupFailed"))
+            assertTrue(primary.suppressed.isEmpty()) // No foreign cleanup graph attached or used as authority.
+        }
+    }
+
+    @Test
+    fun actualHistoryCatchKeepsLatchedCancellationBeforeWrappedBodyAndDualCloseFailures() {
+        val primary = IllegalStateException("PRIVATE-cancel")
+        val wrapper = IllegalStateException("PRIVATE-lower-reader-wrapper")
+        val transaction = construct("HistoryProjectionCapture", { throw primary })
+        val closed = mutableListOf<String>()
+        val authorized = AutoCloseable { closed += "authorized"; throw IllegalStateException("PRIVATE-authorized-close") }
+        val named = AutoCloseable { closed += "named"; throw IllegalStateException("PRIVATE-named-close") }
+        var returned: RepairHistoryProjectionDiagnostic? = null
+        val failure = assertFails {
+            returned = call(transaction, "inspect", {
+                call(transaction, "owned", authorized, { _: AutoCloseable ->
+                    call(transaction, "owned", named, { _: AutoCloseable ->
+                        assertSame(primary, assertFails { call(transaction, "checkCancellation") })
+                        throw wrapper
+                    }) as RepairHistoryProjectionDiagnostic
+                }) as RepairHistoryProjectionDiagnostic
+            }) as RepairHistoryProjectionDiagnostic
+        }
+        assertSame(primary, failure)
+        assertNull(returned)
+        assertEquals(listOf("named", "authorized"), closed)
+        assertSame(primary, field(transaction, "cancelled"))
+        assertEquals(true, field(transaction, "cleanupFailed"))
+    }
+
+    @Test
+    fun actualHistoryCatchDowngradesOnlyCleanLeafFailureAndRetainsCleanPositive() {
+        for (malformed in listOf(false, true)) {
+            val closed = mutableListOf<String>()
+            val authorized = AutoCloseable { closed += "authorized" }
+            val named = AutoCloseable { closed += "named" }
+            val transaction = construct("HistoryProjectionCapture", {})
+            val diagnostic = call(transaction, "inspect", {
+                call(transaction, "owned", authorized, { _: AutoCloseable ->
+                    call(transaction, "owned", named, { _: AutoCloseable ->
+                        if (malformed) throw IllegalArgumentException("PRIVATE-malformed-history")
+                        RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION)
+                    }) as RepairHistoryProjectionDiagnostic
+                }) as RepairHistoryProjectionDiagnostic
+            }) as RepairHistoryProjectionDiagnostic
+            assertEquals(if (malformed) RepairHistoryProjectionStatus.UNAVAILABLE else RepairHistoryProjectionStatus.MATCHED_CAPTURED_PROJECTION,
+                diagnostic.status)
+            assertEquals(listOf("named", "authorized"), closed)
+            assertEquals(false, field(transaction, "cleanupFailed"))
+            assertNull(field(transaction, "cancelled"))
+            assertFalse(diagnostic.toString().contains("PRIVATE-"))
+        }
+        // Existing actual filesystem malformed-H control still exercises clean diagnostic -> RECORDED.
+        val root = producer()
+        root.resolve("reports/repair_history.json").writeText("PRIVATE-malformed-history")
+        val result = readProjectRecordedRepairHistory(root)
+        assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+        assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
+        assertEquals(RepairRollbackState.RESTORED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state)
+    }
+
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)
