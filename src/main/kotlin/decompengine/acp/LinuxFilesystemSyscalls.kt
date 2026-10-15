@@ -138,6 +138,12 @@ internal object LinuxFilesystemSyscalls {
     /** Owns only eight scratch bytes; the event descriptor remains borrowed from its scope. */
     class MountMetadataPollScratch(private val handle: LinuxDescriptor) : AutoCloseable {
         private var closed = false
+        // Diagnostic-only token/scalars: never reuse prior query facts or change its outcome.
+        private var failurePrimary: Throwable? = null
+        private var failureResult = 0
+        private var failureEvents = 0
+        private var failureError = 0
+        private var failureHasEvents = false
         private val descriptorCount = NativeLong(1)
         // Allocate this callback once, not at each protected checkpoint.
         private val pollAction: (Int) -> Long = { descriptor -> pollDescriptor(descriptor, null) }
@@ -147,6 +153,7 @@ internal object LinuxFilesystemSyscalls {
         /** Production has no query argument and hardwires the native poll below. */
         @Synchronized
         fun poll(): Long {
+            failurePrimary = null
             check(!closed) { "mount event poll scratch is closed" }
             return handle.whileOpen(pollAction)
         }
@@ -154,6 +161,7 @@ internal object LinuxFilesystemSyscalls {
         // Private reflection seam mirrors the statx-query controls: never a production permit.
         @Synchronized
         private fun pollWith(query: (Memory) -> Int): Long {
+            failurePrimary = null
             check(!closed) { "mount event poll scratch is closed" }
             return handle.whileOpen { descriptor -> pollDescriptor(descriptor, query) }
         }
@@ -169,17 +177,46 @@ internal object LinuxFilesystemSyscalls {
                 val error = if (result < 0) Native.getLastError() else 0
                 if (result >= 0) {
                     val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
-                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    if (events and (POLLNVAL or POLLHUP) != 0) {
+                        failureResult = result
+                        failureEvents = events
+                        failureHasEvents = true
+                        val failure = IOException("mountinfo event descriptor is invalid")
+                        failurePrimary = failure
+                        throw failure
+                    }
                     return (result.toLong() shl 32) or events.toLong()
                 }
-                if (error != EINTR) throw LinuxSyscallException("inspect host mount metadata events", error)
+                if (error != EINTR) {
+                    failureResult = result
+                    failureError = error
+                    failureHasEvents = false
+                    val failure = LinuxSyscallException("inspect host mount metadata events", error)
+                    failurePrimary = failure
+                    throw failure
+                }
             }
         }
+
+        /**
+         * Same owner's immediate catch consumes only our exact newly constructed failure once.
+         * Constructor -> throw -> Boundary catch adds no suppression entries. Foreign/query/closed
+         * failures have no token. No lock, exception-graph access, native read or errno lookup.
+         */
+        fun claimFailureObservation(failure: Throwable): FailureObservation? {
+            if (failurePrimary !== failure) return null
+            failurePrimary = null
+            return FailureObservation(failureResult, if (failureHasEvents) failureEvents else null,
+                if (failureHasEvents) null else failureError)
+        }
+
+        class FailureObservation(val result: Int, val events: Int?, val error: Int?)
 
         @Synchronized
         override fun close() {
             if (closed) return
             closed = true
+            failurePrimary = null
             polled.close()
         }
     }

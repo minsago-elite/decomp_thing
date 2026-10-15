@@ -16,6 +16,66 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `mount poll failure facts belong only to the current query and never add observations`() {
+        val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedMountHandle(-106))
+        try {
+            var calls = 0
+            for (events in listOf(16, 32, 65535)) {
+                val failure = assertFailsWith<IOException> {
+                    scriptedMountPoll(scratch) { buffer -> calls++; buffer.setShort(6, events.toShort()); 1 }
+                }
+                assertEquals("mountinfo event descriptor is invalid", failure.message)
+                assertTrue(failure.suppressed.isEmpty()) // Fresh constructor, no intermediate annotation.
+                assertEquals(null, scratch.claimFailureObservation(IOException("different identity")))
+                val fact = requireNotNull(scratch.claimFailureObservation(failure))
+                assertEquals(1, fact.result)
+                assertEquals(events, fact.events)
+                assertEquals(null, fact.error)
+                assertEquals(null, scratch.claimFailureObservation(failure)) // Consume exactly once.
+            }
+            assertEquals(3, calls)
+            val syscall = assertFailsWith<LinuxSyscallException> {
+                scriptedMountPoll(scratch) { calls++; com.sun.jna.Native.setLastError(Int.MIN_VALUE); Int.MIN_VALUE }
+            }
+            assertTrue(syscall.suppressed.isEmpty())
+            val fact = requireNotNull(scratch.claimFailureObservation(syscall))
+            assertEquals(Int.MIN_VALUE, syscall.errno)
+            assertEquals(Int.MIN_VALUE, fact.result)
+            assertEquals(Int.MIN_VALUE, fact.error)
+            assertEquals(null, fact.events) // No revents read is added on a negative result.
+            assertEquals(4, calls)
+            val primary = assertFailsWith<LinuxSyscallException> {
+                scriptedMountPoll(scratch) { calls++; com.sun.jna.Native.setLastError(5); -1 }
+            } // Deliberately leave this token unconsumed before the next query rethrows its identity.
+            val thrown = assertFailsWith<IOException> {
+                scriptedMountPoll(scratch) { calls++; throw primary }
+            }
+            assertTrue(thrown === primary)
+            assertEquals(null, scratch.claimFailureObservation(primary)) // No stale exact-identity token.
+            val beforeSuccess = assertFailsWith<IOException> {
+                scriptedMountPoll(scratch) { buffer -> calls++; buffer.setShort(6, 16); 1 }
+            }
+            var interrupted = true
+            assertEquals(0L, scriptedMountPoll(scratch) { buffer ->
+                calls++
+                if (interrupted) { interrupted = false; com.sun.jna.Native.setLastError(4); -1 }
+                else { assertEquals(0, buffer.getShort(6).toInt()); 0 }
+            })
+            assertEquals(9, calls)
+            assertEquals(null, scratch.claimFailureObservation(beforeSuccess))
+            val beforeClose = assertFailsWith<IOException> {
+                scriptedMountPoll(scratch) { buffer -> calls++; buffer.setShort(6, 16); 1 }
+            }
+            scratch.close()
+            assertEquals(null, scratch.claimFailureObservation(beforeClose))
+            val closed = assertFailsWith<IllegalStateException> { scratch.poll() } // Refuses before libc.
+            assertEquals(null, scratch.claimFailureObservation(beforeClose))
+            assertEquals(null, scratch.claimFailureObservation(closed)) // Closed admission clears old facts too.
+            assertEquals(10, calls)
+        } finally { scratch.close() }
+    }
+
+    @Test
     fun `owned statx scratch resets all bytes and retains fresh immutable identities across scopes`() {
         LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
             LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->
