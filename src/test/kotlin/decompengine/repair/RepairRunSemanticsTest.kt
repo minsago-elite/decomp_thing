@@ -816,6 +816,127 @@ class RepairRunSemanticsTest {
         }
     }
 
+    @Test
+    fun `startup snapshots authenticated target bytes when installed candidate exceeds aggregate source cap`() {
+        val paths = listOf("a.c", "b.c")
+        val original = "a".repeat(8).toByteArray()
+        val unchanged = "b".repeat(8).toByteArray()
+        val candidate = "c".repeat(16).toByteArray()
+        val foreign = "x".repeat(16).toByteArray()
+        val boundedProfile = DeclarativeRepairIndexProfile("oversized-recovery-target",
+            RepairIndexLayout(paths, paths, modules = listOf(
+                RepairModuleEvidence("a", listOf("a.c")), RepairModuleEvidence("b", listOf("b.c")))))
+        val budget = RepairResourceBudget(maximumSourceFiles = 2, maximumSourceFileBytes = 16,
+            maximumSourceBytes = 16, maximumContextFiles = 2, maximumContextBytes = 16,
+            maximumStagingDirectories = 2, maximumStagingBytes = 16, maximumPatchFiles = 1,
+            maximumPatchBytes = 16)
+        for (foreignReplacement in listOf(false, true)) {
+            val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
+            Files.createDirectories(parent)
+            val root = Files.createTempDirectory(parent, "oversized-recovery-")
+            val source = root.resolve("a.c")
+            source.writeBytes(original)
+            root.resolve("b.c").writeBytes(unchanged)
+            var exchanges = 0
+            ModuleRevisionGraph.openForTesting(root, boundedProfile, budget, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "candidate") {
+                    exchanges++
+                    throw CandidateInstallCrash()
+                }
+            }).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("a.c")) // Standalone: no owning run is fabricated.
+                assertFailsWith<CandidateInstallCrash> { graph.installCandidate(attempt, mapOf("a.c" to candidate)) }
+                // Error poisons the graph. Only close it, then reopen from durable state.
+            }
+            assertEquals(1, exchanges)
+            assertContentEquals(candidate, source.readBytes())
+            assertTrue(source.fileSize() + root.resolve("b.c").fileSize() > budget.maximumSourceBytes)
+            assertTrue(paths.all { root.resolve(it).fileSize() <= budget.maximumSourceFileBytes })
+            if (foreignReplacement) {
+                source.writeBytes(foreign)
+                val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                val failure = assertFailsWith<IllegalStateException> {
+                    ModuleRevisionGraph.open(root, boundedProfile, budget).use { }
+                }
+                assertEquals("pending repair recovery found an unrecognized source replacement", failure.message)
+                assertContentEquals(foreign, source.readBytes())
+                assertContentEquals(unchanged, root.resolve("b.c").readBytes())
+                assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                val durable = Json.parseToJsonElement(root.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+                assertTrue(durable.getValue("runs").jsonArray.isEmpty())
+                val record = durable.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+                assertEquals("unrecognized_source_state", record.getValue("failureCode").jsonPrimitive.content)
+            } else {
+                ModuleRevisionGraph.open(root, boundedProfile, budget).use { graph ->
+                    assertContentEquals(original, source.readBytes())
+                    assertContentEquals(unchanged, root.resolve("b.c").readBytes())
+                    assertNull(graph.snapshot.pendingAttemptId)
+                    assertTrue(graph.snapshot.runs.isEmpty())
+                    val recovered = graph.snapshot.nodes.last()
+                    assertEquals(ModuleRevisionStatus.REJECTED, recovered.status)
+                    assertTrue(recovered.recoveredAfterCrash)
+                    assertEquals(RepairRollbackState.RESTORED_VERIFIED, recovered.rollbackRecord?.state)
+                    assertNull(recovered.rollbackRecord?.runId)
+                    assertEquals(listOf("a"), recovered.changedModules)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `schema one owning run cannot hide pending or finalized committed rollback failure`() {
+        val root = rollbackRoot()
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
+        }).use { leavePromotedPending(it) }
+        assertFailsWith<StartupRestoreRefusal> {
+            ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") {
+                    throw StartupRestoreRefusal()
+                }
+            }).use { }
+        }
+        val graphPath = root.resolve("reports/repair-revisions/graph.json")
+        val sourcePath = root.resolve("code.c")
+        fun refuseDowngrade(expectedResolution: RepairRollbackState) {
+            val canonical = graphPath.readText()
+            val run = parseRepairRunState(Json.parseToJsonElement(canonical).jsonObject
+                .getValue("runs").jsonArray.single().toString())
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, run.status)
+            assertEquals(expectedResolution, run.rollbackResolution)
+            val downgraded = run.copy(schemaVersion = 1, status = RepairRunStatus.VALIDATION_FAILED,
+                rollbackFailureAttemptId = null, rollbackResolution = null)
+            val forged = canonical.replace(run.toJson(), downgraded.toJson())
+            assertNotEquals(canonical, forged)
+            graphPath.writeText(forged)
+            val sourceBytes = sourcePath.readBytes()
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val sourceKey = Files.readAttributes(sourcePath, BasicFileAttributes::class.java).fileKey()
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).use { } }
+            assertEquals("rollback record lacks its run failure link", failure.message)
+            assertEquals(forged, graphPath.readText())
+            assertContentEquals(sourceBytes, sourcePath.readBytes())
+            assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+            assertEquals(sourceKey, Files.readAttributes(sourcePath, BasicFileAttributes::class.java).fileKey())
+            graphPath.writeText(canonical)
+        }
+        refuseDowngrade(RepairRollbackState.RESTORE_FAILED_UNRESOLVED)
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, graph.snapshot.runs.single().status)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, graph.snapshot.runs.single().rollbackResolution)
+            assertEquals("broken", sourcePath.readText())
+        }
+        refuseDowngrade(RepairRollbackState.RESTORED_AFTER_FAILURE)
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            val run = graph.snapshot.runs.single()
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, run.status)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, run.rollbackResolution)
+            assertEquals(run.rollbackFailureAttemptId, graph.snapshot.nodes.last().rollbackRecord?.attemptId)
+        }
+    }
+
+    private class CandidateInstallCrash : Error()
     private class PromotionCrash : Error()
     private class PromotionFailure : IllegalStateException("authored promotion failure")
     private class PromotionRollbackRefusal : IllegalStateException("authored promotion CAS rollback refusal")

@@ -1091,7 +1091,7 @@ internal class ModuleRepairIndex private constructor(
             val profileSha256 = profile.configurationSha256(budget)
             require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "invalid repair profile fingerprint" }
             val layoutSha256 = layout.canonicalSha256(budget.maximumIndexEvidenceBytes)
-            val snapshot = captureSourceSnapshot(root, sourcePaths, budget, profile)
+            val snapshot = captureSourceSnapshot(root, sourcePaths, budget, profile, sourceView)
             val sourceMap = snapshot.associateBy { it.path }
             val editable = layout.editablePaths.toCollection(TreeSet())
             require(editable.isNotEmpty()) { "repair index profile has no editable source inputs" }
@@ -1212,7 +1212,7 @@ internal class ModuleRepairIndex private constructor(
                 appendJoined(behaviorRoots)
                 append('\n')
             }
-            val verifiedSnapshot = captureSourceSnapshot(root, sourcePaths, budget, profile)
+            val verifiedSnapshot = captureSourceSnapshot(root, sourcePaths, budget, profile, sourceView)
             require(revisionSha256(verifiedSnapshot) == revisionSha256(snapshot)) {
                 "repair source inputs changed while dependency evidence was indexed"
             }
@@ -4414,12 +4414,12 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
             require((pending?.repairMetadata ?: node?.repairMetadata)?.runId == run.id)
             require(node == null || node.status == ModuleRevisionStatus.REJECTED)
         }
-        if (run.schemaVersion >= 2) {
-            val failedRecords = state.nodes.filter { it.repairMetadata?.runId == run.id }
-                .mapNotNull { it.rollbackRecord }.plus(listOfNotNull(state.pending?.takeIf {
-                    it.repairMetadata?.runId == run.id }?.rollbackRecord)).filter { it.failureCode != null }
-            require(failedRecords.all { it.attemptId == failedAttempt }) { "rollback record lacks its run failure link" }
-        }
+        // Schema one cannot carry a failure link. It must not hide a committed failure record
+        // merely by downgrading the owning run; standalone records still name no run here.
+        val failedRecords = state.nodes.filter { it.repairMetadata?.runId == run.id }
+            .mapNotNull { it.rollbackRecord }.plus(listOfNotNull(state.pending?.takeIf {
+                it.repairMetadata?.runId == run.id }?.rollbackRecord)).filter { it.failureCode != null }
+        require(failedRecords.all { it.attemptId == failedAttempt }) { "rollback record lacks its run failure link" }
         if (run.status == RepairRunStatus.FULLY_ACCEPTED) {
             require(run.originalBinarySha256 != null && run.expectedObservationsSha256 != null)
             val accepted = nodes.getValue(requireNotNull(run.acceptedHeadId))
@@ -4810,16 +4810,19 @@ private fun restorePendingPreimagesBeforeIndex(
     require(targetSources.keys.sorted() == binding.sourcePaths)
     val targetBytes = targetSources.values.fold(0L) { total, source -> Math.addExact(total, source.bytes) }
     require(targetBytes <= requestedBudget.maximumSourceBytes) { "recovery source view exceeds source-byte budget" }
-    val readPaths = hashSetOf<String>()
+    val readCounts = hashMapOf<String, Int>()
     val sourceView = object : RepairRecoverySourceView {
         override val sourcePaths: List<String> get() = binding.sourcePaths
         override val editablePaths: List<String> get() = binding.editablePaths
         override fun readSource(relative: String): ByteArray {
             val source = requireNotNull(targetSources[relative]) { "recovery source view path is absent" }
-            require(relative == normalizedRelative(relative) && readPaths.add(relative) &&
-                readPaths.size <= requestedBudget.maximumSourceFiles) {
-                "recovery source view read is repeated, unnormalized, or over budget"
+            val priorReads = readCounts[relative] ?: 0
+            // At most one profile include/layout read and the two authenticated index snapshots.
+            require(relative == normalizedRelative(relative) && priorReads < 3 &&
+                (relative in readCounts || readCounts.size < requestedBudget.maximumSourceFiles)) {
+                "recovery source view read is unnormalized or exceeds its fixed three-pass budget"
             }
+            readCounts[relative] = priorReads + 1
             val blob = readStableRegularFile(store.blobsPath, source.sha256, requestedBudget.maximumSourceFileBytes)
             require(blob.sha256 == source.sha256 && blob.bytes.size.toLong() == source.bytes) {
                 "recovery source view preimage digest or size differs"
@@ -4830,7 +4833,8 @@ private fun restorePendingPreimagesBeforeIndex(
     }
     // Index identity depends on the resolved dependency evidence, not the dirty source digest.
     // The virtual view substitutes authenticated preimages and excludes paths absent from the
-    // immutable source set. Actual-file snapshots are stability checks only, never source truth.
+    // immutable source set. Both index snapshots use this same authenticated target view; an
+    // oversized unaccepted dirty aggregate cannot prevent recovery or become snapshot authority.
     val recoveryIndex = SecureRepairRuntime.loadRecoveryIndex(graphAuthority, projectRoot, profile, requestedBudget, sourceView)
     require(recoveryIndex.belongsTo(projectRoot) && recoveryIndex.budget == requestedBudget &&
         recoveryBinding(recoveryIndex) == binding) { "startup recovery dependency index is not bound to persisted authority" }
@@ -5981,17 +5985,20 @@ private fun captureSourceSnapshot(
     paths: Collection<String>,
     budget: RepairResourceBudget,
     profile: RepairIndexProfile,
+    sourceView: RepairRecoverySourceView? = null,
 ): List<IndexedSource> {
     var total = 0L
     val snapshot = paths.distinct().sorted().map { relative ->
         val normalized = normalizedRelative(relative)
-        val source = readStableRegularFile(root, normalized, budget.maximumSourceFileBytes)
-        total = Math.addExact(total, source.bytes.size.toLong())
+        val bytes = sourceView?.readSource(normalized)
+            ?: readStableRegularFile(root, normalized, budget.maximumSourceFileBytes).bytes
+        require(bytes.size.toLong() <= budget.maximumSourceFileBytes)
+        total = Math.addExact(total, bytes.size.toLong())
         if (total > budget.maximumSourceBytes) {
             throw RepairBudgetExceededException("repair source inputs exceed ${budget.maximumSourceBytes} bytes")
         }
-        profile.validateSourceContent(normalized, source.bytes)
-        IndexedSource(normalized, source.bytes.size.toLong(), source.sha256)
+        profile.validateSourceContent(normalized, bytes)
+        IndexedSource(normalized, bytes.size.toLong(), sha256(bytes))
     }
     if (snapshot.size > budget.maximumSourceFiles) {
         throw RepairBudgetExceededException("repair source inputs exceed ${budget.maximumSourceFiles} files")

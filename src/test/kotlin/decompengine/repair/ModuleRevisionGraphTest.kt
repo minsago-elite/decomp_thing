@@ -3468,6 +3468,45 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `archive refuses schema one run hiding a genuine resolved rollback failure`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(recoveredRollbackPrefix = true, temporaryParent = parent)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("resolved-failure-schema-two.zip"))
+        // Genuine schema2 failure/recovery plus later accepted contribution remains a positive.
+        val positive = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath,
+            fixture.project.parent.resolve("resolved-failure-schema-two-control"))
+        val contribution = positive.source.acceptedAcpContributions.single()
+        for (terminal in listOf("validation_failed", "interrupted", "rejected")) {
+            val tampered = fixture.project.parent.resolve("hidden-failure-schema-one-$terminal.zip")
+            rewriteArchive(bundle.archivePath, tampered) { entries ->
+                val graph = Json.parseToJsonElement(entries.getValue("reports/repair-revisions/graph.json").decodeToString()).jsonObject
+                val record = graph.getValue("nodes").jsonArray[1].jsonObject.getValue("rollbackRecord").jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                assertTrue(record.getValue("failureCode") != JsonNull)
+                assertEquals(contribution.taskId, graph.getValue("nodes").jsonArray.last().jsonObject.getValue("id").jsonPrimitive.content)
+                for (path in listOf("reports/repair-revisions/graph.json", "reports/repair_history.json")) {
+                    val document = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val runs = document.getValue("runs").jsonArray
+                    assertEquals(2, runs.size)
+                    val historical = runs.first().jsonObject
+                    assertEquals("rollback_failed", historical.getValue("status").jsonPrimitive.content)
+                    assertEquals(record.getValue("attemptId"), historical.getValue("rollbackFailureAttemptId"))
+                    val hidden = JsonObject((historical - setOf("rollbackFailureAttemptId", "rollbackResolution")) + mapOf(
+                        "schemaVersion" to JsonPrimitive(1), "status" to JsonPrimitive(terminal)))
+                    assertEquals("fully_accepted", runs.last().jsonObject.getValue("status").jsonPrimitive.content)
+                    entries[path] = JsonObject(document + ("runs" to JsonArray(listOf(hidden) + runs.drop(1))))
+                        .toString().toByteArray()
+                }
+                // All node/source/receipt/contribution bytes remain unchanged; helper reseals outer manifest.
+            }
+            val output = fixture.project.parent.resolve("hidden-failure-schema-one-$terminal-rejected")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            assertTrue(failure.message.orEmpty().contains("schema-1 repair release run owns failure-coded rollback records"), failure.message)
+            assertFalse(output.exists())
+        }
+    }
+
+    @Test
     fun `archive supports both run schemas and refuses cross paired rollback run claims`() {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
         val fixture = releaseRepairFixture(rejectedAttempts = 1, temporaryParent = parent)

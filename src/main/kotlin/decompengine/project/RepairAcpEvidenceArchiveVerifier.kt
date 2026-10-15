@@ -1422,9 +1422,13 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
                 "repair release rollback run is cross-paired with its finalized record"
             }
         }
-        if (run.document.requiredInt("schemaVersion", "repair release run") >= 2) {
-            require(attemptsByRun[run.id].orEmpty().mapNotNull { it.rollbackRecord }
-                .filter { it.failureCode != null }.all { it.attemptId == run.rollbackFailureAttemptId }) {
+        val failedRecords = attemptsByRun[run.id].orEmpty().mapNotNull { it.rollbackRecord }
+            .filter { it.failureCode != null }
+        if (run.document.requiredInt("schemaVersion", "repair release run") == 1) {
+            // A genuine committed failure upgrades its owning run; legacy bytes cannot hide it.
+            require(failedRecords.isEmpty()) { "schema-1 repair release run owns failure-coded rollback records" }
+        } else {
+            require(failedRecords.all { it.attemptId == run.rollbackFailureAttemptId }) {
                 "repair release rollback record lacks its run failure link"
             }
         }
