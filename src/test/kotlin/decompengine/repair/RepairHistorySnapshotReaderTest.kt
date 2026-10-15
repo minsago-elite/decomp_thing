@@ -713,6 +713,82 @@ class RepairHistorySnapshotReaderTest {
         return root
     }
 
+    @Test
+    fun underCapLegacyOriginUsesBothDeclaredPassesAndTheExistingLedger() {
+        val root = underCapLegacyPending()
+        val path = root.resolve("reports/repair-revisions")
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        val selected = recordedRepairHistoryReadBudget(graph)
+        assertTrue(graph.size.toLong() < selected.maximumGraphBytes)
+        val declared = Files.newDirectoryStream(path, "legacy-graph-*.json").use { it.toList() }
+        assertEquals(1, declared.size)
+        val bytes = declared.sumOf { Files.size(it) }
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            val capture = session(revisions)
+            val read = call(capture, "read") as RepairHistoryReadResult
+            assertEquals(RepairHistoryReadStatus.RECORDED, read.status)
+            assertEquals(true, read.snapshot?.pending?.rollback?.legacyPendingStateUnknown)
+            assertEquals(2L * graph.size + 2L * binding.size + 2L * bytes, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        assertEquals("candidate", root.resolve("code.c").readText())
+        val missing = root.resolve("held-original-declaration")
+        Files.move(declared.single(), missing)
+        unavailable(readProjectRecordedRepairHistory(root))
+        Files.move(missing, declared.single())
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(root).status)
+        assertContentEquals(graph, path.resolve("graph.json").readBytes())
+    }
+
+    @Test
+    fun underCapLegacyFinalSourceAndGraphBindingContinuityAndCancellationRemainMandatory() {
+        for (mutation in listOf("declaration", "graph.json", "recovery-binding.json", "cancel")) {
+            val root = underCapLegacyPending()
+            val path = root.resolve("reports/repair-revisions")
+            val graph = path.resolve("graph.json").readBytes()
+            val binding = path.resolve("recovery-binding.json").readBytes()
+            val declared = Files.newDirectoryStream(path, "legacy-graph-*.json").use { it.single() }
+            val firstPass = graph.size.toLong() + binding.size + Files.size(declared)
+            LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+                var changed = false
+                lateinit var capture: Any
+                capture = session(revisions, revalidate = {
+                    if (!changed && (field(field(capture, "ledger")!!, "used") as Long) >= firstPass) {
+                        changed = true
+                        if (mutation == "cancel") throw IllegalStateException("authored cancellation at existing check")
+                        val selected = if (mutation == "declaration") declared else path.resolve(mutation)
+                        val bytes = selected.readBytes()
+                        Files.move(selected, root.resolve("held-old-" + selected.fileName))
+                        selected.writeBytes(bytes) // Same bytes, retained different inode.
+                    }
+                })
+                assertFails { call(capture, "read") }
+                assertTrue(changed)
+                assertEquals(revisions.fd, revisions.whileOpen { it })
+            }
+            assertContentEquals(graph, path.resolve("graph.json").readBytes())
+            assertContentEquals(binding, path.resolve("recovery-binding.json").readBytes())
+            assertEquals("candidate", root.resolve("code.c").readText())
+        }
+    }
+
+    private fun underCapLegacyPending(): Path {
+        val root = root()
+        val selected = budget.copy(maximumGraphBytes = 16 * 1024)
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val attempt = graph.beginAttempt(listOf("code.c")) // Actual original schema2 producer.
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+        }
+        assertFailsWith<MigrationCrash> {
+            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
+            }).close()
+        }
+        return root
+    }
+
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)

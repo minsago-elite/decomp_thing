@@ -1095,6 +1095,101 @@ class RepairRunSemanticsTest {
         corpus.inputs.map { it.id }, RepairEvidence("compile", "code.c:1: syntax error"), corpus.sha256,
         publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
 
+    @Test
+    fun `declared owning run and retained corpus cannot drift while historical failure survives later run`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "origin-run-")
+        val source = root.resolve("code.c").also { it.writeText("broken") }
+        val selected = RepairResourceBudget(maximumGraphBytes = 32 * 1024)
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(inputs)
+            graph.beginRun(3, 60_000)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+            graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
+        }
+        // Existing authored schema3 compatibility technique, NOT historical writer proof.
+        val native = path.readText()
+        val defaults = ",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null"
+        assertTrue(defaults in native)
+        val original = native.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3").replace(defaults, "")
+        path.writeText(original)
+        class MarkerCrash : Error()
+        assertFailsWith<MarkerCrash> {
+            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw MarkerCrash()
+            }).close()
+        }
+        val marker = path.readText(); val binding = path.parent.resolve("recovery-binding.json").readBytes()
+        fun declarations(): List<RepairHistoryDeclaredGraph> = Files.newDirectoryStream(path.parent, "legacy-graph-*.json").use { stream ->
+            stream.map { RepairHistoryDeclaredGraph(it.fileName.toString(), it.readBytes()) }
+        }
+        assertContentEquals(original.toByteArray(), path.parent.resolve("legacy-graph-${sha256(original.toByteArray())}.json").readBytes())
+        val run = parseRepairRunState(Json.parseToJsonElement(marker).jsonObject.getValue("runs").jsonArray.single().toString())
+        assertNotNull(recordedRepairHistorySnapshot(marker.toByteArray(), binding, selected, declarations()).pending)
+        val changedInputs = inputs.mapIndexed { index, input -> if (index == 0)
+            ProcessInput(input.id, listOf("different"), input.stdin.copyOf()) else input }
+        val corpusMethod = Class.forName("decompengine.repair.ModuleRevisionGraphKt").declaredMethods
+            .single { it.name == "regressionCorpusSha256" }.also { it.isAccessible = true }
+        val changedDigest = corpusMethod.invoke(null, changedInputs) as String
+        val corpusMutation = marker.replace("\"args\":[\"arg0\"]", "\"args\":[\"different\"]")
+            .replace(run.regressionCorpusSha256, changedDigest)
+        val mutations = listOf(
+            marker.replace(run.toJson(), run.copy(maximumAttempts = run.maximumAttempts + 1).toJson()),
+            marker.replace(run.toJson(), run.copy(expectedObservationsSha256 = "a".repeat(64)).toJson()),
+            marker.replace("\"prompt\":\"bounded repair\"", "\"prompt\":\"changed repair\""),
+            corpusMutation,
+        )
+        for (mutation in mutations) {
+            assertNotEquals(marker, mutation)
+            assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(mutation.toByteArray(), binding, selected, declarations()) }
+            path.writeText(mutation)
+            val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            assertTrue(assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile, selected).close() }
+                .message.orEmpty().contains("complete declared rollback origin"))
+            assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+            assertEquals(mutation, path.readText()); assertEquals("broken", source.readText())
+        }
+        path.writeText(marker); source.writeText("unknown concurrent source")
+        assertFailsWith<IllegalStateException> { ModuleRevisionGraph.open(root, profile, selected).close() }
+        val failed = recordedRepairHistorySnapshot(path.readBytes(), binding, selected, declarations())
+        assertEquals(RepairRunStatus.ROLLBACK_FAILED, failed.runs.single().status)
+        source.writeText("broken")
+        lateinit var erasedFailure: String
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val historical = graph.snapshot.runs.single()
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, historical.status)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, historical.rollbackResolution)
+            val restored = path.readText()
+            val record = Json.parseToJsonElement(restored).jsonObject.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").toString()
+            val downgraded = restored.replace("      \"rollbackRecord\": $record,\n", "").replace(historical.toJson(),
+                historical.copy(schemaVersion = 1, status = RepairRunStatus.VALIDATION_FAILED,
+                    rollbackFailureAttemptId = null, rollbackResolution = null).toJson())
+            assertNotEquals(restored, downgraded)
+            erasedFailure = downgraded
+            assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(downgraded.toByteArray(), binding, selected, declarations()) }
+            // Do not mutate an open graph's disk state: actual local missing-record refusal
+            // is covered by the paired reopen controls, with no graph-lock bypass here.
+            graph.beginRun(1, 60_000)
+            graph.finishRun(RepairRunStatus.NO_CHANGES, RepairEvidence("unchanged", "later native run"))
+            assertEquals(historical, graph.snapshot.runs.first())
+        }
+        val acceptedCurrent = path.readText()
+        path.writeText(erasedFailure)
+        val forgedKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+        assertTrue(assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile, selected).close() }
+            .message.orEmpty().contains("complete declared rollback origin"))
+        assertEquals(erasedFailure, path.readText()); assertEquals(forgedKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        assertEquals("broken", source.readText())
+        path.writeText(acceptedCurrent)
+        val later = recordedRepairHistorySnapshot(path.readBytes(), binding, selected, declarations())
+        assertEquals(listOf(RepairRunStatus.ROLLBACK_FAILED, RepairRunStatus.NO_CHANGES), later.runs.map { it.status })
+        assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, later.attempts.single().rollback?.state)
+        assertEquals("broken", source.readText())
+    }
+
     private data class Fixture(val root: Path, val original: Path, val loop: TraceGuidedRepairLoop,
         val history: RepairHistory, val seenSources: MutableList<String>, val canonicalDuringPrompts: MutableList<String>)
 

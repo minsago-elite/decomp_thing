@@ -13,7 +13,7 @@ import decompengine.repair.RepairResourceBudget
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
-import decompengine.repair.requireRepairGraphByteBudget
+import decompengine.repair.requireRepairReleaseGraphAdmission
 import decompengine.repair.repairRevisionDirectoryEntryLimit
 import decompengine.repair.requireSingleLegacyRollbackOrigin
 import java.nio.charset.StandardCharsets
@@ -177,8 +177,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 verifyPreservedLegacyBytes(path, bytes)
             }
         }
-        requireRepairGraphByteBudget(graphBytes, graph.budget) { consume -> scanDeclaredSources(consume) }
-        // Retained declarations remain bounded budget/diagnostic inputs, never rollback authority.
+        requireRepairReleaseGraphAdmission(graphBytes, graph.budget) { consume -> scanDeclaredSources(consume) }
+        // Combined admission consumes at most one inventory; fallback preserves ordinary inventory checks.
         // Validate their resource inventory even when byte-credit admission returns early.
         if (!declaredSourcesScanned) scanDeclaredSources { _, _ -> }
         require(graph.schemaVersion in 3..4) {
