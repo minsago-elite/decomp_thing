@@ -249,6 +249,19 @@ static int all_write(int fd, const void *raw, size_t size) {
     }
     return 0;
 }
+/* Fixed diagnostic vocabulary only. Never emit argv, paths, input bytes or strerror.
+ * Five progress records plus at most one failure record remain well below the
+ * unchanged 256-byte host stream ceiling, including existing gate/terminal markers.
+ * error is immediate errno from a known failed syscall, or zero for a predicate. */
+static void owned_diag(unsigned stage, int error) {
+    char bytes[32];
+    int size = snprintf(bytes, sizeof bytes, "ND1:%u:%d\n", stage, error);
+    if (size > 0 && size < (int)sizeof bytes) (void)all_write(2, bytes, (size_t)size);
+}
+static int owned_diag_failure(unsigned stage, int error) {
+    owned_diag(stage, error);
+    return 1;
+}
 static int fixed_file(const char *path, const char *bytes, size_t size) {
     if (size > 16384) return -1;
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -298,10 +311,11 @@ static int host_gate(int argc, char **argv) {
     uint64_t wall = clock_ms(CLOCK_REALTIME), mono = clock_ms(CLOCK_MONOTONIC);
     if (wall >= epoch || epoch - wall > 30000 || inherited_closed() || exact_limits(nproc, 1)) return 1;
     uint64_t end = mono + (epoch - wall);
-    if (all_write(1, "OWNED_HOST_GATE_V2\n", 19) || gate_byte('H', end - 5000)) return 1;
+    if (all_write(1, "OWNED_HOST_GATE_V2\n", 19) || gate_byte('H', end - 5000)) return owned_diag_failure(10, 0);
+    owned_diag(11, 0); /* H consumed; not proof that bwrap exec/setup succeeded. */
     char *const env[] = {NULL};
     execve(argv[5], &argv[5], env);
-    return 1;
+    return owned_diag_failure(12, errno);
 }
 
 static int install_owned_filter(void) {
@@ -522,46 +536,68 @@ static int owned_metadata(pid_t pid, uint64_t *started, char uid[64], char gid[6
 }
 
 static int supervisor(int argc, char **argv) {
+    owned_diag(20, 0); /* Entered PID1 helper, before any setup authority check. */
     uint64_t epoch, nproc, parent[4];
     if (argc != 10 || getpid() != 1 || (strcmp(argv[2], "cancel") && strcmp(argv[2], "deadline")) ||
         !parse_u64(argv[3], &epoch) || !parse_u64(argv[4], &nproc) ||
-        (strcmp(argv[9], "positive") && strcmp(argv[9], "retained-child") && strcmp(argv[9], "retained-reference") && strcmp(argv[9], "inaccessible-owned"))) return 1;
-    for (unsigned i = 0; i < 4; ++i) if (!parse_u64(argv[i + 5], &parent[i])) return 1;
+        (strcmp(argv[9], "positive") && strcmp(argv[9], "retained-child") && strcmp(argv[9], "retained-reference") && strcmp(argv[9], "inaccessible-owned"))) return owned_diag_failure(21, 0);
+    for (unsigned i = 0; i < 4; ++i) if (!parse_u64(argv[i + 5], &parent[i])) return owned_diag_failure(22, 0);
     uint64_t wall = clock_ms(CLOCK_REALTIME), mono = clock_ms(CLOCK_MONOTONIC);
     if (epoch <= wall || epoch - wall > 30000 || inherited_closed() || exact_limits(nproc, 0) ||
-        !exact_state(0x1400, 0) || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)) return 1;
+        !exact_state(0x1400, 0)) return owned_diag_failure(23, 0);
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)) return owned_diag_failure(25, errno);
     uint64_t end = mono + epoch - wall, execution_end = end - 5000;
     struct stat ns[4], proc;
     int setup[2];
-    if (pipe2(setup, O_CLOEXEC)) return 1;
+    if (pipe2(setup, O_CLOEXEC)) return owned_diag_failure(30, errno);
     /* The legacy helper's exact48-byte setup receipt is consumed here, not on
      * the host control stream. No child or JVM runs in this setup interval. */
     int saved_stdout = dup(1);
-    if (saved_stdout < 0 || dup2(setup[1], 1) < 0) return 1;
+    if (saved_stdout < 0) return owned_diag_failure(31, errno);
+    if (dup2(setup[1], 1) < 0) return owned_diag_failure(31, errno);
     char numbers[4][24]; char *setup_argv[5] = {argv[0], numbers[0], numbers[1], numbers[2], numbers[3]};
     for (unsigned i = 0; i < 4; ++i) snprintf(numbers[i], sizeof numbers[i], "%" PRIu64, parent[i]);
     int configured = legacy_loopback(5, setup_argv);
-    if (dup2(saved_stdout, 1) < 0 || close(saved_stdout) || close(setup[1])) return 1;
+    if (dup2(saved_stdout, 1) < 0) return owned_diag_failure(33, errno);
+    if (close(saved_stdout)) return owned_diag_failure(33, errno);
+    if (close(setup[1])) return owned_diag_failure(33, errno);
     unsigned char setup_receipt[48]; ssize_t received = read(setup[0], setup_receipt, sizeof setup_receipt);
-    if (close(setup[0]) || configured || received != 48) return 1;
+    int received_error = received < 0 ? errno : 0;
+    if (close(setup[0])) return owned_diag_failure(34, errno);
+    if (received < 0) return owned_diag_failure(34, received_error);
+    if (configured || received != 48) return owned_diag_failure(35, 0);
+    owned_diag(36, 0);
     int blackhole = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (blackhole < 0) return owned_diag_failure(40, errno);
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    if (blackhole != 3 || bind(blackhole, (struct sockaddr *)&address, sizeof address) ||
-        namespace_reference("pid", 4, &ns[0]) || namespace_reference("user", 5, &ns[1]) ||
-        namespace_reference("net", 6, &ns[2]) || namespace_reference("mnt", 7, &ns[3])) return 1;
+    if (blackhole != 3) return owned_diag_failure(40, 0);
+    if (bind(blackhole, (struct sockaddr *)&address, sizeof address)) return owned_diag_failure(41, errno);
+    if (namespace_reference("pid", 4, &ns[0]) || namespace_reference("user", 5, &ns[1]) ||
+        namespace_reference("net", 6, &ns[2]) || namespace_reference("mnt", 7, &ns[3])) return owned_diag_failure(42, 0);
     char own_proc[16];
     ssize_t own_proc_length = readlink("/proc/self", own_proc, sizeof own_proc);
-    if (own_proc_length != 1 || own_proc[0] != '1') return 1;
+    if (own_proc_length < 0) return owned_diag_failure(43, errno);
+    if (own_proc_length != 1 || own_proc[0] != '1') return owned_diag_failure(43, 0);
     int procfd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (procfd < 0) return owned_diag_failure(44, errno);
     struct statx proc_mount;
-    if (procfd != 8 || fstat(procfd, &proc) || statx(procfd, "", AT_EMPTY_PATH, STATX_MNT_ID, &proc_mount) ||
-        !(proc_mount.stx_mask & STATX_MNT_ID) || !proc_mount.stx_mnt_id) return 1;
+    if (procfd != 8) return owned_diag_failure(44, 0);
+    if (fstat(procfd, &proc)) return owned_diag_failure(45, errno);
+    if (statx(procfd, "", AT_EMPTY_PATH, STATX_MNT_ID, &proc_mount)) return owned_diag_failure(45, errno);
+    if (!(proc_mount.stx_mask & STATX_MNT_ID) || !proc_mount.stx_mnt_id) return owned_diag_failure(46, 0);
+    owned_diag(50, 0);
     struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     struct __user_cap_data_struct zero[2] = {{0}, {0}};
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) ||
-        syscall(SYS_capset, &header, zero) || !exact_state(0, 1) || install_owned_filter() || denial_canaries() || private_proc_alone() != 1) return 1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return owned_diag_failure(51, errno);
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)) return owned_diag_failure(52, errno);
+    if (syscall(SYS_capset, &header, zero)) return owned_diag_failure(53, errno);
+    if (!exact_state(0, 1)) return owned_diag_failure(54, 0);
+    if (install_owned_filter()) return owned_diag_failure(55, 0);
+    if (denial_canaries()) return owned_diag_failure(56, 0);
+    if (private_proc_alone() != 1) return owned_diag_failure(57, 0);
+    owned_diag(58, 0);
     uint64_t inner_start; char own_uid[64], own_gid[64];
-    if (owned_metadata(1, &inner_start, own_uid, own_gid)) return 1;
+    if (owned_metadata(1, &inner_start, own_uid, own_gid)) return owned_diag_failure(60, 0);
     char gate_record[2048];
     int length = snprintf(gate_record, sizeof gate_record,
         "schema=2\ncaseName=%s\ncontrol=%s\ninnerPid=1\ninnerStart=%" PRIu64 "\nactiveCapabilitiesZero=true\nboundingMask=1400\nnoNewPrivileges=true\nseccomp=2\nescapeCanariesPassed=true\nprivateProcOnlyPid1=true\nnproc=%" PRIu64 "\nnofile=128\nfsize=67108864\nas=2147483648\ncpu=120\ncore=0\n"
@@ -569,8 +605,10 @@ static int supervisor(int argc, char **argv) {
         argv[2], argv[9], inner_start, nproc, (uintmax_t)ns[0].st_dev, (uintmax_t)ns[0].st_ino,
         (uintmax_t)ns[1].st_dev, (uintmax_t)ns[1].st_ino, (uintmax_t)ns[2].st_dev, (uintmax_t)ns[2].st_ino,
         (uintmax_t)ns[3].st_dev, (uintmax_t)ns[3].st_ino, (uintmax_t)proc.st_dev, (uintmax_t)proc.st_ino, (uint64_t)proc_mount.stx_mnt_id);
-    if (length <= 0 || length >= (int)sizeof gate_record || fixed_file("/fixture-output/gate.properties", gate_record, (size_t)length) ||
-        children_empty() != 1 || all_write(1, "OWNED_PID1_GATE_V2\n", 19) || gate_byte('P', execution_end)) return 1;
+    if (length <= 0 || length >= (int)sizeof gate_record) return owned_diag_failure(61, 0);
+    if (fixed_file("/fixture-output/gate.properties", gate_record, (size_t)length)) return owned_diag_failure(62, 0);
+    if (children_empty() != 1) return owned_diag_failure(63, 0);
+    if (all_write(1, "OWNED_PID1_GATE_V2\n", 19) || gate_byte('P', execution_end)) return owned_diag_failure(64, 0);
     int child_output = -1, child_handle = -1, status = 0, failure = 0, child_reaped = 0, eof = 0, query_count = 0, qtype = 0;
     char child_bytes[OWNED_MAX_OUTPUT + 1]; size_t child_count = 0;
     pid_t child = launch_inner(&child_output, &child_handle, argv[2], argv[3]);
