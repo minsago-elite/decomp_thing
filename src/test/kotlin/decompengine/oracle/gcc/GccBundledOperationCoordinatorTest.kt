@@ -560,7 +560,15 @@ class GccBundledOperationCoordinatorTest {
             val fullBudget = GccCompilerEngineContainmentBudgets(
                 suite.budgets.fullRecoveryCc1ExportWallClockMillis, budgets().maximumResidentBytes, 32)
             assertFails { build(limits = fullBudget) }
-            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 6)
+            // This default policy has no retained parallel throughput; keep the v2 full-export control serial.
+            assertEquals(null, suite.fullRecoveryCc1Throughput)
+            val parallelRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 6)
+            val parallel = assertFailsWith<IllegalArgumentException> {
+                GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                    selected, parallelRuntime, fullBudget, policy(), profile)
+            }
+            assertEquals("parallel full recovery requires the retained cc1 throughput policy", parallel.message)
+            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 5)
             val fullIntent = GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 selected, fullRuntime, fullBudget, policy(), profile)
             assertEquals(fullBudget, fullIntent.budgets)
