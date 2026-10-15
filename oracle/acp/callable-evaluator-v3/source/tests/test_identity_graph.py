@@ -292,25 +292,33 @@ class IdentityGraph(unittest.TestCase):
             helper=work/'inert-helper';helper.write_text('NOT EXECUTED')
             for mutate in mutations:
                 value=graph();mutate(value)
-                result=completed_result(json.dumps(value).encode(),target_sha=gate.digest(helper))
+                result=completed_result(json.dumps(value).encode(),target_sha=gate.digest(helper),phase='probe')
+                self.assertTrue(gate._complete_execution(result))
+                gate._require_helper_target(result,gate.digest(helper))
                 with patch.object(gate,'bounded_run',return_value=result) as runner, patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                     with self.assertRaises(ValueError) as failure:gate.probe(source,helper,work,{})
                     self.assertIs(failure.exception.bounded_result,result)
                     self.assertEqual(runner.call_args.kwargs['phase'],'probe')
             refusal={'schemaVersion':3,'status':'refused','diagnostics':['unsupported-integer-builtin-kind']}
-            result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=gate.digest(helper))
+            result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=gate.digest(helper),phase='probe')
+            self.assertTrue(gate._complete_execution(result))
+            gate._require_helper_target(result,gate.digest(helper))
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 refused=gate.probe(source,helper,work,{})
                 self.assertEqual(refused['status'],'refused');self.assert_unknown(refused)
             fixture={'schemaVersion':3,'fixtureOnly':True,'status':'supported','diagnostic':'','visited':1}
-            result=completed_result(json.dumps(fixture).encode(),target_sha=gate.digest(helper))
+            result=completed_result(json.dumps(fixture).encode(),target_sha=gate.digest(helper),phase='probe')
+            self.assertTrue(gate._complete_execution(result))
+            gate._require_helper_target(result,gate.digest(helper))
             with patch.object(gate,'bounded_run',return_value=result), patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
                 with self.assertRaisesRegex(ValueError,'fixture-only'):gate.probe(source,helper,work,{})
 
     def test_trusted_enrichment_is_explicit_and_cannot_enter_through_raw_gate(self):
         value=graph()
         bindings={'sourceSha256':'a'*64,'helperSha256':'0'*64,'inputsUnchanged':True}
-        execution=gate.public_result(completed_result())
+        execution=gate.public_result(completed_result(phase='probe'))
+        self.assertTrue(gate._complete_execution(execution))
+        gate._require_helper_target(execution,bindings['helperSha256'])
         execution['inputBindings']=bindings
         value.update(execution=execution,inputBindings=bindings)
         with self.assertRaises(ValueError):gate._validate_raw_helper(value)
@@ -327,14 +335,18 @@ class IdentityGraph(unittest.TestCase):
             def swapped(*args,**kwargs):
                 helper.write_bytes(b'authored substituted helper')
                 actual_sha=gate.digest(helper)
-                result=completed_result(json.dumps(graph()).encode(),target_sha=actual_sha)
+                result=completed_result(json.dumps(graph()).encode(),target_sha=actual_sha,phase='probe')
+                self.assertTrue(gate._complete_execution(result))
+                gate._require_helper_target(result,actual_sha)
                 helper.write_bytes(original)  # pre/post pathname digests agree
                 return result
             with patch.object(gate,'bounded_run',side_effect=swapped),patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
-                with self.assertRaisesRegex(ValueError,'monitor-proven executable'):gate.probe(source,helper,work,{})
+                with self.assertRaisesRegex(ValueError,'monitor-proven immutable executable'):gate.probe(source,helper,work,{})
             value=graph();bindings={'sourceSha256':'a'*64,'helperSha256':'0'*64,'inputsUnchanged':True}
-            execution=gate.public_result(completed_result());execution['inputBindings']=bindings
+            execution=gate.public_result(completed_result(phase='probe'));execution['inputBindings']=bindings
             value.update(execution=execution,inputBindings=bindings)
+            self.assertTrue(gate._complete_execution(execution))
+            gate._require_helper_target(execution,bindings['helperSha256'])
             gate._raw_from_receipt(value)
             for mutation in ('claimed-sha','target-pin-inode'):
                 bad=copy.deepcopy(value)
