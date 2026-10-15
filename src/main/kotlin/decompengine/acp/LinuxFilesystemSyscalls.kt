@@ -135,6 +135,58 @@ internal object LinuxFilesystemSyscalls {
         false
     }
 
+    /** Owns only eight scratch bytes; the event descriptor remains borrowed from its scope. */
+    class MountMetadataPollScratch(private val handle: LinuxDescriptor) : AutoCloseable {
+        private var closed = false
+        private val descriptorCount = NativeLong(1)
+        // Allocate this callback once, not at each protected checkpoint.
+        private val pollAction: (Int) -> Long = { descriptor -> pollDescriptor(descriptor, null) }
+        // Allocate native storage last: no subsequent callback/object initialization can fail.
+        private val polled = Memory(POLLFD_BYTES.toLong())
+
+        /** Production has no query argument and hardwires the native poll below. */
+        @Synchronized
+        fun poll(): Long {
+            check(!closed) { "mount event poll scratch is closed" }
+            return handle.whileOpen(pollAction)
+        }
+
+        // Private reflection seam mirrors the statx-query controls: never a production permit.
+        @Synchronized
+        private fun pollWith(query: (Memory) -> Int): Long {
+            check(!closed) { "mount event poll scratch is closed" }
+            return handle.whileOpen { descriptor -> pollDescriptor(descriptor, query) }
+        }
+
+        private fun pollDescriptor(descriptor: Int, query: ((Memory) -> Int)?): Long {
+            // These original field writes reset all eight bytes, including prior revents.
+            polled.setInt(0, descriptor)
+            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
+            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            while (true) {
+                val result = if (query == null) libc.poll(polled, descriptorCount, 0) else query(polled)
+                // Capture errno before any other native memory/cleanup operation can alter it.
+                val error = if (result < 0) Native.getLastError() else 0
+                if (result >= 0) {
+                    val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                    if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                    return (result.toLong() shl 32) or events.toLong()
+                }
+                if (error != EINTR) throw LinuxSyscallException("inspect host mount metadata events", error)
+            }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            polled.close()
+        }
+    }
+
+    fun mountMetadataPollChanged(observation: Long): Boolean =
+        observation ushr 32 > 0 && observation.toInt() and (POLLPRI or POLLERR) != 0
+
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
         handle.signalWhileOpen { descriptor ->
@@ -437,19 +489,20 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
+                    cancellationCheck()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                    }
+                    if (count == 0L) return total
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    output.write(buffer.getByteArray(0, count.toInt()))
+                    cancellationCheck()
                 }
-                if (count == 0L) return total
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                output.write(buffer.getByteArray(0, count.toInt()))
-                cancellationCheck()
             }
         }
     }
@@ -463,34 +516,35 @@ internal object LinuxFilesystemSyscalls {
     ): Long {
         require(maximumBytes >= 0) { "copy byte budget must not be negative" }
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(BUFFER_BYTES.toLong())
-            var total = 0L
-            while (true) {
-                cancellationCheck()
-                val count = retryOnInterrupted("copy authenticated runtime file") {
-                    libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
-                }
-                if (count == 0L) {
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
                     cancellationCheck()
-                    call("synchronize private runtime file") { libc.fsync(destination.fd) }
-                    cancellationCheck()
-                    return total
-                }
-                if (count < 0L) throw syscallFailure("copy authenticated runtime file")
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) throw LinuxResourceLimitException()
-                var offset = 0L
-                while (offset < count) {
-                    val written = retryOnInterrupted("write private runtime file") {
-                        libc.write(
-                            destination.fd,
-                            buffer.share(offset),
-                            NativeLong(count - offset),
-                        ).toLong()
+                    val count = retryOnInterrupted("copy authenticated runtime file") {
+                        libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
                     }
-                    if (written <= 0L) throw syscallFailure("write private runtime file")
-                    offset += written
-                    cancellationCheck()
+                    if (count == 0L) {
+                        cancellationCheck()
+                        call("synchronize private runtime file") { libc.fsync(destination.fd) }
+                        cancellationCheck()
+                        return total
+                    }
+                    if (count < 0L) throw syscallFailure("copy authenticated runtime file")
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    var offset = 0L
+                    while (offset < count) {
+                        val written = retryOnInterrupted("write private runtime file") {
+                            libc.write(
+                                destination.fd,
+                                buffer.share(offset),
+                                NativeLong(count - offset),
+                            ).toLong()
+                        }
+                        if (written <= 0L) throw syscallFailure("write private runtime file")
+                        offset += written
+                        cancellationCheck()
+                    }
                 }
             }
         }
@@ -765,6 +819,46 @@ internal object LinuxFilesystemSyscalls {
     }
 
     fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
+
+    /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
+    class StatxIdentityScratch : AutoCloseable {
+        private var closed = false
+        private val statistics = Memory(STATX_BYTES)
+
+        @Synchronized
+        fun identity(fd: Int): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, null, null)
+        }
+
+        // Script only through reflection in controls; production always uses libc and the proc fallback.
+        @Synchronized
+        private fun identityWith(fd: Int, query: (Memory) -> Long, fallback: () -> LinuxFileIdentity): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, query, fallback)
+        }
+
+        private fun queryIdentity(fd: Int, query: ((Memory) -> Long)?, fallback: (() -> LinuxFileIdentity)?): LinuxFileIdentity {
+            statistics.clear() // Reset all 256 bytes before each observation, never reuse an identity.
+            val observed = descriptorStatxQueryOrNull {
+                retryOnInterrupted("inspect pinned descriptor identity") {
+                    if (query == null) {
+                        libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                            STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                    } else query(statistics)
+                }
+            }
+            return (if (observed == null) null else decodeDescriptorStatxIdentity(statistics))
+                ?: if (fallback == null) descriptorProcIdentity(fd) else fallback()
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            statistics.close()
+        }
+    }
 
     /** One descriptor-relative query preserves live checks without repeated stat/fdinfo reads. */
     private fun descriptorStatxIdentity(fd: Int): LinuxFileIdentity? = Memory(STATX_BYTES).use { statistics ->
