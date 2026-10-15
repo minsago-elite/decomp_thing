@@ -326,11 +326,102 @@ class AgentProgressJournalTest {
     }
 
     @Test
+    fun `basic authorization credentials are removed without a configured token`() {
+        val token = "c3ludGhldGljOnNlbnRpbmVsIQ=="
+        val redactor = ProgressRedactor(emptyList())
+        for (prefix in listOf("Authorization: ", "aUtHoRiZaTiOn :\t", "Proxy-Authorization\t=\t")) {
+            for (scheme in listOf("Basic ", "bAsIc\t")) {
+                val input = "before; " + prefix + scheme + token + "; after"
+                assertEquals("before; " + prefix + "[redacted]; after", redactor.text(input))
+                assertFalse(redactor.text(input).contains(token))
+            }
+        }
+        for (secret in listOf("Basic", "Authorization", token.take(8))) {
+            val safe = ProgressRedactor(listOf(secret)).text("Authorization: Basic $token")
+            assertFalse(safe.contains(token))
+            assertFalse(safe.contains(token.drop(8)))
+        }
+        val publicText = "Basic examples use placeholders; authorization policy remains public."
+        assertEquals(publicText, redactor.text(publicText))
+        val markerSecrets = listOf("[redacted]", "[unredactable text omitted]")
+        assertEquals("", ProgressRedactor(markerSecrets).text("Authorization: Basic $token"))
+    }
+
+    @Test
+    fun `split basic authorization is never previewed raw or persisted with its token`() {
+        val root = Files.createTempDirectory(
+            Files.createDirectories(java.nio.file.Path.of("build", "progress-basic-authorization-tests")), "journal-",
+        )
+        val tokenPrefix = "c3ludGhl"
+        val tokenSuffix = "dGljOnNlbnRpbmVs"
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("task", request(root))
+            task.event(AgentMessageEvent(0, "basic", AgentMessageRole.ASSISTANT, "Authorization: Ba", false))
+            task.event(AgentMessageEvent(1, "basic", AgentMessageRole.ASSISTANT, "sic $tokenPrefix", false))
+            task.event(AgentMessageEvent(2, "basic", AgentMessageRole.ASSISTANT, tokenSuffix, true))
+        }
+        val messages = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }
+            .filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3, messages.size)
+        messages.take(2).forEach {
+            assertFalse(it.getValue("completed").jsonPrimitive.boolean)
+            assertFalse("text" in it)
+        }
+        val completed = messages.last()
+        assertTrue(completed.getValue("completed").jsonPrimitive.boolean)
+        assertFalse(completed.getValue("textOmitted").jsonPrimitive.boolean)
+        assertEquals("Authorization: [redacted]", completed.getValue("text").jsonPrimitive.content)
+        val persisted = Files.readString(root.resolve(AgentProgressJournal.FILE_NAME))
+        listOf(tokenPrefix, tokenSuffix, tokenPrefix + tokenSuffix).forEach { assertFalse(persisted.contains(it)) }
+    }
+
+    @Test
     fun `replacement output cannot synthesize a reordered secret`() {
         val redactor = ProgressRedactor(listOf("foo", "[redacted]X"))
         assertEquals("[redacted]", redactor.text("fooX"))
         val marker = ProgressRedactor(listOf("[redacted]"))
         assertFalse(marker.text("hello [redacted] world").contains("[redacted]"))
+    }
+
+    @Test
+    fun `fixed omission markers cannot disclose configured secrets`() {
+        val oversized = "[oversized text omitted]"
+        val unredactable = "[unredactable text omitted]"
+        assertEquals("", ProgressRedactor(listOf(oversized)).text("x".repeat(16_385)))
+        assertEquals("", ProgressRedactor(listOf("[redacted]", unredactable)).text("[redacted]"))
+        // Replacement expansion crosses the same bound even though the original input fits.
+        assertEquals("", ProgressRedactor(listOf("x", oversized)).text("x".repeat(2_000)))
+        // The truncation suffix must not bypass the final fallback check either.
+        assertEquals("", ProgressRedactor(listOf("preview truncated", unredactable)).text("abcdef", 3))
+
+        val ordinary = ProgressRedactor(emptyList())
+        assertEquals(oversized, ordinary.text("x".repeat(16_385)))
+        assertEquals(unredactable, ProgressRedactor(listOf("[redacted]")).text("[redacted]"))
+        assertEquals("a… [preview truncated]", ordinary.text("a\uD83D\uDE00b", 2))
+        assertEquals("unchanged", ordinary.text("unchanged"))
+    }
+
+    @Test
+    fun `journal persists safe empty previews when omission markers are sensitive`() {
+        val root = Files.createTempDirectory(
+            Files.createDirectories(java.nio.file.Path.of("build", "progress-redactor-fallback-tests")), "journal-",
+        )
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
+        AgentProgressJournal(root, "repair", sensitiveValues = secrets, maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("task", request(root))
+            task.event(AgentToolEvent(0, "tool", "x".repeat(16_385), AgentToolStatus.FAILED))
+            task.event(AgentMessageEvent(1, "message", AgentMessageRole.ASSISTANT, "[reda", false))
+            task.event(AgentMessageEvent(2, "message", AgentMessageRole.ASSISTANT, "cted]", true))
+        }
+        val snapshot = AgentProgressJournal.read(root)!!
+        val events = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+        val tool = events.single { it["kind"]?.jsonPrimitive?.content == "tool" }
+        val message = events.last { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals("", tool.getValue("text").jsonPrimitive.content)
+        assertEquals("", message.getValue("text").jsonPrimitive.content)
+        assertFalse(message.getValue("textOmitted").jsonPrimitive.boolean)
+        val persisted = Files.readString(root.resolve(AgentProgressJournal.FILE_NAME))
+        secrets.forEach { assertFalse(persisted.contains(it)) }
     }
 
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(

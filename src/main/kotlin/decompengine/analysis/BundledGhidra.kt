@@ -48,6 +48,14 @@ class BundledGhidra private constructor(val root: Path) {
         return command
     }
 
+    /** Only the generic exporter uses this opt-in gate; existing probe/oracle commands stay unchanged. */
+    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
+        val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
+        val command = workerCommand(checkpoint, libraries) + "await-parent-launch" + invocation.arguments()
+        checkpoint("before returning owned bundled Ghidra analysis command")
+        return command
+    }
+
     private fun workerCommand(checkpoint: (String) -> Unit, libraries: List<Path>): List<String> {
         val bridge = root.resolve("decomp-ghidra-bridge.jar")
         require(libraries.isNotEmpty()) { "Bundled Ghidra libraries are missing; rebuild installDist" }
@@ -57,7 +65,8 @@ class BundledGhidra private constructor(val root: Path) {
         val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         require(Files.isExecutable(java)) { "The application JDK has no executable Java worker: $java" }
         checkpoint("after checking bundled Ghidra Java worker")
-        val command = GhidraWorkerCommand.prefix(java, release, classPath)
+        val prefix = GhidraWorkerCommand.prefix(java, release, classPath)
+        val command = listOf(prefix.first(), "-XX:-UsePerfData") + bundledGhidraDirectoryOptions() + prefix.drop(1)
         checkpoint("after preparing bundled Ghidra worker command")
         return command
     }
@@ -179,6 +188,23 @@ class BundledGhidra private constructor(val root: Path) {
         }
 
         internal fun at(root: Path): BundledGhidra = BundledGhidra(root.toAbsolutePath().normalize())
+    }
+}
+
+/** Forward only the parent's explicit directory policy, independent of the child's working directory. */
+internal fun bundledGhidraDirectoryOptions(): List<String> {
+    val workingDirectory = Path.of("").toAbsolutePath().normalize()
+    return listOf("user.home", "java.io.tmpdir", "jna.tmpdir").mapNotNull { name ->
+        val value = System.getProperty(name)
+        require(value != null || name == "jna.tmpdir") { "Missing bundled Ghidra parent directory property: $name" }
+        value?.let {
+            require(it.isNotBlank() && it.none { character -> character.code < 0x20 || character.code == 0x7f }) {
+                "Invalid bundled Ghidra parent directory property: $name"
+            }
+            val path = workingDirectory.resolve(Path.of(it)).normalize()
+            require(path.isAbsolute) { "Bundled Ghidra parent directory is not absolute: $name" }
+            "-D$name=$path"
+        }
     }
 }
 

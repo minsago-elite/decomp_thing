@@ -20,6 +20,17 @@ public final class BundledGhidraWorker {
 
     public static void main(String[] arguments) {
         try {
+            if (arguments.length > 1 && arguments[1].equals("await-parent-launch")) {
+                // A native launch may return its process handle after the parent's deadline.
+                // Do not initialize Ghidra or touch project/output files without ownership.
+                if (System.in.read() != '1' || System.in.read() != '\n') {
+                    throw new IllegalStateException("Parent did not authorize bundled analysis launch");
+                }
+                String[] admitted = new String[arguments.length - 1];
+                admitted[0] = arguments[0];
+                System.arraycopy(arguments, 2, admitted, 1, arguments.length - 2);
+                arguments = admitted;
+            }
             run(arguments);
             System.exit(0);
         } catch (Exception failure) {
@@ -30,6 +41,7 @@ public final class BundledGhidraWorker {
 
     private static void run(String[] arguments) throws Exception {
         if (arguments.length < 2) throw new IllegalArgumentException("Expected bundle and operation");
+        validateNativeCallInvocation(arguments);
         Path bundle = Path.of(arguments[0]).toAbsolutePath().normalize();
         var configuration = new HeadlessGhidraApplicationConfiguration();
         Application.initializeApplication(new GhidraApplicationLayout(bundle.toFile()), configuration);
@@ -92,5 +104,32 @@ public final class BundledGhidraWorker {
         }
         if (analyzer.checkAnalysisTimedOut()) throw new IllegalStateException("Ghidra analysis timed out");
         if (!exportsCompleted) throw new IllegalStateException("Bundled Ghidra import or export failed; existing output is not a successful result");
+    }
+
+    private static void validateNativeCallInvocation(String[] arguments) {
+        boolean requested = Arrays.stream(arguments).anyMatch(value ->
+            value.equals("ExportNativeCallsV1.class") || value.equals("ExportNativeCallsV1.java"));
+        if (!requested) return;
+        if (arguments.length != 20 || !arguments[1].equals("analyze") ||
+            !arguments[6].equals("ExportProgramModel.java") || !arguments[7].equals("4") ||
+            !arguments[10].equals("full") || !arguments[12].equals("ExportNativeCallsV1.class") ||
+            !arguments[13].equals("6") || !arguments[15].equals(arguments[8]) ||
+            !arguments[16].equals(arguments[9]) || !arguments[18].equals(arguments[11])) {
+            throw new IllegalArgumentException("Native call observations require the exact paired full-model invocation");
+        }
+        for (int index : new int[] {8, 9, 14, 17}) {
+            if (!arguments[index].matches("[a-f0-9]{64}")) {
+                throw new IllegalArgumentException("Native call observation binding digest is invalid");
+            }
+        }
+        Path model = Path.of(arguments[11]);
+        Path nativeDirectory = Path.of(arguments[19]);
+        if (!model.isAbsolute() || !model.normalize().equals(model) ||
+            model.getFileName() == null || !model.getFileName().toString().equals("program_model.json") ||
+            model.getParent() == null || model.getParent().getFileName() == null ||
+            !model.getParent().getFileName().toString().equals("reports") ||
+            !nativeDirectory.equals(model.getParent().resolve("native-calls-v1"))) {
+            throw new IllegalArgumentException("Native call observation outputs differ from the paired report layout");
+        }
     }
 }

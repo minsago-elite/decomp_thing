@@ -30,6 +30,62 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class GccBundledGhidraDeploymentReferenceTest {
     @Test
+    fun `compiled worker rejects unpaired native scripts before initializing Ghidra`() {
+        GccBundledGhidraDeploymentReference.open().use { deployment ->
+            val urls = deployment.reference.classPath.map { deployment.bundleRoot.resolve(it).toUri().toURL() }.toTypedArray()
+            java.net.URLClassLoader(urls, ClassLoader.getPlatformClassLoader()).use { loader ->
+                val worker = Class.forName("decompengine.ghidra.BundledGhidraWorker", false, loader)
+                val method = worker.getDeclaredMethod("validateNativeCallInvocation", Array<String>::class.java).also { it.isAccessible = true }
+                val paired = arrayOf("/bundle", "analyze", "/scratch/state", "archival_reconstruction", "/input", "/scripts",
+                    "ExportProgramModel.java", "4", SHA_A, SHA_B, "full", "/scratch/reports/program_model.json",
+                    "ExportNativeCallsV1.class", "6", SHA_C, SHA_A, SHA_B, SHA_C, "/scratch/reports/program_model.json",
+                    "/scratch/reports/native-calls-v1")
+                method.invoke(null, paired as Any)
+                for (mutated in listOf(paired.copyOf().also { it[6] = "Other.java" },
+                    paired.copyOf().also { it[10] = "planning" }, paired.copyOf().also { it[13] = "5" },
+                    paired.copyOf().also { it[15] = SHA_C }, paired.copyOf().also { it[18] = "/other/model.json" },
+                    paired.copyOf().also { it[19] = "/other/native-calls-v1" }, paired + arrayOf("Other.class", "0"))) {
+                    val failure = assertFailsWith<java.lang.reflect.InvocationTargetException> { method.invoke(null, mutated as Any) }
+                    assertTrue(failure.cause is IllegalArgumentException)
+                }
+                method.invoke(null, arrayOf("/legacy/ExportNativeCallsV1", "probe") as Any)
+            }
+        }
+    }
+    @Test
+    fun `optional native collector reference pins source and compiled class without changing legacy references`() {
+        val legacy = GccBundledGhidraReference.parse(canonical(fixture()))
+        assertNull(legacy.nativeCallCollector)
+        val classPath = "scripts/ExportNativeCallsV1.class"
+        val document = withEntries(fixture(), (entries(fixture()) + file(classPath, 128, SHA_A)).sortedBy {
+            it.getValue("path").jsonPrimitive.content
+        })
+        val source = JsonObject(mapOf("resourcePath" to JsonPrimitive("/ghidra_scripts/ExportNativeCallsV1.java"),
+            "bytes" to JsonPrimitive(64), "sha256" to JsonPrimitive(SHA_B), "classPath" to JsonPrimitive(classPath)))
+        val complete = JsonObject(document + ("nativeCallCollector" to source))
+        val reference = GccBundledGhidraReference.parse(rehash(complete))
+        val identity = assertNotNull(reference.nativeCallCollector)
+        assertEquals(GccBundledNativeCallCollectorIdentityV1(64, SHA_B, 128, SHA_A), identity)
+        val base = candidateRuntime(reference)
+        val runtime = GccBundledGhidraRuntime(base.root, base.classPath, 8, identity)
+        reference.requireCandidate(runtime, candidateArtifacts(reference, runtime))
+        legacy.requireCandidate(candidateRuntime(legacy), candidateArtifacts(legacy, candidateRuntime(legacy)))
+        assertFailsWith<IllegalArgumentException> { legacy.requireCandidate(runtime, candidateArtifacts(reference, runtime)) }
+        for (changed in listOf(identity.copy(sourceSha256 = SHA_C), identity.copy(sourceBytes = 65),
+            identity.copy(classSha256 = SHA_C), identity.copy(classBytes = 129))) {
+            val candidate = GccBundledGhidraRuntime(base.root, base.classPath, 8, changed)
+            assertFailsWith<IllegalArgumentException> { reference.requireCandidate(candidate, candidateArtifacts(reference, candidate)) }
+        }
+        for (badSource in listOf(JsonObject(source + ("extra" to JsonPrimitive(true))),
+            JsonObject(source + ("resourcePath" to JsonPrimitive("/other/ExportNativeCallsV1.java"))),
+            JsonObject(source + ("classPath" to JsonPrimitive("scripts/Other.class"))),
+            JsonObject(source + ("bytes" to JsonPrimitive(0))),
+            JsonObject(source + ("bytes" to JsonPrimitive("64"))), JsonObject(source - "sha256"))) {
+            assertRejected(JsonObject(document + ("nativeCallCollector" to badSource)))
+        }
+        assertRejected(JsonObject(fixture() + ("nativeCallCollector" to source)))
+    }
+    @Test
     fun `installed opener selects its own application exporter despite an earlier shadow resource`() {
         assertTrue(runInstalledProbe("open").startsWith("installed-reference-opened:"))
     }
@@ -338,6 +394,7 @@ class GccBundledGhidraDeploymentReferenceTest {
             val exporter = shadow.resolve("ghidra_scripts/ExportProgramModel.java")
             Files.createDirectories(exporter.parent)
             Files.writeString(exporter, GccBundledGhidraInstalledReferenceProbe.SHADOW_EXPORTER)
+            Files.writeString(shadow.resolve("ghidra_scripts/ExportNativeCallsV1.java"), GccBundledGhidraInstalledReferenceProbe.SHADOW_NATIVE_COLLECTOR)
             val command = listOf(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-Djava.io.tmpdir=$temporary",
@@ -503,6 +560,7 @@ class GccBundledGhidraDeploymentReferenceTest {
 
 object GccBundledGhidraInstalledReferenceProbe {
     const val SHADOW_EXPORTER = "test-only shadow exporter must not authenticate"
+    const val SHADOW_NATIVE_COLLECTOR = "test-only shadow native collector must not authenticate"
 
     @JvmStatic
     fun main(arguments: Array<String>) {
@@ -519,9 +577,13 @@ object GccBundledGhidraInstalledReferenceProbe {
         val shadow = checkNotNull(GccBundledGhidraDeploymentReference::class.java.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
             .use { it.readNBytes(1024).toString(Charsets.UTF_8) }
         check(shadow == SHADOW_EXPORTER) { "probe exporter resource was not actually shadowed" }
+        val shadowCollector = checkNotNull(GccBundledGhidraDeploymentReference::class.java.getResourceAsStream("/ghidra_scripts/ExportNativeCallsV1.java"))
+            .use { it.readNBytes(1024).toString(Charsets.UTF_8) }
+        check(shadowCollector == SHADOW_NATIVE_COLLECTOR) { "probe native collector resource was not actually shadowed" }
         if (mode == "open") {
             GccBundledGhidraDeploymentReference.open().use { deployment ->
                 check(deployment.bundleRoot == expectedRoot)
+                checkNotNull(deployment.reference.nativeCallCollector) { "installed reference omitted its independently pinned native collector" }
                 deployment.verify("from the installed child JVM")
                 println("installed-reference-opened:${deployment.reference.closureSha256}")
             }

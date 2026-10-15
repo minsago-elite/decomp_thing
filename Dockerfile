@@ -16,8 +16,19 @@ RUN apt-get update \
         python3 \
         python3-pip \
         unzip \
-    && python3 -m pip install --no-cache-dir "angr==${ANGR_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
+
+# pip connection retries do not retry a failed streaming download. Keep completed
+# downloads outside the image and bound retries of the complete installation.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    timeout --signal=KILL 15m sh -ec ' \
+        for attempt in 1 2 3; do \
+            if python3 -m pip install --no-input --disable-pip-version-check \
+                --timeout 60 --retries 5 "$1"; then exit 0; fi; \
+            if [ "$attempt" -lt 3 ]; then sleep 5; fi; \
+        done; \
+        exit 1 \
+    ' -- "angr==${ANGR_VERSION}"
 
 FROM toolchain AS build
 

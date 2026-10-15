@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   frontend:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Frontend contracts and bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -34,8 +36,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Record toolchain and install locked dependencies
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-ci"
@@ -91,6 +93,8 @@ jobs:
             build/frontend/bundle-composition.json
 
   web-packaged:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -112,8 +116,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -174,6 +178,8 @@ jobs:
             build/test-results/test
 
   kotlin-suite:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: kotlin-${{ matrix.shard }}
     runs-on: ubuntu-24.04
     strategy:
@@ -195,8 +201,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -252,6 +258,9 @@ jobs:
         run: |
           mv build/test-results/test build/test-results/full-suite
           mv build/reports/tests/test build/reports/tests/full-suite
+      - name: Verify installed native analysis I/O
+        if: matrix.shard == 'core'
+        run: ./gradlew --no-daemon verifyAnalysisIoHelperInstalled | tee build/analysis-native-installed-verification.txt
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
         run: bash scripts/test-repair-validation-snapshot.sh
@@ -280,6 +289,15 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/tests/v3BoundaryFinalStagingIsolated
+            build/test-results/v3BoundaryFinalStagingIsolated
+            build/reports/tests/v3BoundaryPublicationIsolated
+            build/test-results/v3BoundaryPublicationIsolated
+            build/reports/tests/v3BoundaryCensusIsolated
+            build/test-results/v3BoundaryCensusIsolated
+            build/reports/tests/gccCompilerEnginePlanningIsolated
+            build/test-results/gccCompilerEnginePlanningIsolated
+            build/analysis-native-installed-verification.txt
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
@@ -329,12 +347,16 @@ jobs:
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
+          RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
         run: |
           unset GHIDRA_HOME
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
+            --tests decompengine.project.NativeCallCollectorRealTest \
+            --tests decompengine.project.NativeCallObservationsV1Test \
+            --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest

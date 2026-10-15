@@ -115,9 +115,12 @@ an immutable ledger. Its operator summary begins with `NON-AUTHORITATIVE` and re
 `releaseEligible=false`.
 
 The output is intentionally not published by this component and is not wired into release CI. The
+[retained mismatch ledger](llvm-behavior-mismatch-ledger-v1.md) now preserves its exact v1 bytes and
+untrusted annotation history through a separate integrity-only publication path. Saving a comparison
+does not grant it execution, scoring or release authority. The
 separate [candidate execution pre-START admission](llvm-candidate-execution-prestart.md) now
 authenticates and immutably publishes the raw candidate, input-only command/corpus commitments,
 runtime declaration, and limits declaration, but deliberately refuses to start a process. A future
 authoritative A15 path still needs a Kotlin-owned generic sandbox runner, authenticated candidate-run
-and ACP/build provenance, deterministic repeated replay, persistent mismatch rationale, hosted clean
+and ACP/build provenance, deterministic repeated replay, qualified mismatch-ledger consumption, hosted clean
 reconstruction, scoring, and a separate fail-closed release decision.

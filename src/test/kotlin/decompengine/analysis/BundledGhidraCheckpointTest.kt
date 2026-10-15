@@ -47,6 +47,22 @@ class BundledGhidraCheckpointTest {
     }
 
     @Test
+    fun `owned analysis launch adds only an explicit parent activation gate`() = withFixture { bundle ->
+        val invocation = GhidraInvocation(
+            bundle.root.resolve("project"), "fixture", bundle.root.resolve("input"), bundle.root.resolve("scripts"),
+            listOf(GhidraPostScript("Export.java", listOf("argument with spaces"))),
+        )
+        val legacy = bundle.analysisCommand(invocation)
+        val owned = bundle.analysisCommandForOwnedLaunch(invocation) {}
+        val operationIndex = legacy.indexOf(BundledGhidra.WORKER_CLASS) + 2
+        assertEquals("analyze", legacy[operationIndex])
+        assertEquals("await-parent-launch", owned[operationIndex])
+        assertEquals(legacy, owned.filterIndexed { index, _ -> index != operationIndex })
+        assertFalse("await-parent-launch" in bundle.probeCommand())
+        assertEquals(legacy, bundle.analysisCommand(invocation) {})
+    }
+
+    @Test
     fun `hash checkpoint cancellation preserves its exception and skips later work`() = withFixture { bundle ->
         val cancellation = InterruptedException("caller cancelled bundle verification")
         val stages = mutableListOf<String>()

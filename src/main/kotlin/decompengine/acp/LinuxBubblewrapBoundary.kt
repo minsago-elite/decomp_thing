@@ -22,6 +22,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /** A fatal failure to prove that a sandbox scope/tree or one of its pinned resources is gone. */
@@ -552,6 +553,9 @@ internal class LinuxBubblewrapBoundary private constructor(
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     ): AcpTerminalBroker {
         closeFailure.get()?.let { throw it }
+        // Workspace roots are not terminal bind sources, but active filesystem callback grants can
+        // expose host paths outside bubblewrap. Reject only grants that can reach private controls.
+        requireFilesystemCallbacksDoNotExposeControlDirectory(request, cancellationCheck)
         val effectivePolicy = configuredPolicy?.takeIf {
             AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
         }
@@ -603,6 +607,39 @@ internal class LinuxBubblewrapBoundary private constructor(
         )
     }
 
+    private fun requireFilesystemCallbacksDoNotExposeControlDirectory(
+        request: AgentExecutionRequest,
+        cancellationCheck: () -> Unit,
+    ) {
+        val filesystemOperations = setOf(
+            AgentOperation.READ_FILE,
+            AgentOperation.WRITE_FILE,
+            AgentOperation.CREATE_FILE,
+        )
+        request.accessPolicy.pathRules.forEach { rule ->
+            cancellationCheck()
+            if (rule.operations.none { operation ->
+                    operation in filesystemOperations && operation in request.accessPolicy.allowedOperations
+                }
+            ) return@forEach
+            val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+            val grantedPath = root.path.resolve(rule.path.relativePath).normalize()
+            val canReachControlDirectory = if (rule.recursive) {
+                pathsOverlap(grantedPath, controlDirectory.path)
+            } else {
+                grantedPath.startsWith(controlDirectory.path)
+            }
+            if (canReachControlDirectory) {
+                throw IOException("ACP filesystem callback authority may reach the private control directory")
+            }
+            try {
+                requireAcpPrivateControlsUnexposed(grantedPath, rule.recursive, cancellationCheck)
+            } catch (failure: IOException) {
+                throw IOException("ACP filesystem callback authority may reach the private control directory", failure)
+            }
+        }
+    }
+
     private inner class VerifiedTerminalBroker(
         request: AgentExecutionRequest,
         cancellation: AgentCancellation,
@@ -643,7 +680,11 @@ internal class LinuxBubblewrapBoundary private constructor(
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
         requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
+        // Empty-directory anchors become target-side bubblewrap --dir entries, not host sources.
         launch.stagingRoots.forEach { grant ->
+            cancellationCheck()
+            controlDirectory.requireMountSourceUnexposed(grant.stagingRoot.path, cancellationCheck)
+            requireHostStagingMountClosure(grant.stagingRoot.path, hostPhysicalMounts(cancellationCheck))
             if (grant.mode == AcpSandboxRootMode.READ_WRITE && grant.stagingRoot.quotaProof == null) {
                 throw IOException("writable sandbox staging root lacks verified aggregate quota authority")
             }
@@ -651,6 +692,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
         requireBoundaryUnchanged(cancellationCheck)
         var launchMounts = emptyList<PinnedReadOnlyMount>()
+        var retainedStagingRoots = emptyList<RetainedHostStagingRoot>()
         var environmentFile: SandboxEnvironmentFile? = null
         var scopeController: SystemdScopeController? = null
         var process: Process? = null
@@ -658,6 +700,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         var sandboxed: AcpSandboxedProcess? = null
         var launchEvidenceReservation: LaunchEvidenceReservation? = null
         try {
+            retainedStagingRoots = retainHostStagingRoots(launch.stagingRoots, cancellationCheck)
             launchMounts = pinMounts(
                 listOf(sandboxGateHelperMount) + launch.readOnlyMounts,
                 configuration.runtimeClosureLimits,
@@ -741,7 +784,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 openedRootProcessHandle,
                 verifiedScope,
                 cleanupAfterScope = {
-                    cleanupLaunchResources(launchMounts, createdEnvironment)
+                    cleanupLaunchResources(launchMounts, createdEnvironment, retainedStagingRoots)
                 },
                 onCleanupProven = { cleaned -> active.remove(cleaned) },
                 onCleanupFailed = { failure -> closeFailure.compareAndSet(null, failure) },
@@ -777,6 +820,8 @@ internal class LinuxBubblewrapBoundary private constructor(
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
+                controlDirectory.requireMountSourceUnexposed(it.stagingRoot.path, cancellationCheck)
+                requireHostStagingMountClosure(it.stagingRoot.path, hostPhysicalMounts(cancellationCheck))
             }
             createdEnvironment.requireCurrentIdentity(cancellationCheck)
             requireSandboxVisibleBindings(
@@ -801,6 +846,8 @@ internal class LinuxBubblewrapBoundary private constructor(
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
+                controlDirectory.requireMountSourceUnexposed(it.stagingRoot.path, cancellationCheck)
+                requireHostStagingMountClosure(it.stagingRoot.path, hostPhysicalMounts(cancellationCheck))
             }
             createdEnvironment.requireCurrentIdentity(cancellationCheck)
             requireSandboxVisibleBindings(
@@ -835,6 +882,8 @@ internal class LinuxBubblewrapBoundary private constructor(
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
+                controlDirectory.requireMountSourceUnexposed(it.stagingRoot.path, cancellationCheck)
+                requireHostStagingMountClosure(it.stagingRoot.path, hostPhysicalMounts(cancellationCheck))
             }
             createdEnvironment.requireCurrentIdentity(cancellationCheck)
             requireSandboxVisibleBindings(
@@ -954,7 +1003,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                         cleanupFailures,
                         AcpSandboxCleanupStage.RUNTIME_SNAPSHOTS,
                         cleanupHook,
-                    ) { cleanupLaunchResources(launchMounts, environmentFile) }
+                    ) { cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots) }
                 } else {
                     cleanupFailures += IOException(
                         "launch runtime snapshots retained because scope cleanup was not proven",
@@ -968,6 +1017,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                         scopeController,
                         launchMounts,
                         environmentFile,
+                        retainedStagingRoots,
                     )
                     rootProcessHandle = null
                 } else {
@@ -1297,6 +1347,31 @@ internal class LinuxBubblewrapBoundary private constructor(
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
         ): LinuxBubblewrapBoundary {
             cancellationCheck()
+            val controlTemporaryParent = sandboxControlTemporaryParent()
+            return try {
+                prepareWithPinnedTemporaryParent(
+                    configuration,
+                    observer,
+                    launchHook,
+                    cleanupHook,
+                    scopeObserver,
+                    cancellationCheck,
+                    controlTemporaryParent,
+                )
+            } finally {
+                controlTemporaryParent.close()
+            }
+        }
+
+        private fun prepareWithPinnedTemporaryParent(
+            configuration: AcpLinuxSandboxConfiguration,
+            observer: AcpSandboxCommandObserver?,
+            launchHook: AcpSandboxLaunchHook?,
+            cleanupHook: AcpSandboxCleanupHook?,
+            scopeObserver: AcpSandboxScopeObserver?,
+            cancellationCheck: () -> Unit,
+            controlTemporaryParent: PinnedSandboxControlTemporaryParent,
+        ): LinuxBubblewrapBoundary {
             requireLinuxCgroupV2()
             LinuxFilesystemSyscalls.requirePidfdSupported()
             cancellationCheck()
@@ -1337,7 +1412,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             val version = probeBubblewrap(bubblewrap.path, cancellationCheck)
             probeResourceLimiter(resourceLimiter.path, cancellationCheck)
             probeSystemd(scopeSupervisor, scopeInspector, bus, cancellationCheck)
-            probeEnvironmentFdOpener(environmentFdOpener.path, cancellationCheck)
+            probeEnvironmentFdOpener(environmentFdOpener.path, controlTemporaryParent, cancellationCheck)
             val forbidden = forbiddenRuntimeFiles(
                 cancellationCheck,
                 bubblewrap,
@@ -1351,7 +1426,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 ACP_SANDBOX_GATE_HELPER_PATH,
                 configuration.expectedSandboxGateHelperManifestSha256,
             )
-            val controlDirectory = createControlDirectory(configuration.runtimeClosureLimits)
+            val controlDirectory = createControlDirectory(configuration.runtimeClosureLimits, controlTemporaryParent)
             val pinnedLauncher = mutableListOf<PinnedReadOnlyMount>()
             var helperValidation: PinnedReadOnlyMount? = null
             var helperMode = 0
@@ -1484,8 +1559,10 @@ internal class LinuxBubblewrapBoundary private constructor(
             }
         }
 
-        private fun createControlDirectory(limits: AcpRuntimeClosureLimits): PinnedControlDirectory =
-            PinnedControlDirectory.create(limits)
+        private fun createControlDirectory(
+            limits: AcpRuntimeClosureLimits,
+            parent: PinnedSandboxControlTemporaryParent,
+        ): PinnedControlDirectory = PinnedControlDirectory.create(limits, parent)
     }
 }
 
@@ -1572,6 +1649,7 @@ private class RetainedLaunchCleanup(
     private val scopeController: SystemdScopeController?,
     private val launchMounts: List<PinnedReadOnlyMount>,
     private val environmentFile: SandboxEnvironmentFile?,
+    private val retainedStagingRoots: List<RetainedHostStagingRoot>,
 ) {
     fun retry(): Boolean {
         val retainedProcess = process
@@ -1588,7 +1666,7 @@ private class RetainedLaunchCleanup(
             }
         }
         try {
-            cleanupLaunchResources(launchMounts, environmentFile)
+            cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots)
         } catch (failure: Throwable) {
             throw AcpCleanupProofFailure(
                 "failed launch runtime-snapshot cleanup remains unproven",
@@ -1603,6 +1681,7 @@ private class RetainedLaunchCleanup(
 private fun cleanupLaunchResources(
     launchMounts: List<PinnedReadOnlyMount>,
     environmentFile: SandboxEnvironmentFile?,
+    retainedStagingRoots: List<RetainedHostStagingRoot>,
 ) {
     val failures = mutableListOf<Throwable>()
     try {
@@ -1623,6 +1702,372 @@ private fun cleanupLaunchResources(
         failures.drop(1).forEach(primary::addSuppressed)
         throw primary
     }
+    synchronized(ACTIVE_PRIVATE_CONTROLS) {
+        retainedStagingRoots.forEach { root ->
+            ACTIVE_HOST_STAGING_ROOTS.remove(root)
+            root.descriptor.close()
+        }
+    }
+}
+
+/** Process-owned controls stay protected until descriptor-bound deletion is proved. */
+private val ACTIVE_PRIVATE_CONTROLS = LinkedHashSet<PinnedControlDirectory>()
+private val PRIVATE_CONTROL_GENERATION = AtomicLong()
+private const val MAXIMUM_ACTIVE_PRIVATE_CONTROLS = 128
+private val ACTIVE_HOST_STAGING_ROOTS = LinkedHashSet<RetainedHostStagingRoot>()
+private const val MAXIMUM_ACTIVE_HOST_STAGING_ROOTS = 128
+
+private class RetainedHostStagingRoot(
+    val descriptor: LinuxDescriptor,
+    val admitted: HostPhysicalLocation,
+) {
+    fun locations(mounts: List<HostPhysicalMount>, cancellationCheck: () -> Unit): List<HostPhysicalLocation> {
+        val current = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
+        if (current.key != admitted.key) throw IOException("retained staging descriptor identity changed")
+        return listOf(admitted, current)
+    }
+}
+
+/** Lifecycle order is registry -> descriptor; no guarded operation acquires a control monitor. */
+private fun retainHostStagingRoots(
+    grants: List<AcpSandboxRootGrant>,
+    cancellationCheck: () -> Unit,
+): List<RetainedHostStagingRoot> = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    if (grants.isEmpty()) return emptyList()
+    if (ACTIVE_HOST_STAGING_ROOTS.size + grants.size > MAXIMUM_ACTIVE_HOST_STAGING_ROOTS) {
+        throw IOException("active ACP host staging roots exceed their descriptor ownership limit")
+    }
+    val retained = mutableListOf<RetainedHostStagingRoot>()
+    try {
+        val mounts = hostPhysicalMounts(cancellationCheck)
+        grants.forEach { grant ->
+            cancellationCheck()
+            grant.stagingRoot.requireCurrentIdentity(cancellationCheck)
+            requireHostStagingMountClosure(grant.stagingRoot.path, mounts)
+            val descriptor = openCanonicalDirectoryNoFollow(grant.stagingRoot.path)
+            try {
+                val location = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
+                if (location.key != grant.stagingRoot.identity.key ||
+                    descriptor.identity.mountId != grant.stagingRoot.identity.mountId) {
+                    throw IOException("host staging root changed while retained")
+                }
+                requirePrivateControlLocationUnexposed(location, true, mounts, cancellationCheck)
+                retained.add(RetainedHostStagingRoot(descriptor, location))
+            } catch (failure: Throwable) {
+                descriptor.close()
+                throw failure
+            }
+        }
+        if (mounts != hostPhysicalMounts(cancellationCheck)) throw IOException("host staging mounts changed during admission")
+        ACTIVE_HOST_STAGING_ROOTS.addAll(retained)
+        retained
+    } catch (failure: Throwable) {
+        retained.asReversed().forEach { it.descriptor.close() }
+        throw failure
+    }
+}
+
+/** Bubblewrap binds trees recursively; host staging authority must contain no descendant mounts. */
+private fun requireHostStagingMountClosure(source: Path, mounts: List<HostPhysicalMount>) {
+    if (mounts.any { it.mountPoint != source && it.mountPoint.startsWith(source) }) {
+        throw IOException("host staging authority contains a nested mount")
+    }
+}
+
+private fun requireControlCreationUnexposed(parent: LinuxDescriptor, name: String) {
+    if (ACTIVE_HOST_STAGING_ROOTS.isEmpty() && ACTIVE_PRIVATE_CONTROLS.isEmpty()) return
+    val mounts = hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)
+    val candidate = hostPhysicalLocation(parent, mounts, NO_SANDBOX_CHECKPOINT).let {
+        it.copy(path = it.path.resolve(name), namespacePath = it.namespacePath.resolve(name))
+    }
+    ACTIVE_PRIVATE_CONTROLS.forEach { control ->
+        control.physicalLocations(mounts, NO_SANDBOX_CHECKPOINT).forEach { active ->
+            if (candidate.key == active.key || candidate.namespacePath.startsWith(active.namespacePath) ||
+                (candidate.filesystemDevice == active.filesystemDevice && candidate.path.startsWith(active.path))) {
+                throw IOException("sandbox private control creation overlaps an active private control directory")
+            }
+        }
+    }
+    ACTIVE_HOST_STAGING_ROOTS.forEach { grant ->
+        grant.locations(mounts, NO_SANDBOX_CHECKPOINT).forEach { active ->
+            if (candidate.namespacePath.startsWith(active.namespacePath) ||
+                (candidate.filesystemDevice == active.filesystemDevice && pathsOverlap(candidate.path, active.path))) {
+                throw IOException("sandbox private control creation overlaps an active host staging authority")
+            }
+        }
+    }
+    if (mounts != hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)) throw IOException("host staging mounts changed during control admission")
+}
+
+private data class HostPhysicalMount(
+    val mountId: Long,
+    val deviceMajor: Long,
+    val deviceMinor: Long,
+    val root: Path,
+    val mountPoint: Path,
+)
+
+private data class HostPhysicalLocation(
+    val key: LinuxFileKey,
+    val filesystemDevice: Pair<Long, Long>,
+    val path: Path,
+    val namespacePath: Path,
+)
+
+/** Bind mounts have different mount ids but retain the original filesystem root coordinates. */
+private fun hostPhysicalMounts(cancellationCheck: () -> Unit): List<HostPhysicalMount> =
+    parseHostPhysicalMounts(readBoundedProcLines(Path.of("/proc/self/mountinfo"), MAXIMUM_PROC_MOUNTINFO_BYTES,
+        MAXIMUM_PROC_MOUNTINFO_LINES, cancellationCheck), cancellationCheck)
+
+private fun parseHostPhysicalMounts(lines: List<String>, cancellationCheck: () -> Unit): List<HostPhysicalMount> =
+    lines.map { line ->
+        cancellationCheck()
+        val separator = line.indexOf(" - ")
+        val fields = if (separator > 0) line.substring(0, separator).split(' ') else emptyList()
+        if (fields.size < 6) throw IOException("host mountinfo record is incomplete")
+        val device = fields[2].split(':')
+        val root = decodeMountInfoPath(fields[3])
+        val point = decodeMountInfoPath(fields[4])
+        val id = fields[0].toLongOrNull()
+        val major = device.getOrNull(0)?.toLongOrNull()
+        val minor = device.getOrNull(1)?.toLongOrNull()
+        if (id == null || id <= 0 || device.size != 2 || major == null || minor == null ||
+            major < 0 || minor < 0 || !root.isAbsolute || root != root.normalize() ||
+            !point.isAbsolute || point != point.normalize()) {
+            throw IOException("host mountinfo contains invalid physical coordinates")
+        }
+        HostPhysicalMount(id, major, minor, root, point)
+    }
+
+/** Every host path component is inspected without following symlinks; missing tails are explicit. */
+private fun <T> withHostPhysicalPath(
+    path: Path,
+    cancellationCheck: () -> Unit,
+    action: (LinuxDescriptor, Path) -> T,
+): T {
+    if (!path.isAbsolute || path != path.normalize() ||
+        path.toString().toByteArray(Charsets.UTF_8).size > MAXIMUM_SANDBOX_PATH_BYTES) {
+        throw IOException("private-control protection requires a bounded canonical host path")
+    }
+    var current = LinuxFilesystemSyscalls.openRoot(requireNotNull(path.root))
+    try {
+        val components = path.toList()
+        for ((index, component) in components.withIndex()) {
+            cancellationCheck()
+            val next = LinuxFilesystemSyscalls.openPathAtOrNull(current.fd, component.toString())
+                ?: return action(current, Path.of("").resolve(path.subpath(index, components.size)))
+            if (next.identity.isSymbolicLink || (!next.identity.isDirectory && index != components.lastIndex)) {
+                next.close()
+                throw IOException("private-control protection encountered a noncanonical host path")
+            }
+            current.close()
+            current = next
+        }
+        return action(current, Path.of(""))
+    } finally {
+        current.close()
+    }
+}
+
+private fun hostPhysicalLocation(
+    descriptor: LinuxDescriptor,
+    mounts: List<HostPhysicalMount>,
+    cancellationCheck: () -> Unit,
+): HostPhysicalLocation = descriptor.whileOpen { fd ->
+    cancellationCheck()
+    val identity = LinuxFilesystemSyscalls.identity(fd)
+    val mount = mounts.singleOrNull { it.mountId == identity.mountId }
+        ?: throw IOException("private-control descriptor mount is absent or ambiguous")
+    // st_dev can be a synthetic subvolume identity (not mountinfo's superblock device on Btrfs).
+    // The exact kernel mount id, reopened pathname and descriptor key authenticate this mapping.
+    val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
+    if (!named.isAbsolute || named != named.normalize() || !named.startsWith(mount.mountPoint)) {
+        throw IOException("private-control descriptor has no authenticated host pathname")
+    }
+    withHostPhysicalPath(named, cancellationCheck) { reopened, missing ->
+        if (missing.toString().isNotEmpty() || reopened.identity.key != identity.key ||
+            reopened.identity.mountId != identity.mountId) {
+            throw IOException("private-control descriptor pathname changed during inspection")
+        }
+    }
+    val after = LinuxFilesystemSyscalls.identity(fd)
+    if (identity.key != after.key || identity.mountId != after.mountId || identity.mode != after.mode) {
+        throw IOException("private-control descriptor changed during inspection")
+    }
+    HostPhysicalLocation(identity.key, mount.deviceMajor to mount.deviceMinor,
+        mount.root.resolve(mount.mountPoint.relativize(named)).normalize(), named)
+}
+
+private fun requirePrivateControlLocationUnexposed(
+    candidate: HostPhysicalLocation,
+    recursive: Boolean,
+    mounts: List<HostPhysicalMount>,
+    cancellationCheck: () -> Unit,
+    privateSnapshotOwner: LinuxFileKey? = null,
+) {
+    ACTIVE_PRIVATE_CONTROLS.forEach { control ->
+        cancellationCheck()
+        if (control.key == privateSnapshotOwner) return@forEach
+        control.physicalLocations(mounts, cancellationCheck).forEach { protected ->
+            if (candidate.key == protected.key || (candidate.filesystemDevice == protected.filesystemDevice &&
+                    (candidate.path.startsWith(protected.path) ||
+                        (recursive && protected.path.startsWith(candidate.path))))) {
+                throw IOException("sandbox authority may not expose its private control directory")
+            }
+        }
+    }
+}
+
+internal fun requireAcpPrivateControlsUnexposed(
+    source: Path,
+    recursive: Boolean,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    privateSnapshotOwner: LinuxFileKey? = null,
+): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    if (ACTIVE_PRIVATE_CONTROLS.isEmpty()) return
+    cancellationCheck()
+    val mounts = hostPhysicalMounts(cancellationCheck)
+    withHostPhysicalPath(source, cancellationCheck) { descriptor, missing ->
+        val location = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
+        requirePrivateControlLocationUnexposed(
+            if (missing.toString().isEmpty()) location else location.copy(path = location.path.resolve(missing)),
+            recursive, mounts, cancellationCheck, privateSnapshotOwner,
+        )
+    }
+    if (mounts != hostPhysicalMounts(cancellationCheck)) {
+        throw IOException("host mounts changed during private-control protection")
+    }
+    ACTIVE_PRIVATE_CONTROLS.forEach { it.physicalLocations(mounts, cancellationCheck) }
+}
+
+/** Applied to the actual callback/root/copy descriptors, including aliases introduced after admission. */
+internal fun requireAcpPrivateControlDescriptorUnexposed(
+    descriptor: LinuxDescriptor,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    privateSnapshotOwner: LinuxFileKey? = null,
+): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    if (ACTIVE_PRIVATE_CONTROLS.isEmpty()) return
+    val mounts = hostPhysicalMounts(cancellationCheck)
+    val location = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
+    requirePrivateControlLocationUnexposed(location, false, mounts, cancellationCheck, privateSnapshotOwner)
+    if (mounts != hostPhysicalMounts(cancellationCheck)) {
+        throw IOException("host mounts changed during private-control protection")
+    }
+    ACTIVE_PRIVATE_CONTROLS.forEach { it.physicalLocations(mounts, cancellationCheck) }
+}
+
+private class ManifestControlIdentity(
+    val descriptor: LinuxDescriptor,
+    val admitted: HostPhysicalLocation,
+    val current: HostPhysicalLocation,
+) : AutoCloseable {
+    fun requireUnchanged() {
+        requireDirectoryDescriptorIdentity(descriptor, current.key, descriptor.identity.mountId, CONTROL_DIRECTORY_MODE)
+        if (Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor)) != current.namespacePath) {
+            throw IOException("private control moved during runtime manifest")
+        }
+    }
+    override fun close() = descriptor.close()
+}
+
+/** A bounded lease on mount metadata and independently owned control descriptors, never a global cache. */
+private class RuntimePrivateControlScope private constructor(
+    private val mountEvents: LinuxDescriptor,
+    private val mounts: List<HostPhysicalMount>,
+    private val controls: List<ManifestControlIdentity>,
+    private val generation: Long,
+    private val root: HostPhysicalLocation,
+    private val rootMountId: Long,
+    private val fast: Boolean,
+    private val privateSnapshotOwner: LinuxFileKey?,
+    private val cancellationCheck: () -> Unit,
+) : AutoCloseable {
+    fun checkpoint() {
+        cancellationCheck()
+        if (PRIVATE_CONTROL_GENERATION.get() != generation) throw IOException("private controls changed during runtime manifest")
+        if (LinuxFilesystemSyscalls.mountMetadataChanged(mountEvents)) throw IOException("host mounts changed during runtime manifest")
+        controls.forEach { it.requireUnchanged() }
+    }
+
+    fun requireDescriptor(descriptor: LinuxDescriptor, expectedPath: Path, recursive: Boolean = false) {
+        checkpoint()
+        if (!fast) {
+            requireAcpPrivateControlDescriptorUnexposed(descriptor, cancellationCheck, privateSnapshotOwner)
+            checkpoint()
+            return
+        }
+        descriptor.whileOpen { fd ->
+            val identity = LinuxFilesystemSyscalls.identity(fd)
+            if (identity.key != descriptor.identity.key || identity.mountId != rootMountId ||
+                identity.mode != descriptor.identity.mode) throw IOException("runtime manifest descriptor changed or crossed a mount")
+            val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
+            if (!named.isAbsolute || named != named.normalize() || named != expectedPath || !named.startsWith(root.namespacePath)) {
+                throw IOException("runtime manifest descriptor has no authenticated source pathname")
+            }
+            controls.forEach { control ->
+                if (control.current.key != privateSnapshotOwner &&
+                    (identity.key == control.current.key ||
+                        (control.current.filesystemDevice == root.filesystemDevice &&
+                            listOf(control.admitted.namespacePath, control.current.namespacePath).any { protected ->
+                                named.startsWith(protected) || (recursive && protected.startsWith(named))
+                            }))) throw IOException("sandbox authority may not expose its private control directory")
+            }
+        }
+        checkpoint()
+    }
+
+    fun finish() {
+        checkpoint()
+        if (mounts != hostPhysicalMounts(cancellationCheck)) throw IOException("host mount coordinates changed during runtime manifest")
+        checkpoint()
+    }
+
+    override fun close() {
+        controls.asReversed().forEach { it.close() }
+        mountEvents.close()
+    }
+
+    companion object {
+        fun open(source: Path, owner: LinuxFileKey?, check: () -> Unit): RuntimePrivateControlScope {
+            val authorized = LinuxFilesystemSyscalls.openAbsolutePathOrNull(Path.of("/proc/self/mountinfo"))
+                ?: throw IOException("host mount metadata is unavailable")
+            val events = authorized.use { LinuxFilesystemSyscalls.openReadableFrom(it) }
+            val retained = mutableListOf<ManifestControlIdentity>()
+            try {
+                // Read this handle exactly once. The first mount event terminates the scope;
+                // polling may acknowledge an event, so it must never be caught and ignored.
+                val text = LinuxFilesystemSyscalls.read(events, MAXIMUM_PROC_MOUNTINFO_BYTES, check).toString(Charsets.UTF_8)
+                val lines = text.lineSequence().filter(String::isNotEmpty).take(MAXIMUM_PROC_MOUNTINFO_LINES + 1).toList()
+                if (lines.size > MAXIMUM_PROC_MOUNTINFO_LINES) throw IOException("host mount metadata has too many records")
+                val mounts = parseHostPhysicalMounts(lines, check)
+                val byId = mounts.associateBy { it.mountId }
+                if (byId.size != mounts.size) throw IOException("host mount metadata contains duplicate mount ids")
+                return synchronized(ACTIVE_PRIVATE_CONTROLS) {
+                    val generation = PRIVATE_CONTROL_GENERATION.get()
+                    ACTIVE_PRIVATE_CONTROLS.forEach { retained += it.retainManifestIdentity(mounts, check) }
+                    withHostPhysicalPath(source, check) { descriptor, missing ->
+                        if (missing.toString().isNotEmpty()) throw IOException("runtime manifest source disappeared")
+                        val location = hostPhysicalLocation(descriptor, mounts, check)
+                        requirePrivateControlLocationUnexposed(location, true, mounts, check, owner)
+                        val mountId = descriptor.identity.mountId
+                        val mount = requireNotNull(byId[mountId])
+                        // Same-vfsmount names need no mutable mount.root translation. Other bind aliases
+                        // keep the full physical-coordinate guard rather than trusting cached prefixes.
+                        val fast = retained.filter { it.current.filesystemDevice == location.filesystemDevice }.all {
+                            it.descriptor.identity.mountId == mountId && it.admitted.namespacePath.startsWith(mount.mountPoint) &&
+                                mount.root.resolve(mount.mountPoint.relativize(it.admitted.namespacePath)).normalize() == it.admitted.path
+                        }
+                        RuntimePrivateControlScope(events, mounts, retained, generation, location, mountId, fast, owner, check)
+                            .also { it.checkpoint() }
+                    }
+                }
+            } catch (failure: Throwable) {
+                retained.asReversed().forEach { it.close() }
+                events.close()
+                throw failure
+            }
+        }
+    }
 }
 
 /** A factory-created mode-0700 control directory pinned by parent/name and open descriptors. */
@@ -1636,15 +2081,52 @@ private class PinnedControlDirectory private constructor(
     private val cleanupLimits: AcpRuntimeClosureLimits,
 ) {
     private val expectedKey = descriptor.identity.key
+    val key: LinuxFileKey get() = expectedKey
     private val expectedMountId = descriptor.identity.mountId
     private var deleted = false
     private var cleanupFailure: AcpCleanupProofFailure? = null
+    private var registeredPhysicalLocation: HostPhysicalLocation? = null
+
+    fun registerPhysicalLocation() {
+        registeredPhysicalLocation = hostPhysicalLocation(descriptor, hostPhysicalMounts(NO_SANDBOX_CHECKPOINT),
+            NO_SANDBOX_CHECKPOINT)
+    }
+
+    fun requireMountSourceUnexposed(source: Path, cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT) {
+        if (pathsOverlap(path, source)) {
+            throw IOException("sandbox authority may not expose its private control directory")
+        }
+        requireAcpPrivateControlsUnexposed(source, recursive = true, cancellationCheck)
+    }
+
+    fun physicalLocations(mounts: List<HostPhysicalMount>, cancellationCheck: () -> Unit): List<HostPhysicalLocation> {
+        // A failed cleanup retains the exact descriptor, preventing inode reuse. Protect both its
+        // admitted location and its current location after a hostile rename/replacement. An unknown
+        // descriptor/location fails closed; it is never silently removed from the registry.
+        requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
+        val admitted = registeredPhysicalLocation ?: throw IOException("private control lacks its registered location")
+        val current = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
+        requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
+        return listOf(admitted, current)
+    }
+
+    fun retainManifestIdentity(mounts: List<HostPhysicalMount>, check: () -> Unit): ManifestControlIdentity {
+        val locations = physicalLocations(mounts, check)
+        val retained = descriptor.whileOpen { LinuxFilesystemSyscalls.openDirectoryAt(it, ".") }
+        return try {
+            ManifestControlIdentity(retained, locations[0], locations[1]).also { it.requireUnchanged() }
+        } catch (failure: Throwable) {
+            retained.close()
+            throw failure
+        }
+    }
+
 
     fun requireCurrent() {
         if (deleted) throw IOException("sandbox control directory is already deleted")
         requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
         requireDirectoryDescriptorIdentity(parent, parent.identity.key, parent.identity.mountId, null)
-        LinuxFilesystemSyscalls.openRoot(parentPath).use { currentParent ->
+        openCanonicalDirectoryNoFollow(parentPath).use { currentParent ->
             if (currentParent.identity.key != parent.identity.key ||
                 currentParent.identity.mountId != parent.identity.mountId
             ) throw IOException("sandbox control-directory parent pathname changed")
@@ -1707,7 +2189,7 @@ private class PinnedControlDirectory private constructor(
     }
 
     @Synchronized
-    fun deleteAndProve() {
+    fun deleteAndProve(): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
         if (deleted) {
             cleanupFailure?.let { throw it }
             return
@@ -1715,6 +2197,14 @@ private class PinnedControlDirectory private constructor(
         val priorFailure = cleanupFailure
         try {
             requireCurrent()
+            val mounts = hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)
+            requirePrivateControlLocationUnexposed(
+                hostPhysicalLocation(descriptor, mounts, NO_SANDBOX_CHECKPOINT), true, mounts,
+                NO_SANDBOX_CHECKPOINT, privateSnapshotOwner = expectedKey,
+            )
+            if (mounts != hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)) {
+                throw IOException("host mounts changed during private-control cleanup admission")
+            }
             // A failed launch can leave attacker-created residue beside the pinned resources. Drain
             // only this already-authenticated directory through its retained descriptor and the same
             // aggregate entry/byte/depth limits used for private runtime cleanup. A pathname
@@ -1739,6 +2229,7 @@ private class PinnedControlDirectory private constructor(
             descriptor.close()
             parent.close()
             deleted = true
+            if (ACTIVE_PRIVATE_CONTROLS.remove(this)) PRIVATE_CONTROL_GENERATION.incrementAndGet()
         } catch (failure: Throwable) {
             val proof = if (failure is AcpCleanupProofFailure) failure else {
                 AcpCleanupProofFailure("sandbox control-directory cleanup was not proven", failure)
@@ -1757,13 +2248,22 @@ private class PinnedControlDirectory private constructor(
     }
 
     companion object {
-        fun create(cleanupLimits: AcpRuntimeClosureLimits): PinnedControlDirectory {
-            val parentPath = Path.of("/tmp")
-            val parent = LinuxFilesystemSyscalls.openRoot(parentPath)
+        fun create(
+            cleanupLimits: AcpRuntimeClosureLimits,
+            pinnedParent: PinnedSandboxControlTemporaryParent,
+        ): PinnedControlDirectory = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+            if (ACTIVE_PRIVATE_CONTROLS.size >= MAXIMUM_ACTIVE_PRIVATE_CONTROLS) {
+                throw IOException("active ACP private controls exceed their descriptor ownership limit")
+            }
+            val parentPath = pinnedParent.path
+            val parent = pinnedParent.transfer()
             var descriptor: LinuxDescriptor? = null
             var createdName: String? = null
             try {
                 val name = ".decomp-acp-control-${UUID.randomUUID()}"
+                requireControlCreationUnexposed(parent, name)
+                // Invalidate outstanding manifest scopes before any new private directory exists.
+                PRIVATE_CONTROL_GENERATION.incrementAndGet()
                 LinuxFilesystemSyscalls.createDirectory(parent.fd, name, CONTROL_DIRECTORY_MODE)
                 createdName = name
                 val directory = parentPath.resolve(name)
@@ -1774,8 +2274,8 @@ private class PinnedControlDirectory private constructor(
                 if (openedIdentity.uid != currentUid() ||
                     openedIdentity.mode.permissions != CONTROL_DIRECTORY_MODE ||
                     openedIdentity.mountId != parent.identity.mountId
-                ) throw IOException("sandbox control directory is not a private mode-0700 child of /tmp")
-                LinuxFilesystemSyscalls.openRoot(directory).use { byPath ->
+                ) throw IOException("sandbox control directory is not a private mode-0700 child of its temporary parent")
+                openCanonicalDirectoryNoFollow(directory).use { byPath ->
                     if (byPath.identity.key != opened.identity.key ||
                         byPath.identity.mountId != opened.identity.mountId
                     ) throw IOException("sandbox control-directory pathname changed during creation")
@@ -1788,7 +2288,13 @@ private class PinnedControlDirectory private constructor(
                     name,
                     name,
                     cleanupLimits,
-                ).also { descriptor = null; createdName = null }
+                ).also { control ->
+                    control.registerPhysicalLocation()
+                    ACTIVE_PRIVATE_CONTROLS += control
+                    PRIVATE_CONTROL_GENERATION.incrementAndGet()
+                    descriptor = null
+                    createdName = null
+                }
             } catch (failure: Throwable) {
                 val cleanup = runCatching {
                     val opened = descriptor
@@ -1828,6 +2334,7 @@ private class PinnedPrivateTree(
     private var currentName = originalName
     private var deleted = false
     private var cleanupFailure: AcpCleanupProofFailure? = null
+    val controlKey: LinuxFileKey get() = parent.key
 
     private fun requireCurrentTree(): LinuxDescriptor {
         if (deleted) throw IOException("private runtime snapshot is already deleted")
@@ -2267,6 +2774,7 @@ private fun deletePrivateTreeContents(
             if (child.identity.mountId != directoryMountId) {
                 throw IOException("private cleanup tree crosses a mount boundary")
             }
+            requirePrivateCleanupEntryNotActiveControl(child.identity.key)
             val quarantine = ".decomp-acp-entry-delete-${UUID.randomUUID()}"
             LinuxFilesystemSyscalls.renameNoReplace(directory.fd, name, quarantine)
             LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, quarantine).use { selected ->
@@ -2280,6 +2788,7 @@ private fun deletePrivateTreeContents(
                     if (childDirectory.identity.key != child.identity.key ||
                         childDirectory.identity.mountId != child.identity.mountId
                     ) throw IOException("private cleanup directory changed after quarantine")
+                    requirePrivateCleanupEntryNotActiveControl(childDirectory.identity.key)
                     deletePrivateTreeContents(childDirectory, budget, depth + 1)
                     LinuxFilesystemSyscalls.removeDirectory(directory.fd, quarantine)
                     if (LinuxFilesystemSyscalls.identity(childDirectory.fd).linkCount != 0) {
@@ -2298,6 +2807,12 @@ private fun deletePrivateTreeContents(
             requireNameAbsent(directory.fd, quarantine)
             requireNameAbsent(directory.fd, name)
         }
+    }
+}
+
+private fun requirePrivateCleanupEntryNotActiveControl(key: LinuxFileKey): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    if (ACTIVE_PRIVATE_CONTROLS.any { it.key == key }) {
+        throw IOException("private cleanup may not remove another active private control")
     }
 }
 
@@ -3407,12 +3922,13 @@ private class PinnedReadOnlyMount private constructor(
             if (readIdentity(verificationSource, cancellationCheck) != manifest.rootIdentity) {
                 throw IOException("root-owned runtime closure root changed: ${mount.destination}")
             }
-        } else if (buildRuntimeManifest(
+        } else if (buildRuntimeManifestOwned(
                 verificationSource,
                 limits,
                 forbidden,
                 allowPrivateControlSource = snapshotContainer != null,
                 cancellationCheck = cancellationCheck,
+                privateSnapshotOwner = snapshotContainer?.controlKey,
             ) != manifest
         ) {
             throw IOException("authenticated runtime closure changed: ${mount.destination}")
@@ -3522,23 +4038,25 @@ private class PinnedReadOnlyMount private constructor(
                 cancellationCheck,
             )
             try {
-                val copiedManifest = buildRuntimeManifest(
+                val copiedManifest = buildRuntimeManifestOwned(
                     snapshot.source,
                     limits,
                     forbidden,
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
+                    privateSnapshotOwner = snapshot.container.controlKey,
                 )
                 if (copiedManifest.manifestSha256 != expected) {
                     throw IOException("user-owned runtime snapshot does not match its expected SHA-256")
                 }
                 hardenPrivateSnapshot(snapshot.container, cancellationCheck)
-                val hardenedManifest = buildRuntimeManifest(
+                val hardenedManifest = buildRuntimeManifestOwned(
                     snapshot.source,
                     limits,
                     forbidden,
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
+                    privateSnapshotOwner = snapshot.container.controlKey,
                 )
                 val descriptor = requirePinnedDescriptor(snapshot.source, hardenedManifest.rootIdentity)
                 val descriptorDigest = if (hardenedManifest.rootDirectory) null else {
@@ -3866,102 +4384,129 @@ internal fun buildRuntimeManifest(
     forbidden: Set<ForbiddenRuntimeFile>,
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): RuntimeManifest = buildRuntimeManifestOwned(source, limits, forbidden, allowPrivateControlSource,
+    cancellationCheck, privateSnapshotOwner = null)
+
+private fun buildRuntimeManifestOwned(
+    source: Path,
+    limits: AcpRuntimeClosureLimits,
+    forbidden: Set<ForbiddenRuntimeFile>,
+    allowPrivateControlSource: Boolean = false,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    privateSnapshotOwner: LinuxFileKey? = null,
 ): RuntimeManifest {
     cancellationCheck()
-    val basic = Files.readAttributes(source, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-    if (basic.isSymbolicLink || (!basic.isRegularFile && !basic.isDirectory)) {
-        throw IOException("sandbox runtime source must be a real file or directory: $source")
+    if (allowPrivateControlSource && privateSnapshotOwner == null) {
+        throw IOException("private runtime manifest lacks its owning control identity")
     }
-    if (!allowPrivateControlSource && basic.isDirectory &&
-        (source in BROAD_RUNTIME_DIRECTORY_ROOTS || source.parent in BROAD_RUNTIME_DIRECTORY_PARENTS)
-    ) {
-        throw IOException("sandbox runtime may not expose a broad host data directory: $source")
-    }
-    val paths = if (basic.isDirectory) {
-        Files.walk(source, limits.maximumDepth).use { stream ->
-            stream.peek { cancellationCheck() }.limit(limits.maximumEntries.toLong() + 1L).toList()
-        }.also {
-            if (it.size > limits.maximumEntries) throw IOException("sandbox runtime closure has too many entries")
-            it.filter { path ->
-                Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                    source.relativize(path).nameCount == limits.maximumDepth
-            }.forEach { boundaryDirectory ->
-                cancellationCheck()
-                Files.newDirectoryStream(boundaryDirectory).use { children ->
-                    if (children.iterator().hasNext()) {
-                        throw IOException("sandbox runtime closure exceeds its authenticated depth limit")
+    return RuntimePrivateControlScope.open(source, privateSnapshotOwner, cancellationCheck).use { protection ->
+        val basic = Files.readAttributes(source, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        if (basic.isSymbolicLink || (!basic.isRegularFile && !basic.isDirectory)) {
+            throw IOException("sandbox runtime source must be a real file or directory: $source")
+        }
+        if (!allowPrivateControlSource && basic.isDirectory &&
+            (source in BROAD_RUNTIME_DIRECTORY_ROOTS || source.parent in BROAD_RUNTIME_DIRECTORY_PARENTS)
+        ) {
+            throw IOException("sandbox runtime may not expose a broad host data directory: $source")
+        }
+        val paths = if (basic.isDirectory) {
+            Files.walk(source, limits.maximumDepth).use { stream ->
+                stream.peek { cancellationCheck() }.limit(limits.maximumEntries.toLong() + 1L).toList()
+            }.also {
+                if (it.size > limits.maximumEntries) throw IOException("sandbox runtime closure has too many entries")
+                it.filter { path ->
+                    Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
+                        source.relativize(path).nameCount == limits.maximumDepth
+                }.forEach { boundaryDirectory ->
+                    cancellationCheck()
+                    Files.newDirectoryStream(boundaryDirectory).use { children ->
+                        if (children.iterator().hasNext()) {
+                            throw IOException("sandbox runtime closure exceeds its authenticated depth limit")
+                        }
                     }
                 }
-            }
-        }.sortedBy { source.relativize(it).toString() }
-    } else listOf(source)
-    val entries = paths.map { path ->
-        cancellationCheck()
-        Triple(
-            path,
-            readIdentity(path, cancellationCheck),
-            Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS),
-        )
-    }
-    val rootMountId = entries.first().second.mountId
-    if (entries.any { (_, identity, _) -> identity.mountId != rootMountId }) {
-        throw IOException("sandbox runtime closure crosses a mount boundary")
-    }
-    val rootOwned = entries.all { (path, identity, entryBasic) ->
-        cancellationCheck()
-        identity.uid == 0 &&
-            (entryBasic.isSymbolicLink || identity.mode.permissions and 0x12 == 0) &&
-            !Files.isWritable(path) &&
-            hasSafeSandboxTrustExtendedAttributes(path, identity, cancellationCheck)
-    }
-    var userBytes = 0L
-    val digest = MessageDigest.getInstance("SHA-256")
-    entries.forEach { (path, identity, entryBasic) ->
-        cancellationCheck()
-        val type = when {
-            entryBasic.isRegularFile -> "file"
-            entryBasic.isDirectory -> "directory"
-            entryBasic.isSymbolicLink -> throw IOException(
-                "sandbox runtime closure contains a symbolic link; mount canonical targets explicitly",
+            }.sortedBy { source.relativize(it).toString() }
+        } else listOf(source)
+        val entries = paths.map { path ->
+            cancellationCheck()
+            protection.checkpoint()
+            Triple(
+                path,
+                readIdentity(path, cancellationCheck, protection),
+                Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS),
             )
-            else -> throw IOException("sandbox runtime closure contains a special filesystem entry")
         }
-        val relative = if (path == source) "." else source.relativize(path).toString()
-        digest.update(
-            (
-                "$relative\u0000$type\u0000${identity.mode.permissions}\u0000${identity.uid}\u0000" +
-                    "${identity.size}\u0000${identity.metadataSha256}\u0000"
-                ).toByteArray(),
-        )
-        if (entryBasic.isRegularFile) {
-            val candidateForbidden = forbidden.filter { it.size == identity.size }
-            val mustHash = !rootOwned || candidateForbidden.isNotEmpty()
-            if (!rootOwned) {
-                userBytes = Math.addExact(userBytes, identity.size)
-                if (userBytes > limits.maximumUserOwnedFileBytes) {
-                    throw IOException("user-owned sandbox runtime closure exceeds its authenticated byte limit")
+        val rootMountId = entries.first().second.mountId
+        if (entries.any { (_, identity, _) -> identity.mountId != rootMountId }) {
+            throw IOException("sandbox runtime closure crosses a mount boundary")
+        }
+        val rootOwned = entries.all { (path, identity, entryBasic) ->
+            cancellationCheck()
+            identity.uid == 0 &&
+                (entryBasic.isSymbolicLink || identity.mode.permissions and 0x12 == 0) &&
+                !Files.isWritable(path) &&
+                hasSafeSandboxTrustExtendedAttributes(path, identity, cancellationCheck)
+        }
+        var userBytes = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
+        entries.forEach { (path, identity, entryBasic) ->
+            cancellationCheck()
+            val type = when {
+                entryBasic.isRegularFile -> "file"
+                entryBasic.isDirectory -> "directory"
+                entryBasic.isSymbolicLink -> throw IOException(
+                    "sandbox runtime closure contains a symbolic link; mount canonical targets explicitly",
+                )
+                else -> throw IOException("sandbox runtime closure contains a special filesystem entry")
+            }
+            val relative = if (path == source) "." else source.relativize(path).toString()
+            digest.update(
+                (
+                    "$relative\u0000$type\u0000${identity.mode.permissions}\u0000${identity.uid}\u0000" +
+                        "${identity.size}\u0000${identity.metadataSha256}\u0000"
+                    ).toByteArray(),
+            )
+            if (entryBasic.isRegularFile) {
+                val candidateForbidden = forbidden.filter { it.size == identity.size }
+                val mustHash = !rootOwned || candidateForbidden.isNotEmpty()
+                if (!rootOwned) {
+                    userBytes = Math.addExact(userBytes, identity.size)
+                    if (userBytes > limits.maximumUserOwnedFileBytes) {
+                        throw IOException("user-owned sandbox runtime closure exceeds its authenticated byte limit")
+                    }
+                }
+                if (mustHash) {
+                    val fileDigest = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path).use { opened ->
+                        val authenticated = opened ?: throw IOException("sandbox runtime file disappeared before hashing")
+                        if (authenticated.identity.key.device != identity.device ||
+                            authenticated.identity.key.inode != identity.inode ||
+                            authenticated.identity.mountId != identity.mountId || !authenticated.identity.isRegularFile) {
+                            throw IOException("sandbox runtime file changed before hashing")
+                        }
+                        protection.requireDescriptor(authenticated, path)
+                        sha256(authenticated, identity.size) { protection.requireDescriptor(authenticated, path) }
+                    }
+                    // Screening must not change an immutable root-owned runtime's provisioning
+                    // manifest merely because an unrelated security tool has the same byte size.
+                    // User-owned snapshots still commit every file's content hash.
+                    if (!rootOwned) digest.update(fileDigest.toByteArray())
+                    if (candidateForbidden.any { forbiddenFile ->
+                        (forbiddenFile.device == identity.device && forbiddenFile.inode == identity.inode) ||
+                            forbiddenFile.sha256 == fileDigest
+                    }) throw IOException("sandbox runtime closure exposes a security-boundary executable")
                 }
             }
-            if (mustHash) {
-                val fileDigest = sha256(path, cancellationCheck)
-                // Screening must not change an immutable root-owned runtime's provisioning
-                // manifest merely because an unrelated security tool has the same byte size.
-                // User-owned snapshots still commit every file's content hash.
-                if (!rootOwned) digest.update(fileDigest.toByteArray())
-                if (candidateForbidden.any { forbiddenFile ->
-                    (forbiddenFile.device == identity.device && forbiddenFile.inode == identity.inode) ||
-                        forbiddenFile.sha256 == fileDigest
-                }) throw IOException("sandbox runtime closure exposes a security-boundary executable")
-            }
         }
+        cancellationCheck()
+        val manifest = RuntimeManifest(
+            readIdentity(source, cancellationCheck, protection),
+            digest.digest().toHex(),
+            rootOwned,
+            basic.isDirectory,
+        )
+        protection.finish()
+        manifest
     }
-    cancellationCheck()
-    return RuntimeManifest(
-        readIdentity(source, cancellationCheck),
-        digest.digest().toHex(),
-        rootOwned,
-        basic.isDirectory,
-    )
 }
 
 /**
@@ -3999,6 +4544,7 @@ private fun pinMounts(
     val unique = LinkedHashMap<Path, AcpSandboxReadOnlyMount>()
     mounts.forEach { mount ->
         cancellationCheck()
+        controlDirectory.requireMountSourceUnexposed(mount.source, cancellationCheck)
         val existing = unique.putIfAbsent(mount.destination, mount)
         if (existing != null && (
                 existing.source != mount.source ||
@@ -4099,17 +4645,22 @@ private fun stagePrivateRuntimeSnapshot(
         val root = LinuxFilesystemSyscalls.openAbsolutePathOrNull(source)
             ?: throw IOException("sandbox runtime source disappeared")
         root.use {
-            val budget = RuntimeSnapshotBudget()
-            copyRuntimeNode(
-                descriptor = root,
-                destinationParent = container.requireRootDirectory(),
-                destinationName = "root",
-                rootMountId = root.identity.mountId,
-                depth = 0,
-                limits = limits,
-                budget = budget,
-                cancellationCheck = cancellationCheck,
-            )
+            RuntimePrivateControlScope.open(source, null, cancellationCheck).use { protection ->
+                val budget = RuntimeSnapshotBudget()
+                copyRuntimeNode(
+                    descriptor = root,
+                    sourcePath = source,
+                    destinationParent = container.requireRootDirectory(),
+                    destinationName = "root",
+                    rootMountId = root.identity.mountId,
+                    depth = 0,
+                    limits = limits,
+                    budget = budget,
+                    protection = protection,
+                    cancellationCheck = cancellationCheck,
+                )
+                protection.finish()
+            }
         }
         return PrivateRuntimeSnapshot(container, destination)
     } catch (failure: Throwable) {
@@ -4126,15 +4677,18 @@ private fun stagePrivateRuntimeSnapshot(
 
 private fun copyRuntimeNode(
     descriptor: LinuxDescriptor,
+    sourcePath: Path,
     destinationParent: LinuxDescriptor,
     destinationName: String,
     rootMountId: Long,
     depth: Int,
     limits: AcpRuntimeClosureLimits,
     budget: RuntimeSnapshotBudget,
+    protection: RuntimePrivateControlScope,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ) {
     cancellationCheck()
+    protection.requireDescriptor(descriptor, sourcePath)
     if (descriptor.identity.mountId != rootMountId) {
         throw IOException("sandbox runtime snapshot crosses a mount boundary")
     }
@@ -4166,12 +4720,14 @@ private fun copyRuntimeNode(
                         ) throw IOException("sandbox runtime snapshot contains a link or special entry")
                         copyRuntimeNode(
                             child,
+                            sourcePath.resolve(name),
                             targetDirectory,
                             name,
                             rootMountId,
                             depth + 1,
                             limits,
                             budget,
+                            protection,
                             cancellationCheck,
                         )
                     }
@@ -4193,7 +4749,7 @@ private fun copyRuntimeNode(
                         descriptor,
                         output,
                         remaining,
-                        cancellationCheck,
+                        { protection.requireDescriptor(descriptor, sourcePath) },
                     ),
                 )
                 LinuxFilesystemSyscalls.chmod(output, descriptor.identity.mode.permissions)
@@ -4389,6 +4945,12 @@ private fun hasSafeSandboxTrustExtendedAttributes(
 private fun readIdentity(
     path: Path,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): PinnedFileIdentity = readIdentity(path, cancellationCheck, null)
+
+private fun readIdentity(
+    path: Path,
+    cancellationCheck: () -> Unit,
+    protection: RuntimePrivateControlScope?,
 ): PinnedFileIdentity {
     cancellationCheck()
     val unix = Files.readAttributes(
@@ -4399,6 +4961,7 @@ private fun readIdentity(
     val descriptor = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
         ?: throw IOException("sandbox boundary path disappeared: $path")
     descriptor.use {
+        protection?.requireDescriptor(descriptor, path)
         if (descriptor.identity.key.device != (unix.getValue("dev") as Number).toLong() ||
             descriptor.identity.key.inode != (unix.getValue("ino") as Number).toLong()
         ) throw IOException("sandbox boundary path changed while its identity was pinned: $path")
@@ -4576,43 +5139,128 @@ internal fun isValidSystemdManagerVersionOutput(output: String): Boolean {
 /** Proves that the fixed launcher opens only the supplied environment descriptor path as fd 4. */
 private fun probeEnvironmentFdOpener(
     path: Path,
+    parent: PinnedSandboxControlTemporaryParent,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ) {
     cancellationCheck()
-    LinuxFilesystemSyscalls.openRoot(Path.of("/tmp")).use { parent ->
-        LinuxFilesystemSyscalls.createTemporaryAt(parent.fd).use { probeFile ->
-            LinuxFilesystemSyscalls.chmod(probeFile, SANDBOX_ENVIRONMENT_FILE_MODE)
-            LinuxFilesystemSyscalls.write(
-                probeFile,
-                ENVIRONMENT_FD_OPENER_PROBE_OUTPUT.toByteArray(),
-                cancellationCheck,
-            )
-            val command = listOf(
-                path.toString(),
-                "--noprofile",
-                "--norc",
-                "-c",
-                ENVIRONMENT_FD_OPENER_SCRIPT,
-                ENVIRONMENT_FD_OPENER_ARG0,
-                LinuxFilesystemSyscalls.stableDescriptorPath(probeFile.fd).toString(),
-                path.toString(),
-                "--noprofile",
-                "--norc",
-                "-c",
-                ENVIRONMENT_FD_OPENER_PROBE_SCRIPT,
-            )
-            val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
-                builder.environment().clear()
-            }.let { builder ->
-                cancellationCheck()
-                builder.start()
-            }
-            awaitTrustedProcess(process, PROBE_TIMEOUT, cancellationCheck, "environment-fd launcher")
-            val output = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1).toString(Charsets.UTF_8)
-            if (process.exitValue() != 0 || output != ENVIRONMENT_FD_OPENER_PROBE_OUTPUT) {
-                throw IOException("environment-fd launcher did not preserve exact fd-4 semantics")
+    parent.requireCurrentPath()
+    LinuxFilesystemSyscalls.createTemporaryAt(parent.descriptor().fd).use { probeFile ->
+        parent.requireCurrentPath()
+        LinuxFilesystemSyscalls.chmod(probeFile, SANDBOX_ENVIRONMENT_FILE_MODE)
+        LinuxFilesystemSyscalls.write(
+            probeFile,
+            ENVIRONMENT_FD_OPENER_PROBE_OUTPUT.toByteArray(),
+            cancellationCheck,
+        )
+        val command = listOf(
+            path.toString(),
+            "--noprofile",
+            "--norc",
+            "-c",
+            ENVIRONMENT_FD_OPENER_SCRIPT,
+            ENVIRONMENT_FD_OPENER_ARG0,
+            LinuxFilesystemSyscalls.stableDescriptorPath(probeFile.fd).toString(),
+            path.toString(),
+            "--noprofile",
+            "--norc",
+            "-c",
+            ENVIRONMENT_FD_OPENER_PROBE_SCRIPT,
+        )
+        val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
+            builder.environment().clear()
+        }.let { builder ->
+            cancellationCheck()
+            builder.start()
+        }
+        awaitTrustedProcess(process, PROBE_TIMEOUT, cancellationCheck, "environment-fd launcher")
+        val output = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1).toString(Charsets.UTF_8)
+        if (process.exitValue() != 0 || output != ENVIRONMENT_FD_OPENER_PROBE_OUTPUT) {
+            throw IOException("environment-fd launcher did not preserve exact fd-4 semantics")
+        }
+        parent.requireCurrentPath()
+    }
+}
+
+/** Both host-side control resources use one existing canonical JVM temporary parent. */
+private fun sandboxControlTemporaryParent(): PinnedSandboxControlTemporaryParent {
+    val configured = System.getProperty("java.io.tmpdir")
+        ?: throw IOException("sandbox temporary parent is not configured")
+    val parent = try {
+        Path.of(configured)
+    } catch (failure: RuntimeException) {
+        throw IOException("sandbox temporary parent is invalid", failure)
+    }
+    if (!parent.isAbsolute || parent != parent.normalize() ||
+        !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS) || parent.toRealPath() != parent
+    ) throw IOException("sandbox temporary parent must be an existing absolute canonical directory")
+    val pinned = openCanonicalDirectoryNoFollow(parent)
+    try {
+        requireDirectoryDescriptorIdentity(pinned, pinned.identity.key, pinned.identity.mountId, null)
+        openCanonicalDirectoryNoFollow(parent).use { current ->
+            if (current.identity.key != pinned.identity.key || current.identity.mountId != pinned.identity.mountId) {
+                throw IOException("sandbox temporary parent pathname changed while it was pinned")
             }
         }
+        return PinnedSandboxControlTemporaryParent(parent, pinned)
+    } catch (failure: Throwable) {
+        pinned.close()
+        throw failure
+    }
+}
+
+/** Walks every path component through O_NOFOLLOW directory descriptors, never pathname ancestors. */
+private fun openCanonicalDirectoryNoFollow(path: Path): LinuxDescriptor {
+    val root = path.root
+    if (!path.isAbsolute || path != path.normalize() || root == null) {
+        throw IOException("private directory path must be absolute and normalized")
+    }
+    var current: LinuxDescriptor? = LinuxFilesystemSyscalls.openRoot(root)
+    try {
+        for (component in path) {
+            val parent = requireNotNull(current)
+            val next = LinuxFilesystemSyscalls.openDirectoryAt(
+                parent.fd,
+                component.toString(),
+            )
+            parent.close()
+            current = next
+        }
+        return requireNotNull(current).also { current = null }
+    } finally {
+        current?.close()
+    }
+}
+
+/** Owns the canonical temporary parent descriptor until control-directory creation takes it over. */
+private class PinnedSandboxControlTemporaryParent(
+    val path: Path,
+    descriptor: LinuxDescriptor,
+) : AutoCloseable {
+    private var ownedDescriptor: LinuxDescriptor? = descriptor
+
+    fun descriptor(): LinuxDescriptor = ownedDescriptor
+        ?: throw IOException("sandbox temporary parent descriptor was transferred")
+
+    fun requireCurrentPath() {
+        val pinned = descriptor()
+        requireDirectoryDescriptorIdentity(pinned, pinned.identity.key, pinned.identity.mountId, null)
+        openCanonicalDirectoryNoFollow(path).use { current ->
+            if (current.identity.key != pinned.identity.key || current.identity.mountId != pinned.identity.mountId) {
+                throw IOException("sandbox temporary parent pathname changed")
+            }
+        }
+    }
+
+    fun transfer(): LinuxDescriptor {
+        requireCurrentPath()
+        val pinned = descriptor()
+        ownedDescriptor = null
+        return pinned
+    }
+
+    override fun close() {
+        ownedDescriptor?.close()
+        ownedDescriptor = null
     }
 }
 

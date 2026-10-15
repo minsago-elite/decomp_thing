@@ -34,15 +34,18 @@ internal class GccBundledOperationIntent(
     init {
         require(operationId.matches(Regex("[0-9a-f]{64}"))) { "GCC bundled operation ID is invalid" }
         require(engineId in setOf("cc1", "lto1")) { "GCC bundled engine ID is invalid" }
-        require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion == 5) {
+        require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion in setOf(5, 8)) {
             "fresh operation intent cannot select the resume-only runtime"
         }
         require(runKind != GccCompilerEngineContainmentRunKind.RESUMED) { "GCC bundled prepared operations require fresh analysis" }
-        require(bundledRuntime.invocationVersion != 5 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+        require(bundledRuntime.invocationVersion !in setOf(5, 8) || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
-        require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
+        require(bundledRuntime.invocationVersion !in setOf(5, 8) || engineId == "cc1") {
             "full-recovery structural export is currently supported only for cc1"
+        }
+        require(bundledRuntime.invocationVersion != 8 || (plannerProfile != null && cliInvocation != null)) {
+            "native call observations require a retained production profile and bound CLI invocation"
         }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
@@ -60,7 +63,8 @@ internal class GccBundledOperationIntent(
         ) { "GCC bundled intent must bind every distinct artifact role and path exactly once" }
         this.artifacts = java.util.List.copyOf(copied.sortedBy { it.role.wireName })
         bundledRuntime.requireArtifacts(this.artifacts)
-        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
+        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets,
+            nativeCallObservations = bundledRuntime.invocationVersion == 8)
         val byRole = this.artifacts.associateBy { it.role }
         cliInvocation?.let { invocation ->
             val selected = invocation.options
@@ -69,6 +73,7 @@ internal class GccBundledOperationIntent(
                 selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
                 selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
                 selected.fullRecoveryExport == (bundledRuntime.invocationVersion == 5) &&
+                selected.nativeCallObservations == (bundledRuntime.invocationVersion == 8) &&
                 (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
                 "CLI selection differs from operation intent"
             }
@@ -82,8 +87,12 @@ internal class GccBundledOperationIntent(
             "sourceLockSha256" to JsonPrimitive(byRole.getValue(GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK).sha256),
         ))))
         encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(if (profilePolicy == null) 1 else 2),
-            "provider" to JsonPrimitive(if (profilePolicy == null) "gcc-bundled-operation-intent-v1" else "gcc-bundled-operation-intent-v2"),
+            "schemaVersion" to JsonPrimitive(when { bundledRuntime.invocationVersion == 8 -> 5; profilePolicy == null -> 1; else -> 2 }),
+            "provider" to JsonPrimitive(when {
+                bundledRuntime.invocationVersion == 8 -> "gcc-bundled-operation-intent-v5"
+                profilePolicy == null -> "gcc-bundled-operation-intent-v1"
+                else -> "gcc-bundled-operation-intent-v2"
+            }),
             "operationId" to JsonPrimitive(operationId),
             "engineId" to JsonPrimitive(engineId),
             "runKind" to JsonPrimitive(runKind.wireName),
@@ -119,7 +128,8 @@ internal class GccBundledOperationIntent(
         val retained = GccRetainedCompilerEngineProfile.open(path)
         try {
             retained.requireDisjoint(excludedRoots + bundledRuntime.root)
-            require(retained.bindInvocation(engineId, artifacts, budgets).contentEquals(expected)) {
+            require(retained.bindInvocation(engineId, artifacts, budgets,
+                nativeCallObservations = bundledRuntime.invocationVersion == 8).contentEquals(expected)) {
                 "GCC planner profile differs from its prepared operation intent"
             }
             return retained

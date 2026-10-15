@@ -5,6 +5,19 @@ on:
     branches: [master]
     tags: ['**']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      qualification:
+        description: "Explicit native runtime measurement; never approves a production profile"
+        type: choice
+        required: true
+        default: native-runtime-measurement
+        options: [native-runtime-measurement]
+      listener_continuity:
+        description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
@@ -12,6 +25,7 @@ concurrency:
 
 jobs:
   provenance-artifacts-and-ground-truth:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -208,3 +222,487 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+
+  native-runtime-measurement:
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      NATIVE_MEASUREMENT_ROOT: ${{ github.workspace }}/build/nrm-live
+      LISTENER_CONTINUITY: ${{ inputs.listener_continuity && 'true' || 'false' }}
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/nrm-live/gradle-home
+      DOCKER_CONFIG: ${{ github.workspace }}/build/nrm-live/build-config
+      DOCKER_HOST: unix://${{ github.workspace }}/build/nrm-live/r/s
+      TMPDIR: ${{ github.workspace }}/build/nrm-live/tmp
+      npm_config_cache: ${{ github.workspace }}/build/nrm-live/npm-cache
+      PYTHONDONTWRITEBYTECODE: "1"
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ github.workspace }}/build/nrm-live/tmp -Djna.tmpdir=${{ github.workspace }}/build/nrm-live/tmp -Duser.home=${{ github.workspace }}/build/nrm-live/java-home -XX:-UsePerfData
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create repository-owned measurement paths
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$NATIVE_MEASUREMENT_ROOT" \
+            "$NATIVE_MEASUREMENT_ROOT/tmp" "$NATIVE_MEASUREMENT_ROOT/java-home" \
+            "$NATIVE_MEASUREMENT_ROOT/build-config" "$NATIVE_MEASUREMENT_ROOT/empty-config" \
+            "$NATIVE_MEASUREMENT_ROOT/r" "$NATIVE_MEASUREMENT_ROOT/data" \
+            "$NATIVE_MEASUREMENT_ROOT/exec" "$NATIVE_MEASUREMENT_ROOT/state" \
+            "$NATIVE_MEASUREMENT_ROOT/daemon-home" "$NATIVE_MEASUREMENT_ROOT/evidence" \
+            "$NATIVE_MEASUREMENT_ROOT/daemon-cache" "$NATIVE_MEASUREMENT_ROOT/daemon-config" \
+            "$NATIVE_MEASUREMENT_ROOT/daemon-share"
+          cat > "$NATIVE_MEASUREMENT_ROOT/owned-runtime.py" <<'PYTHON'
+          import json, os, re, signal, stat, subprocess, sys, time
+          from pathlib import Path
+          root = Path(sys.argv[2]).resolve(strict=True)
+          assert root.is_relative_to(Path(os.environ["GITHUB_WORKSPACE"]).resolve() / "build")
+          evidence = root / "evidence"
+          def save(name, value):
+              encoded = json.dumps(value, sort_keys=True, indent=2) + "\n"
+              assert len(encoded.encode()) <= 8 * 1024 * 1024, "ownership evidence byte bound"
+              target = evidence / name
+              pending = target.with_name(target.name + ".pending")
+              with pending.open("w") as output:
+                  output.write(encoded)
+                  output.flush()
+                  os.fsync(output.fileno())
+              os.replace(pending, target)
+          def read(name):
+              target = evidence / name
+              assert target.stat().st_size <= 8 * 1024 * 1024, "ownership evidence byte bound"
+              return json.loads(target.read_text())
+          def retained_facts(errors):
+              try:
+                  facts = read("observed-processes.json") if (evidence / "observed-processes.json").exists() else []
+                  assert isinstance(facts, list) and len(facts) <= 8192
+                  for fact in facts:
+                      assert isinstance(fact["pid"], int) and fact["pid"] > 0 and isinstance(fact["startTime"], int) and fact["startTime"] >= 0
+                  return facts
+              except Exception as error:
+                  errors.append("retained PID evidence: " + str(error))
+                  return []
+          def command(label, *args):
+              started = time.monotonic()
+              try:
+                  result = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, timeout=10)
+                  facts = dict(argv=result.args, exitCode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+              except subprocess.TimeoutExpired as error:
+                  facts = dict(argv=error.cmd, timeout=True, stdout=str(error.stdout), stderr=str(error.stderr))
+              facts["elapsedSeconds"] = time.monotonic() - started
+              save(label + ".json", facts)
+              assert len(facts["stdout"]) + len(facts["stderr"]) <= 1024 * 1024, "systemd response bound"
+              assert facts.get("exitCode") == 0, "systemd command failed or timed out: " + label
+              return facts["stdout"]
+          def show(unit, label):
+              text = command(label, "show", unit, "--all", "--property=Id,LoadState,ActiveState,ControlGroup,InvocationID")
+              props = dict(line.split("=", 1) for line in text.splitlines())
+              assert props["Id"] == unit and props["LoadState"] == "loaded", "unknown unit state"
+              return props
+          def process(pid):
+              try:
+                  value = Path("/proc", str(pid), "stat").read_text()
+              except FileNotFoundError:
+                  return None
+              fields = value[value.rindex(")") + 2:].split()
+              assert len(fields) >= 20
+              return dict(pid=pid, startTime=int(fields[19]), state=fields[0])
+          def group_path(group):
+              assert group.startswith("/") and ".." not in group.split("/")
+              return Path("/sys/fs/cgroup" + group)
+          def group_stat(admission):
+              path = group_path(admission["group"])
+              try:
+                  info = path.lstat()
+              except FileNotFoundError:
+                  return None
+              assert stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (admission["device"], admission["inode"]), "owned cgroup drift"
+              return path
+          def capture(admission, label):
+              path = group_stat(admission)
+              groups, processes = [], {}
+              if path is not None:
+                  def walk_error(error):
+                      raise error
+                  for directory, children, files in os.walk(path, onerror=walk_error):
+                      assert len(groups) < 4096 and len(Path(directory).relative_to(path).parts) <= 64, "cgroup traversal bound"
+                      try:
+                          info = Path(directory).lstat()
+                          assert stat.S_ISDIR(info.st_mode) and info.st_dev == admission["device"]
+                          pids = (Path(directory) / "cgroup.procs").read_text().split()
+                      except FileNotFoundError:
+                          continue
+                      groups.append(dict(path=directory, device=info.st_dev, inode=info.st_ino))
+                      for value in pids:
+                          fact = process(int(value))
+                          if fact is not None:
+                              processes[(fact["pid"], fact["startTime"])] = fact
+                              assert len(processes) <= 8192, "owned PID bound"
+              prior = read("observed-processes.json") if (evidence / "observed-processes.json").exists() else []
+              for fact in prior:
+                  processes.setdefault((fact["pid"], fact["startTime"]), fact)
+              assert len(processes) <= 8192, "cumulative owned PID bound"
+              save("observed-processes.json", list(processes.values()))
+              save(label + ".json", dict(groupAbsent=path is None, groups=groups, processes=list(processes.values())))
+          def terminal_group(admission):
+              path = group_stat(admission)
+              if path is None:
+                  return dict(absent=True)
+              events = dict(line.split() for line in (path / "cgroup.events").read_text().splitlines())
+              return dict(absent=False, events=events, unpopulated=events.get("populated") == "0")
+          def live(facts):
+              result = []
+              for fact in facts:
+                  current = process(fact["pid"])
+                  if current is not None and current["startTime"] == fact["startTime"]:
+                      result.append(current)
+              return result
+          def signal_owned(facts, signum, actions):
+              for fact in live(facts):
+                  try:
+                      descriptor = os.pidfd_open(fact["pid"], 0)
+                  except ProcessLookupError:
+                      continue
+                  try:
+                      current = process(fact["pid"])
+                      if current is not None and current["startTime"] == fact["startTime"]:
+                          try:
+                              signal.pidfd_send_signal(descriptor, signum)
+                              actions.append(dict(pid=fact["pid"], startTime=fact["startTime"], signal=int(signum)))
+                          except ProcessLookupError:
+                              pass
+                  finally:
+                      os.close(descriptor)
+          mode = sys.argv[1]
+          if mode == "prepare":
+              unit = sys.argv[3]
+              assert re.fullmatch(r"decompnativemeasurement[0-9]+a[0-9]+\.slice", unit)
+              props = show(unit, "slice-before-start")
+              assert props["ActiveState"] == "inactive" and not props["ControlGroup"], "slice already occupied"
+              save("slice-intent.json", dict(unit=unit, before=props))
+              command("slice-start", "start", unit)
+              props = show(unit, "slice-admitted")
+              group = props["ControlGroup"]
+              assert props["ActiveState"] == "active" and group.endswith("/" + unit)
+              info = group_path(group).lstat()
+              assert stat.S_ISDIR(info.st_mode)
+              admission = dict(unit=unit, group=group, device=info.st_dev, inode=info.st_ino, invocationId=props["InvocationID"])
+              save("slice-admission.json", admission)
+              capture(admission, "slice-initial-tree")
+              assert not read("observed-processes.json"), "new slice is populated"
+          elif mode == "snapshot":
+              admission = read("slice-admission.json")
+              props = show(admission["unit"], sys.argv[3] + "-unit")
+              assert props["ActiveState"] == "active" and props["ControlGroup"] == admission["group"] and props["InvocationID"] == admission["invocationId"]
+              capture(admission, sys.argv[3] + "-tree")
+          elif mode == "cleanup":
+              errors, actions, terminal = [], [], {}
+              try:
+                  if (evidence / "slice-intent.json").exists():
+                      unit = read("slice-intent.json")["unit"]
+                      admission = None
+                      try:
+                          admission = read("slice-admission.json") if (evidence / "slice-admission.json").exists() else None
+                      except Exception as error:
+                          errors.append("slice admission evidence: " + str(error))
+                      facts = retained_facts(errors)
+                      try:
+                          props = show(unit, "cleanup-before-unit")
+                          if admission is not None:
+                              assert not props["ControlGroup"] or props["ControlGroup"] == admission["group"], "slice path drift"
+                              assert props["ActiveState"] == "inactive" or props["InvocationID"] == admission["invocationId"], "slice invocation drift"
+                              capture(admission, "cleanup-before-tree")
+                          elif props["ControlGroup"]:
+                              group = props["ControlGroup"]
+                              assert group.endswith("/" + unit)
+                              info = group_path(group).lstat()
+                              admission = dict(unit=unit, group=group, device=info.st_dev, inode=info.st_ino)
+                              capture(admission, "cleanup-failed-start-tree")
+                      except Exception as error:
+                          errors.append("pre-stop observation: " + str(error))
+                      # An observation failure remains a failure, but must not skip owned teardown.
+                      try:
+                          command("slice-stop", "stop", unit)
+                      except Exception as error:
+                          errors.append(str(error))
+                      facts += retained_facts(errors)
+                      facts = list({(fact["pid"], fact["startTime"]): fact for fact in facts}.values())
+                      assert len(facts) <= 8192, "retained cleanup PID bound"
+                      # Signals use retained PID/starttime and kernel pidfds; no PID number alone authorizes a signal.
+                      signal_owned(facts, signal.SIGTERM, actions)
+                      deadline = time.monotonic() + 15
+                      killed, terminal_unknown = False, False
+                      while True:
+                          remaining = live(facts)
+                          if not terminal_unknown:
+                              try:
+                                  terminal = terminal_group(admission) if admission is not None else dict(noGroupWasAdmitted=True)
+                              except Exception as error:
+                                  errors.append("terminal cgroup observation: " + str(error))
+                                  terminal_unknown = True
+                          if not remaining and (terminal_unknown or admission is None or terminal.get("absent") or terminal.get("unpopulated")):
+                              break
+                          if not killed and time.monotonic() >= deadline - 10:
+                              signal_owned(facts, signal.SIGKILL, actions)
+                              killed = True
+                          assert time.monotonic() < deadline, "owned processes or cgroup remain"
+                          time.sleep(0.1)
+                      props = show(unit, "cleanup-after-unit")
+                      assert props["ActiveState"] == "inactive", "slice has not stopped"
+                      terminal.update(savedProcessIdentitiesAbsent=True, cgroupObservationUnknown=terminal_unknown, systemdState=props)
+                  else:
+                      terminal = dict(noOwnedSliceWasStarted=True)
+              except Exception as error:
+                  errors.append(str(error))
+              save("owned-runtime-cleanup.json", dict(terminal=terminal, pidfdActions=actions, errors=errors, cleanupProved=not errors))
+              assert not errors, "; ".join(errors)
+          else:
+              raise AssertionError("unknown ownership operation")
+          PYTHON
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: true
+      - name: Authenticate the fixed Docker and rootless tool archives
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          install -d -m 0700 "$root/tools"
+          curl --fail --silent --show-error --location \
+            --connect-timeout 15 --max-time 180 --retry 2 --retry-max-time 300 \
+            https://download.docker.com/linux/static/stable/x86_64/docker-29.7.2.tgz \
+            --output "$root/tools/docker.tgz"
+          echo "803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f  $root/tools/docker.tgz" | sha256sum --check --strict
+          tar --extract --gzip --file "$root/tools/docker.tgz" --directory "$root/tools"
+          echo "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13  $root/tools/docker/docker" | sha256sum --check --strict
+          test "$(stat --format='%s' "$root/tools/docker/docker")" = 42677472
+          test "$("$root/tools/docker/docker" --version)" = 'Docker version 29.7.2, build a7dcaa6'
+          test "$("$root/tools/docker/dockerd" --version)" = 'Docker version 29.7.2, build 6a43e3d'
+          curl --fail --silent --show-error --location \
+            --connect-timeout 15 --max-time 180 --retry 2 --retry-max-time 300 \
+            https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
+            --output "$root/tools/rootless.tgz"
+          echo "15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a  $root/tools/rootless.tgz" | sha256sum --check --strict
+          tar --extract --gzip --file "$root/tools/rootless.tgz" --directory "$root/tools"
+          rootless="$root/tools/docker-rootless-extras"
+          echo "98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466  $rootless/rootlesskit" | sha256sum --check --strict
+          echo "904c9b9e35f6927c0a5e65afb4d35b6bc9eb1278c878044501281fc728c9be46  $rootless/dockerd-rootless.sh" | sha256sum --check --strict
+          test "$("$rootless/rootlesskit" --version)" = 'rootlesskit version 3.0.2'
+          bash -n "$rootless/dockerd-rootless.sh"
+          { uname -a; /usr/sbin/apparmor_parser --version; slirp4netns --version; \
+            sha256sum "$root/tools/docker.tgz" "$root/tools/rootless.tgz" \
+              "$root/tools/docker/docker" "$root/tools/docker/dockerd" "$rootless/rootlesskit"; } \
+            > "$root/evidence/host-tools.txt"
+      - name: Prepare delegated user services and an exact binary AppArmor profile
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          : > "$root/sandbox.environment"
+          GITHUB_ENV="$root/sandbox.environment" bash scripts/ci-prepare-acp-sandbox.sh \
+            > "$root/evidence/user-service-preparation.log" 2>&1
+          rootlesskit="$root/tools/docker-rootless-extras/rootlesskit"
+          [[ "$rootlesskit" =~ ^[A-Za-z0-9_./-]+$ ]]
+          profile="decomp-native-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf '%s\n' "$profile" > "$root/profile-name"
+          cat > "$root/rootlesskit.apparmor" <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile $profile "$rootlesskit" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-before.txt"
+          if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-before.txt"; then exit 1; fi
+          : > "$root/profile-load-intent"
+          timeout --kill-after=5s 20s sudo -n apparmor_parser --replace "$root/rootlesskit.apparmor"
+          : > "$root/profile-loaded"
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-profiles.txt"
+          grep --fixed-strings "$profile (unconfined)" "$root/evidence/apparmor-profiles.txt"
+      - name: Start the pinned private rootless daemon and containers in one owned user slice
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          source "$root/sandbox.environment"
+          export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+          unit="decomp-native-measurement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf '%s\n' "$unit.service" > "$root/daemon-service-unit"
+          slice="decompnativemeasurement${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}.slice"
+          python3 "$root/owned-runtime.py" prepare "$root" "$slice"
+          timeout --kill-after=5s 15s systemd-run --user --quiet --collect --service-type=exec --expand-environment=no \
+            --unit="$unit" --slice="$slice" --property=Delegate=yes --property=KillMode=control-group \
+            --property=SendSIGKILL=yes --property=RuntimeMaxSec=2400s --property=TimeoutStopSec=5s \
+            --property="StandardOutput=append:$root/evidence/dockerd.log" \
+            --property="StandardError=append:$root/evidence/dockerd.log" \
+            -- env PATH="$root/tools/docker:$root/tools/docker-rootless-extras:$PATH" \
+              HOME="$root/daemon-home" TMPDIR="$root/tmp" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+              XDG_CACHE_HOME="$root/daemon-cache" XDG_CONFIG_HOME="$root/daemon-config" \
+              XDG_DATA_HOME="$root/daemon-share" \
+              DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+              DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$root/state" \
+              DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns \
+              DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin \
+              DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true \
+              "$root/tools/docker-rootless-extras/dockerd-rootless.sh" \
+                --data-root="$root/data" --exec-root="$root/exec" \
+                --pidfile="$root/dockerd.pid" --host="$DOCKER_HOST" \
+                --exec-opt=native.cgroupdriver=systemd --cgroup-parent="$slice" \
+                --storage-driver=overlay2 --bridge=none --iptables=false --ip6tables=false \
+                --ip-forward=false --ip-masq=false \
+              > "$root/evidence/daemon-service-start.log" 2>&1
+          python3 "$root/owned-runtime.py" snapshot "$root" daemon-started
+          ready=false
+          for attempt in $(seq 1 60); do
+            if timeout 2s "$root/tools/docker/docker" info > "$root/evidence/startup-info.txt" 2>&1; then ready=true; break; fi
+            if ! timeout 2s systemctl --user is-active --quiet "$unit.service"; then break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          timeout 10s systemctl --user show "$unit.service" > "$root/evidence/daemon-service.txt"
+          python3 "$root/owned-runtime.py" snapshot "$root" daemon-ready
+          "$root/tools/docker/docker" version > "$root/evidence/actual-version.txt"
+          test "$("$root/tools/docker/docker" version --format '{{.Server.Version}}')" = 29.7.2
+      - name: Build the installed JVM and authenticate the independent LLVM inputs
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          bash scripts/install-frontend-node.sh "$root/frontend-node"
+          export PATH="$root/frontend-node/bin:$PATH"
+          ./gradlew --no-daemon installDist compileTestKotlin
+          ./gradlew --no-daemon fetchLlvmSourceArchive \
+            --args="--lock oracle/llvm/22.1.6/source-lock.json --output $root/source"
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts --args="$root/release"
+      - name: Build a distinct measured runtime with the exact subject and source resource component
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          export PATH="$root/tools/docker:$PATH"
+          install -d -m 0700 "$root/context" "$root/raw-oci"
+          cp -- oracle/llvm/22.1.6/native-runtime-measurement-v2.Dockerfile "$root/context/"
+          cp -- "$root/source/llvm-project-22.1.6.src.tar.xz" "$root/context/"
+          cp -- "$root/release/artifacts/clang-driver.stripped" "$root/context/"
+          sha256sum "$root/context/"* > "$root/evidence/build-context-sha256.txt"
+          source "$root/sandbox.environment"
+          export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+          docker info --format '{{json .ClientInfo.Plugins}}' > "$root/evidence/client-plugins.json"
+          python3 - "$root" <<'PYTHON'
+          import hashlib, json, os, stat, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          plugins = json.loads((root / "evidence/client-plugins.json").read_text())
+          selected = [plugin for plugin in plugins if plugin["Name"] == "buildx"]
+          assert len(selected) == 1
+          path = Path(selected[0]["Path"]).resolve(strict=True)
+          with path.open("rb") as stream:
+              before = os.fstat(stream.fileno())
+              assert stat.S_ISREG(before.st_mode) and 0 < before.st_size <= 256 * 1024 * 1024
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              after = os.fstat(stream.fileno())
+          def identity(info):
+              return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+          assert identity(before) == identity(after) == identity(path.stat())
+          facts = dict(plugin=selected[0], realPath=str(path), bytes=before.st_size, sha256=digest,
+                       device=before.st_dev, inode=before.st_ino, mtimeNs=before.st_mtime_ns, ctimeNs=before.st_ctime_ns,
+                       toolIndependentlyPinned=False, candidateOnly=True)
+          (root / "evidence/buildx-input.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
+          PYTHON
+          docker buildx version > "$root/evidence/buildx-version.txt"
+          docker buildx create --driver docker-container --driver-opt network=host \
+            --buildkitd-flags '--allow-insecure-entitlement network.host' --name native-measurement --use
+          timeout --signal=INT --kill-after=10s 120s docker buildx inspect --bootstrap > "$root/evidence/buildx-builder.txt"
+          docker inspect --type container buildx_buildkit_native-measurement0 > "$root/evidence/buildkit-container.json"
+          builder_image="$(docker inspect --type container --format '{{.Image}}' buildx_buildkit_native-measurement0)"
+          [[ "$builder_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker image inspect "$builder_image" > "$root/evidence/buildkit-image.json"
+          python3 "$root/owned-runtime.py" snapshot "$root" builder-ready
+          timeout --signal=INT --kill-after=30s 1200s docker buildx build \
+            --platform linux/amd64 --network=host --allow network.host --no-cache --provenance=false --sbom=false \
+            --build-arg SOURCE_DATE_EPOCH=1779182222 \
+            --file "$root/context/native-runtime-measurement-v2.Dockerfile" \
+            --output "type=oci,dest=$root/raw-oci,tar=false,rewrite-timestamp=true" \
+            --output "type=docker,dest=$root/load-image.tar,rewrite-timestamp=true" \
+            --metadata-file "$root/evidence/buildx-metadata.json" --progress=plain \
+            "$root/context" > "$root/evidence/runtime-build.log" 2>&1
+          docker image load --input "$root/load-image.tar" > "$root/evidence/image-load.txt"
+          python3 "$root/owned-runtime.py" snapshot "$root" build-complete
+          python3 - "$root" <<'PYTHON'
+          import hashlib, os, sys, json
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          facts = json.loads((root / "evidence/buildx-input.json").read_text())
+          with Path(facts["realPath"]).open("rb") as stream:
+              before = os.fstat(stream.fileno())
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              after = os.fstat(stream.fileno())
+          assert (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == \
+              (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+          assert (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns, digest) == \
+              (facts["device"], facts["inode"], facts["bytes"], facts["mtimeNs"], facts["ctimeNs"], facts["sha256"])
+          (root / "evidence/buildx-terminal.json").write_text(json.dumps(dict(input=facts, current=True), sort_keys=True, indent=2) + "\n")
+          PYTHON
+      - name: Measure the actual installed raw OCI and fixed Docker export without START
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          listener_args=()
+          candidate="$root/evidence/native-runtime-measurement-candidate-v2.json"
+          if [[ "$LISTENER_CONTINUITY" == true ]]; then
+            listener_args=(--listener-continuity)
+            candidate="$root/evidence/native-runtime-measurement-candidate-v3.json"
+          fi
+          timeout --signal=INT --kill-after=10s 900s java -Xmx1g \
+            -cp 'build/install/llm_bin_patch/lib/*:build/classes/kotlin/test:build/classes/java/test' \
+            decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2LiveMain \
+              "${listener_args[@]}" "$root/raw-oci" "$root/tools/docker/docker" "$root/empty-config" "$root/r/s" \
+              "$root/source/llvm-project-22.1.6.src.tar.xz" \
+              "$root/source/llvm-project-22.1.6.src.tar.xz.sig" \
+              "$candidate" \
+              > "$root/evidence/installed-measurement.log" 2>&1
+      - name: Prove whole-build cleanup and unload the exact owned binary profile
+        if: always()
+        run: |
+          set -euo pipefail
+          root="$NATIVE_MEASUREMENT_ROOT"
+          if test -f "$root/sandbox.environment"; then
+            source "$root/sandbox.environment"
+            export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+          fi
+          runtime_cleanup_status=0
+          profile_cleanup_status=0
+          if test -f "$root/owned-runtime.py"; then
+            if timeout --kill-after=5s 50s python3 "$root/owned-runtime.py" cleanup "$root"; then :
+            else runtime_cleanup_status=$?; fi
+          fi
+          if test -f "$root/profile-load-intent"; then
+            # A separate errexit-enabled shell ensures a failed owned-process proof cannot skip policy cleanup.
+            if timeout --kill-after=5s 55s bash -euo pipefail <<'CLEANUP_PROFILE'
+          root="$NATIVE_MEASUREMENT_ROOT"
+          profile="$(cat "$root/profile-name")"
+          [[ "$profile" =~ ^decomp-native-measurement-[0-9]+-[0-9]+$ ]]
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-before-cleanup.txt"
+          if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-before-cleanup.txt"; then
+            timeout --kill-after=5s 20s sudo -n apparmor_parser --remove "$root/rootlesskit.apparmor" \
+              > "$root/evidence/apparmor-remove.txt" 2>&1
+          fi
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-after-cleanup.txt"
+          if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-after-cleanup.txt"; then exit 1; fi
+          CLEANUP_PROFILE
+            then :
+            else profile_cleanup_status=$?; fi
+          fi
+          printf '{"ownedRuntimeExitCode":%s,"profileExitCode":%s}\n' \
+            "$runtime_cleanup_status" "$profile_cleanup_status" > "$root/evidence/cleanup-step-status.json"
+          test "$runtime_cleanup_status" = 0 && test "$profile_cleanup_status" = 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-runtime-measurement-candidate-${{ inputs.listener_continuity && 'v3' || 'v2' }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/nrm-live/evidence
+            build/nrm-live/raw-oci

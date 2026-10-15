@@ -2,9 +2,19 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-repair_gradle_home="${GRADLE_USER_HOME:-${HOME}/.gradle}"
+repair_gradle_home="${GRADLE_USER_HOME:-$PWD/build/gradle-user-home}"
 repair_node_home="${DECOMP_TEST_FRONTEND_NODE_HOME:-}"
-repair_fixture_parent="$(mktemp -d /tmp/decomp-repair-snapshot.XXXXXX)"
+repair_preparation_args=(:testClasses :installDist :stageOracleNativeLibraries --no-daemon)
+if [[ -n "$repair_node_home" ]]; then
+  repair_preparation_args+=("-PfrontendNodeHome=$repair_node_home")
+fi
+# Compile and authenticate the real application/helper dependency closure with host credentials.
+# Namespace root maps only this user's UID and cannot lease the host-root-owned compiler inode.
+GRADLE_USER_HOME="$repair_gradle_home" ./gradlew "${repair_preparation_args[@]}"
+
+repair_fixture_directory="$PWD/build"
+mkdir -p "$repair_fixture_directory"
+repair_fixture_parent="$(mktemp -d "$repair_fixture_directory/decomp-repair-snapshot.XXXXXX")"
 repair_source_mount="$repair_fixture_parent/source"
 repair_output_mount="$repair_fixture_parent/output"
 mkdir -m 0700 "$repair_source_mount" "$repair_output_mount"
@@ -27,7 +37,10 @@ unshare -Ur -m bash -c '
     decomp-repair-source "$repair_source_mount"
   mount -t tmpfs -o rw,nodev,nosuid,noexec,size=1M,nr_inodes=128,uid=0,gid=0,mode=0700 \
     decomp-repair-output "$repair_output_mount"
-  repair_gradle_args=(cleanTest test --tests decompengine.project.GeneratedCValidationSnapshotFixtureTest --no-daemon)
+  # Reuse the dependency closure prepared above; only the quota-backed test runs in this namespace.
+  # Checksum/resource/distribution checks remain enabled; only the prepared compiler producers are excluded.
+  repair_gradle_args=(cleanTest test --tests decompengine.project.GeneratedCValidationSnapshotFixtureTest
+    -x :buildLlvmBehaviorHelper -x :buildAnalysisIoHelper --no-daemon)
   if [[ -n "$repair_node_home" ]]; then
     repair_gradle_args+=("-PfrontendNodeHome=$repair_node_home")
   fi
