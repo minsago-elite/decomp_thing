@@ -3877,6 +3877,7 @@ class ModuleRevisionGraphTest {
             graph.accept(accepted, RepairEvidence("valid", "later native fixture observations matched"), proof)
             graph.synchronizeRepairHistory()
         }
+        assertEquals(0, MakeProjectBuilder.build(fixture.project).returnCode)
         val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-native-append.zip"))
         val control = fixture.project.parent.resolve("authored-origin-native-append-control")
         ArchivalBundleVerifier.extractAndVerify(valid.archivePath, control)
