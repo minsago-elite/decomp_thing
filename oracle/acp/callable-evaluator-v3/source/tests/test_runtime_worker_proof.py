@@ -2786,7 +2786,11 @@ class _ReceiptInitializationFilesystem:
         descriptor={'root':101,'child':102,'report':103}[role]
         if self.alias==role:descriptor=101
         self.fds.setdefault(descriptor,role);self.acquired.append(descriptor)
-        self.act('opened-'+role,can_fail=False);return descriptor
+        self.act('opened-'+role,can_fail=False)
+        # An open-entry expiry is observable by the caller only after this call returns.
+        if self.late=='open-'+role+'#'+str(self.counts['open-'+role]):
+            self.expired_at=len(self.events)
+        return descriptor
 
     def fstat(self,descriptor):
         role=self.fds[descriptor];return self.act('fstat-'+role,self.metadata(role))

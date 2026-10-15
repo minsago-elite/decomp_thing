@@ -568,8 +568,17 @@ class ProfileLimits(unittest.TestCase):
         with self.assertRaises(TimeoutError) as caught:
             self.simulate(clock=itertools.chain([0,0,0,0,100],itertools.repeat(100)))
         self.assertTrue(caught.exception.bounded_result['timedOut'])
-        with self.assertRaises(TimeoutError) as caught:
-            self.simulate(cleanup_failure=True,clock=itertools.count(0,0.2))
+        create_receipt=runtime._create_worker_receipt
+        def initialize_receipt(*args,**kwargs):
+            # Keep the actual factory within the existing phase end, then advance
+            # the same simulated clock to exercise the intended cleanup refusal.
+            with patch.object(runtime.time,'monotonic',return_value=0):
+                return create_receipt(*args,**kwargs)
+        with patch.object(runtime,'_create_worker_receipt',side_effect=initialize_receipt):
+            with self.assertRaises(TimeoutError) as caught:
+                self.simulate(cleanup_failure=True,clock=itertools.count(0,0.2))
+        self.last_popen.assert_called_once()
+        self.assertTrue(self.last_census_deadlines)
         result=caught.exception.bounded_result
         self.assertFalse(result['cleanupVerified']); self.assertIsNone(result['exitCode'])
         self.assertFalse(result['workerExecVerified'])

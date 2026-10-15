@@ -826,6 +826,7 @@ def _create_worker_receipt(*, deadline=None, initialization=None) -> dict:
         state.stage = 10
         timely()
         directory = root / component
+        timely()
         receipt = {'path': directory / 'worker-proof.jsonl', 'directory': directory, 'fd': state.fds[2],
                    'device': metadata.st_dev, 'inode': metadata.st_ino,
                    'directoryDevice': directory_metadata.st_dev, 'directoryInode': directory_metadata.st_ino,
