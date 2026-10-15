@@ -109,7 +109,9 @@ class ProcessResults(unittest.TestCase):
             shutil.copytree(e.BASE/'contracts',root/'contracts')
             for name in ('candidate.c','helper','caller','observations.json'):(root/name).write_text('synthetic only')
             def directory(path):path.mkdir(parents=True);return path
-            def write(path,value):path.write_text(json.dumps(value))
+            def write(path,value):
+                raw=json.dumps(value).encode('utf-8');path.write_bytes(raw)
+                return e.hashlib.sha256(raw).hexdigest()
             def fake_run(argv,work,**kwargs):
                 if '-o' in argv:
                     target=argv[argv.index('-o')+1]
@@ -126,6 +128,8 @@ class ProcessResults(unittest.TestCase):
             checks=json.loads((root/'output/gcc-assertions.json').read_bytes())['checks']
             self.assertEqual(checks['expected']['status'],'unknown');self.assertEqual(checks['candidate']['status'],'passed')
             self.assertEqual(report['runtimeRequestCount'],0)
+            for name,sha in report['evidenceFiles'].items():
+                self.assertEqual(e.hashlib.sha256((root/'output'/name).read_bytes()).hexdigest(),sha)
 
     def test_worker_proof_bindings_and_launcher_failures_are_unknown(self):
         expected=e.process_observation(receipt())

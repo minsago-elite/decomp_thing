@@ -614,13 +614,53 @@ def private_directory(path: Path) -> Path:
     return path
 
 
-def write_json(path: Path, value: object) -> None:
+def write_json(path: Path, value: object) -> str:
+    """Write/hash one owned encoding; no pathname reread or durability authority.
+
+    The immutable contract's existing RLIMIT_FSIZE supplies the16MiB byte cap
+    without loading a profile or creating a new wall-clock allowance. Regular
+    nonblocking IO is finite in bytes/progress, not a hard kernel/time bound.
+    """
     if not path.resolve().is_relative_to(BASE):
         raise ValueError('JSON outside owned benchmark root')
-    with path.open('x', encoding='utf-8') as stream:
+    maximum = enforced_process_limits()['RLIMIT_FSIZE']['hard']
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    try:
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size != 0:
+            raise ValueError('JSON output requires an empty owned regular file')
+        os.fchmod(descriptor, 0o600)
+        buffer = bytearray()
+        class OwnedEncoding:
+            def write(self, text):
+                # json.dump's default ensure_ascii remains unchanged. Check
+                # characters before allocating encoded bytes, then bytes too.
+                if len(text) > maximum - len(buffer):
+                    raise ValueError('JSON output exceeds file byte bound')
+                encoded = text.encode('utf-8')
+                if len(encoded) > maximum - len(buffer):
+                    raise ValueError('JSON output exceeds file byte bound')
+                buffer.extend(encoded)
+                return len(text)
+        stream = OwnedEncoding()
         json.dump(value, stream, sort_keys=True, indent=2)
         stream.write('\n')
-    path.chmod(0o600)
+        raw = bytes(buffer)
+        view = memoryview(raw)
+        offset = 0
+        while offset < len(view):
+            chunk = view[offset:offset + 65536]
+            count = os.write(descriptor, chunk)
+            if type(count) is not int or not 0 < count <= len(chunk):
+                raise ValueError('JSON output short write')
+            offset += count
+        final = os.fstat(descriptor)
+        if (not stat.S_ISREG(final.st_mode) or final.st_size != len(raw) or
+                stat.S_IMODE(final.st_mode) != 0o600):
+            raise ValueError('JSON output write completion differs')
+    finally:
+        os.close(descriptor)
+    return hashlib.sha256(raw).hexdigest()
 
 
 def execution_bounds(timeout=None, output_limit=None, managed_scope=False, phase='unspecified', snapshot=None):

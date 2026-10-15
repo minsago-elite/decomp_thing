@@ -676,7 +676,7 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
     p=profile(); output=private_directory(output)
     evidence={}
     def retain(name, value):
-        path=output/(name+'.json');write_json(path,value);sha=digest(path);evidence[path.name]=sha;return sha
+        path=output/(name+'.json');sha=write_json(path,value);evidence[path.name]=sha;return sha
     def phase_receipt(name, value):
         return {'status':value['status'], 'reason':str(value.get('reason',''))[:500], 'evidenceSha256':retain(name,value)}
     source_end=time.monotonic()+p['bounds']['compilerSeconds']

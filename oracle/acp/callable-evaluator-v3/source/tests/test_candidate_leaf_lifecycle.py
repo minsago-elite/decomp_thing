@@ -1,4 +1,6 @@
 """Pure evaluator snapshot and exact-owned leaf lifecycle controls; no processes."""
+import ast
+import io
 import hashlib
 import json
 import os
@@ -9,7 +11,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import evaluate_candidate_v3 as e
 from static_test_support import static_temp
@@ -547,6 +549,114 @@ class PhaseArtifactContinuity(unittest.TestCase):
             self.assertEqual(gate.public_result(originals[0]),value['execution'])
             self.assertEqual(gate.public_result(originals[1]),value['sectionsExecution'])
             self.assertEqual(originals,(first,second))
+
+
+class OwnedJsonEvidence(unittest.TestCase):
+    """Authored owned files and mocked descriptors; no worker/FIFO/native work."""
+    def setUp(self):
+        import bounded_runtime as runtime
+        self.runtime=runtime
+        self.temp=tempfile.TemporaryDirectory(dir=static_temp('static-process'))
+        self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        base=patch.object(runtime,'BASE',self.root);base.start();self.addCleanup(base.stop)
+        profile=patch.object(runtime,'load_profile_with_digest',side_effect=AssertionError('writer must not acquire profile'))
+        profile.start();self.addCleanup(profile.stop)
+
+    def encoded(self,value):
+        stream=io.StringIO();json.dump(value,stream,sort_keys=True,indent=2);stream.write('\n')
+        return stream.getvalue().encode('utf-8')
+
+    def consumer(self,writer):
+        # Isolate only the real nested retain seam, never execute the evaluator.
+        tree=ast.parse(Path(e.__file__).read_text())
+        evaluate=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_evaluate')
+        retain=next(n for n in evaluate.body if isinstance(n,ast.FunctionDef) and n.name=='retain')
+        reopened=Mock(side_effect=AssertionError('pathname digest/reopen forbidden'))
+        namespace={'output':self.root,'write_json':writer,'evidence':{},'digest':reopened}
+        exec(compile(ast.Module(body=[deepcopy(retain)],type_ignores=[]),'<owned-retain-seam>','exec'),namespace)
+        return namespace['retain'],namespace['evidence'],reopened
+
+    def test_exact_existing_unicode_indentation_ascii_and_lf_encoding(self):
+        value={'z':['é','😀','surrogate:\ud800','line\nbreak'], 'a':None,'float':float('nan')}
+        expected=self.encoded(value);path=self.root/'unicode.json';original=json.dump
+        with patch.object(self.runtime.json,'dump',wraps=original) as dump,patch.object(self.runtime,'digest',side_effect=AssertionError('no file digest')):
+            result=self.runtime.write_json(path,value)
+        self.assertEqual(1,dump.call_count);self.assertEqual(expected,path.read_bytes())
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),result)
+        self.assertEqual(0o600,stat.S_IMODE(path.stat().st_mode))
+        self.assertEqual(16777216,self.runtime.enforced_process_limits()['RLIMIT_FSIZE']['hard'])
+
+    def test_short_writes_commit_one_immutable_serialization_even_if_value_changes(self):
+        value={'value':'authored original'};expected=self.encoded(value);path=self.root/'short.json'
+        original_write=os.write;original_dump=json.dump;offered=[]
+        def write(fd,data):
+            value['value']='changed after serialization'
+            offered.append(bytes(data));return original_write(fd,data[:2])
+        with patch.object(self.runtime.os,'write',side_effect=write),patch.object(self.runtime.json,'dump',wraps=original_dump) as dump:
+            result=self.runtime.write_json(path,value)
+        self.assertGreater(len(offered),1);self.assertEqual(1,dump.call_count)
+        self.assertEqual(expected,path.read_bytes());self.assertEqual(hashlib.sha256(expected).hexdigest(),result)
+        self.assertNotEqual(expected,self.encoded(value))
+
+    def test_each_write_is_bounded_without_changing_encoded_bytes(self):
+        value={'payload':'x'*70000};expected=self.encoded(value);original=os.write;amounts=[]
+        def write(fd,data):amounts.append(len(data));return original(fd,data)
+        with patch.object(self.runtime.os,'write',side_effect=write):result=self.runtime.write_json(self.root/'chunks.json',value)
+        self.assertGreater(len(amounts),1);self.assertLessEqual(max(amounts),65536)
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),result)
+
+    def test_retain_never_reopens_replaced_removed_or_fake_fifo_path(self):
+        value={'message':'authored retained value'};expected=self.encoded(value)
+        for change in ('replacement','removal','fifo-fake'):
+            with self.subTest(change=change):
+                def writer(path,item):
+                    digest=self.runtime.write_json(path,item)
+                    path.unlink()
+                    if change=='replacement':path.write_bytes(b'authored replacement bytes')
+                    # fifo-fake deliberately supplies no real special file. Any
+                    # attempted digest models a blocking FIFO observer and fails.
+                    return digest
+                retain,evidence,reopen=self.consumer(writer)
+                actual=retain(change,value)
+                self.assertEqual(hashlib.sha256(expected).hexdigest(),actual)
+                self.assertEqual({change+'.json':actual},evidence);reopen.assert_not_called()
+
+    def test_exclusive_outside_and_mocked_special_descriptor_fail_before_payload(self):
+        path=self.root/'existing.json';path.write_bytes(b'keep')
+        with self.assertRaises(FileExistsError):self.runtime.write_json(path,{})
+        self.assertEqual(b'keep',path.read_bytes())
+        with self.assertRaisesRegex(ValueError,'outside'):self.runtime.write_json(self.root.parent/'outside-owned-json.json',{})
+        with patch.object(self.runtime.os,'open',return_value=1234) as opened,patch.object(self.runtime.os,'fstat',return_value=SimpleNamespace(st_mode=stat.S_IFIFO,st_size=0)),patch.object(self.runtime.os,'write') as write,patch.object(self.runtime.os,'fchmod') as chmod,patch.object(self.runtime.os,'close') as close:
+            with self.assertRaisesRegex(ValueError,'regular file'):self.runtime.write_json(self.root/'mock-special.json',{})
+        flags=opened.call_args.args[1]
+        for flag in (os.O_CREAT,os.O_EXCL,os.O_NOFOLLOW,os.O_NONBLOCK,os.O_CLOEXEC):self.assertEqual(flag,flags&flag)
+        self.assertEqual(0o600,opened.call_args.args[2]);write.assert_not_called();chmod.assert_not_called();close.assert_called_once_with(1234)
+
+    def test_byte_bound_admits_exact_size_then_refuses_before_payload_write(self):
+        value={'value':'authored'};expected=self.encoded(value)
+        for maximum in (len(expected),len(expected)-1):
+            with self.subTest(maximum=maximum),patch.object(self.runtime,'enforced_process_limits',return_value={'RLIMIT_FSIZE':{'hard':maximum}}):
+                path=self.root/('bound-'+str(maximum)+'.json')
+                if maximum==len(expected):
+                    self.assertEqual(hashlib.sha256(expected).hexdigest(),self.runtime.write_json(path,value))
+                else:
+                    with patch.object(self.runtime.os,'write') as write,self.assertRaisesRegex(ValueError,'byte bound'):self.runtime.write_json(path,value)
+                    write.assert_not_called();self.assertEqual(b'',path.read_bytes())
+
+    def test_write_chmod_and_close_errors_propagate_without_evidence_credit(self):
+        original_close=os.close
+        for bad in (0,-1,True,100000):
+            with self.subTest(write_result=bad),patch.object(self.runtime.os,'write',return_value=bad),patch.object(self.runtime.os,'close',side_effect=original_close) as close:
+                with self.assertRaisesRegex(ValueError,'short write'):self.runtime.write_json(self.root/('bad-'+str(bad)+'.json'),{})
+                self.assertEqual(1,close.call_count)
+        for failing in ('write','fchmod','close'):
+            error=OSError('authored '+failing+' error')
+            def close_failure(fd):original_close(fd);raise error
+            side_effect=close_failure if failing=='close' else error
+            retain,evidence,reopen=self.consumer(self.runtime.write_json)
+            with self.subTest(failing=failing),patch.object(self.runtime.os,failing,side_effect=side_effect),self.assertRaises(OSError) as caught:
+                retain('error-'+failing,{})
+            self.assertIs(error,caught.exception);self.assertEqual({},evidence);reopen.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()
