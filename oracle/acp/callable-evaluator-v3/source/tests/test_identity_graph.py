@@ -358,4 +358,100 @@ class IdentityGraph(unittest.TestCase):
                 self.assertEqual(exported['status'],'unknown');self.assertFalse(exported['accepted'])
                 self.assertEqual(runner.call_count,2)
 
+class HelperSchemaSnapshots(unittest.TestCase):
+    @staticmethod
+    def schema(kind):
+        return json.dumps({'$schema':'http://json-schema.org/draft-07/schema#',
+                           'type':'object','required':['kind'],'additionalProperties':False,
+                           'properties':{'kind':{'const':kind}}}).encode()
+
+    def test_captured_a_compiles_a_despite_pathname_b_then_hits_a_and_misses_b(self):
+        a, b = self.schema('A'), self.schema('B')
+        pathname = [a]
+        snapshots = []
+        def capture(path, maximum):
+            self.assertEqual(Path(gate.__file__).resolve().parent/'contracts/helper-schema.json', path)
+            self.assertEqual(65536, maximum)
+            captured = pathname[0]
+            pathname[0] = b  # Inter-read replacement is modeled after the one captured snapshot.
+            snapshots.append(captured)
+            return captured
+        compiler = gate.fastjsonschema.compile
+        with patch.object(gate, '_COMPILED_HELPER_SCHEMA', None), \
+                patch.object(gate, '_bounded_json_snapshot', side_effect=capture), \
+                patch.object(gate, 'digest', side_effect=AssertionError('separate schema digest')), \
+                patch.object(Path, 'read_bytes', side_effect=AssertionError('second pathname read')), \
+                patch.object(gate.fastjsonschema, 'compile', wraps=compiler) as compile_schema:
+            value = {'kind':'A'}
+            self.assertIs(value, gate._validate_raw_helper(value))
+            self.assertEqual(gate.hashlib.sha256(a).hexdigest(), gate._COMPILED_HELPER_SCHEMA[0])
+            self.assertEqual(json.loads(a), compile_schema.call_args.args[0])
+            self.assertEqual({'use_default':False}, compile_schema.call_args.kwargs)
+            self.assertEqual(b, pathname[0])
+            pathname[0] = a  # Restoring A cannot retain a validator compiled from B.
+            gate._validate_raw_helper(value)
+            self.assertEqual(1, compile_schema.call_count)
+            gate._validate_raw_helper({'kind':'B'})  # The next snapshot observes B.
+            self.assertEqual(2, compile_schema.call_count)
+            self.assertEqual(gate.hashlib.sha256(b).hexdigest(), gate._COMPILED_HELPER_SCHEMA[0])
+            with self.assertRaises(ValueError): gate._validate_raw_helper(value)
+            self.assertEqual(2, compile_schema.call_count)
+            self.assertEqual([a, a, b, b], snapshots)
+
+    def test_populated_cache_never_bypasses_snapshot_refusal(self):
+        calls = []
+        cached = ('a'*64, lambda value: calls.append(value))
+        primary = ValueError('authored snapshot refusal')
+        with patch.object(gate, '_COMPILED_HELPER_SCHEMA', cached), \
+                patch.object(gate, '_bounded_json_snapshot', side_effect=primary) as capture, \
+                patch.object(gate.fastjsonschema, 'compile') as compile_schema:
+            with self.assertRaises(ValueError) as caught: gate._validate_raw_helper({'kind':'A'})
+            self.assertIs(primary, caught.exception)
+            self.assertIs(cached, gate._COMPILED_HELPER_SCHEMA)
+            self.assertEqual(65536, capture.call_args.args[1])
+            self.assertEqual([], calls)
+            compile_schema.assert_not_called()
+
+    def test_failed_compile_keeps_old_cache_and_never_runs_its_validator(self):
+        calls = []
+        a, b = self.schema('A'), self.schema('B')
+        cached = (gate.hashlib.sha256(a).hexdigest(), lambda value: calls.append(value))
+        primary = RuntimeError('authored compiler refusal')
+        with patch.object(gate, '_COMPILED_HELPER_SCHEMA', cached), \
+                patch.object(gate, '_bounded_json_snapshot', return_value=b), \
+                patch.object(gate.fastjsonschema, 'compile', side_effect=primary):
+            with self.assertRaises(RuntimeError) as caught: gate._validate_raw_helper({'kind':'B'})
+            self.assertIs(primary, caught.exception)
+            self.assertIs(cached, gate._COMPILED_HELPER_SCHEMA)
+            self.assertEqual([], calls)
+
+    def test_selected_local_validator_survives_injected_global_cache_replacement(self):
+        a = self.schema('A')
+        calls = []
+        replacement = ('b'*64, lambda value: self.fail('replacement validator selected'))
+        class SwapOnCompare(str):
+            def __ne__(self, other):
+                gate._COMPILED_HELPER_SCHEMA = replacement
+                return str.__ne__(self, other)
+        # A synthetic comparison operand injects replacement after cache selection;
+        # no thread, process, actual pathname race or production injection API is used.
+        cached = (SwapOnCompare(gate.hashlib.sha256(a).hexdigest()), lambda value: calls.append(value))
+        with patch.object(gate, '_COMPILED_HELPER_SCHEMA', cached), \
+                patch.object(gate, '_bounded_json_snapshot', return_value=a), \
+                patch.object(gate.fastjsonschema, 'compile') as compile_schema:
+            value = {'kind':'A'}
+            self.assertIs(value, gate._validate_raw_helper(value))
+            self.assertEqual([value], calls)
+            self.assertIs(replacement, gate._COMPILED_HELPER_SCHEMA)
+            compile_schema.assert_not_called()
+
+    def test_schema_capture_keeps_existing_json_duplicate_key_semantics(self):
+        raw = (b'{"$schema":"http://json-schema.org/draft-07/schema#",'
+               b'"type":"string","type":"integer"}')
+        with patch.object(gate, '_COMPILED_HELPER_SCHEMA', None), \
+                patch.object(gate, '_bounded_json_snapshot', return_value=raw):
+            self.assertEqual(7, gate._validate_raw_helper(7))
+            with self.assertRaises(ValueError): gate._validate_raw_helper('not an integer')
+
+
 if __name__ == '__main__': unittest.main()

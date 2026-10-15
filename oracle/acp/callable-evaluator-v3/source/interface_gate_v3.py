@@ -1,5 +1,6 @@
 """Independent export and structural declaration admission; never loads a library."""
 import json
+import hashlib
 import math
 import time
 import os
@@ -10,7 +11,7 @@ from importlib.metadata import version
 import fastjsonschema
 from pathlib import Path
 from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete
-from build_contract import profile, load_profile, load_profile_with_digest
+from build_contract import profile, load_profile, load_profile_with_digest, _bounded_json_snapshot
 REQUIRED = {'acp_mix','acp_pair_scale','acp_update','acp_apply','acp_fold','acp_state'}
 # Stable Clang builtin kinds; width alone never identifies a C integer type.
 INTEGER_SPELLINGS = {
@@ -21,6 +22,7 @@ INTEGER_SPELLINGS = {
 }
 MAX_GRAPH_NODES = 4096
 MAX_GRAPH_DEPTH = 64
+MAXIMUM_HELPER_SCHEMA_BYTES = 65536
 _IDENTIFIER = re.compile(r'[A-Za-z_][A-Za-z_0-9]*\Z', re.ASCII)
 _EXPRESSION = re.compile(r'(?:(?:struct|enum) )?[A-Za-z_][A-Za-z_0-9]*\Z', re.ASCII)
 
@@ -41,16 +43,19 @@ def _validate_raw_helper(value):
     """Apply the actual closed exchange schema before any trusted enrichment."""
     global _COMPILED_HELPER_SCHEMA
     schema_path = Path(__file__).resolve().parent / 'contracts/helper-schema.json'
-    schema_sha = digest(schema_path)
-    if _COMPILED_HELPER_SCHEMA is None or _COMPILED_HELPER_SCHEMA[0] != schema_sha:
+    raw = _bounded_json_snapshot(schema_path, MAXIMUM_HELPER_SCHEMA_BYTES)
+    schema_sha = hashlib.sha256(raw).hexdigest()
+    compiled = _COMPILED_HELPER_SCHEMA
+    if compiled is None or compiled[0] != schema_sha:
         if version('fastjsonschema') != '2.22.2':
             raise ValueError('unqualified helper schema validator version')
-        schema = json.loads(schema_path.read_bytes())
+        schema = json.loads(raw)
         if schema.get('$schema') != 'http://json-schema.org/draft-07/schema#':
             raise ValueError('unqualified helper schema dialect')
-        _COMPILED_HELPER_SCHEMA = (schema_sha, fastjsonschema.compile(schema, use_default=False))
+        compiled = (schema_sha, fastjsonschema.compile(schema, use_default=False))
+        _COMPILED_HELPER_SCHEMA = compiled
     try:
-        _COMPILED_HELPER_SCHEMA[1](value)
+        compiled[1](value)
     except fastjsonschema.JsonSchemaException as error:
         raise ValueError('invalid raw helper schema: ' + str(error)[:300]) from error
     return value
