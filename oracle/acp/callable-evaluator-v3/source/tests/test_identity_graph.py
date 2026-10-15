@@ -215,16 +215,30 @@ class IdentityGraph(unittest.TestCase):
             (work/'toolchain-001/record_identity_probe').write_bytes(b'NOT EXECUTABLE')
             build=builder['build']
             from unittest.mock import Mock
-            runner=Mock(return_value=completed_result())
-            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576,'fileSizeBytes':16777216}},bounded_run=runner,read_output=lambda path,limit,elf=False:b'NOT EXECUTABLE'):
+            import bounded_runtime as runtime
+            profile,profile_sha=builder['load_profile_with_digest']()
+            source=work/'record_identity_probe.cpp'
+            source_pins=builder['_pin_files']([source],None)
+            execution=completed_result(phase='helper-build')
+            execution['launchInputPins'].update(copy.deepcopy(source_pins))
+            # Synthetic executable identity stays separate from independently captured source A.
+            execution['launchInputPins']['/usr/lib/llvm/23/bin/clang++']=execution['launchInputPins'].pop('/authored/worker')
+            execution['bounds']['profileSha256']=profile_sha
+            execution['launchInputPins'][str(runtime.BASE/'contracts/candidate-build-profile.json')]['sha256']=profile_sha
+            execution['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(execution['launchInputPins'])
+            self.assertTrue(builder['_complete_execution'](execution))
+            runner=Mock(return_value=execution)
+            with patch.dict(build.__globals__,ROOT=work,bounded_run=runner,read_output=lambda path,limit,elf=False:b'NOT EXECUTABLE'):
                 result=build('receipt.json')
             self.assertEqual(runner.call_args.kwargs['phase'],'helper-build')
+            self.assertEqual(profile['bounds']['helperBuildSeconds'],runner.call_args.kwargs['timeout'])
             self.assertEqual(result['schemaVersion'],3)
             self.assertEqual(result['binarySha256'],gate.digest(work/'toolchain-001/record_identity_probe'))
             self.assertEqual(result['helperSchemaSha256'],gate.digest(work/'contracts/helper-schema.json'))
             self.assertEqual(result['sourceSha256'],gate.digest(work/'record_identity_probe.cpp'))
-            incomplete=completed_result();incomplete['cleanupVerified']=False
-            with patch.dict(build.__globals__,ROOT=work,load_profile=lambda:{'bounds':{'helperBuildSeconds':60,'helperOutputBytesPerStream':1048576,'fileSizeBytes':16777216}},bounded_run=lambda *args,**kwargs:incomplete):
+            incomplete=copy.deepcopy(execution);incomplete['cleanupVerified']=False
+            self.assertFalse(builder['_complete_execution'](incomplete))
+            with patch.dict(build.__globals__,ROOT=work,bounded_run=lambda *args,**kwargs:incomplete):
                 with self.assertRaisesRegex(ValueError,'incomplete helper build') as failure:build('not-created.json')
                 self.assertIs(failure.exception.bounded_result,incomplete)
                 self.assertFalse((work/'toolchain-001/not-created.json').exists())
