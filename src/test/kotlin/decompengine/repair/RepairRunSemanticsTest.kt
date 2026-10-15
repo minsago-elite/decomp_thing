@@ -818,6 +818,105 @@ class RepairRunSemanticsTest {
     }
 
     @Test
+    fun `successful interrupted recovery history is reserved at its real projector boundary before candidate publication`() {
+        // Resource-only iterator controls: no filesystem race or graph authority is inferred.
+        fun inventory(entries: Iterable<Path>, maximum: Int) =
+            decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(entries, maximum)
+        val first = Path.of("first")
+        val second = Path.of("second")
+        assertEquals(setOf("first", "second"), inventory(listOf(first, second), 2))
+        val duplicate = assertFailsWith<IllegalArgumentException> { inventory(listOf(first, first), 2) }
+        assertTrue(duplicate.message.orEmpty().contains("duplicate entry"))
+        var observed = 0
+        val beyondBound = Iterable {
+            object : Iterator<Path> {
+                override fun hasNext() = true
+                override fun next(): Path {
+                    observed++
+                    check(observed <= 3) { "inventory advanced after refusing M+1" }
+                    return Path.of("entry-$observed")
+                }
+            }
+        }
+        val overflow = assertFailsWith<IllegalArgumentException> { inventory(beyondBound, 2) }
+        assertTrue(overflow.message.orEmpty().contains("entry bound"))
+        assertEquals(3, observed)
+        val reference = rollbackRoot()
+        ModuleRevisionGraph.open(reference, profile).use { graph ->
+            val corpus = graph.retainRegressionInputs(inputs)
+            graph.beginRun(2, 60_000)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+            graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+        }
+        lateinit var iterations: List<RepairIteration>
+        lateinit var runs: List<RepairRunState>
+        ModuleRevisionGraph.open(reference, profile).use { graph ->
+            assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
+            val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
+            assertEquals(true, rollback.candidateSourceInstallStarted)
+            assertEquals("broken", reference.resolve("code.c").readText())
+            assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
+            iterations = graph.derivedRepairIterations()
+            runs = graph.snapshot.runs
+        }
+        // Ask the actual existing projector, not a duplicated size formula, for its exact admission edge.
+        fun fits(limit: Long): Boolean = try {
+            renderRepairHistoryProjection(iterations, inputs, limit, 3, runs)
+            true
+        } catch (_: RepairBudgetExceededException) { false }
+        var low = 1L
+        var high = 16L * 1024
+        assertTrue(fits(high))
+        while (low < high) {
+            val middle = (low + high) / 2
+            if (fits(middle)) high = middle else low = middle + 1
+        }
+        val admitted = low
+        assertTrue(fits(admitted))
+        assertFalse(fits(admitted - 1))
+        for (limit in listOf(admitted, admitted - 1)) {
+            val root = rollbackRoot()
+            val source = root.resolve("code.c")
+            val budget = RepairResourceBudget(maximumProjectionBytes = limit)
+            var publications = 0
+            ModuleRevisionGraph.openForTesting(root, profile, budget, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") publications++
+            }).use { graph ->
+                val corpus = graph.retainRegressionInputs(inputs)
+                graph.beginRun(2, 60_000)
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+                val path = root.resolve("reports/repair-revisions/graph.json")
+                val before = path.readBytes()
+                val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                val snapshot = graph.snapshot
+                publications = 0
+                if (limit == admitted) {
+                    graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+                } else {
+                    assertFailsWith<RepairBudgetExceededException> {
+                        graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+                    }
+                    assertEquals(0, publications)
+                    assertEquals(snapshot, graph.snapshot)
+                    assertContentEquals(before, path.readBytes())
+                    assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                    assertEquals("broken", source.readText())
+                }
+            }
+            if (limit == admitted) {
+                ModuleRevisionGraph.open(root, profile, budget).use { graph ->
+                    assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
+                    assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
+                    graph.synchronizeRepairHistory()
+                }
+                assertTrue(root.resolve("reports/repair_history.json").readBytes().isNotEmpty())
+            }
+        }
+    }
+
+    @Test
     fun `startup snapshots authenticated target bytes when installed candidate exceeds aggregate source cap`() {
         val paths = listOf("a.c", "b.c")
         val original = "a".repeat(8).toByteArray()

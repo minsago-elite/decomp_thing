@@ -2477,8 +2477,9 @@ class ModuleRevisionGraphTest {
 
     @Test
     fun `saturated legacy pending graphs retain bounded recovery headroom across marker crash and failure`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
         for (schema in 1..3) {
-            val project = generatedProject()
+            val project = generatedProject(temporaryParent = parent)
             val target = project.resolve("src/modules/alpha.c")
             val original = target.readBytes()
             val candidate = original + "\n/* saturated legacy recovery */\n".toByteArray()
@@ -2506,7 +2507,7 @@ class ModuleRevisionGraphTest {
             assertTrue(fill > 0)
             legacy = legacy.replace("LEGACY_PADDING", "x".repeat("LEGACY_PADDING".length + fill))
             graphPath.writeText(legacy)
-            assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong())
+            assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong(), "source schema=$schema")
             val binding = bindingPath.readBytes()
             val installedBefore = target.readBytes()
             graphPath.writeText(legacy.replace("\"summary\":\"", "\"summary\":\"z"))
@@ -2527,15 +2528,15 @@ class ModuleRevisionGraphTest {
             assertTrue(marker.size.toLong() > budget.maximumGraphBytes)
             assertContentEquals(installedBefore, target.readBytes())
             assertContentEquals(binding, bindingPath.readBytes())
-            requireRepairGraphByteBudget(marker, budget)
+            requireDeclaredGraphBudget(project, marker, budget)
             // Retained prior producers wrote every null node explicitly. Their allowance is
             // computed using that recognized wire, not the new compact serializer's byte count.
             val oldMarker = explicitNullNodeWire(marker.toString(Charsets.UTF_8)).toByteArray()
             assertTrue(oldMarker.size.toLong() > budget.maximumGraphBytes)
-            requireRepairGraphByteBudget(oldMarker, budget)
+            requireDeclaredGraphBudget(project, oldMarker, budget)
             val compactMarker = Json.parseToJsonElement(marker.toString(Charsets.UTF_8)).toString().toByteArray()
             assertTrue(compactMarker.size.toLong() > budget.maximumGraphBytes)
-            assertFailsWith<IllegalArgumentException> { requireRepairGraphByteBudget(compactMarker, budget) }
+            assertFailsWith<IllegalArgumentException> { requireDeclaredGraphBudget(project, compactMarker, budget) }
 
             // The read envelope is not admission: ordinary metadata cannot spend the reserved
             // migration bytes, and rejection still precedes any source exchange.
@@ -2560,9 +2561,220 @@ class ModuleRevisionGraphTest {
                 assertEquals(RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE, rollback.failureCode)
             }
             assertContentEquals(binding, bindingPath.readBytes())
-            requireRepairGraphByteBudget(graphPath.readBytes(), budget)
+            requireDeclaredGraphBudget(project, graphPath.readBytes(), budget)
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
         }
+    }
+
+    @Test
+    fun `declared schema one two and three sources reserve successful recovery and interruption at the original cap`() {
+        for (schema in 1..3) {
+            val fixture = declaredBudgetFixture(schema)
+            val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+            val binding = path.parent.resolve("recovery-binding.json").readBytes()
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+                val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_VERIFIED, record.state, "schema=$schema")
+                assertTrue(record.legacyPendingStateUnknown)
+                assertNull(record.candidateSourceInstallStarted)
+                assertEquals(record.expectedSourceRevisionSha256, record.observedSourceRevisionSha256)
+                if (schema == 3) {
+                    val run = graph.snapshot.runs.single()
+                    assertEquals(RepairRunStatus.INTERRUPTED, run.status)
+                    assertEquals(RepairEvidence("interrupted", "repair run reopened without a completed terminal publication"), run.lastEvidence)
+                    assertNull(run.rollbackFailureAttemptId)
+                } else assertTrue(graph.snapshot.runs.isEmpty())
+                graph.synchronizeRepairHistory()
+            }
+            assertContentEquals(binding, path.parent.resolve("recovery-binding.json").readBytes())
+            assertContentEquals(fixture.originalSource, fixture.project.resolve("src/modules/alpha.c").readBytes())
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
+            val preserved = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+            assertContentEquals(fixture.legacy, preserved.readBytes())
+            // Schema3 legitimately retains the older nonpending schema2 graph as well.
+            if (schema == 3) assertTrue(Files.newDirectoryStream(path.parent, "legacy-graph-*.json").use { it.count() } >= 2)
+            ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).close()
+        }
+    }
+
+    @Test
+    fun `over cap migration requires a unique joined source and charges schema two ordinary plus one growth`() {
+        val fixture = declaredBudgetFixture(2)
+        val root = fixture.project
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        assertFailsWith<SimulatedRepairCrash> {
+            ModuleRevisionGraph.openForTesting(root, GeneratedCRepairIndexProfile, fixture.budget,
+                ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                }).close()
+        }
+        val marker = path.readBytes()
+        assertTrue(marker.size.toLong() > fixture.budget.maximumGraphBytes)
+        requireDeclaredGraphBudget(root, marker, fixture.budget) // Actual producer at charged M.
+        assertFailsWith<RepairBudgetExceededException> { requireRepairGraphByteBudget(marker, fixture.budget) }
+        val source = root.resolve("src/modules/alpha.c")
+        val bytes = source.readBytes()
+        val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+        fun refuse(action: () -> Unit) {
+            val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            action()
+            assertContentEquals(marker, path.readBytes())
+            assertContentEquals(bytes, source.readBytes())
+            assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+            assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        }
+        val declaredPath = path.parent.resolve("legacy-graph-${sha256(fixture.legacy)}.json")
+        Files.delete(declaredPath)
+        refuse { assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) } }
+        declaredPath.writeBytes(fixture.legacy)
+        // A canonical cross-snapshot declaration does not join even when self-hashed.
+        Files.delete(declaredPath)
+        val originalText = fixture.legacy.toString(Charsets.UTF_8)
+        val index = Json.parseToJsonElement(originalText).jsonObject.getValue("indexSha256").jsonPrimitive.content
+        val unjoined = originalText.replace("\"indexSha256\": \"$index\"", "\"indexSha256\": \"${"0".repeat(64)}\"").toByteArray()
+        assertFalse(fixture.legacy.contentEquals(unjoined))
+        val unjoinedPath = path.parent.resolve("legacy-graph-${sha256(unjoined)}.json").also { it.writeBytes(unjoined) }
+        refuse { assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) } }
+        Files.delete(unjoinedPath)
+        declaredPath.writeBytes(fixture.legacy)
+        // Both declarations can have identical semantic defaults. Never choose schema1's larger credit.
+        val schemaOne = originalText.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+            .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "").toByteArray()
+        val alternative = path.parent.resolve("legacy-graph-${sha256(schemaOne)}.json").also { it.writeBytes(schemaOne) }
+        refuse {
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+            assertTrue(failure.message.orEmpty().contains("multiple declared legacy graphs"))
+        }
+        Files.delete(alternative)
+        val corruptName = path.parent.resolve("legacy-graph-${"0".repeat(64)}.json")
+        corruptName.writeBytes(fixture.legacy)
+        refuse {
+            val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+            assertEquals("declared legacy graph digest changed", failure.message)
+        }
+        Files.delete(corruptName)
+        val plusOne = marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"z").toByteArray()
+        assertEquals(marker.size + 1, plusOne.size)
+        assertFailsWith<RepairBudgetExceededException> { requireDeclaredGraphBudget(root, plusOne, fixture.budget) }
+        path.writeBytes(plusOne)
+        val plusOneKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+        assertFailsWith<RepairBudgetExceededException> { ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget) }
+        assertEquals(plusOneKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+        assertContentEquals(plusOne, path.readBytes())
+        assertContentEquals(bytes, source.readBytes())
+        path.writeBytes(marker)
+        ModuleRevisionGraph.open(root, GeneratedCRepairIndexProfile, fixture.budget).close()
+    }
+
+    @Test
+    fun `empty run context cannot turn a declared schema three source into schema two credit`() {
+        // Authored budget-helper input only: old schema3 without a run is not native recovery authority.
+        val fixture = declaredBudgetFixture(3, withRun = false)
+        val marker = fixture.nativeGraph.toString(Charsets.UTF_8)
+            .replace("\"legacyRecoveryRequired\":false", "\"legacyRecoveryRequired\":true")
+            .replace("\"legacyPendingStateUnknown\":false", "\"legacyPendingStateUnknown\":true")
+            .replace("\"candidateSourceInstallStarted\":true", "\"candidateSourceInstallStarted\":null").toByteArray()
+        val name = "legacy-graph-${sha256(fixture.legacy)}.json"
+        requireRepairGraphByteBudget(marker, fixture.budget) { consume -> consume(name, fixture.legacy) }
+        val plusOne = marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"z").toByteArray()
+        assertEquals(marker.size + 1, plusOne.size)
+        assertFailsWith<RepairBudgetExceededException> {
+            requireRepairGraphByteBudget(plusOne, fixture.budget) { consume -> consume(name, fixture.legacy) }
+        }
+    }
+
+    @Test
+    fun `declared graph store admits exact aggregate bytes and refuses all name and payload overruns`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "declared-source-bounds-")
+        LinuxFilesystemSyscalls.openRoot(root).use { descriptor ->
+            RepairStateStore.open(descriptor).use { store ->
+                val revisions = root.resolve("reports/repair-revisions")
+                fun body(value: String): Path = revisions.resolve("legacy-graph-${sha256(value.toByteArray())}.json")
+                    .also { it.writeText(value) }
+                val one = body("a")
+                val two = body("bc")
+                val budget = RepairResourceBudget(maximumGraphBytes = 2, maximumIndexEvidenceBytes = 3)
+                val seen = mutableListOf<ByteArray>()
+                // Raw body-reader control only; these strings are not graph or history evidence.
+                store.forEachDeclaredLegacyGraph(budget) { _, bytes -> seen += bytes }
+                assertEquals(3, seen.sumOf { it.size })
+                val extra = body("d")
+                val failure = assertFailsWith<RepairBudgetExceededException> {
+                    store.forEachDeclaredLegacyGraph(budget) { _, _ -> }
+                }
+                assertTrue(failure.message.orEmpty().contains("remaining evidence budget"))
+                Files.delete(extra)
+                val tooLarge = body("xyz")
+                assertFailsWith<RepairBudgetExceededException> { store.forEachDeclaredLegacyGraph(budget) { _, _ -> } }
+                Files.delete(tooLarge)
+                // Every direct name counts, including an irrelevant ordinary file and blobs directory.
+                revisions.resolve("irrelevant").writeText("")
+                assertFailsWith<decompengine.acp.LinuxResourceLimitException> {
+                    store.forEachDeclaredLegacyGraph(budget.copy(maximumStateDirectoryEntries = 3)) { _, _ -> }
+                }
+                Files.delete(revisions.resolve("irrelevant"))
+                store.forEachDeclaredLegacyGraph(budget.copy(maximumStateDirectoryEntries = 3)) { _, _ -> }
+                Files.delete(two)
+                val link = revisions.resolve("legacy-graph-${"0".repeat(64)}.json")
+                Files.createSymbolicLink(link, one.fileName)
+                var reachedLink = false
+                kotlin.test.assertFails { store.forEachDeclaredLegacyGraph(budget) { name, _ -> if (name == link.fileName.toString()) reachedLink = true } }
+                assertFalse(reachedLink)
+            }
+        }
+    }
+
+    @Test
+    fun `later native run evidence cannot enlarge a declared migration allowance`() {
+        val fixture = declaredBudgetFixture(2, reserve = 8192)
+        val path = fixture.project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            graph.beginRun(1, 60_000)
+            graph.finishRun(RepairRunStatus.NO_CHANGES, RepairEvidence("unchanged", "bounded later native run"))
+            graph.beginRun(1, 60_000)
+            val before = path.readBytes()
+            val snapshot = graph.snapshot
+            val source = fixture.project.resolve("src/modules/alpha.c")
+            val sourceBytes = source.readBytes()
+            val key = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+            assertFailsWith<RepairBudgetExceededException> {
+                graph.finishRun(RepairRunStatus.INTERRUPTED, RepairEvidence("interrupted", "n".repeat(20 * 1024)))
+            }
+            assertEquals(snapshot, graph.snapshot)
+            assertContentEquals(before, path.readBytes())
+            assertEquals(key, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(sourceBytes, source.readBytes())
+        }
+    }
+
+    @Test
+    fun `archive over cap source scanning cannot skip a corrupt declaration for a later valid history`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(temporaryParent = parent, legacyRejectedPrefix = true)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("declared-source-base.zip"))
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, fixture.project.parent.resolve("declared-source-base-control"))
+        val forged = fixture.project.parent.resolve("declared-source-corrupt.zip")
+        rewriteArchive(bundle.archivePath, forged) { entries ->
+            val graphPath = "reports/repair-revisions/graph.json"
+            val text = entries.getValue(graphPath).toString(Charsets.UTF_8)
+            val graph = Json.parseToJsonElement(text).jsonObject
+            val oldCap = graph.getValue("budget").jsonObject.getValue("maximumGraphBytes").jsonPrimitive.content
+            val cap = text.toByteArray().size - 128
+            assertTrue(cap > 0)
+            val changed = text.replace("\"maximumGraphBytes\":$oldCap", "\"maximumGraphBytes\":$cap")
+            assertTrue(changed.toByteArray().size > cap)
+            entries[graphPath] = changed.toByteArray() // Preserve the real canonical graph whitespace.
+            val retained = entries.entries.single { it.key.startsWith("reports/repair-revisions/legacy-graph-") &&
+                Json.parseToJsonElement(it.value.toString(Charsets.UTF_8)).jsonObject["pending"] != JsonNull }.value
+            assertTrue(retained.size <= cap, "source body admission must reach its digest check")
+            entries["reports/repair-revisions/legacy-graph-${"0".repeat(64)}.json"] = retained
+        }
+        val output = fixture.project.parent.resolve("declared-source-corrupt-refused")
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
+        assertTrue(failure.message.orEmpty().contains("declared legacy graph digest changed"), failure.message)
+        assertFalse(output.exists())
     }
 
     @Test
@@ -5380,6 +5592,52 @@ class ModuleRevisionGraphTest {
             assertContentEquals(installedBytes, target.readBytes())
             assertEquals(listOf("original"), reopened.retainedRegressionCorpus().inputs.single().args)
             assertContentEquals(byteArrayOf(1, 2, 3), reopened.retainedRegressionCorpus().inputs.single().stdin)
+        }
+    }
+
+    private data class DeclaredBudgetFixture(val project: Path, val budget: RepairResourceBudget,
+        val legacy: ByteArray, val nativeGraph: ByteArray, val originalSource: ByteArray)
+
+    private fun declaredBudgetFixture(schema: Int, withRun: Boolean = true, reserve: Int = 0): DeclaredBudgetFixture {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = parent)
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val budget = RepairResourceBudget(maximumGraphBytes = 16 * 1024)
+        val path = project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+            if (schema == 3) {
+                graph.enableRunContract()
+                if (withRun) graph.beginRun(2, 60_000)
+            }
+            val metadata = RevisionRepairMetadata(1, "compile", "short", "DECLARED_GRAPH_PADDING", emptyList(),
+                null, graph.retainedRegressionCorpus().sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"), metadata)
+            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to original + "\n/* declared source */\n".toByteArray()))
+        }
+        var native = path.readText()
+        fun legacy(text: String): String = when (schema) {
+            1 -> text.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+                .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "")
+            2 -> text
+            else -> text.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+                .replace(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null", "")
+                .replace(Regex(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":\\{[^{}\n]*\\}"), "")
+        }
+        val padding = (budget.maximumGraphBytes - reserve - legacy(native).toByteArray().size).toInt()
+        assertTrue(padding > 0)
+        native = native.replace("DECLARED_GRAPH_PADDING", "p".repeat("DECLARED_GRAPH_PADDING".length + padding))
+        val old = legacy(native).toByteArray()
+        assertEquals(budget.maximumGraphBytes - reserve, old.size.toLong(), "declared schema=$schema")
+        path.writeBytes(old)
+        return DeclaredBudgetFixture(project, budget, old, native.toByteArray(), original)
+    }
+
+    private fun requireDeclaredGraphBudget(project: Path, payload: ByteArray, budget: RepairResourceBudget) {
+        requireRepairGraphByteBudget(payload, budget) { consume ->
+            Files.newDirectoryStream(project.resolve("reports/repair-revisions"), "legacy-graph-*.json").use { paths ->
+                paths.sortedBy { it.fileName.toString() }.forEach { consume(it.fileName.toString(), it.readBytes()) }
+            }
         }
     }
 

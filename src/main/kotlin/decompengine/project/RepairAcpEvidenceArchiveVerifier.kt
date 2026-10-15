@@ -17,6 +17,7 @@ import decompengine.repair.requireRepairGraphByteBudget
 import decompengine.repair.requireSingleLegacyRollbackOrigin
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.nio.file.Files
 import java.util.Collections
 import java.util.Base64
 import java.util.TreeMap
@@ -80,6 +81,24 @@ internal class ArchivedRepairReleaseLineage private constructor(
  * and sends every immutable invocation through the independent schema-v2 ACP receipt verifier.
  */
 internal object RepairAcpEvidenceArchiveVerifier {
+    // Count observations before deduplication: a weakly consistent directory iterator may repeat.
+    // The caller owns and closes the stream even when either admission check refuses an entry.
+    internal fun boundedDeclaredSourceEntryNames(entries: Iterable<Path>, maximumEntries: Int): Set<String> {
+        require(maximumEntries > 0)
+        val names = linkedSetOf<String>()
+        var observedEntries = 0
+        for (entry in entries) {
+            require(observedEntries < maximumEntries) {
+                "repair release declared source inventory exceeds its entry bound"
+            }
+            observedEntries++
+            require(names.add(entry.fileName.toString())) {
+                "repair release declared source inventory contains a duplicate entry"
+            }
+        }
+        return names
+    }
+
     fun verifyIfPresent(
         projectDir: Path,
         payloadSha256: Map<String, String>,
@@ -122,7 +141,30 @@ internal object RepairAcpEvidenceArchiveVerifier {
             payloadSizes,
         )
         val graph = parseGraph(graphBytes)
-        requireRepairGraphByteBudget(graphBytes, graph.budget)
+        requireRepairGraphByteBudget(graphBytes, graph.budget) { consume ->
+            // Resource inventory only: include irrelevant files and empty directories. Content
+            // authority still comes from manifest-bound descriptor-stable readPayloadFile below.
+            val names = Files.newDirectoryStream(projectDir.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
+                boundedDeclaredSourceEntryNames(entries, graph.budget.maximumStateDirectoryEntries)
+            }
+            val declaredPaths = repairPaths.filter(REPAIR_LEGACY_GRAPH_PATH::matches).sorted()
+            require(names.filter { REPAIR_LEGACY_GRAPH_PATH.matches(REPAIR_STATE_PREFIX + it) }.toSet() ==
+                declaredPaths.map { it.substringAfterLast('/') }.toSet()) {
+                "repair release declared source inventory differs from its payload"
+            }
+            var remaining = graph.budget.maximumIndexEvidenceBytes
+            declaredPaths.forEach { path ->
+                val admitted = requireNotNull(payloadSizes[path]) { "declared legacy graph size is missing" }
+                require(admitted in 1..minOf(graph.budget.maximumGraphBytes, remaining, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES)) {
+                    "repair release declared source exceeds its remaining evidence budget"
+                }
+                remaining -= admitted
+                // Exact admitted size closes growth between metadata admission and stable read.
+                val bytes = readPayloadFile(projectDir, path, admitted, payloadSha256, payloadSizes)
+                require(bytes.size.toLong() == admitted)
+                consume(path.substringAfterLast('/'), bytes)
+            }
+        }
         require(graph.schemaVersion in 3..4) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
@@ -148,7 +190,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 payloadSha256, payloadSizes)
             require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
             val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
-            require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..2) {
+            val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 3 else 2
+            require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..maximumSchema) {
                 "preserved legacy repair evidence has an unsupported schema"
             }
         }
@@ -1789,3 +1832,5 @@ private val TERMINAL_RUN_STATUSES = setOf(
     "fully_accepted", "compile_valid", "no_changes", "rejected", "iteration_exhausted", "resource_exhausted",
     "cancelled", "interrupted", "validation_failed", "rollback_failed",
 )
+
+private val REPAIR_LEGACY_GRAPH_PATH = Regex("reports/repair-revisions/legacy-graph-([0-9a-f]{64})\\.json")
