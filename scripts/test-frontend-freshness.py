@@ -596,7 +596,7 @@ class FreshnessControls(unittest.TestCase):
         self.assertFalse(runner.uncertain);self.assertTrue(state['closed'])
         self.assertEqual([0],[value for kind,value in events if kind=='signal'])
 
-    def group_vector(self, names, defect=None):
+    def group_vector(self, names, defect=None, *, observation_error=None, observation_pid=800):
         clock=Clock();ledger=f.Ledger(clock);files=MemoryFiles(ledger)
         runner=f.Runner(ledger,files,Path('/repo/evidence'));opened=[];closed=[];reads=[];buffers={}
         class Entries:
@@ -611,8 +611,10 @@ class FreshnessControls(unittest.TestCase):
         def opened_stat(path,flags):
             self.assertTrue(flags&f.os.O_NOFOLLOW);self.assertTrue(flags&f.os.O_NONBLOCK)
             if defect=='permission':raise PermissionError('authored denial')
-            pid=int(path.split('/')[2]);fd=1000+pid;opened.append(fd)
-            raw=(str(pid)+' (authored ) comm) Z 1 '+str(123 if pid in (123,124) else pid)+' '+str(123 if pid in (123,124) else pid)+' ').encode()+b'0 '*15+b'99\n'
+            pid=int(path.split('/')[2])
+            if defect=='open-error' and pid==observation_pid:raise observation_error
+            fd=1000+pid;opened.append(fd)
+            raw=(str(pid)+' (authored ) comm) Z 1 '+str(123 if pid in (123,124,125) else pid)+' '+str(123 if pid in (123,124,125) else pid)+' ').encode()+b'0 '*15+b'99\n'
             if defect=='session':raw=raw.replace(b' Z 1 123 123 ',b' Z 1 123 999 ')
             buffers[fd]=b'malformed' if defect=='malformed' else (b'x'*4096 if defect=='read-large' else raw)
             return fd
@@ -621,6 +623,7 @@ class FreshnessControls(unittest.TestCase):
             if defect=='late':clock.now=406
             data=buffers[fd][:size];buffers[fd]=buffers[fd][size:];return data
         def named(path,**kwargs):
+            if defect=='stat-error' and int(path.split('/')[2])==observation_pid:raise observation_error
             if defect=='disappeared':raise FileNotFoundError('authored disappearing row')
             fd=1000+int(path.split('/')[2]);row=metadata(fd)
             if defect=='identity':row.st_ino+=1
@@ -659,6 +662,54 @@ class FreshnessControls(unittest.TestCase):
             result,error,entries,opened,closed,_=self.group_vector(['123'])
             self.assertIsNone(result);self.assertIsInstance(error,f.Refusal);self.assertTrue(entries.closed);self.assertEqual(opened,closed)
 
+
+    def test_group_observer_open_enoent_skips_vanished_row_and_keeps_survivors(self):
+        names=['123','124','125','800']
+        for vanished,expected in ((124,(125,)),(800,(124,125))):
+            with self.subTest(vanished=vanished):
+                missing=FileNotFoundError(f.errno.ENOENT,'authored vanished PID')
+                result,error,entries,opened,closed,reads=self.group_vector(
+                    names,'open-error',observation_error=missing,observation_pid=vanished)
+                self.assertIsNone(error);self.assertEqual(expected,result)
+                self.assertTrue(entries.closed);self.assertEqual(5,entries.advances)
+                self.assertEqual([1000+int(name) for name in names if int(name)!=vanished],opened)
+                self.assertEqual(opened,closed);self.assertNotIn(1000+vanished,[fd for fd,_ in reads])
+
+    def test_group_observer_stat_enoent_closes_owned_fd_and_keeps_survivors(self):
+        names=['123','124','125','800']
+        for vanished,expected in ((124,(125,)),(800,(124,125))):
+            with self.subTest(vanished=vanished):
+                missing=FileNotFoundError(f.errno.ENOENT,'authored vanished PID')
+                result,error,entries,opened,closed,reads=self.group_vector(
+                    names,'stat-error',observation_error=missing,observation_pid=vanished)
+                self.assertIsNone(error);self.assertEqual(expected,result)
+                self.assertTrue(entries.closed);self.assertEqual(5,entries.advances)
+                self.assertEqual([1000+int(name) for name in names],opened)
+                self.assertEqual(opened,closed);self.assertIn(1000+vanished,[fd for fd,_ in reads])
+                self.assertEqual(1,closed.count(1000+vanished))
+
+    def test_group_observer_vanished_leader_remains_unknown_at_both_points(self):
+        for defect in ('open-error','stat-error'):
+            with self.subTest(defect=defect):
+                missing=FileNotFoundError(f.errno.ENOENT,'authored vanished leader')
+                result,error,entries,opened,closed,reads=self.group_vector(
+                    ['123','124','125'],defect,observation_error=missing,observation_pid=123)
+                self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+                self.assertRegex(str(error),'held leader absent from group observation')
+                self.assertTrue(entries.closed);self.assertEqual(4,entries.advances)
+                self.assertEqual(opened,closed)
+                self.assertTrue({1124,1125}.issubset({fd for fd,_ in reads}))
+
+    def test_group_observer_non_enoent_open_and_stat_errors_propagate(self):
+        for defect in ('open-error','stat-error'):
+            for code in (f.errno.EACCES,f.errno.ELOOP,f.errno.EIO,f.errno.ESRCH,f.errno.ENOTDIR):
+                with self.subTest(defect=defect,code=code):
+                    denied=OSError(code,'authored non-ENOENT refusal')
+                    result,error,entries,opened,closed,_=self.group_vector(
+                        ['123','124','125','800'],defect,observation_error=denied,observation_pid=124)
+                    self.assertIsNone(result);self.assertIs(error,denied);self.assertEqual(code,error.errno)
+                    self.assertTrue(entries.closed);self.assertEqual(opened,closed)
+                    self.assertNotIn(1125,opened)
 
 if __name__=='__main__':
     unittest.main()

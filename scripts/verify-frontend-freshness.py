@@ -6,6 +6,7 @@ context are prerequisites. This is not descendant containment or packaging proof
 """
 from __future__ import annotations
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -303,7 +304,10 @@ class Runner:
                 if not name.isascii() or not name.isdecimal(): continue
                 if len(name)>10 or int(name)<=0: raise Refusal('invalid proc identity')
                 path='/proc/'+name+'/stat'; self.ledger.check(cleanup=cleanup)
-                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+                try: fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+                except OSError as error:
+                    if error.errno!=errno.ENOENT: raise
+                    continue  # This enumerated PID vanished; retain the entry/work bounds.
                 try:
                     self.ledger.check(cleanup=cleanup); first=os.fstat(fd); self.ledger.check(cleanup=cleanup)
                     if not stat.S_ISREG(first.st_mode) or not 0<=first.st_size<=GROUP_STAT_BYTES:
@@ -318,7 +322,11 @@ class Runner:
                         if len(part)>left: raise Refusal('proc read exceeded request')
                         total+=len(part); data.extend(part)
                     self.ledger.check(cleanup=cleanup); last=os.fstat(fd)
-                    self.ledger.check(cleanup=cleanup); named=os.stat(path,follow_symlinks=False)
+                    self.ledger.check(cleanup=cleanup)
+                    try: named=os.stat(path,follow_symlinks=False)
+                    except OSError as error:
+                        if error.errno!=errno.ENOENT: raise
+                        continue  # The owned descriptor still closes in finally below.
                     self.ledger.check(cleanup=cleanup)
                     fields=('st_dev','st_ino','st_mode','st_size')
                     if any(getattr(first,k)!=getattr(last,k) or getattr(first,k)!=getattr(named,k) for k in fields):
