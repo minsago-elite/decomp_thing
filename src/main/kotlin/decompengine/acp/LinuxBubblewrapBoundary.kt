@@ -709,6 +709,10 @@ internal class LinuxBubblewrapBoundary private constructor(
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
                 },
             )
+            launchMounts.forEach { mount ->
+                cancellationCheck()
+                mount.requireUnchanged(cancellationCheck)
+            }
             val launchGateHelper = launchMounts.singleOrNull {
                 it.mount.destination == ACP_SANDBOX_GATE_HELPER_PATH
             } ?: throw IOException("sandbox launch lacks its private static gate-helper snapshot")

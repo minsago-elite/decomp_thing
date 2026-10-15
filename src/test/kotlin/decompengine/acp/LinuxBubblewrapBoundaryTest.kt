@@ -2031,6 +2031,46 @@ class LinuxBubblewrapBoundaryTest {
         }
         assertEquals(before, controlDirectories())
 
+        val revalidationCheckpoint = AtomicBoolean(false)
+        val commandObserved = AtomicBoolean(false)
+        val startHookReached = AtomicBoolean(false)
+        val revalidationUnits = mutableListOf<String>()
+        val revalidationScopes = mutableListOf<AcpSandboxScopeIdentity>()
+        val recordUnit = unitObserver(revalidationUnits)
+        val revalidationBoundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = AcpSandboxCommandObserver { command ->
+                commandObserved.set(true)
+                recordUnit.beforeStart(command)
+            },
+            launchHook = AcpSandboxLaunchHook { stage ->
+                if (stage == AcpSandboxLaunchStage.BEFORE_SCOPE_START) startHookReached.set(true)
+            },
+            scopeObserver = AcpSandboxScopeObserver { revalidationScopes.add(it) },
+        )
+        val revalidationFailure = IOException("injected launch mount revalidation deadline")
+        try {
+            val failure = assertFailsWith<IOException> {
+                revalidationBoundary.launch(probeLaunch(listOf("netns")), true) {
+                    val stack = Thread.currentThread().stackTrace
+                    if (stack.none { it.methodName == "requireBoundaryUnchanged" } &&
+                        stack.any { it.className == "decompengine.acp.PinnedReadOnlyMount" && it.methodName == "requireUnchanged" } &&
+                        revalidationCheckpoint.compareAndSet(false, true)
+                    ) throw revalidationFailure
+                }
+            }
+            assertTrue(failure === revalidationFailure, "launch cleanup must preserve the injected primary")
+            assertTrue(revalidationCheckpoint.get(), "launch mounts must be revalidated before command construction")
+            assertFalse(commandObserved.get(), "mount revalidation must precede the command observer")
+            assertFalse(startHookReached.get(), "mount revalidation must precede scope start")
+            assertTrue(revalidationUnits.isEmpty())
+            assertTrue(revalidationScopes.isEmpty())
+            assertTrue(revalidationBoundary.evidence(null).launches.isEmpty())
+        } finally {
+            revalidationBoundary.close()
+        }
+        assertBoundaryResidueAbsent(before, revalidationUnits, revalidationScopes)
+
         val launchBoundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
         val nprocCheckpoint = AtomicBoolean(false)
         try {
