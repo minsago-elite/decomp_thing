@@ -7,6 +7,8 @@ import os
 import stat
 from pathlib import Path
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 BASE = Path(__file__).resolve().parent
 PROFILE_PATH = BASE / 'contracts/candidate-build-profile.json'
@@ -138,14 +140,18 @@ def _bounded_json_snapshot(path: Path, maximum: int) -> bytes:
                 raise cleanup_failure
 
 
-def _read_json(path: Path, maximum: int):
-    raw = _bounded_json_snapshot(path, maximum)
+def _decode_json(raw):
     try:
         value = json.loads(raw, object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite contract value')))
     except (RecursionError, UnicodeError, json.JSONDecodeError) as failure:
         raise ValueError('invalid contract JSON') from failure
-    return value, hashlib.sha256(raw).hexdigest()
+    return value
+
+
+def _read_json(path: Path, maximum: int):
+    raw = _bounded_json_snapshot(path, maximum)
+    return _decode_json(raw), hashlib.sha256(raw).hexdigest()
 
 
 def validate_profile(value):
@@ -176,10 +182,52 @@ def enforced_process_limits():
         ('RLIMIT_FSIZE','fileSizeBytes','bytes')]}
 
 
+class _ProfileSnapshot:
+    """Owned original bytes; no returned mutable profile object can retarget this value."""
+    __slots__ = ('raw', 'sha256')
+
+    def __init__(self, raw):
+        if hasattr(self, 'raw') or hasattr(self, 'sha256'):
+            raise AttributeError('profile snapshot is immutable')
+        if type(raw) is not bytes or not 0 <= len(raw) <= MAXIMUM_PROFILE_BYTES:
+            raise ValueError('profile snapshot byte bound')
+        validate_profile(_decode_json(raw))
+        object.__setattr__(self, 'raw', raw)
+        object.__setattr__(self, 'sha256', hashlib.sha256(raw).hexdigest())
+
+    def __setattr__(self, name, value):
+        raise AttributeError('profile snapshot is immutable')
+
+    def __delattr__(self, name):
+        raise AttributeError('profile snapshot is immutable')
+
+
+_PROFILE_SNAPSHOT = ContextVar('verified_candidate_profile', default=None)
+
+
+def _read_profile_snapshot(path=None):
+    # Admission/explicit reads must not inherit an outer evaluation's profile.
+    return _ProfileSnapshot(_bounded_json_snapshot(
+        Path(path) if path is not None else PROFILE_PATH, MAXIMUM_PROFILE_BYTES))
+
+
+@contextmanager
+def profile_scope(snapshot):
+    if type(snapshot) is not _ProfileSnapshot:
+        raise ValueError('owned profile snapshot required')
+    token = _PROFILE_SNAPSHOT.set(snapshot)
+    try:
+        yield
+    finally:
+        _PROFILE_SNAPSHOT.reset(token)
+
+
 def load_profile_with_digest(path=None):
-    """Read/validate only the local declared contract; no host tool resolution or policy changes."""
-    value, sha256 = _read_json(Path(path) if path is not None else PROFILE_PATH, MAXIMUM_PROFILE_BYTES)
-    return validate_profile(value), sha256
+    """Ordinary aliases share the invocation; explicit paths remain independent reads."""
+    snapshot = _PROFILE_SNAPSHOT.get() if path is None else None
+    if snapshot is None:
+        snapshot = _read_profile_snapshot(path)
+    return validate_profile(_decode_json(snapshot.raw)), snapshot.sha256
 
 
 def load_profile(path=None):
@@ -188,7 +236,10 @@ def load_profile(path=None):
 
 def profile():
     """Execution-side tool byte revalidation; no subprocess or compiler invocation."""
-    value = load_profile()
+    return _revalidate_gcc(load_profile())
+
+
+def _revalidate_gcc(value):
     identity = value['gccIdentity']
     if str(Path(identity['executable']).resolve()) != identity['realpath'] or digest(Path(identity['realpath'])) != identity['sha256']:
         raise ValueError('GCC executable differs from visible profile identity')
@@ -207,15 +258,24 @@ def render():
 
 def _visible_snapshot():
     # One validated byte snapshot binds both visible artifacts; no reread between prompt and manifest.
-    value, sha256 = load_profile_with_digest()
-    identity = value['gccIdentity']
-    if str(Path(identity['executable']).resolve()) != identity['realpath'] or digest(Path(identity['realpath'])) != identity['sha256']:
-        raise ValueError('GCC executable differs from visible profile identity')
-    return value, sha256
+    snapshot = _read_profile_snapshot()
+    return _revalidate_gcc(validate_profile(_decode_json(snapshot.raw))), snapshot.sha256
 
 
 def verify_visible(directory):
     value, sha256 = _visible_snapshot()
+    _verify_visible(directory, value, sha256)
+
+
+def verified_visible_snapshot(directory):
+    """Independently admit the visible contract, including inside an outer profile scope."""
+    snapshot = _read_profile_snapshot()
+    value = _revalidate_gcc(validate_profile(_decode_json(snapshot.raw)))
+    _verify_visible(directory, value, snapshot.sha256)
+    return snapshot
+
+
+def _verify_visible(directory, value, sha256):
     manifest, _ = _read_json(directory / 'visible-manifest.json', MAXIMUM_VISIBLE_BYTES)
     expected = {'schemaVersion': 3, 'profile': value, 'profileSha256': sha256}
     if json.dumps(manifest, sort_keys=True, allow_nan=False) != json.dumps(expected, sort_keys=True):

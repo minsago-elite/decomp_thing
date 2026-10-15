@@ -61,6 +61,9 @@ def _valid_worker_bindings(result: dict) -> bool:
                 any(type(item[key]) is not int or not 0 <= item[key] <= (1 << 64) - 1 for key in ('device','inode')) or
                 type(item['mode']) is not int or not 0 <= item['mode'] <= 0o7777 or not sha(item['sha256'])):
             return False
+    profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
+    if profile_pin is None or profile_pin['sha256'] != bounds['profileSha256']:
+        return False
     if _canonical_pin_digest(pins) != binding['launchPinsSha256']:
         return False
     def matches(prefix, digest=None):
@@ -1137,6 +1140,9 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
             monitor_argv[index:index] = ['--library-device', str(library['device']), '--library-inode', str(library['inode']), '--library-size', str(library['size'])]
         command = ['/usr/bin/bwrap', *prefix, '--', *monitor_argv]
     pins = _pin_files(common, deadline)
+    profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
+    if type(profile_pin) is not dict or profile_pin.get('sha256') != bounds['profileSha256']:
+        raise ValueError('launch profile pin differs from admitted bounds profile')
     _check_compiler_input_pins(compiler_recording, pins)
     if library is not None and pins.get(library['sourcePath']) != library_pin:
         raise ValueError('runtime library input changed during preparation')

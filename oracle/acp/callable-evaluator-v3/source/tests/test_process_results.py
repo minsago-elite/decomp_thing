@@ -9,6 +9,7 @@ import json
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import evaluate_candidate_v3 as e
+import build_contract as contract
 from static_test_support import historical_namespace, static_temp
 
 
@@ -16,6 +17,7 @@ def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/
     """Authored inert protocol records; no assertion of a real launch."""
     import hashlib
     from test_identity_graph import completed_result
+    import bounded_runtime as runtime
     raw=completed_result(stdout,stderr,code)
     raw['bounds']={'phase':phase,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json')}
     expected=raw['workerProofBindings']['expected'];expected.update(phase=phase,attempt=attempt)
@@ -34,6 +36,7 @@ def receipt(code=0,stdout=b'ok',stderr=b'',*,phase='runtime',caller='/synthetic/
     pins=raw['launchInputPins'];target=pins.pop('/authored/worker');target['sha256']=caller_sha;pins[caller]=target
     pins['/synthetic/libcandidate.so']={'device':9,'inode':10,'mode':256,'sha256':'c'*64}
     if input_pins is not None:pins.update(deepcopy(input_pins))
+    pins[str(runtime.BASE/'contracts/candidate-build-profile.json')]['sha256']=raw['bounds']['profileSha256']
     raw['workerProofBindings']['targetSha256']=caller_sha
     raw['workerProofBindings']['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     return raw
@@ -108,6 +111,7 @@ class ProcessResults(unittest.TestCase):
             for name in ('original.c','original.h'):(root/'private'/name).write_text('synthetic only')
             shutil.copytree(e.BASE/'contracts',root/'contracts')
             for name in ('candidate.c','helper','caller','observations.json'):(root/name).write_text('synthetic only')
+            admitted_profile=contract._read_profile_snapshot()
             def directory(path):path.mkdir(parents=True);return path
             def write(path,value):
                 raw=json.dumps(value).encode('utf-8');path.write_bytes(raw)
@@ -121,7 +125,7 @@ class ProcessResults(unittest.TestCase):
             def assertions(source,value):
                 if source.name=='expected.i':raise ValueError('missing independent GCC binding')
                 return 'synthetic assertion'
-            with patch.object(e,'BASE',root),patch.object(e,'private_directory',side_effect=directory),patch.object(e,'write_json',side_effect=write),patch.object(e,'validated_observations',return_value=observations()),patch.object(e,'verify_visible'),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'run',side_effect=fake_run),patch.object(e,'probe',return_value={'status':'supported','interfaces':{'acp_state':{}}}),patch.object(e,'compare_descriptors',return_value={'status':'passed','accepted':True}),patch.object(e,'layout_assertions',side_effect=assertions),patch.object(e,'resolve_declaration',return_value={'sizeBits':64}),patch.object(e,'export_inventory',return_value={'status':'passed'}):
+            with patch.object(e,'BASE',root),patch.object(e,'private_directory',side_effect=directory),patch.object(e,'write_json',side_effect=write),patch.object(e,'validated_observations',return_value=observations()),patch.object(e,'verified_visible_snapshot',return_value=admitted_profile),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'run',side_effect=fake_run),patch.object(e,'probe',return_value={'status':'supported','interfaces':{'acp_state':{}}}),patch.object(e,'compare_descriptors',return_value={'status':'passed','accepted':True}),patch.object(e,'layout_assertions',side_effect=assertions),patch.object(e,'resolve_declaration',return_value={'sizeBits':64}),patch.object(e,'export_inventory',return_value={'status':'passed'}):
                 report=e.evaluate(root/'candidate.c',root/'output',root/'helper',root/'caller',root,root/'observations.json')
             self.assertEqual(report['phases']['declarations']['status'],'passed')
             self.assertEqual(report['phases']['gccAssertions']['status'],'unknown')

@@ -235,4 +235,96 @@ class JsonSnapshots(unittest.TestCase):
         self.assertEqual([12,11,10],facts['closed'])
 
 
+
+def authored_profile_bytes(label='A', *, compact=False):
+    """Pure declared inputs, never host GCC observations or execution authority."""
+    value=json.loads(json.dumps(contract._IMMUTABLE))
+    value.update(gccIdentity={'executable':'/usr/bin/gcc','realpath':'/authored/gcc-'+label,
+                 'sha256':'a'*64,'target':'x86_64-pc-linux-gnu','version':label},
+                 toolchainEnvironmentPinSha256='b'*64 if label=='A' else 'c'*64)
+    return (json.dumps(value,sort_keys=True,indent=None if compact else 2)+'\n').encode()
+
+
+class ProfileCarry(unittest.TestCase):
+    def test_original_wire_digest_immutable_bytes_and_fresh_loader_aliases(self):
+        import bounded_runtime as runtime
+        import interface_gate_v3 as gate
+        import evaluate_candidate_v3 as evaluator
+        raw=authored_profile_bytes();snapshot=contract._ProfileSnapshot(raw)
+        compact=authored_profile_bytes(compact=True)
+        self.assertEqual(json.loads(raw),json.loads(compact))
+        self.assertNotEqual(hashlib.sha256(raw).hexdigest(),hashlib.sha256(compact).hexdigest())
+        with contract.profile_scope(snapshot),patch.object(contract,'_bounded_json_snapshot',side_effect=AssertionError('context must not reread pathname')):
+            for loader in (contract.load_profile_with_digest,runtime.load_profile_with_digest,gate.load_profile_with_digest,evaluator.load_profile_with_digest):
+                value,digest=loader()
+                self.assertEqual('A',value['gccIdentity']['version'])
+                self.assertEqual(hashlib.sha256(raw).hexdigest(),digest)
+                value['gccIdentity']['version']='mutated'
+                value['commands']['compile'].clear()
+                fresh=loader()[0]
+                self.assertEqual('A',fresh['gccIdentity']['version'])
+                self.assertTrue(fresh['commands']['compile'])
+            self.assertEqual('A',evaluator.load_profile()['gccIdentity']['version'])
+            with self.assertRaises(AttributeError):snapshot.raw=b'changed'
+            with self.assertRaises(AttributeError):del snapshot.sha256
+            with self.assertRaises(AttributeError):snapshot.__init__(authored_profile_bytes('B'))
+            # Exercise the actual completion consumer, not just the loader aliases.
+            from test_process_results import receipt
+            with patch.object(evaluator, 'digest', return_value=snapshot.sha256):
+                execution=receipt()
+            with patch.object(evaluator, 'bounded_run', return_value=execution) as launched, \
+                    patch.object(evaluator, 'digest', side_effect=AssertionError('completion must not rehash profile pathname')):
+                status,result=evaluator._run(['/usr/bin/bwrap','authored'],Path('/authored/work'),timeout=5,phase='runtime')
+            self.assertEqual('passed',status['status']);self.assertIs(execution,result)
+            launched.assert_called_once()
+            self.assertEqual(65536,launched.call_args.kwargs['output_limit'])
+        self.assertEqual(raw,snapshot.raw)
+
+    def test_nested_visible_admission_bypasses_outer_context_and_explicit_path_is_independent(self):
+        raw_a=authored_profile_bytes('A');raw_b=authored_profile_bytes('B',compact=True)
+        snapshot_a=contract._ProfileSnapshot(raw_a)
+        value_b=json.loads(raw_b);visible=Path('/authored/visible');explicit=Path('/authored/independent.json')
+        digest_b=hashlib.sha256(raw_b).hexdigest();reads=[]
+        def capture(path,maximum):
+            reads.append((path,maximum))
+            if path in (contract.PROFILE_PATH,explicit):return raw_b
+            self.assertEqual(visible/'prompt.txt',path)
+            return contract._render(value_b).encode('utf-8')
+        def manifest(path,maximum):
+            self.assertEqual((visible/'visible-manifest.json',contract.MAXIMUM_VISIBLE_BYTES),(path,maximum))
+            return {'schemaVersion':3,'profile':value_b,'profileSha256':digest_b},'d'*64
+        with contract.profile_scope(snapshot_a),patch.object(contract,'_bounded_json_snapshot',side_effect=capture),patch.object(contract,'_read_json',side_effect=manifest),patch.object(contract,'_revalidate_gcc',side_effect=lambda value:value):
+            snapshot_b=contract.verified_visible_snapshot(visible)
+            self.assertEqual(raw_b,snapshot_b.raw);self.assertEqual(digest_b,snapshot_b.sha256)
+            self.assertEqual('A',contract.load_profile()['gccIdentity']['version'])
+            independent,independent_digest=contract.load_profile_with_digest(explicit)
+            self.assertEqual('B',independent['gccIdentity']['version']);self.assertEqual(digest_b,independent_digest)
+            with contract.profile_scope(snapshot_b):self.assertEqual('B',contract.load_profile()['gccIdentity']['version'])
+            self.assertEqual('A',contract.load_profile()['gccIdentity']['version'])
+        self.assertEqual([(contract.PROFILE_PATH,contract.MAXIMUM_PROFILE_BYTES),
+                          (visible/'prompt.txt',contract.MAXIMUM_VISIBLE_BYTES),
+                          (explicit,contract.MAXIMUM_PROFILE_BYTES)],reads)
+
+    def test_scoped_profile_still_revalidates_actual_gcc_identity_and_rejects_drift(self):
+        snapshot=contract._ProfileSnapshot(authored_profile_bytes())
+        with contract.profile_scope(snapshot),patch.object(Path,'resolve',return_value=Path('/authored/gcc-A')) as resolved,patch.object(contract,'digest',return_value='a'*64) as hashed,patch.object(contract,'_bounded_json_snapshot',side_effect=AssertionError('no profile reopen')):
+            self.assertEqual('A',contract.profile()['gccIdentity']['version'])
+            hashed.assert_called_once_with(Path('/authored/gcc-A'));resolved.assert_called_once_with()
+            hashed.return_value='f'*64
+            with self.assertRaisesRegex(ValueError,'GCC executable differs'):contract.profile()
+            self.assertEqual('A',contract.load_profile()['gccIdentity']['version'])
+
+    def test_nested_context_failure_restores_each_token_without_changing_json_policy(self):
+        a=contract._ProfileSnapshot(authored_profile_bytes('A'));b=contract._ProfileSnapshot(authored_profile_bytes('B'))
+        before=contract._PROFILE_SNAPSHOT.get();failure=ValueError('authored nested failure')
+        with contract.profile_scope(a):
+            with self.assertRaises(ValueError) as caught:
+                with contract.profile_scope(b):
+                    self.assertEqual('B',contract.load_profile()['gccIdentity']['version']);raise failure
+            self.assertIs(failure,caught.exception);self.assertIs(a,contract._PROFILE_SNAPSHOT.get())
+        self.assertIs(before,contract._PROFILE_SNAPSHOT.get())
+        for raw in (b'{"schemaVersion":3,"schemaVersion":3}',b'NaN',b'\xff',b'',b' '*(contract.MAXIMUM_PROFILE_BYTES+1)):
+            with self.subTest(raw=raw[:32]),self.assertRaises(ValueError):contract._ProfileSnapshot(raw)
+
+
 if __name__=='__main__':unittest.main()

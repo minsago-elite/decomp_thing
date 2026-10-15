@@ -180,6 +180,7 @@ class ProfileLimits(unittest.TestCase):
                  wrapper=0, proof_kind='complete', admission=True, setup_failure=False, provisioning=False, late_cleanup_wait=False, late_absence=False, cleanup_prework=0.0,
                  metadata_failure=None, census_failure=None):
         import worker_exec_proof as parser
+        declared_profile_sha=contract.load_profile_with_digest()[1]
         stack = ExitStack(); self.addCleanup(stack.close)
         temporary = Path(stack.enter_context(tempfile.TemporaryDirectory(dir=TEMP)))
         base = temporary / 'trusted'; base.mkdir(mode=0o700)
@@ -221,7 +222,8 @@ class ProfileLimits(unittest.TestCase):
         stack.enter_context(patch.object(runtime.time,'monotonic',side_effect=clock if clock is not None else lambda:now[0]))
         stack.enter_context(patch.object(runtime,'_fixed_source_module',return_value=parser))
         pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
-              '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64}}
+              '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64},
+              str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':declared_profile_sha}}
         stack.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
         def prepare(argv,cwd,bounds,receipt,provisioning,deadline=None):
             self.last_receipt=receipt

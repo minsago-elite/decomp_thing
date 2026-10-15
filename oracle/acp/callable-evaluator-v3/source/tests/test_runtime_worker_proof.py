@@ -96,6 +96,46 @@ class RuntimeWorkerProof(unittest.TestCase):
         recipe=runtime._contained_recipe(command,self.work)
         self.assertTrue(any(m['target']==Path('/work/input') and not m['writable'] for m in recipe['mounts']))
 
+    def test_actual_prepare_refuses_missing_wrong_or_rekeyed_profile_before_publication(self):
+        profile,profile_sha=build_contract.load_profile_with_digest()
+        bounds=runtime.execution_bounds(managed_scope=True,phase='runtime',snapshot=(profile,profile_sha))
+        key=str(runtime.BASE/'contracts/candidate-build-profile.json')
+        target=Path('/authored/worker');monitor=Path('/authored/monitor')
+        recipe={'target':target,'worker':['/worker'],'prefix':[],'mounts':[]}
+        binding={'binaryPath':str(monitor),'dependencies':[],**{name:'0'*64 for name in
+            ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
+        def executable(path,deadline=None):
+            device,inode=(3,4) if str(path)=='/usr/bin/bwrap' else (11,12) if path==monitor else (7,8)
+            return {'path':str(path),'device':device,'inode':inode,'mode':0o500,'sha256':'0'*64}
+        for provisioning in (False,True):
+            for mutation in (None,'missing','wrong','rekeyed'):
+                with self.subTest(provisioning=provisioning,mutation=mutation):
+                    pins={key:{'device':70,'inode':71,'mode':0o400,'sha256':profile_sha}}
+                    if mutation=='missing':pins.clear()
+                    if mutation=='wrong':pins[key]['sha256']='f'*64
+                    if mutation=='rekeyed':pins['/authored/other-profile.json']=pins.pop(key)
+                    receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
+                    with ExitStack() as effects:
+                        for target_object,name,effect in ((Path,'stat',lambda *a,**k:types.SimpleNamespace(st_dev=5,st_ino=6)),
+                                (Path,'lstat',lambda *a,**k:types.SimpleNamespace(st_dev=1,st_ino=2)),
+                                (runtime,'_contained_recipe',lambda *a:recipe),(runtime,'load_worker_monitor_binding',lambda:binding),
+                                (runtime,'_nonprivileged_executable',executable),(runtime,'_recorded_compiler_inputs',lambda *a:None),
+                                (runtime,'load_profile_with_digest',lambda:(profile,profile_sha)),
+                                (runtime,'private_directory',lambda path:path),(runtime,'process_identity',lambda pid:{'start':1}),
+                                (runtime.os,'getpid',lambda:123),(runtime.os,'getuid',lambda:55)):
+                            effects.enter_context(patch.object(target_object,name,side_effect=effect))
+                        effects.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
+                        published=effects.enter_context(patch.object(runtime,'_publish_config'))
+                        effects.enter_context(patch.object(runtime.os,'open',side_effect=AssertionError('authored producer must not open files')))
+                        if mutation is None:
+                            launch=runtime._prepare_launch(['/authored/worker'],self.work,bounds,receipt,provisioning)
+                            self.assertEqual(profile_sha,launch['pins'][key]['sha256']);published.assert_called_once()
+                            self.assertEqual(receipt['directory']/'launch.json',published.call_args.args[0])
+                        else:
+                            with self.assertRaisesRegex(ValueError,'launch profile pin differs'):
+                                runtime._prepare_launch(['/authored/worker'],self.work,bounds,receipt,provisioning)
+                            published.assert_not_called()
+
     def test_prepare_inserts_fixed_monitor_and_owned_snapshot_mount_before_root_remount(self):
         from evaluate_candidate_v3 import runtime_command
         helper=self.directory/'helper';helper.write_bytes(b'public ELF placeholder')
@@ -109,7 +149,8 @@ class RuntimeWorkerProof(unittest.TestCase):
             identity=lambda p,deadline=None:{'path':str(p),'device':7,'inode':8,'mode':0o755,'sha256':'0'*64}
             receipt['librarySnapshotFd']=5  # mocked descriptor; never opened/closed by this preparation-only control
             snapshot={'device':51,'inode':52,'size':3,'sha256':'0'*64,'sourcePath':str(library)}
-            with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value={}):
+            profile_pins={str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':runtime.load_profile_with_digest()[1]}}
+            with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value=profile_pins):
                 launch=runtime._prepare_launch(runtime_command(helper,library,2),self.work,
                                                runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':'0'*64})
                 # Portable actual admission-path controls: no ignored/private template input.
@@ -309,6 +350,8 @@ class RuntimeWorkerProof(unittest.TestCase):
                      'toolchain-001/worker-exec-monitor.json','toolchain-001/environment-pin.json',
                      'toolchain-001/pin_environment.py','toolchain-001/link_inputs.py','toolchain-001/monitor_inputs.py'):
             file=base/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(b'authored fixed metadata input')
+        # Match the actual admitted profile rather than hashing a generic metadata stub.
+        (base/'contracts/candidate-build-profile.json').write_bytes(build_contract.PROFILE_PATH.read_bytes())
         caller=base/'caller';caller.write_bytes(b'authored inert caller');caller.chmod(0o500)
         library=base/'reference/libcandidate.so';library.parent.mkdir();library.write_bytes(b'authored inert shared object');library.chmod(0o400)
         monitor=base/'monitor';monitor.write_bytes(b'authored inert monitor');monitor.chmod(0o500)

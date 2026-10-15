@@ -13,7 +13,8 @@ from pathlib import Path
 from bounded_runtime import (bounded_run, digest, private_directory, public_result, write_json,
                              worker_execution_complete, contained_command)
 from worker_exec_proof import parse_proof, MAX_PROOF_BYTES
-from build_contract import profile, load_profile, verify_visible, _read_json
+from build_contract import (profile, load_profile, load_profile_with_digest,
+                            verified_visible_snapshot, profile_scope, _read_json)
 from interface_gate_v3 import (compare_descriptors, probe, export_inventory, layout_assertions, resolve_declaration,
                                phase_remaining, revalidate_handoff, require_handoff_execution)
 BASE = Path(__file__).resolve().parent
@@ -280,7 +281,7 @@ def _run(argv, work, timeout=None, phase='compiler', runtime_library=None, *, ph
         r=bounded_run(argv,work,environment(work),timeout=timeout if timeout is not None else p['bounds']['compilerSeconds'],output_limit=p['bounds']['outputBytesPerStream'],managed_scope=True,phase=phase,**({'runtime_library':runtime_library} if runtime_library is not None else {}),
                       **({'phase_deadline':phase_deadline} if phase_deadline is not None else {}))
         complete = (_proof_replays(r) and r["bounds"]["phase"] == phase
-                    and r["bounds"]["profileSha256"] == digest(BASE/"contracts/candidate-build-profile.json"))
+                    and r["bounds"]["profileSha256"] == load_profile_with_digest()[1])
         return {'status':('passed' if r['exitCode']==0 else 'failed') if complete else 'unknown','execution':public_result(r)},r
     except Exception as e:
         r=getattr(e,'bounded_result',None)
@@ -607,7 +608,7 @@ def validated_observations(path, caller, preparation):
             or value['callerPath']!=str(caller)
             or value['libraryPath']!=str(library)
             or value['librarySha256']!=inputs[str(library)]['sha256']
-            or value['profileSha256']!=digest(BASE/'contracts/candidate-build-profile.json')):
+            or value['profileSha256']!=load_profile_with_digest()[1]):
         raise ValueError('reference observations do not bind current fixture/caller')
     observations=value['observations']
     if [o['id'] for o in observations]!=list(range(24)) or [o['family'] for o in observations]!=SCENARIO_FAMILIES:
@@ -657,21 +658,36 @@ def _require_reference_caller(caller, expected):
 
 
 def evaluate(candidate, output, helper, caller, visible, observations_path):
-    scope = WorkerLeaves()
-    token = _LEAF_SCOPE.set(scope)
-    try:
-        return _evaluate(candidate, output, helper, caller, visible, observations_path)
-    finally:
-        _LEAF_SCOPE.reset(token)
-        scope.close()
-
-
-def _evaluate(candidate, output, helper, caller, visible, observations_path):
     if 'build/acp-decomp-effectiveness/callable-library-v3' not in str(BASE):
         raise ValueError('execution requires trusted v3 source copy')
     for path in (candidate,helper,caller,visible,observations_path):
         if not path.resolve(strict=True).is_relative_to(BASE): raise ValueError('input outside trusted v3 namespace')
-    verify_visible(visible)
+    snapshot = verified_visible_snapshot(visible)
+    with profile_scope(snapshot):
+        scope = WorkerLeaves()
+        token = _LEAF_SCOPE.set(scope)
+        primary = None
+        try:
+            return _evaluate(candidate, output, helper, caller, visible, observations_path)
+        except BaseException as failure:
+            primary = failure
+            raise
+        finally:
+            try:
+                try:
+                    scope.close()
+                except BaseException:
+                    if primary is None:
+                        raise
+                    try:
+                        BaseException.add_note(primary, 'worker leaf cleanup failed after evaluation failure')
+                    except BaseException:
+                        pass  # A diagnostic must never replace the evaluation's original failure.
+            finally:
+                _LEAF_SCOPE.reset(token)
+
+
+def _evaluate(candidate, output, helper, caller, visible, observations_path):
     observations=validated_observations(observations_path,caller,visible)
     p=profile(); output=private_directory(output)
     evidence={}
@@ -776,5 +792,5 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
     summary=summarize(scenarios,admitted)
     phases['load']={'status':'unverified' if summary['runtimeRequestCount'] else 'not-attempted','value':None}
     phases['behavior']={'status':summary.pop('behaviorStatus'),'reason':'completed-process-bytes-and-termination','evidenceSha256':None}
-    report={'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':hashlib.sha256(raw).hexdigest(),'profileSha256':digest(BASE/'contracts/candidate-build-profile.json'),'runtimeInputs':runtime_inputs,'phases':phases,'admitted':admitted,**summary,'scenarios':scenarios,'evidenceFiles':evidence,'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
+    report={'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':hashlib.sha256(raw).hexdigest(),'profileSha256':load_profile_with_digest()[1],'runtimeInputs':runtime_inputs,'phases':phases,'admitted':admitted,**summary,'scenarios':scenarios,'evidenceFiles':evidence,'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
     validate_exchange('report',report);write_json(output/'receipt.json',report);return report

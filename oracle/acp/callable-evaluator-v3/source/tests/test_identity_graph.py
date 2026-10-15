@@ -56,8 +56,10 @@ def remap(value, mapping):
 
 def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
     import hashlib
+    import bounded_runtime as runtime
     pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':target_sha},
-          '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64}}
+          '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64},
+          str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':256,'sha256':'0'*64}}
     bindings={'protocolVersion':1,'expected':{'attempt':'a'*32,'phase':'runtime','reportDevice':1,
         'reportInode':2,'reaperDevice':3,'reaperInode':4,'outerPidNsDevice':5,'outerPidNsInode':6,'targetDevice':7,'targetInode':8},
         **{key:'0'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256','monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256')},

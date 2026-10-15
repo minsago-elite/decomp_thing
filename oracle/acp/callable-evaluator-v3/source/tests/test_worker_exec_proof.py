@@ -423,8 +423,10 @@ def fault_receipt(name, *, descendant_complete=False):
     """Public synthetic receipt only; no actual execution or qualification."""
     raw=wire(exec_record(),terminal()) if name=='descendant' else wire(exec_record())
     parsed_proof=parse_proof(raw,binding())
+    import bounded_runtime as runtime
     pins={'/public/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'c'*64},
-          '/public/reaper':{'device':3,'inode':4,'mode':0o755,'sha256':'d'*64}}
+          '/public/reaper':{'device':3,'inode':4,'mode':0o755,'sha256':'d'*64},
+          str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':'b'*64}}
     bound={key:'b'*64 for key in ('launchConfigSha256','environmentPinSha256','monitorBinarySha256',
         'monitorSourceSha256','protocolSha256','parserSha256','manifestSha256','targetSha256','launchPinsSha256')}
     bound.update(protocolVersion=1,expected=binding(),targetSha256='c'*64,
@@ -458,6 +460,23 @@ class ReviewCorrectionTests(unittest.TestCase):
         path=ROOT/'tests/qualify_worker_exec.py'
         spec=importlib.util.spec_from_file_location('qualifier_review_corrections',path)
         cls.qualifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.qualifier)
+
+    def test_replay_requires_canonical_profile_pin_even_after_aggregate_resealing(self):
+        import bounded_runtime as runtime
+        good=fault_receipt('descendant',descendant_complete=True)
+        key=str(runtime.BASE/'contracts/candidate-build-profile.json')
+        with patch.object(runtime,'load_profile_with_digest',side_effect=AssertionError('replay must not read profile')),patch.object(runtime.os,'open',side_effect=AssertionError('replay must not open files')):
+            self.assertTrue(runtime._valid_worker_bindings(good))
+            self.assertTrue(runtime.worker_execution_complete(good))
+            for mutation in ('missing','wrong','rekeyed'):
+                with self.subTest(mutation=mutation):
+                    bad=copy.deepcopy(good)
+                    row=bad['launchInputPins'].pop(key)
+                    if mutation=='wrong':row['sha256']='f'*64;bad['launchInputPins'][key]=row
+                    if mutation=='rekeyed':bad['launchInputPins']['/authored/other-profile.json']=row
+                    bad['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(bad['launchInputPins'])
+                    self.assertFalse(runtime._valid_worker_bindings(bad))
+                    self.assertFalse(runtime.worker_execution_complete(bad))
 
     def test_one_over_proof_cap_does_no_hash_or_record_parse(self):
         with patch.object(proof_parser.hashlib,'sha256') as hashed, patch.object(proof_parser,'_record') as decoded:

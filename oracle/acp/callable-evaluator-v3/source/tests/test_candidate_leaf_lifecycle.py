@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch, Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import evaluate_candidate_v3 as e
+import build_contract as contract
 from static_test_support import static_temp
 
 
@@ -133,13 +134,15 @@ class CandidateLeafLifecycle(unittest.TestCase):
             (self.root/'output/candidate-source.c').write_bytes(b'int replaced copy;\n')
             self.assertEqual(source.data,original)
             return {},{}
+        admitted_profile=contract._read_profile_snapshot()
         summary={'runtimeRequestCount':0,'behaviorStatus':'not-attempted'}
         # The production namespace gate remains active; the repository fixture
         # path includes its required trusted-copy namespace.
-        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verify_visible'),patch.object(e,'validated_observations',return_value=[]),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'compile_sequence',side_effect=compile_snapshot),patch.object(e,'summarize',return_value=summary),patch.object(e,'digest',return_value='a'*64),patch.object(e,'validate_exchange'),patch.object(e,'write_json'):
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verified_visible_snapshot',return_value=admitted_profile),patch.object(e,'validated_observations',return_value=[]),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'compile_sequence',side_effect=compile_snapshot),patch.object(e,'summarize',return_value=summary),patch.object(e,'digest',return_value='a'*64),patch.object(e,'validate_exchange'),patch.object(e,'write_json'):
             report=e.evaluate(candidate,self.root/'output',self.root/'helper',self.root/'caller',visible,self.root/'observations')
         self.assertEqual(report['candidateSha256'],hashlib.sha256(original).hexdigest())
         self.assertNotEqual(report['candidateSha256'],hashlib.sha256(candidate.read_bytes()).hexdigest())
+        self.assertEqual(admitted_profile.sha256,report['profileSha256'])
 
 
 class PhaseArtifactContinuity(unittest.TestCase):
@@ -382,6 +385,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
         from test_identity_graph import graph
         from test_process_results import receipt
         declared_profile=gate.load_profile()
+        admitted_profile=contract._read_profile_snapshot()
         candidate=self.root/'candidate.c';candidate.write_bytes(b'authored candidate source')
         helper=self.root/'helper';helper.write_bytes(b'authored inert helper')
         caller=self.root/'caller';caller.write_bytes(b'authored inert caller')
@@ -449,7 +453,7 @@ class PhaseArtifactContinuity(unittest.TestCase):
                 return receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),caller_sha=pin(helper)['sha256'],input_pins=pins)
             self.assertEqual(linked,(work/'libcandidate.so').read_bytes());inspections.append(1)
             return self.process(pins,phase='elf-inspection',stdout=symbols if len(inspections)==1 else sections)
-        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verify_visible'),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root),patch.object(e,'verified_visible_snapshot',return_value=admitted_profile),patch.object(e,'validated_observations',return_value=observations),patch.object(e,'profile',side_effect=e.load_profile),patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'copy_input',side_effect=copied),patch.object(e,'_run',side_effect=compiler),patch.object(gate,'profile',return_value=declared_profile),patch.object(gate,'bounded_run',side_effect=inspection),patch.object(e,'validate_exchange'):
             report=e.evaluate(candidate,self.root/'output',helper,caller,visible,observations_path)
         diagnostic=json.dumps({
             'phases':{name:{'status':row['status'],'reason':str(row.get('reason',''))[:300]}
@@ -659,6 +663,64 @@ class OwnedJsonEvidence(unittest.TestCase):
             with self.subTest(failing=failing),patch.object(self.runtime.os,failing,side_effect=side_effect),self.assertRaises(OSError) as caught:
                 retain('error-'+failing,{})
             self.assertIs(error,caught.exception);self.assertEqual({},evidence);reopen.assert_not_called()
+
+
+
+class ProfileCarryLifecycle(unittest.TestCase):
+    def test_evaluation_and_cleanup_keep_admitted_a_when_path_reader_now_supplies_b(self):
+        import bounded_runtime as runtime
+        import interface_gate_v3 as gate
+        from test_contracts import authored_profile_bytes
+        a=contract._ProfileSnapshot(authored_profile_bytes('A'))
+        b=contract._ProfileSnapshot(authored_profile_bytes('B'))
+        root=Path('/authored/build/acp-decomp-effectiveness/callable-library-v3/profile-control')
+        scope=Mock();events=[]
+        def operation(*args):
+            for loader in (e.load_profile_with_digest,runtime.load_profile_with_digest,gate.load_profile_with_digest):
+                value,digest=loader();events.append(('body',value['gccIdentity']['version'],digest))
+            return {'profileSha256':e.load_profile_with_digest()[1]}
+        def cleanup():events.append(('close',e._LEAF_SCOPE.get() is scope,contract._PROFILE_SNAPSHOT.get() is a))
+        scope.close.side_effect=cleanup
+        previous_leaf=e._LEAF_SCOPE.get();previous_profile=contract._PROFILE_SNAPSHOT.get()
+        with contract.profile_scope(b),patch.object(e,'BASE',root),patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict=False:path),patch.object(e,'verified_visible_snapshot',return_value=a) as admission,patch.object(e,'WorkerLeaves',return_value=scope),patch.object(e,'_evaluate',side_effect=operation),patch.object(contract,'_bounded_json_snapshot',return_value=b.raw) as pathname:
+            report=e.evaluate(root/'candidate',root/'output',root/'helper',root/'caller',root/'visible',root/'observations')
+            self.assertEqual(a.sha256,report['profileSha256'])
+            self.assertIs(b,contract._PROFILE_SNAPSHOT.get());self.assertIs(previous_leaf,e._LEAF_SCOPE.get())
+            pathname.assert_not_called();admission.assert_called_once_with(root/'visible')
+        self.assertEqual([('body','A',a.sha256)]*3+[('close',True,True)],events)
+        self.assertIs(previous_profile,contract._PROFILE_SNAPSHOT.get());self.assertIs(previous_leaf,e._LEAF_SCOPE.get())
+        scope.close.assert_called_once_with()
+
+    def test_primary_cleanup_failure_and_both_context_resets_preserve_owned_order(self):
+        from test_contracts import authored_profile_bytes
+        admitted=contract._ProfileSnapshot(authored_profile_bytes('A'))
+        outer=contract._ProfileSnapshot(authored_profile_bytes('B'))
+        root=Path('/authored/build/acp-decomp-effectiveness/callable-library-v3/profile-control')
+        for body_fails,cleanup_fails in ((False,False),(True,False),(False,True),(True,True)):
+            with self.subTest(body=body_fails,cleanup=cleanup_fails):
+                primary=ValueError('authored evaluation failure');cleanup_error=OSError('authored cleanup failure')
+                scope=Mock();events=[];caught=None;answer=None
+                def operation(*args):
+                    events.append(('body',contract._PROFILE_SNAPSHOT.get() is admitted))
+                    if body_fails:raise primary
+                    return 'authored answer'
+                def cleanup():
+                    events.append(('close',e._LEAF_SCOPE.get() is scope,contract._PROFILE_SNAPSHOT.get() is admitted))
+                    if cleanup_fails:raise cleanup_error
+                scope.close.side_effect=cleanup
+                before_profile=contract._PROFILE_SNAPSHOT.get();before_leaf=e._LEAF_SCOPE.get()
+                with contract.profile_scope(outer),patch.object(e,'BASE',root),patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict=False:path),patch.object(e,'verified_visible_snapshot',return_value=admitted),patch.object(e,'WorkerLeaves',return_value=scope),patch.object(e,'_evaluate',side_effect=operation):
+                    try:answer=e.evaluate(root/'candidate',root/'output',root/'helper',root/'caller',root/'visible',root/'observations')
+                    except BaseException as failure:caught=failure
+                    self.assertIs(outer,contract._PROFILE_SNAPSHOT.get());self.assertIs(before_leaf,e._LEAF_SCOPE.get())
+                self.assertIs(before_profile,contract._PROFILE_SNAPSHOT.get());self.assertIs(before_leaf,e._LEAF_SCOPE.get())
+                self.assertEqual([('body',True),('close',True,True)],events);scope.close.assert_called_once_with()
+                expected=primary if body_fails else cleanup_error if cleanup_fails else None
+                self.assertIs(expected,caught)
+                if expected is None:self.assertEqual('authored answer',answer)
+                else:self.assertIsNone(answer)
+                if body_fails and cleanup_fails:
+                    self.assertEqual(['worker leaf cleanup failed after evaluation failure'],primary.__notes__)
 
 
 if __name__=='__main__':unittest.main()
