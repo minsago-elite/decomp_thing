@@ -13,6 +13,7 @@ from pathlib import Path
 from bounded_runtime import (bounded_run, digest, private_directory, public_result, write_json,
                              worker_execution_complete, contained_command)
 from bounded_runtime import _parse_worker_proof, _WORKER_PROOF_MAX_BYTES as MAX_PROOF_BYTES
+from bounded_runtime import _pin_files
 from build_contract import (profile, load_profile, load_profile_with_digest,
                             verified_visible_snapshot, profile_scope, _read_json)
 from interface_gate_v3 import (compare_descriptors, probe, export_inventory, layout_assertions, resolve_declaration,
@@ -718,19 +719,21 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
     if phases['preprocess']['status']=='passed':
         try:
             expected_end=time.monotonic()+p['bounds']['probeSeconds']
+            helper=helper.resolve(strict=True)
+            helper_inputs=_pin_files([helper],expected_end)
             expected_work=new_worker_leaf('probe')
             expected_sources={name:capture_artifact(BASE/'private'/name,deadline=expected_end) for name in ('original.c','original.h')}
             expected_inputs=[copy_input(artifact,expected_work/name,deadline=expected_end) for name,artifact in expected_sources.items()]
             expected=_leaf_call(expected_work, lambda: probe(expected_work/'original.c',helper,expected_work,dict(p['analysisIsolation']['environment']),
-                                deadline=expected_end,expected_inputs=_input_pins(expected_inputs)))
+                                deadline=expected_end,expected_inputs=_input_pins(expected_inputs),expected_helper=deepcopy(helper_inputs)))
             retain('expected-descriptors',expected)
             actual_end=time.monotonic()+p['bounds']['probeSeconds']
             actual_work=new_worker_leaf('probe')
             actual_source=copy_input(artifacts['preprocess'],actual_work/'candidate.i',deadline=actual_end)
             actual=_leaf_call(actual_work, lambda: probe(actual_source.path,helper,actual_work,dict(p['analysisIsolation']['environment']),
-                              deadline=actual_end,expected_inputs=_input_pins([actual_source])))
+                              deadline=actual_end,expected_inputs=_input_pins([actual_source]),expected_helper=deepcopy(helper_inputs)))
             retain('candidate-descriptors',actual)
-            phases['declarations']=phase_receipt('declarations',compare_descriptors(expected,actual))
+            phases['declarations']=phase_receipt('declarations',compare_descriptors(expected,actual,expected_helper=deepcopy(helper_inputs)))
         except Exception as error:
             failure={'status':'unknown','reason':str(error)[:300]}
             if hasattr(error,'bounded_result'):failure['execution']=public_result(error.bounded_result)

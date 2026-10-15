@@ -490,6 +490,115 @@ class PhaseArtifactContinuity(unittest.TestCase):
                     commands.append(worker.call_args.args[0])
         self.assertIn(['--ro-bind',str(source.path),'/work/probe.i'],[commands[0][n:n+3] for n in range(len(commands[0]))])
 
+    def test_shared_helper_probe_uses_original_admission_and_refuses_prelaunch_replacement(self):
+        import interface_gate_v3 as gate
+        from test_identity_graph import graph
+        from test_process_results import receipt
+        declared=gate.load_profile();work=self.root/'shared-work';work.mkdir()
+        source=e.copy_input(e.CapturedArtifact(b'authored source'),work/'source.i',deadline=self.end)
+        helper=self.root/'shared-helper';helper.write_bytes(b'authored helper A')
+        admitted=e._pin_files([helper],self.end);saved=deepcopy(admitted)
+        inputs=e._input_pins([source]);pins={**inputs,**admitted};sha=admitted[str(helper)]['sha256']
+        result=receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),caller_sha=sha,input_pins=pins)
+        self.assertTrue(gate._complete_execution(result))
+        with patch.object(gate,'profile',return_value=declared),patch.object(gate,'bounded_run',return_value=result) as worker:
+            value=gate.probe(source.path,helper,work,{},deadline=self.end,expected_inputs=inputs,expected_helper=admitted)
+        self.assertEqual(sha,value['inputBindings']['helperSha256']);self.assertEqual(saved,admitted)
+        command=worker.call_args.args[0]
+        self.assertIn(['--ro-bind',str(helper),'/probe'],[command[i:i+3]for i in range(len(command))])
+        self.assertEqual(self.end,worker.call_args.kwargs['phase_deadline'])
+        self.assertNotIn(str(helper),inputs)
+        helper.write_bytes(b'authored helper B')
+        with patch.object(gate,'bounded_run',side_effect=AssertionError('replaced helper must refuse before launch')) as worker:
+            with self.assertRaisesRegex(ValueError,'handoff input differs'):
+                gate.probe(source.path,helper,work,{},deadline=self.end,expected_inputs=inputs,expected_helper=admitted)
+        worker.assert_not_called();self.assertEqual(saved,admitted)
+
+    def test_shared_helper_probe_executed_b_restored_a_and_lateness_retain_original_receipts(self):
+        import interface_gate_v3 as gate
+        from test_identity_graph import graph
+        from test_process_results import receipt
+        declared=gate.load_profile();work=self.root/'shared-late-work';work.mkdir()
+        source=e.copy_input(e.CapturedArtifact(b'authored source'),work/'source.i',deadline=self.end)
+        helper=self.root/'shared-late-helper';original=b'authored helper A';helper.write_bytes(original)
+        admitted=e._pin_files([helper],self.end);inputs=e._input_pins([source])
+        observed=[]
+        for mutation in ('executed-b','late-return'):
+            self.now=10.0
+            def worker(*args,**kwargs):
+                if mutation=='executed-b':helper.write_bytes(b'authored helper B')
+                actual=e._pin_files([helper],self.end)
+                raw=receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),
+                            caller_sha=actual[str(helper)]['sha256'],input_pins={**inputs,**actual})
+                self.assertTrue(gate._complete_execution(raw));observed.append(raw)
+                helper.write_bytes(original)
+                if mutation=='late-return':self.now=self.end
+                return raw
+            with self.subTest(mutation=mutation),patch.object(gate,'profile',return_value=declared), \
+                    patch.object(gate,'bounded_run',side_effect=worker):
+                with self.assertRaises((ValueError,TimeoutError)) as caught:
+                    gate.probe(source.path,helper,work,{},deadline=self.end,expected_inputs=inputs,expected_helper=admitted)
+            self.assertIs(observed[-1],caught.exception.bounded_result)
+        with patch.object(gate,'bounded_run',side_effect=AssertionError('original end already expired')) as worker:
+            with self.assertRaises(TimeoutError):
+                gate.probe(source.path,helper,work,{},deadline=self.end,expected_inputs=inputs,expected_helper=admitted)
+        worker.assert_not_called()
+
+    def test_evaluator_shared_helper_swap_stops_declaration_admission_and_all_runtime_requests(self):
+        import interface_gate_v3 as gate
+        from test_identity_graph import graph
+        from test_process_results import receipt,observations
+        candidate=self.root/'shared-candidate.c';candidate.write_bytes(b'authored candidate')
+        helper=self.root/'shared-evaluator-helper';helper.write_bytes(b'authored helper A')
+        caller=self.root/'shared-caller';caller.write_bytes(b'authored caller')
+        captured=e.capture_artifact;original_probe=e.probe;original_pin=e._pin_files
+        declared=gate.load_profile()
+        admitted=[];probe_inputs=[];workers=[];leaves=[];expire_admission=False
+        def pin(paths,deadline=None):
+            if expire_admission:self.now=deadline
+            value=original_pin(paths,deadline);admitted.append((deepcopy(value),deadline));return value
+        def capture(path,**kwargs):
+            if Path(path) in (e.BASE/'private/original.c',e.BASE/'private/original.h'):
+                return e.CapturedArtifact(b'authored private fixture')
+            return captured(path,**kwargs)
+        def compile_fixture(source,*,retain,initial_deadline):
+            retain('preprocess',{'status':'passed','reason':'authored inert producer'})
+            return {},{'preprocess':e.CapturedArtifact(b'authored candidate preprocessed')}
+        def leaf(label):
+            path=self.root/('shared-'+label+'-'+str(len(leaves)));path.mkdir();leaves.append(path);return path
+        def worker(command,work,*args,**kwargs):
+            workers.append(kwargs['phase']);pins={}
+            for i,arg in enumerate(command[:-1]):
+                if arg=='--ro-bind':
+                    path=Path(command[i+1])
+                    if path.is_file() and path.is_relative_to(self.root):pins.update(original_pin([path],self.end))
+            return receipt(stdout=json.dumps(graph()).encode(),phase='probe',caller=str(helper),
+                           caller_sha=pins[str(helper)]['sha256'],input_pins=pins)
+        def probe(*args,**kwargs):
+            probe_inputs.append(deepcopy(kwargs['expected_helper']))
+            value=original_probe(*args,**kwargs)
+            if len(probe_inputs)==1:helper.write_bytes(b'authored helper B')
+            return value
+        with patch.object(e,'validated_observations',return_value=observations()), \
+                patch.object(e,'profile',side_effect=e.load_profile),patch.object(gate,'profile',return_value=declared), \
+                patch.object(e,'capture_artifact',side_effect=capture),patch.object(e,'compile_sequence',side_effect=compile_fixture), \
+                patch.object(e,'new_worker_leaf',side_effect=leaf),patch.object(e,'_pin_files',side_effect=pin), \
+                patch.object(e,'probe',side_effect=probe),patch.object(gate,'bounded_run',side_effect=worker), \
+                patch.object(e,'_run',side_effect=AssertionError('no later compiler or runtime launch')),patch.object(e,'validate_exchange'):
+            report=e._evaluate(candidate,self.root/'shared-output',helper,caller,self.root,self.root/'unused-observations')
+            self.now=10.0;expire_admission=True
+            expired=e._evaluate(candidate,self.root/'shared-expired-output',helper,caller,self.root,self.root/'unused-observations')
+        self.assertEqual('unknown',expired['phases']['declarations']['status'])
+        self.assertEqual(0,expired['runtimeRequestCount']);self.assertEqual(24,len(expired['scenarios']))
+        self.assertEqual(1,len(admitted));self.assertEqual(2,len(probe_inputs))
+        self.assertEqual(self.end,admitted[0][1])
+        self.assertEqual(admitted[0][0],probe_inputs[0]);self.assertEqual(probe_inputs[0],probe_inputs[1])
+        self.assertEqual(['probe'],workers)
+        self.assertEqual('unknown',report['phases']['declarations']['status'])
+        self.assertFalse(report['admitted']);self.assertEqual(0,report['runtimeRequestCount'])
+        self.assertEqual(24,len(report['scenarios']))
+        self.assertEqual('not-attempted',report['phases']['gccAssertions']['status'])
+
     def test_export_both_inspections_share_same_copy_and_deadline(self):
         import interface_gate_v3 as gate
         _,artifact=self.artifact('library.so');library=e.copy_input(artifact,self.root/'inspected.so',deadline=self.end)

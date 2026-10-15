@@ -84,8 +84,8 @@ def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64):
 
 
 class IdentityGraph(unittest.TestCase):
-    def assert_unknown(self, value):
-        result = gate.compare_descriptors(value, value)
+    def assert_unknown(self, value, *, expected_helper=None):
+        result = gate.compare_descriptors(value, value,expected_helper=expected_helper)
         self.assertEqual(result['status'], 'unknown')
         self.assertFalse(result['accepted'])
 
@@ -306,9 +306,10 @@ class IdentityGraph(unittest.TestCase):
         execution['inputBindings']=bindings
         value.update(execution=execution,inputBindings=bindings)
         with self.assertRaises(ValueError):gate._validate_raw_helper(value)
-        self.assertTrue(gate.compare_descriptors(value,copy.deepcopy(value))['accepted'])
-        value['unexpectedRoot']=True;self.assert_unknown(value);value.pop('unexpectedRoot')
-        value.pop('execution');self.assert_unknown(value)
+        admitted={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64}}
+        self.assertTrue(gate.compare_descriptors(value,copy.deepcopy(value),expected_helper=admitted)['accepted'])
+        value['unexpectedRoot']=True;self.assert_unknown(value,expected_helper=admitted);value.pop('unexpectedRoot')
+        value.pop('execution');self.assert_unknown(value,expected_helper=admitted)
 
     def test_helper_claim_rejects_transient_path_swap_even_when_restored(self):
         import tempfile
@@ -457,5 +458,86 @@ class HelperSchemaSnapshots(unittest.TestCase):
             self.assertEqual(7, gate._validate_raw_helper(7))
             with self.assertRaises(ValueError): gate._validate_raw_helper('not an integer')
 
+
+
+
+class SharedHelperIdentity(unittest.TestCase):
+    """Independently admitted inert files and real replay validation; no execution."""
+    def setUp(self):
+        import tempfile
+        import bounded_runtime as runtime
+        from static_test_support import static_temp
+        self.runtime=runtime
+        self.temp=tempfile.TemporaryDirectory(dir=static_temp('static-process'))
+        self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        self.helper=self.root/'helper';self.helper.write_bytes(b'authored helper A')
+        self.clock=patch.object(gate.time,'monotonic',return_value=0.0)
+        self.clock.start();self.addCleanup(self.clock.stop)
+        self.admitted=runtime._pin_files([self.helper],10.0)
+
+    def enriched(self, admitted, value=None):
+        from test_process_results import receipt as process_receipt
+        name,pin=next(iter(admitted.items()));value=copy.deepcopy(graph() if value is None else value)
+        result=process_receipt(stdout=json.dumps(value).encode(),phase='probe',caller=name,
+                               caller_sha=pin['sha256'],input_pins=admitted)
+        self.assertTrue(gate._complete_execution(result))
+        bindings={'sourceSha256':'a'*64,'helperSha256':pin['sha256'],'inputsUnchanged':True}
+        execution=gate.public_result(result);execution['inputBindings']=copy.deepcopy(bindings)
+        value.update(execution=execution,inputBindings=bindings)
+        return value
+
+    def test_shared_helper_real_admission_and_complete_evidence_keep_structural_outcomes(self):
+        expected=self.enriched(self.admitted);actual=self.enriched(self.admitted)
+        selected=copy.deepcopy(self.admitted)
+        with patch.object(self.runtime,'_pin_files',side_effect=AssertionError('comparison must not re-admit')), \
+                patch.object(gate,'digest',side_effect=AssertionError('comparison must not read helper')):
+            self.assertTrue(gate.compare_descriptors(expected,actual,expected_helper=self.admitted)['accepted'])
+            different=graph();different['interfaces']['acp_fold']['return']=integer('long')
+            refused=gate.compare_descriptors(expected,self.enriched(self.admitted,different),expected_helper=self.admitted)
+        self.assertEqual('refused',refused['status']);self.assertFalse(refused['accepted'])
+        self.assertEqual(selected,self.admitted)
+        self.assertTrue(gate.compare_descriptors(graph(),graph())['accepted'])
+
+    def test_shared_helper_valid_other_target_or_restored_path_cannot_supply_matching_graph(self):
+        expected=self.enriched(self.admitted);original=self.helper.read_bytes()
+        for mutation in ('different-bytes','equal-bytes-new-inode','different-mode','different-path'):
+            with self.subTest(mutation=mutation):
+                saved=self.root/('saved-'+mutation);self.helper.rename(saved)
+                other=self.helper if mutation!='different-path' else self.root/'other-helper'
+                other.write_bytes(b'authored helper B' if mutation=='different-bytes' else original)
+                if mutation=='different-mode':other.chmod(0o400)
+                observed=self.runtime._pin_files([other],10.0);actual=self.enriched(observed)
+                other.unlink();saved.rename(self.helper)  # Original A is restored before comparison.
+                result=gate.compare_descriptors(expected,actual,expected_helper=self.admitted)
+                self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
+                # A forged controller-visible hash still cannot change target/launch proof.
+                actual['inputBindings']['helperSha256']=next(iter(self.admitted.values()))['sha256']
+                actual['execution']['inputBindings']=copy.deepcopy(actual['inputBindings'])
+                self.assertTrue(gate._complete_execution(actual['execution']))
+                result=gate.compare_descriptors(expected,actual,expected_helper=self.admitted)
+                self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
+        self.assertEqual(original,self.helper.read_bytes())
+
+    def test_shared_helper_missing_malformed_mixed_or_incomplete_authority_is_unknown(self):
+        value=self.enriched(self.admitted);name,pin=next(iter(self.admitted.items()))
+        malformed=[None,{}, {name:pin,'/another':pin}, {name:{**pin,'extra':True}},
+                   {'relative':pin},{name:{**pin,'device':True}},{name:{**pin,'inode':-1}},
+                   {name:{**pin,'mode':0o10000}},{name:{**pin,'sha256':'A'*64}}]
+        for admitted in malformed:
+            with self.subTest(admitted=admitted):
+                result=gate.compare_descriptors(value,copy.deepcopy(value),expected_helper=admitted)
+                self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
+        for changed in ({name:{**pin,'mode':pin['mode'] ^ 0o100}},
+                        {'/independently/admitted/other':dict(pin)},
+                        {name:{**pin,'device':pin['device']+1}},{name:{**pin,'inode':pin['inode']+1}}):
+            self.assertTrue(gate._complete_execution(value['execution']))
+            result=gate.compare_descriptors(value,value,expected_helper=changed)
+            self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
+        for actual in (graph(),{**value,'execution':{}}, {**value,'execution':{**value['execution'],'cleanupVerified':False}}):
+            result=gate.compare_descriptors(value,actual,expected_helper=self.admitted)
+            self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
+        missing=copy.deepcopy(value);missing['execution']['launchInputPins'].pop(name)
+        result=gate.compare_descriptors(value,missing,expected_helper=self.admitted)
+        self.assertEqual('unknown',result['status']);self.assertFalse(result['accepted'])
 
 if __name__ == '__main__': unittest.main()

@@ -138,6 +138,33 @@ def _require_helper_target(execution, helper_sha):
         raise ValueError('helper claim differs from monitor-proven executable')
 
 
+def _shared_helper_pin(expected_helper):
+    """Validate a caller-owned admission, without deriving it from a receipt/path read."""
+    if type(expected_helper) is not dict or len(expected_helper) != 1:
+        raise ValueError('one independently admitted helper required')
+    name, pin = next(iter(expected_helper.items()))
+    if (type(name) is not str or not Path(name).is_absolute() or '\0' in name or
+            '..' in Path(name).parts or name.startswith('//') or str(Path(name)) != name or
+            type(pin) is not dict or set(pin) != {'device','inode','mode','sha256'} or
+            any(type(pin[key]) is not int or not 0 <= pin[key] <= (1 << 64) - 1 for key in ('device','inode')) or
+            type(pin['mode']) is not int or not 0 <= pin['mode'] <= 0o7777 or
+            type(pin['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',pin['sha256'])):
+        raise ValueError('invalid independently admitted helper pin')
+    return name, dict(pin)
+
+
+def _require_shared_helper(execution, expected_helper):
+    name, pin = _shared_helper_pin(expected_helper)
+    if not _complete_execution(execution):
+        raise ValueError('shared helper requires complete protected execution')
+    binding = execution.get('workerProofBindings') or {}
+    target = binding.get('expected') or {}
+    if ((execution.get('launchInputPins') or {}).get(name) != pin or
+            binding.get('targetSha256') != pin['sha256'] or
+            (target.get('targetDevice'),target.get('targetInode')) != (pin['device'],pin['inode'])):
+        raise ValueError('execution differs from independently admitted helper')
+
+
 def _raw_from_receipt(receipt):
     """Raw helper roots are closed; only this reader may add these two fields."""
     if not isinstance(receipt, dict):
@@ -294,9 +321,17 @@ def resolve_declaration(receipt, descriptor):
     return nodes[descriptor['identity']]
 
 
-def compare_descriptors(expected, actual):
+def compare_descriptors(expected, actual, *, expected_helper=None):
     try:
         expected_nodes, actual_nodes = _validated_graph(expected), _validated_graph(actual)
+        enriched = any(key in value for value in (expected,actual) for key in ('execution','inputBindings'))
+        if enriched or expected_helper is not None:
+            _, pin = _shared_helper_pin(expected_helper)
+            for value in (expected,actual):
+                if (set(value) & {'execution','inputBindings'} != {'execution','inputBindings'} or
+                        value['inputBindings']['helperSha256'] != pin['sha256']):
+                    raise ValueError('descriptor lacks independently admitted helper evidence')
+                _require_shared_helper(value['execution'],expected_helper)
     except (KeyError, TypeError, ValueError, RecursionError) as error:
         return {'accepted':False, 'status':'unknown', 'reason':str(error)[:300]}
     forward, reverse = {}, {}
@@ -375,7 +410,7 @@ def probe_command(helper, work, arguments, read_only_files=()):
         command += ['--ro-bind',str(source),'/work/'+str(source.relative_to(work))]
     return command+['--chdir','/work',*sum((['--setenv',k,v] for k,v in profile()['analysisIsolation']['environment'].items()),[]),'/probe',*arguments]
 
-def probe(source, helper, work, environment, *, deadline=None, expected_inputs=None):
+def probe(source, helper, work, environment, *, deadline=None, expected_inputs=None, expected_helper=None):
     bounds=load_profile()['bounds']
     if deadline is not None:
         phase_remaining(deadline, 1)
@@ -385,18 +420,26 @@ def probe(source, helper, work, environment, *, deadline=None, expected_inputs=N
         raise ValueError('probe input outside isolated work root')
     helper=helper.resolve(strict=True)
     helper_pin = None
+    if expected_helper is not None:
+        name, helper_pin = _shared_helper_pin(expected_helper)
+        if expected_inputs is None or name != str(helper) or name in expected_inputs:
+            raise ValueError('shared helper requires distinct canonical helper and captured source')
+        revalidate_handoff({name:helper_pin},deadline)
     if expected_inputs is not None:
         from bounded_runtime import _pin_files
         revalidate_handoff(expected_inputs, deadline)
         if str(source) not in expected_inputs:
             raise ValueError('probe source lacks captured artifact pin')
-        helper_pin = _pin_files([helper], deadline)[str(helper)]
+        if helper_pin is None:
+            helper_pin = _pin_files([helper], deadline)[str(helper)]
         bindings={'sourceSha256':expected_inputs[str(source)]['sha256'],'helperSha256':helper_pin['sha256']}
     else:
         bindings={'sourceSha256':digest(source,maximum=bounds['fileSizeBytes'],deadline=deadline),'helperSha256':digest(helper,maximum=bounds['workerLaunchPinFileBytes'],deadline=deadline)}
     argument='/work/'+str(source.relative_to(work))
     if expected_inputs is not None:
         revalidate_handoff(expected_inputs, deadline)
+        if expected_helper is not None:
+            revalidate_handoff({str(helper):helper_pin},deadline)
         if str(source) not in expected_inputs or bindings['sourceSha256'] != expected_inputs[str(source)]['sha256']:
             raise ValueError('probe source differs from captured artifact')
     command=(probe_command(helper,work,[argument],read_only_files=expected_inputs) if expected_inputs is not None
@@ -418,6 +461,8 @@ def probe(source, helper, work, environment, *, deadline=None, expected_inputs=N
         if not _complete_execution(result):
             raise ValueError('incomplete helper execution')
         _require_helper_target(result, bindings['helperSha256'])
+        if expected_helper is not None:
+            _require_shared_helper(result,expected_helper)
         if result['exitCode'] not in (0,1,2):
             raise ValueError('unexpected helper termination')
         value = _validate_raw_helper(json.loads(result['stdout']))
