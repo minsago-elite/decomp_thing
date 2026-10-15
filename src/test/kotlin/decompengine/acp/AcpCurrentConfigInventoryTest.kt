@@ -152,6 +152,30 @@ class AcpCurrentConfigInventoryTest {
         }
     }
 
+    @Test
+    fun `choice previews do not publish sensitive omission markers`() {
+        val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]", "preview truncated")
+        // Use environment secrets, not private preferences: the outer preference guard cannot rescue this path.
+        val preview = previewSessionChoices(sequenceOf("x".repeat(16_385), "[redacted]", "x".repeat(100)), secrets)
+        assertEquals(listOf("", "", ""), Json.parseToJsonElement(preview).jsonArray.map { it.jsonPrimitive.content })
+        secrets.forEach { assertFalse(preview.contains(it)) }
+    }
+
+    @Test
+    fun `choice previews recheck configured secrets after formatting`() {
+        assertEquals("", previewSessionChoices(
+            sequenceOf("x".repeat(16_385)), listOf("[oversized text omitted]", "[\"\"]"),
+        ))
+        assertEquals("", previewSessionChoices(sequenceOf("plain"), listOf("[\"plain\"]")))
+        assertEquals("", previewSessionChoices(sequenceOf("plain"), listOf("\u0000[\"plain\"]")))
+        assertEquals("", previewSessionChoices(emptySequence(), listOf("[]")))
+        assertEquals("", previewSessionChoices(sequenceOf("\""), listOf("\\\"")))
+        assertEquals("", previewSessionChoices(
+            sequenceOf("a", "b", "c", "d", "e"), listOf("(more choices omitted)"),
+        ))
+        assertEquals("[\"safe\"]", previewSessionChoices(sequenceOf("safe"), listOf("unrelated")))
+    }
+
     private fun inventory(name: String): List<SessionConfigOption> {
         val fixture = javaClass.getResourceAsStream("/acp/v1/wire-contract.json")!!.use { it.readBytes().decodeToString() }
         return Json.parseToJsonElement(fixture).jsonObject.getValue("messages").jsonObject.getValue(name)

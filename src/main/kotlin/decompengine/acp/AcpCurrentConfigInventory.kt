@@ -62,7 +62,7 @@ internal fun previewSessionChoices(values: Sequence<String>, sensitiveValues: Co
     val bounded = values.take(5).toList()
     val text = JsonArray(bounded.take(4).map { JsonPrimitive(redactor.text(it, 48)) }).toString()
     val formatted = text + if (bounded.size > 4) " (more choices omitted)" else ""
-    // Redaction markers, JSON quoting and omission text can synthesize another private ID.
+    // Redaction markers, JSON quoting and omission text can synthesize a configured secret.
     // No fixed replacement is safe for arbitrary identifiers; omit this display-only hint.
-    return if (privatePreferences.any { it.isNotEmpty() && formatted.contains(it) }) "" else formatted
+    return if (redactor.leaks(formatted) || privatePreferences.any { it.isNotEmpty() && formatted.contains(it) }) "" else formatted
 }
