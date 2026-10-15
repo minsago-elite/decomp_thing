@@ -2709,13 +2709,21 @@ class ModuleRevisionGraphTest {
                 val tooLarge = body("xyz")
                 assertFailsWith<RepairBudgetExceededException> { store.forEachDeclaredLegacyGraph(budget) { _, _ -> } }
                 Files.delete(tooLarge)
-                // Every direct name counts, including an irrelevant ordinary file and blobs directory.
-                revisions.resolve("irrelevant").writeText("")
-                assertFailsWith<decompengine.acp.LinuxResourceLimitException> {
-                    store.forEachDeclaredLegacyGraph(budget.copy(maximumStateDirectoryEntries = 3)) { _, _ -> }
+                // Every direct name counts against T, including irrelevant files and blobs directory.
+                val traversal = budget.copy(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 3)
+                val limit = repairRevisionDirectoryEntryLimit(traversal)
+                val present = Files.list(revisions).use { it.count().toInt() }
+                val fillers = (0..(limit - present)).map { index ->
+                    revisions.resolve("irrelevant-$index").also { it.writeText("") }
                 }
-                Files.delete(revisions.resolve("irrelevant"))
-                store.forEachDeclaredLegacyGraph(budget.copy(maximumStateDirectoryEntries = 3)) { _, _ -> }
+                assertEquals(limit + 1L, Files.list(revisions).use { it.count() })
+                assertFailsWith<decompengine.acp.LinuxResourceLimitException> {
+                    store.forEachDeclaredLegacyGraph(traversal) { _, _ -> }
+                }
+                Files.delete(fillers.last())
+                assertEquals(limit.toLong(), Files.list(revisions).use { it.count() })
+                store.forEachDeclaredLegacyGraph(traversal) { _, _ -> }
+                fillers.dropLast(1).forEach { Files.delete(it) }
                 Files.delete(two)
                 val link = revisions.resolve("legacy-graph-${"0".repeat(64)}.json")
                 Files.createSymbolicLink(link, one.fileName)
@@ -6142,6 +6150,142 @@ class ModuleRevisionGraphTest {
             }.also { it.isAccessible = true }
             .invoke(null, *arguments)
     } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+
+    @Test
+    fun `revision directory role helper preserves admitted node arithmetic and blob budget`() {
+        assertFailsWith<IllegalArgumentException> { RepairResourceBudget(maximumRevisionNodes = 1) }
+        for ((nodes, expected) in listOf(2 to 18, 64 to 80, 1_000_000 to 1_000_016)) {
+            val selected = RepairResourceBudget(maximumRevisionNodes = nodes, maximumStateDirectoryEntries = 2)
+            assertEquals(expected, repairRevisionDirectoryEntryLimit(selected))
+            assertEquals(2, selected.maximumStateDirectoryEntries)
+            assertEquals(nodes, selected.maximumRevisionNodes)
+        }
+    }
+
+    @Test
+    fun `archive name iterator charges all observations before duplicates or filtering`() {
+        val selected = RepairResourceBudget(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 2)
+        val limit = repairRevisionDirectoryEntryLimit(selected)
+        val fixed = listOf("graph.json", "recovery-binding.json", "blobs", "revision_00000001_abcd.acp-receipt.json",
+            "legacy-graph-" + "0".repeat(64) + ".json", "legacy-graph-" + "1".repeat(64) + ".json")
+        val names = fixed + (0 until limit - fixed.size).map { "irrelevant-$it" }
+        class Entries(private val values: List<String>) : Iterable<Path>, AutoCloseable {
+            var advanced = 0
+            var closes = 0
+            override fun iterator(): Iterator<Path> = object : Iterator<Path> {
+                private var index = 0
+                override fun hasNext() = index < values.size
+                override fun next(): Path { advanced++; return Path.of(values[index++]) }
+            }
+            override fun close() { closes++ }
+        }
+        val exact = Entries(names)
+        exact.use {
+            assertEquals(names.toSet(), decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit))
+        }
+        assertEquals(limit, exact.advanced); assertEquals(1, exact.closes)
+        val overflow = Entries(names + "overflow")
+        overflow.use {
+            assertEquals("repair release declared source inventory exceeds its entry bound",
+                assertFailsWith<IllegalArgumentException> {
+                    decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit)
+                }.message)
+        }
+        assertEquals(limit + 1, overflow.advanced); assertEquals(1, overflow.closes)
+        val duplicate = Entries(listOf("same", "same"))
+        duplicate.use {
+            assertEquals("repair release declared source inventory contains a duplicate entry",
+                assertFailsWith<IllegalArgumentException> {
+                    decompengine.project.RepairAcpEvidenceArchiveVerifier.boundedDeclaredSourceEntryNames(it, limit)
+                }.message)
+        }
+        assertEquals(2, duplicate.advanced); assertEquals(1, duplicate.closes)
+    }
+
+    @Test
+    fun `store candidate count refuses before first body while tiny blob migration really recovers`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val raw = Files.createTempDirectory(parent, "role-bound-raw-")
+        LinuxFilesystemSyscalls.openRoot(raw).use { descriptor ->
+            RepairStateStore.open(descriptor).use { store ->
+                val revisions = raw.resolve("reports/repair-revisions")
+                val selected = RepairResourceBudget(maximumRevisionNodes = 16, maximumStateDirectoryEntries = 2)
+                val candidates = listOf("a", "b", "c").map { text ->
+                    revisions.resolve("legacy-graph-" + sha256(text.toByteArray()) + ".json").also { it.writeText(text) }
+                }
+                revisions.resolve("irrelevant").writeText("not a body")
+                revisions.resolve("revision_00000001_abcd.acp-receipt.json").writeText("traversal only; no receipt authority")
+                var bodies = 0
+                assertEquals("declared legacy graph candidate count exceeds its entry budget",
+                    assertFailsWith<IllegalArgumentException> { store.forEachDeclaredLegacyGraph(selected) { _, _ -> bodies++ } }.message)
+                assertEquals(0, bodies)
+                Files.delete(candidates.last())
+                val names = mutableListOf<String>()
+                store.forEachDeclaredLegacyGraph(selected) { name, bytes -> names += name; assertEquals(1, bytes.size); bodies++ }
+                assertEquals(2, bodies)
+                assertEquals(candidates.take(2).map { it.fileName.toString() }.sorted(), names)
+                assertTrue(Files.list(revisions).use { it.count() } > selected.maximumStateDirectoryEntries)
+            }
+        }
+        val root = Files.createTempDirectory(parent, "role-bound-migration-")
+        root.resolve("code.c").writeText("before")
+        val profile = DeclarativeRepairIndexProfile("role-bound-migration", RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        val selected = RepairResourceBudget(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 2)
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val attempt = graph.beginAttempt(listOf("code.c")) // Actual pre-marker schema2.
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+        }
+        val revisions = root.resolve("reports/repair-revisions")
+        assertEquals(2L, Files.list(revisions.resolve("blobs")).use { it.count() })
+        ModuleRevisionGraph.open(root, profile, selected).use { recovered ->
+            assertEquals(4, recovered.snapshot.schemaVersion)
+            assertNull(recovered.snapshot.pendingAttemptId)
+            val record = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, record.state)
+            assertTrue(record.legacyPendingStateUnknown)
+            assertNull(record.candidateSourceInstallStarted)
+            assertEquals(record.expectedSourceRevisionSha256, record.observedSourceRevisionSha256)
+            assertEquals("before", root.resolve("code.c").readText())
+        }
+        assertTrue(Files.list(revisions).use { it.count() } > selected.maximumStateDirectoryEntries)
+        assertEquals(1L, Files.newDirectoryStream(revisions, "legacy-graph-*.json").use { it.count().toLong() })
+        assertEquals(2L, Files.list(revisions.resolve("blobs")).use { it.count() })
+        ModuleRevisionGraph.open(root, profile, selected).close()
+        assertEquals("before", root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun `archive candidate count is independent and refuses before invalid first payload`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val selected = RepairResourceBudget(maximumRevisionNodes = 128, maximumStateDirectoryEntries = 64)
+        val fixture = releaseRepairFixture(temporaryParent = parent, budget = selected)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("role-bound-archive.zip"))
+        val exact = fixture.project.parent.resolve("role-bound-declarations-exact.zip")
+        rewriteArchive(bundle.archivePath, exact) { entries ->
+            // Resource-only authored declarations, NOT evidence of historical writer origin.
+            repeat(selected.maximumStateDirectoryEntries) { index ->
+                val bytes = "{\"schemaVersion\":3,\"authoredIndex\":$index}".toByteArray()
+                entries["reports/repair-revisions/legacy-graph-" + sha256(bytes) + ".json"] = bytes
+            }
+        }
+        val output = fixture.project.parent.resolve("role-bound-declarations-exact-output")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(exact, output)
+        assertEquals(fixture.receiptPath, lineage.source.acceptedAcpContributions.single().receiptPath)
+        assertContentEquals(fixture.after, output.resolve(fixture.relativePath).readBytes())
+        val overflow = fixture.project.parent.resolve("role-bound-declarations-overflow.zip")
+        rewriteArchive(exact, overflow) { entries ->
+            // Lexically first matching candidate would fail size/hash admission if any body opened.
+            entries["reports/repair-revisions/legacy-graph-" + "0".repeat(64) + ".json"] = byteArrayOf()
+            val total = entries.keys.count { it.startsWith("reports/repair-revisions/") &&
+                '/' !in it.removePrefix("reports/repair-revisions/") } + 1 // blobs directory
+            assertTrue(total <= repairRevisionDirectoryEntryLimit(selected))
+        }
+        val refused = fixture.project.parent.resolve("role-bound-declarations-overflow-output")
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(overflow, refused) }
+        assertEquals("repair release declared graph candidate count exceeds its entry budget", failure.message)
+        assertFalse(refused.exists())
+    }
 
     private data class ReleaseRepairFixture(
         val project: Path,

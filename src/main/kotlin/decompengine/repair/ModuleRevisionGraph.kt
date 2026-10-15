@@ -62,6 +62,10 @@ import kotlin.math.min
 internal const val MAXIMUM_REPAIR_PROJECTION_BYTES: Long = 64L * 1024 * 1024
 internal const val MAXIMUM_REPAIR_ACP_RECEIPT_BYTES: Long = 64L * 1024 * 1024
 private const val MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES = 16
+
+/** Existing revision-directory traversal role; blob and declared-body populations keep their own D. */
+internal fun repairRevisionDirectoryEntryLimit(budget: RepairResourceBudget): Int =
+    Math.addExact(budget.maximumRevisionNodes, MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES)
 private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val REPAIR_RECEIPT_PATH =
@@ -3422,10 +3426,7 @@ internal class ModuleRevisionGraph private constructor(
         // Bound that traversal by the maximum number of attempts plus the small fixed set of
         // graph/binding/temporary entries; a deliberately tiny blob-entry budget must not make a
         // valid graph impossible to reopen.
-        val receiptDirectoryLimit = Math.addExact(
-            state.budget.maximumRevisionNodes,
-            MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES,
-        )
+        val receiptDirectoryLimit = repairRevisionDirectoryEntryLimit(state.budget)
         val observedReceipts = stateStore.receiptFileNames(receiptDirectoryLimit)
         require(observedReceipts == expectedReceipts) {
             "repair revision state contains missing, extra, or stale ACP invocation receipts"

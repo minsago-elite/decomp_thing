@@ -218,8 +218,12 @@ private class HistoryCaptureSession(
     private fun names(budget: RepairResourceBudget): List<String> {
         check()
         // Existing iterator advances/counts every entry BEFORE filter/deduplication.
-        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, budget.maximumStateDirectoryEntries, cancel)
-        val sorted = boundedHistoryNames(names, budget.maximumStateDirectoryEntries)
+        val maximumEntries = repairRevisionDirectoryEntryLimit(budget)
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, maximumEntries, cancel)
+        val sorted = boundedHistoryNames(names, maximumEntries)
+        require(sorted.count { HISTORY_DECLARED_NAME.matches(it) } <= budget.maximumStateDirectoryEntries) {
+            "recorded history declared graph candidate count exceeds its entry budget"
+        }
         check()
         return sorted
     }

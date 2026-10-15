@@ -189,11 +189,33 @@ class RepairHistorySnapshotReaderTest {
     @Test
     fun actualEnumerationCountsAllEntriesBeforeFilteringAndRefusesDuplicates() {
         withRevisions { revisions, path ->
-            for (name in listOf("not-selected", "graph.json", "recovery-binding.json")) path.resolve(name).writeText("x")
+            val selected = budget.copy(maximumRevisionNodes = 2, maximumStateDirectoryEntries = 2)
+            val limit = repairRevisionDirectoryEntryLimit(selected)
+            val initial = listOf("not-selected", "graph.json", "recovery-binding.json")
+            val fillers = (0 until limit - initial.size).map { "irrelevant-$it" }
+            for (name in initial + fillers) path.resolve(name).writeText("x")
             val session = session(revisions)
-            val names = call(session, "names", budget.copy(maximumStateDirectoryEntries = 3)) as List<*>
-            assertEquals(listOf("graph.json", "not-selected", "recovery-binding.json"), names)
-            assertFails { call(session, "names", budget.copy(maximumStateDirectoryEntries = 2)) }
+            val names = call(session, "names", selected) as List<*>
+            assertEquals((initial + fillers).sorted(), names)
+            assertEquals(names, top("boundedHistoryNames", initial + fillers, limit))
+            assertFails { top("boundedHistoryNames", initial + fillers, limit - 1) }
+            path.resolve("all-name-overflow").writeText("x")
+            assertFails { call(session, "names", selected) }
+            Files.delete(path.resolve("all-name-overflow"))
+            val candidates = (0..2).map { "legacy-graph-" + it.toString().padStart(64, '0') + ".json" }
+            for (index in 0..1) {
+                Files.delete(path.resolve(fillers[index]))
+                path.resolve(candidates[index]).writeText("not read by names")
+            }
+            val admitted = call(session, "names", selected) as List<*>
+            assertEquals(limit, admitted.size)
+            assertTrue(candidates.take(2).all { it in admitted })
+            assertTrue("not-selected" in admitted)
+            Files.delete(path.resolve(fillers[2]))
+            path.resolve(candidates[2]).writeText("not read by names")
+            assertEquals("recorded history declared graph candidate count exceeds its entry budget",
+                assertFailsWith<IllegalArgumentException> { call(session, "names", selected) }.message)
+            assertEquals(0L, field(field(session, "ledger")!!, "used"))
         }
         assertFails { top("boundedHistoryNames", listOf("same", "same"), 2) }
         for (bad in listOf("", ".", "..", "a/b", "nul" + '\u0000')) {
@@ -592,6 +614,103 @@ class RepairHistorySnapshotReaderTest {
         assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
         assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
         assertEquals(RepairRollbackState.RESTORED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state)
+    }
+
+
+    @Test
+    fun tinyDeclarationBudgetRetainsFullNamespaceAndBothPassesBeforeHistoryPublication() {
+        val selected = budget.copy(maximumRevisionNodes = 32, maximumStateDirectoryEntries = 2, maximumGraphBytes = 16 * 1024)
+        val root = roleBoundMigration(selected)
+        val reports = root.resolve("reports")
+        val revisionsPath = reports.resolve("repair-revisions")
+        val graphBytes = revisionsPath.resolve("graph.json").readBytes()
+        val bindingBytes = revisionsPath.resolve("recovery-binding.json").readBytes()
+        assertTrue(graphBytes.size.toLong() > selected.maximumGraphBytes)
+        // A second complete nonjoining schema2 producer input is still consumed under the SAME D.
+        val other = this.root()
+        ModuleRevisionGraph.open(other, profile).close()
+        val unrelated = other.resolve("reports/repair-revisions/graph.json").readBytes()
+        revisionsPath.resolve("legacy-graph-" + sha256(unrelated) + ".json").writeBytes(unrelated)
+        val declared = Files.newDirectoryStream(revisionsPath, "legacy-graph-*.json").use { it.toList() }
+        assertEquals(2, declared.size)
+        val declaredBytes = declared.sumOf { Files.size(it) }
+        val history = reports.resolve("repair_history.json").also { it.writeText("PRIVATE-corrupt") }
+        val limit = repairRevisionDirectoryEntryLimit(selected)
+        val present = Files.list(revisionsPath).use { it.count().toInt() }
+        val fillers = (0 until limit - present).map { index ->
+            revisionsPath.resolve("unrelated-$index").also { it.writeText("not a declared body") }
+        }
+        assertEquals(limit.toLong(), Files.list(revisionsPath).use { it.count() })
+        LinuxFilesystemSyscalls.openRoot(reports).use { parent ->
+            LinuxFilesystemSyscalls.openRoot(revisionsPath).use { revisions ->
+                val positive = session(revisions)
+                val result = call(positive, "readWithHistory", parent) as RepairHistoryReadResult
+                assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+                assertEquals(true, result.snapshot?.pending?.rollback?.legacyPendingStateUnknown)
+                assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
+                assertEquals(2L * graphBytes.size + 2L * bindingBytes.size + 2L * declaredBytes + Files.size(history),
+                    field(field(positive, "ledger")!!, "used"))
+                // Keep total at T: the third candidate alone must refuse BEFORE first declared body.
+                Files.delete(fillers.first())
+                val third = revisionsPath.resolve("legacy-graph-" + "0".repeat(64) + ".json")
+                Files.createSymbolicLink(third, declared.first().fileName)
+                val candidates = session(revisions)
+                assertEquals("recorded history declared graph candidate count exceeds its entry budget",
+                    assertFailsWith<IllegalArgumentException> { call(candidates, "readWithHistory", parent) }.message)
+                assertEquals(graphBytes.size.toLong() + bindingBytes.size, field(field(candidates, "ledger")!!, "used"))
+                unavailable(readProjectRecordedRepairHistory(root))
+                Files.delete(third)
+                fillers.first().writeText("not a declared body")
+                // Unrelated T+1 also refuses before any declared body, independently of candidate D.
+                val extra = revisionsPath.resolve("all-name-overflow").also { it.writeText("not selected") }
+                val overflow = session(revisions)
+                assertFails { call(overflow, "readWithHistory", parent) }
+                assertEquals(graphBytes.size.toLong() + bindingBytes.size, field(field(overflow, "ledger")!!, "used"))
+                unavailable(readProjectRecordedRepairHistory(root))
+                Files.delete(extra)
+                // Same T and same candidates, but a changed irrelevant name must fail final ALL-name comparison.
+                var checks = 0
+                var renamed = false
+                val continuity = session(revisions, revalidate = {
+                    if (++checks == 14) {
+                        Files.move(fillers.last(), revisionsPath.resolve("renamed-unrelated"))
+                        renamed = true
+                    }
+                })
+                assertFails { call(continuity, "readWithHistory", parent) }
+                assertTrue(renamed)
+                assertEquals(graphBytes.size.toLong() + bindingBytes.size + declaredBytes + Files.size(history),
+                    field(field(continuity, "ledger")!!, "used"))
+                assertEquals(revisions.fd, revisions.whileOpen { it }); assertEquals(parent.fd, parent.whileOpen { it })
+            }
+        }
+        assertContentEquals(graphBytes, revisionsPath.resolve("graph.json").readBytes())
+        assertContentEquals(bindingBytes, revisionsPath.resolve("recovery-binding.json").readBytes())
+        assertEquals("candidate", root.resolve("code.c").readText()) // Reader did NOT recover the pending source.
+    }
+
+    private fun roleBoundMigration(selected: RepairResourceBudget): Path {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("case", emptyList(), byteArrayOf())))
+            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
+                "ROLE_BOUND_PADDING", corpus.inputs.map { it.id }, null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+        }
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        val original = path.readText()
+        val padding = (selected.maximumGraphBytes - original.toByteArray().size).toInt()
+        assertTrue(padding > 0)
+        path.writeText(original.replace("ROLE_BOUND_PADDING", "x".repeat("ROLE_BOUND_PADDING".length + padding)))
+        assertEquals(selected.maximumGraphBytes, Files.size(path))
+        assertFailsWith<MigrationCrash> {
+            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync && point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
+            }).close()
+        }
+        assertEquals(2L, Files.list(root.resolve("reports/repair-revisions/blobs")).use { it.count() })
+        return root
     }
 
     private fun root(): Path {

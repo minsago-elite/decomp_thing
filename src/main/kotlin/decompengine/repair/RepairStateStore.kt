@@ -75,7 +75,10 @@ internal class RepairStateStore private constructor(
     /** Declared compatibility inputs, not authenticated chronology. Every name/body is bounded. */
     fun forEachDeclaredLegacyGraph(budget: RepairResourceBudget, consume: (String, ByteArray) -> Unit) {
         checkOpen()
-        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, budget.maximumStateDirectoryEntries)
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, repairRevisionDirectoryEntryLimit(budget))
+        require(names.count { it.matches(LEGACY_GRAPH_NAME) } <= budget.maximumStateDirectoryEntries) {
+            "declared legacy graph candidate count exceeds its entry budget"
+        }
         var remaining = budget.maximumIndexEvidenceBytes
         names.sorted().filter { it.matches(LEGACY_GRAPH_NAME) }.forEach { name ->
             val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(revisions.fd, name)) {

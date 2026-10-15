@@ -14,6 +14,7 @@ import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
 import decompengine.repair.requireRepairGraphByteBudget
+import decompengine.repair.repairRevisionDirectoryEntryLimit
 import decompengine.repair.requireSingleLegacyRollbackOrigin
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
@@ -151,12 +152,15 @@ internal object RepairAcpEvidenceArchiveVerifier {
             // Resource inventory only: include irrelevant files and empty directories. The
             // manifest/stable read checks byte identity, never an external historical origin.
             val names = Files.newDirectoryStream(projectDir.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
-                boundedDeclaredSourceEntryNames(entries, graph.budget.maximumStateDirectoryEntries)
+                boundedDeclaredSourceEntryNames(entries, repairRevisionDirectoryEntryLimit(graph.budget))
             }
             val declaredPaths = repairPaths.filter(REPAIR_LEGACY_GRAPH_PATH::matches).sorted()
             require(names.filter { REPAIR_LEGACY_GRAPH_PATH.matches(REPAIR_STATE_PREFIX + it) }.toSet() ==
                 declaredPaths.map { it.substringAfterLast('/') }.toSet()) {
                 "repair release declared source inventory differs from its payload"
+            }
+            require(declaredPaths.size <= graph.budget.maximumStateDirectoryEntries) {
+                "repair release declared graph candidate count exceeds its entry budget"
             }
             var remaining = graph.budget.maximumIndexEvidenceBytes
             declaredPaths.forEach { path ->
