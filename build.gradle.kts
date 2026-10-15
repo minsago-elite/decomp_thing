@@ -166,7 +166,8 @@ val testFrontendAssetManifest = tasks.register<Exec>("testFrontendAssetManifest"
     description = "Checks split UI bundles and rejection of omitted, duplicate, stale or changed resources"
     dependsOn(verifyFrontendToolchain)
     inputs.files(layout.projectDirectory.file("scripts/web-asset-manifest.mjs"),
-        layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs"))
+        layout.projectDirectory.file("scripts/web-asset-manifest.test.mjs"),
+        layout.projectDirectory.file("frontend/scripts/bundle-report.mjs"))
     doFirst {
         commandLine(
             frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node",

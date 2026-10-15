@@ -1,30 +1,150 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
-const output = new URL('../../build/frontend/', import.meta.url);
-const dist = new URL('dist/', output);
-const manifest = JSON.parse(await readFile(new URL('.vite/manifest.json', dist), 'utf8'));
-const composition = JSON.parse(await readFile(new URL('bundle-composition.json', output), 'utf8'));
-const seen = new Set();
-function visit(key) {
-  assert.ok(manifest[key], `Manifest is missing ${key}`);
-  if (seen.has(key)) return;
-  seen.add(key);
-  for (const dependency of manifest[key].imports ?? []) visit(dependency);
+function assetPath(name) {
+  assert.ok(typeof name === 'string' && name.length <= 240 && /^[a-zA-Z0-9_./-]+$/.test(name) &&
+    name.split('/').every(part => part && part !== '.' && part !== '..'), `Unsafe bundle path: ${name}`);
+  return name;
 }
-visit('index.html');
-const entryJs = [...seen].map((key) => manifest[key].file).filter((name) => name.endsWith('.js'));
-const entryCss = [...new Set([...seen].flatMap((key) => manifest[key].css ?? []))];
-const files = [];
-async function inspect(relative = '') {
-  for (const entry of await readdir(new URL(relative, dist), { withFileTypes: true })) {
-    const name = `${relative}${entry.name}`;
-    if (entry.isDirectory()) await inspect(`${name}/`);
-    else {
+
+/** Aggregate already measured gzip-9 resources; a path is counted once per budget. */
+export function bundleBudgets(manifest, files, html) {
+  assert.ok(manifest && typeof manifest === 'object' && !Array.isArray(manifest), 'Invalid Vite manifest');
+  const byPath = new Map();
+  for (const file of files) {
+    assetPath(file.file);
+    assert.ok(!byPath.has(file.file), `Duplicate bundle resource: ${file.file}`);
+    for (const field of ['rawBytes', 'gzipBytes']) assert.ok(Number.isSafeInteger(file[field]) && file[field] >= 0, 'Invalid resource size');
+    byPath.set(file.file, file);
+  }
+  function resource(name) {
+    assetPath(name);
+    assert.ok(byPath.has(name), `Manifest/HTML names an absent bundle resource: ${name}`);
+    return byPath.get(name);
+  }
+  assert.ok(manifest['index.html']?.isEntry === true && manifest['index.html'].file?.endsWith('.js'), 'Missing index.html JavaScript entry');
+  const keysByFile = new Map();
+  for (const [key, chunk] of Object.entries(manifest)) {
+    assetPath(key);
+    assert.ok(chunk && typeof chunk === 'object' && !Array.isArray(chunk), `Invalid manifest chunk: ${key}`);
+    resource(chunk.file);
+    assert.ok(chunk.file.startsWith('assets/'), 'Manifest resource is not a public asset');
+    if (!keysByFile.has(chunk.file)) keysByFile.set(chunk.file, []);
+    keysByFile.get(chunk.file).push(key);
+    for (const field of ['css', 'assets', 'imports', 'dynamicImports']) {
+      assert.ok(chunk[field] === undefined || Array.isArray(chunk[field]), `Invalid manifest ${field}: ${key}`);
+      for (const name of chunk[field] ?? []) {
+        assetPath(name);
+        if (field === 'imports' || field === 'dynamicImports') {
+          assert.ok(Object.hasOwn(manifest, name), `Manifest is missing ${name}`);
+          assert.ok(/\.(js|css)$/.test(manifest[name]?.file ?? ''), `Manifest import is not a script/style chunk: ${name}`);
+        } else {
+          resource(name);
+          assert.ok(name.startsWith('assets/'), 'Manifest resource is not a public asset');
+        }
+      }
+    }
+    for (const name of chunk.css ?? []) assert.ok(name.endsWith('.css'), 'Invalid manifest CSS resource');
+  }
+  const seen = new Set();
+  function visit(key) {
+    if (seen.has(key)) return;
+    seen.add(key);
+    for (const alias of keysByFile.get(manifest[key].file)) visit(alias);
+    for (const dependency of manifest[key].imports ?? []) visit(dependency);
+  }
+  visit('index.html');
+  const htmlJs = new Set();
+  const htmlCss = new Set();
+  // Vite emits local quoted attributes. Reject ambiguous/encoded resource paths instead of omitting them.
+  for (const [tag] of html.matchAll(/<(?:script|link)\b(?:[^"'>]|"[^"]*"|'[^']*')*>/gi)) {
+    const attributes = new Map();
+    for (const match of tag.matchAll(/\s([a-zA-Z][a-zA-Z0-9:-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+      const name = match[1].toLowerCase();
+      assert.ok(!attributes.has(name), `Duplicate HTML attribute: ${name}`);
+      attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+    }
+    const script = /^<script\b/i.test(tag);
+    assert.ok(!/[&]/.test(attributes.get('rel') ?? '') && !/[&]/.test(attributes.get('as') ?? ''), 'Encoded HTML resource classification');
+    const rel = (attributes.get('rel') ?? '').toLowerCase().split(/\s+/);
+    const style = rel.includes('stylesheet') || (rel.includes('preload') && attributes.get('as')?.toLowerCase() === 'style');
+    const javascript = script || rel.includes('modulepreload') || (rel.includes('preload') && attributes.get('as')?.toLowerCase() === 'script');
+    if (!style && !javascript) continue;
+    const href = attributes.get(script ? 'src' : 'href');
+    if (href === undefined && script) continue; // Inline script bytes are already inside index.html.
+    assert.ok(href, 'Missing HTML script/style resource');
+    const name = href.startsWith('./') ? href.slice(2) : href;
+    resource(name);
+    assert.ok(name.startsWith('assets/'), 'HTML script/style is not a public asset');
+    if (style) {
+      assert.ok(name.endsWith('.css'), 'Invalid HTML stylesheet');
+      htmlCss.add(name);
+      for (const key of keysByFile.get(name) ?? []) visit(key);
+    } else {
+      assert.ok(name.endsWith('.js'), 'Invalid HTML script');
+      htmlJs.add(name);
+      const keys = keysByFile.get(name);
+      assert.ok(keys?.length, `HTML script is absent from Vite graph: ${name}`);
+      for (const key of keys) visit(key);
+    }
+  }
+  const entryJs = [...new Set([...seen].map(key => manifest[key].file).filter(name => name.endsWith('.js')).concat([...htmlJs]))].sort();
+  const entryCss = [...new Set([...seen].flatMap(key => [
+    ...(manifest[key].file.endsWith('.css') ? [manifest[key].file] : []), ...(manifest[key].css ?? []),
+  ]).concat([...htmlCss]))].sort();
+  function sum(names, limitGzipBytes) {
+    const unique = [...new Set(names)].sort();
+    return { files: unique, rawBytes: unique.reduce((n, name) => n + resource(name).rawBytes, 0),
+      gzipBytes: unique.reduce((n, name) => n + resource(name).gzipBytes, 0), limitGzipBytes };
+  }
+  const initial = {
+    js: sum(entryJs, 50 * 1024),
+    css: sum(entryCss, 10 * 1024),
+    combined: sum(['index.html', ...entryJs, ...entryCss], 150 * 1024),
+  };
+  // Conservatively count EVERY dist file, including private .vite metadata, not just manifest-reachable chunks.
+  const total = { ...sum([...byPath.keys()], 500 * 1024), scope: 'all-dist-files-including-private-vite-metadata' };
+  assert.ok(initial.js.gzipBytes <= initial.js.limitGzipBytes, 'Initial JS exceeds the D1 budget');
+  assert.ok(initial.css.gzipBytes <= initial.css.limitGzipBytes, 'Initial CSS exceeds the D1 budget');
+  assert.ok(initial.combined.gzipBytes <= initial.combined.limitGzipBytes, 'Initial HTML + JS + CSS exceeds the D0 budget');
+  assert.ok(total.gzipBytes <= total.limitGzipBytes, 'All dist resources exceed the D0 budget');
+  const reachable = new Set();
+  function visitAll(key) {
+    if (reachable.has(key)) return;
+    reachable.add(key);
+    for (const alias of keysByFile.get(manifest[key].file)) visitAll(alias);
+    for (const dependency of [...(manifest[key].imports ?? []), ...(manifest[key].dynamicImports ?? [])]) visitAll(dependency);
+  }
+  for (const key of seen) visitAll(key);
+  const chunks = Object.keys(manifest).filter(key => /\.(js|css)$/.test(manifest[key].file)).sort().map(key => ({ key, file: manifest[key].file,
+    loading: seen.has(key) ? 'initial' : reachable.has(key) ? 'deferred' : 'unreferenced',
+    imports: manifest[key].imports ?? [], dynamicImports: manifest[key].dynamicImports ?? [], css: manifest[key].css ?? [],
+  }));
+  return { initial, total, entryJs, entryCss, chunks };
+}
+
+/** Import-safe producer so fixtures exercise the actual byte/gzip/manifest path. */
+export async function buildBundleReport(output = new URL('../../build/frontend/', import.meta.url)) {
+  const dist = new URL('dist/', output);
+  const manifestBytes = await readFile(new URL('.vite/manifest.json', dist));
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  const composition = JSON.parse(await readFile(new URL('bundle-composition.json', output), 'utf8'));
+  const files = [];
+  let html;
+  async function inspect(relative = '') {
+    for (const entry of await readdir(new URL(relative, dist), { withFileTypes: true })) {
+      const name = assetPath(`${relative}${entry.name}`);
+      assert.ok(!entry.isSymbolicLink(), `Bundle resource link is prohibited: ${name}`);
+      if (entry.isDirectory()) { await inspect(`${name}/`); continue; }
+      assert.ok(entry.isFile(), `Bundle resource is not a regular file: ${name}`);
       const bytes = await readFile(new URL(name, dist));
       assert.ok(!name.endsWith('.map'), 'Production source maps are prohibited');
+      if (name === '.vite/manifest.json') assert.deepEqual(bytes, manifestBytes, 'Vite manifest changed while reporting');
+      if (name === 'index.html') html = bytes.toString('utf8');
       if (/\.(html|css|js)$/.test(name)) {
         const source = bytes.toString('utf8');
         for (const marker of ['/@vite/client', 'localhost:5173', '127.0.0.1:5173', 'DECOMP_TEST_ONLY_SENTINEL',
@@ -33,44 +153,35 @@ async function inspect(relative = '') {
           assert.ok(!source.includes(marker), `Production asset contains ${marker}: ${name}`);
         }
       }
-      files.push({
-        file: name,
-        rawBytes: bytes.length,
-        gzipBytes: gzipSync(bytes, { level: 9 }).length,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-      });
+      files.push({ file: name, rawBytes: bytes.length, gzipBytes: gzipSync(bytes, { level: 9 }).length,
+        sha256: createHash('sha256').update(bytes).digest('hex') });
     }
   }
+  await inspect();
+  assert.ok(typeof html === 'string', 'Missing index.html');
+  files.sort((left, right) => left.file.localeCompare(right.file));
+  const budgets = bundleBudgets(manifest, files, html);
+  const owners = {};
+  for (const module of composition) {
+    assert.ok(['application', 'preact', 'preact-iso'].includes(module.owner), `Unreviewed production dependency: ${module.owner}`);
+    owners[module.owner] = (owners[module.owner] ?? 0) + 1;
+  }
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  return { schemaVersion: 1, entry: 'index.html',
+    toolchain: { node: process.versions.node, npm: packageJson.engines.npm, vite: packageJson.devDependencies.vite },
+    measurement: { command: 'npm --prefix frontend run build', gzipLevel: 9, aggregation: 'sum-per-unique-resource-gzip-bytes',
+      viteManifestSha256: createHash('sha256').update(manifestBytes).digest('hex'),
+      generatedInventory: 'asset-manifest.json is generated separately outside dist; it is not a UI payload resource' },
+    ...budgets, moduleCountsByOwner: owners, dependencies: packageJson.dependencies, files };
 }
-await inspect();
-files.sort((left, right) => left.file.localeCompare(right.file));
-const sum = (names, field) => files.filter((file) => names.includes(file.file)).reduce((total, file) => total + file[field], 0);
-const initial = {
-  js: { rawBytes: sum(entryJs, 'rawBytes'), gzipBytes: sum(entryJs, 'gzipBytes'), limitGzipBytes: 50 * 1024 },
-  css: { rawBytes: sum(entryCss, 'rawBytes'), gzipBytes: sum(entryCss, 'gzipBytes'), limitGzipBytes: 10 * 1024 },
-};
-assert.ok(initial.js.gzipBytes <= initial.js.limitGzipBytes, 'Initial JS exceeds the D1 budget');
-assert.ok(initial.css.gzipBytes <= initial.css.limitGzipBytes, 'Initial CSS exceeds the D1 budget');
-const owners = {};
-for (const module of composition) {
-  assert.ok(['application', 'preact', 'preact-iso'].includes(module.owner), `Unreviewed production dependency: ${module.owner}`);
-  owners[module.owner] = (owners[module.owner] ?? 0) + 1;
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  const report = await buildBundleReport();
+  await writeFile(new URL('../../build/frontend/bundle-report.json', import.meta.url), JSON.stringify(report, null, 2) + '\n');
+  for (const [label, value] of [['Initial JavaScript', report.initial.js], ['Initial CSS', report.initial.css],
+    ['Initial HTML + JS + CSS', report.initial.combined], ['All dist resources (including Vite metadata)', report.total]]) {
+    console.log(`${label}: ${value.rawBytes} raw / ${value.gzipBytes} gzip bytes (limit ${value.limitGzipBytes})`);
+  }
+  console.log(`Production module owners: ${Object.keys(report.moduleCountsByOwner).join(', ')}`);
+  console.log('Bundle report: build/frontend/bundle-report.json');
 }
-const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-const report = {
-  schemaVersion: 1,
-  entry: 'index.html',
-  toolchain: { node: process.versions.node, npm: packageJson.engines.npm, vite: packageJson.devDependencies.vite },
-  initial,
-  entryJs,
-  entryCss,
-  // Stable contributing module counts; pre-minification lengths can vary with checkout path.
-  moduleCountsByOwner: owners,
-  dependencies: packageJson.dependencies,
-  files,
-};
-await writeFile(new URL('bundle-report.json', output), JSON.stringify(report, null, 2) + '\n');
-console.log(`Initial JavaScript: ${initial.js.rawBytes} raw / ${initial.js.gzipBytes} gzip bytes (limit ${initial.js.limitGzipBytes})`);
-console.log(`Initial CSS: ${initial.css.rawBytes} raw / ${initial.css.gzipBytes} gzip bytes (limit ${initial.css.limitGzipBytes})`);
-console.log(`Production module owners: ${Object.keys(owners).join(', ')}`);
-console.log('Bundle report: build/frontend/bundle-report.json');

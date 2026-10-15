@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   frontend:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Frontend contracts and bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -34,8 +36,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Record toolchain and install locked dependencies
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-ci"
@@ -91,6 +93,8 @@ jobs:
             build/frontend/bundle-composition.json
 
   web-packaged:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -112,8 +116,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -174,6 +178,8 @@ jobs:
             build/test-results/test
 
   kotlin-suite:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: kotlin-${{ matrix.shard }}
     runs-on: ubuntu-24.04
     strategy:
@@ -195,8 +201,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
