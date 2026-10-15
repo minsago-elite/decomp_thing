@@ -2070,8 +2070,10 @@ private class ManifestControlIdentity(
     val admitted: HostPhysicalLocation,
     val current: HostPhysicalLocation,
 ) : AutoCloseable {
-    fun requireUnchanged() {
-        requireDirectoryDescriptorIdentity(descriptor, current.key, descriptor.identity.mountId, CONTROL_DIRECTORY_MODE)
+    fun requireUnchanged() = requireUnchanged(null)
+
+    fun requireUnchanged(scratch: LinuxFilesystemSyscalls.StatxIdentityScratch?) {
+        requireDirectoryDescriptorIdentity(descriptor, current.key, descriptor.identity.mountId, CONTROL_DIRECTORY_MODE, scratch)
         if (Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor)) != current.namespacePath) {
             throw IOException("private control moved during runtime manifest")
         }
@@ -2190,7 +2192,7 @@ private class RuntimePrivateControlScope private constructor(
                 controls.forEach { (record, identity) ->
                     if (record.lifecycle == PrivateControlLifecycle.LIVE) {
                         if (record !in ACTIVE_PRIVATE_CONTROLS) throw IOException("live private control lost registry ownership")
-                        identity.requireUnchanged()
+                        identity.requireUnchanged(rootIdentity)
                         replacement[record] = identity
                     }
                 }
@@ -2214,7 +2216,7 @@ private class RuntimePrivateControlScope private constructor(
             generation = privateControlGeneration
             removed.asReversed().forEach { it.close() }
         }
-        controls.values.forEach { it.requireUnchanged() }
+        controls.values.forEach { it.requireUnchanged(rootIdentity) }
         currentRoot(NO_SANDBOX_CHECKPOINT)
     }
 
@@ -3052,7 +3054,17 @@ private fun requireDirectoryDescriptorIdentity(
     expectedMountId: Long,
     exactPermissions: Int?,
 ) {
-    val current = LinuxFilesystemSyscalls.identity(descriptor.fd)
+    requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, exactPermissions, null)
+}
+
+private fun requireDirectoryDescriptorIdentity(
+    descriptor: LinuxDescriptor,
+    expectedKey: LinuxFileKey,
+    expectedMountId: Long,
+    exactPermissions: Int?,
+    scratch: LinuxFilesystemSyscalls.StatxIdentityScratch?,
+) {
+    val current = if (scratch == null) LinuxFilesystemSyscalls.identity(descriptor.fd) else scratch.identity(descriptor.fd)
     if (current.key != expectedKey || current.mountId != expectedMountId ||
         !current.isDirectory || current.isSymbolicLink ||
         current.uid != descriptor.identity.uid || current.gid != descriptor.identity.gid ||

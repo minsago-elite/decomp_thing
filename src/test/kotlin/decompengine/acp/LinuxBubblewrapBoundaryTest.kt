@@ -75,7 +75,14 @@ class LinuxBubblewrapBoundaryTest {
     }
 
     private class RootObservationMemory(private val observe: () -> Unit) : com.sun.jna.Memory(256) {
+        var beforeDecode: ((com.sun.jna.Memory) -> Unit)? = null
+        var closes = 0
         override fun clear() { observe(); super.clear() }
+        override fun getInt(offset: Long): Int {
+            if (offset == 0L) beforeDecode?.invoke(this)
+            return super.getInt(offset)
+        }
+        override fun close() { closes++; super.close() }
     }
 
     private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
@@ -271,13 +278,150 @@ class LinuxBubblewrapBoundaryTest {
                         (statistics.get(scratch) as com.sun.jna.Memory).close()
                         val order = mutableListOf<String>()
                         var duringQuery: (() -> Unit)? = null
-                        statistics.set(scratch, RootObservationMemory {
+                        val rootStorage = RootObservationMemory {
                             val ownsDescriptor = Thread.holdsLock(descriptor)
                             assertTrue(ownsDescriptor || Thread.holdsLock(registry), "body or scope ownership covers each query")
                             assertTrue(Thread.holdsLock(scratch), "each query retains scratch ownership")
                             order += if (ownsDescriptor) "query" else "tail-query"
                             duringQuery?.invoke()
-                        })
+                        }
+                        statistics.set(scratch, rootStorage)
+                        // Actual retained-control queries borrow this scope's storage, not a copied validator.
+                        run {
+                            val firstControl = newControl()
+                            var secondControl: Any? = null
+                            var thirdControl: Any? = null
+                            val controlQueries = mutableListOf<Long>()
+                            var changeDecodedControl: ((com.sun.jna.Memory) -> Unit)? = null
+                            try {
+                                secondControl = newControl()
+                                invokePrivate(firstScope, scopeCheckpoint) // Install both original generic admissions.
+                                @Suppress("UNCHECKED_CAST")
+                                fun retained() = (field(firstScope, "controls") as Map<Any, Any>)
+                                val retainedType = Class.forName("decompengine.acp.ManifestControlIdentity")
+                                val retainedDescriptor = retainedType.getDeclaredField("descriptor").apply { isAccessible = true }
+                                val generic = retainedType.getDeclaredMethod("requireUnchanged")
+                                val borrowed = retainedType.getDeclaredMethod("requireUnchanged",
+                                    LinuxFilesystemSyscalls.StatxIdentityScratch::class.java)
+                                fun inode(control: Any): Long =
+                                    (retainedDescriptor.get(retained().getValue(control)) as LinuxDescriptor).identity.key.inode
+                                val originalOrder = listOf(inode(firstControl), inode(checkNotNull(secondControl)))
+                                rootStorage.beforeDecode = { memory ->
+                                    if (Thread.currentThread().stackTrace.any {
+                                        it.className == retainedType.name && it.methodName == "requireUnchanged"
+                                    }) {
+                                        assertTrue(Thread.holdsLock(registry), "control queries retain ACTIVE ownership")
+                                        assertTrue(Thread.holdsLock(scratch), "control queries borrow the scratch under its lock")
+                                        assertFalse(Thread.holdsLock(descriptor), "no new root-descriptor lock wraps control queries")
+                                        controlQueries += memory.getLong(0x20)
+                                        changeDecodedControl?.invoke(memory)
+                                    }
+                                }
+                                repeat(2) {
+                                    controlQueries.clear()
+                                    invokePrivate(firstScope, scopeCheckpoint)
+                                    assertEquals(originalOrder, controlQueries, "normal pass queries every control once in insertion order")
+                                }
+                                thirdControl = newControl()
+                                controlQueries.clear()
+                                invokePrivate(firstScope, scopeCheckpoint)
+                                val completeControlOrder = originalOrder + inode(checkNotNull(thirdControl))
+                                assertEquals(originalOrder + completeControlOrder, controlQueries,
+                                    "reconciliation and normal validation remain two separate observations; new admission stays generic")
+                                controlQueries.clear()
+                                invokePrivate(firstScope, scopeCheckpoint)
+                                assertEquals(completeControlOrder, controlQueries)
+
+                                val identity = retained().getValue(firstControl)
+                                val controlDescriptor = retainedDescriptor.get(identity) as LinuxDescriptor
+                                fun validateBorrowed(storage: LinuxFilesystemSyscalls.StatxIdentityScratch = scratch) =
+                                    synchronized(registry) { invokePrivate(identity, borrowed, storage) }
+                                fun validateGeneric() = synchronized(registry) { invokePrivate(identity, generic) }
+                                val controlInode = controlDescriptor.identity.key.inode
+                                val genericSentinel = IOException("generic route must not borrow scope storage")
+                                changeDecodedControl = { throw genericSentinel }
+                                controlQueries.clear()
+                                validateGeneric()
+                                assertEquals(emptyList<Long>(), controlQueries, "the original no-argument route remains generic")
+                                val livePath = invokePrivate(firstControl, type.getDeclaredMethod("getPath")) as Path
+                                val savedPermissions = Files.getPosixFilePermissions(livePath)
+                                Files.setPosixFilePermissions(livePath, savedPermissions + PosixFilePermission.GROUP_READ)
+                                try {
+                                    val refused = assertFailsWith<IOException> { validateGeneric() }
+                                    assertEquals("private directory descriptor identity changed", refused.message)
+                                    assertEquals(emptyList<Long>(), controlQueries)
+                                } finally { Files.setPosixFilePermissions(livePath, savedPermissions) }
+                                changeDecodedControl = null
+                                validateGeneric()
+
+                                // Alter real post-statx storage before the actual common predicate consumes it.
+                                val mutations: List<(com.sun.jna.Memory) -> Unit> = listOf(
+                                    { it.setLong(0x20, it.getLong(0x20) + 1) },
+                                    { it.setLong(0x90, it.getLong(0x90) + 1) },
+                                    { it.setShort(0x1c, ((it.getShort(0x1c).toInt() and 0xfff) or 0x8000).toShort()) },
+                                    { it.setShort(0x1c, ((it.getShort(0x1c).toInt() and 0xfff) or 0xa000).toShort()) },
+                                    { it.setInt(0x14, it.getInt(0x14) + 1) },
+                                    { it.setInt(0x18, it.getInt(0x18) + 1) },
+                                    { it.setShort(0x1c, (it.getShort(0x1c).toInt() xor 0x40).toShort()) },
+                                )
+                                mutations.forEach { mutation ->
+                                    changeDecodedControl = mutation
+                                    controlQueries.clear()
+                                    val refused = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertEquals("private directory descriptor identity changed", refused.message)
+                                    assertEquals(listOf(controlInode), controlQueries)
+                                    changeDecodedControl = null
+                                    controlQueries.clear()
+                                    validateBorrowed()
+                                    assertEquals(listOf(controlInode), controlQueries,
+                                        "next real query resets and decodes current values, never the prior mutation")
+                                }
+                                val earlier = synchronized(registry) { scratch.identity(controlDescriptor.fd) }
+                                Files.setPosixFilePermissions(livePath, savedPermissions + PosixFilePermission.GROUP_READ)
+                                try {
+                                    val later = synchronized(registry) { scratch.identity(controlDescriptor.fd) }
+                                    assertNotEquals(earlier.mode, later.mode)
+                                    assertEquals(controlDescriptor.identity.mode, earlier.mode, "earlier decoded identity is detached immutable data")
+                                } finally { Files.setPosixFilePermissions(livePath, savedPermissions) }
+
+                                val renamedControl = parent.resolve("retained-query-moved")
+                                Files.move(livePath, renamedControl)
+                                try {
+                                    val sentinel = IOException("borrowed control decode sentinel")
+                                    changeDecodedControl = { throw sentinel }
+                                    controlQueries.clear()
+                                    val observed = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertTrue(observed === sentinel, "query failure precedes the independently failing moved-name check")
+                                    assertEquals(listOf(controlInode), controlQueries)
+                                    changeDecodedControl = null
+                                    val moved = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertEquals("private control moved during runtime manifest", moved.message)
+                                    val movedGeneric = assertFailsWith<IOException> { validateGeneric() }
+                                    assertEquals(moved.message, movedGeneric.message)
+                                    val closedStorage = LinuxFilesystemSyscalls.StatxIdentityScratch()
+                                    val closedMemory = ManifestStatxMemory()
+                                    replaceManifestStatxMemory(closedStorage, closedMemory)
+                                    closedStorage.close(); closedStorage.close()
+                                    controlQueries.clear()
+                                    val closed = assertFailsWith<IllegalStateException> { validateBorrowed(closedStorage) }
+                                    assertEquals("descriptor identity scratch is closed", closed.message)
+                                    assertEquals(emptyList<Long>(), controlQueries)
+                                    assertEquals(1, closedMemory.closes)
+                                    assertEquals(controlDescriptor.fd, controlDescriptor.whileOpen { it }, "scratch close never closes its borrowed fd")
+                                } finally {
+                                    changeDecodedControl = null
+                                    Files.move(renamedControl, livePath)
+                                }
+                                validateBorrowed()
+                                assertEquals(0, rootStorage.closes, "validation never owns scratch close")
+                            } finally {
+                                rootStorage.beforeDecode = null
+                                thirdControl?.let(::remove)
+                                secondControl?.let(::remove)
+                                remove(firstControl)
+                                invokePrivate(firstScope, scopeCheckpoint) // Retire retained deleted identities before old controls.
+                            }
+                        }
                         var previous: Any? = null
                         repeat(3) {
                             order.clear()
@@ -566,6 +710,9 @@ class LinuxBubblewrapBoundaryTest {
                             assertFailsWith<IllegalStateException> { descriptor.whileOpen(retainedObserver) }
                             val closedScope = assertFailsWith<IOException> { checkNotNull(boundAfterScopeClose).invoke() }
                             assertEquals("runtime manifest scope is closed", closedScope.message)
+                            assertEquals(1, rootStorage.closes, "scope close alone releases its reused query storage once")
+                            firstScope.close()
+                            assertEquals(1, rootStorage.closes)
                         } finally {
                             releaseQuery.countDown()
                             observing.get(5, TimeUnit.SECONDS)
