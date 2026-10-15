@@ -52,37 +52,117 @@ class FetchClock:
     """Unix main-thread network guard; not preemption of arbitrary kernel/C stalls."""
     def __init__(self, monotonic):
         self.now = monotonic
-        self.total_end = self.end = monotonic() + FETCH_TOTAL_SECONDS
-        self.phase = 'total'
+        self.total_end = monotonic() + FETCH_TOTAL_SECONDS
+        self.state = ('total', self.total_end)
+        self.replacing = False
         self.closing = False
 
     def check(self):
         now = self.now()
         if now >= self.total_end:
             raise FetchDeadline('total')
-        if now >= self.end:
-            raise FetchDeadline(self.phase)
-        return self.end - now
+        phase, end = self.state
+        if now >= end:
+            raise FetchDeadline(phase)
+        return end - now
 
-    def _expired(self, *unused):
-        if self.closing:
-            return
-        remaining = self.total_end - self.now()
+    def _total_remaining(self, now=None):
+        remaining = self.total_end - (self.now() if now is None else now)
         if remaining <= 0:
             # No budget remains for Python context-manager unwind. This standalone
             # CLI terminates without I/O/finalizers; only owned staging may remain.
             os._exit(124)
             raise RuntimeError('fatal fetch deadline exit unexpectedly returned')
-        if remaining > 0:
-            # The fired one-shot no longer protects response/file/temp __exit__ calls.
-            # Keep the ORIGINAL total end armed before beginning exception unwind.
-            signal.setitimer(signal.ITIMER_REAL,remaining)
-        raise FetchDeadline('total' if remaining <= 0 else self.phase)
+        return remaining
+
+    def _arm_total_unwind(self):
+        # Publish the same logical end as the guard BEFORE any attempt exception.
+        self.state = ('total', self.total_end)
+        signal.setitimer(signal.ITIMER_REAL, self._total_remaining())
+        self._total_remaining()
+
+    def _adjudicate(self, desired):
+        now = self.now()
+        self._total_remaining(now)
+        phase, end = desired
+        if phase == 'attempt' and now >= end:
+            self._arm_total_unwind()
+            raise FetchDeadline('attempt')
+        return end - now
+
+    def _expired(self, *unused):
+        if self.closing:
+            return
+        self._total_remaining()  # Even a deferred callback during replacement is fatal at total.
+        if self.replacing:
+            return
+        current = self.state
+        # A stale/early callback is not proof that the current logical end expired.
+        signal.setitimer(signal.ITIMER_REAL, self._adjudicate(current))
+        self._adjudicate(current)
+
+    def _replace(self, desired):
+        previous_mask = None
+        ready = False
+        primary = None
+        self.replacing = True
+        try:
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.sigtimedwait({signal.SIGALRM}, 0)  # One coalesced owned signal; never wait.
+            remaining = self._adjudicate(desired)
+            self.state = desired
+            signal.setitimer(signal.ITIMER_REAL, remaining)
+            self._adjudicate(desired)
+            ready = True
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                try:
+                    # OS masking does not remove an already-scheduled Python callback.
+                    # Clear suppression FIRST, then freshly adjudicate BOTH original ends.
+                    self.replacing = False
+                    if ready:
+                        self._adjudicate(desired)
+                    else:
+                        self._total_remaining()
+                except FetchDeadline as error:
+                    if error.phase != 'attempt':
+                        raise
+                    self._arm_total_unwind()
+                    if primary is not None and not (isinstance(primary, FetchDeadline) and primary.phase == 'attempt'):
+                        raise primary from error
+                    raise
+            finally:
+                if previous_mask is not None:
+                    try:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                    except FetchDeadline as error:
+                        if error.phase != 'attempt':
+                            raise
+                        # A callback can interrupt the restoration call itself. The exact
+                        # mask restore is idempotent; complete it once, without a new end.
+                        try:
+                            self._arm_total_unwind()
+                        finally:
+                            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                        if primary is not None and not (isinstance(primary, FetchDeadline) and primary.phase == 'attempt'):
+                            raise primary from error
+                        raise
 
     def arm(self, attempt=False):
-        self.phase = 'attempt' if attempt else 'total'
-        self.end = min(self.total_end, self.now() + FETCH_TIMEOUT_SECONDS) if attempt else self.total_end
-        signal.setitimer(signal.ITIMER_REAL, self.check())
+        desired = None
+        try:
+            desired = ('attempt', min(self.total_end, self.now() + FETCH_TIMEOUT_SECONDS)) if attempt else ('total', self.total_end)
+            self._replace(desired)
+        except FetchDeadline as error:
+            if error.phase != 'attempt' or desired is None:
+                raise
+            # At most one old-attempt continuation, retaining the already computed end.
+            self._adjudicate(desired)
+            self._replace(desired)
 
     def __enter__(self):
         if (not hasattr(signal,'setitimer') or not hasattr(signal,'SIGALRM') or not hasattr(signal,'pthread_sigmask') or
@@ -182,9 +262,9 @@ def _fetch_artifact(destination, specification, label, opener, sleeper, clock):
     failures = []
     for url in urls:
         for attempt in range(1,FETCH_ATTEMPTS_PER_ENDPOINT+1):
-            clock.arm(attempt=True)
-            request = urllib.request.Request(url,headers={'User-Agent':'decomp-thing-gcc-oracle-fetch/2'})
             try:
+                clock.arm(attempt=True)
+                request = urllib.request.Request(url,headers={'User-Agent':'decomp-thing-gcc-oracle-fetch/2'})
                 with tempfile.TemporaryDirectory(prefix='.gcc-oracle-download-',dir=destination) as temporary:
                     staged = Path(temporary)/str(specification['fileName'])
                     print(f"fetching {label} (attempt {attempt}): {url}")
@@ -234,7 +314,14 @@ def _fetch_artifact(destination, specification, label, opener, sleeper, clock):
                     raise VerificationError(f"could not fetch {label}: {'; '.join(failures)}") from error
             except (VerificationError,OSError,ValueError,urllib.error.URLError) as error:
                 failures.append(f"{url} attempt {attempt}: {error}")
-            clock.arm()  # Retry work/sleep consumes only the remaining original total.
+            try:
+                clock.arm()  # Retry work/sleep consumes only the remaining original total.
+            except FetchDeadline as error:
+                if error.phase != 'attempt':
+                    raise
+                # A callback before arm's desired value existed already armed total.
+                # Finish only that same unwind guard, not another artifact attempt.
+                clock._arm_total_unwind()
             if attempt < FETCH_ATTEMPTS_PER_ENDPOINT:
                 sleeper(min(FETCH_RETRY_DELAY_SECONDS,clock.check()))
                 clock.check()

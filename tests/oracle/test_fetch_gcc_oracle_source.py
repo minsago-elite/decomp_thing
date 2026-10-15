@@ -206,6 +206,7 @@ class GccOracleSourceFetchTest(unittest.TestCase):
         with self.assertRaisesRegex(Deadline,'attempt'):
             with Clock(lambda:now[0]) as clock:
                 clock.arm(attempt=True)
+                now[0]=20
                 clock._expired()
         self.assertEqual(mock.call(module.SIGALRM,module.SIG_DFL),self.signal.call_args)
         self.assertEqual(mock.call(module.ITIMER_REAL,0),self.setitimer.call_args)
@@ -221,6 +222,7 @@ class GccOracleSourceFetchTest(unittest.TestCase):
             def __exit__(inner,*unused):
                 observed.append(self.setitimer.call_args)
                 self.assertEqual(mock.call(module.ITIMER_REAL,99.0),self.setitimer.call_args)
+                self.assertEqual(('total',120),clock.state)
         with self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):
             with FETCHER['FetchClock'](lambda:now[0]) as clock:
                 clock.arm(attempt=True)
@@ -243,7 +245,7 @@ class GccOracleSourceFetchTest(unittest.TestCase):
         self.sigtimedwait.side_effect=lambda signals,timeout:events.append(('drain',signals,timeout))
         self.signal.side_effect=lambda which,handler:events.append(('handler',handler))
         with FETCHER['FetchClock'](lambda:0):pass
-        block=events.index(('mask',module.SIG_BLOCK,{module.SIGALRM}))
+        block=max(index for index,event in enumerate(events) if event==('mask',module.SIG_BLOCK,{module.SIGALRM}))
         self.assertEqual([('mask',module.SIG_BLOCK,{module.SIGALRM}),('timer',0),('drain',{module.SIGALRM},0),
                           ('handler',module.SIG_DFL),('mask',module.SIG_SETMASK,set())],events[block:])
 
@@ -263,7 +265,7 @@ class GccOracleSourceFetchTest(unittest.TestCase):
                     now[0]=21
                     clock._expired()
         self.fatal_exit.assert_called_once_with(124)
-        self.assertEqual([120,20,99.0,0],[call.args[1] for call in self.setitimer.call_args_list])
+        self.assertEqual([0,120,0,20,99.0,0],[call.args[1] for call in self.setitimer.call_args_list])
 
     def test_total_alarm_exits_without_cleanup_window_and_cannot_return(self):
         now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);now[0]=120
@@ -277,12 +279,296 @@ class GccOracleSourceFetchTest(unittest.TestCase):
 
     def test_guard_teardown_late_success_is_refused_after_restoration(self):
         now=[0.0];module=FETCHER['signal']
-        def timer(which,delay):
-            if delay==0:now[0]=121
-        self.setitimer.side_effect=timer
+        original=FETCHER['FetchClock'].__exit__
+        def teardown(clock,*args):
+            def timer(which,delay):
+                if clock.closing and delay==0:now[0]=121
+            self.setitimer.side_effect=timer
+            return original(clock,*args)
         with self.assertRaisesRegex(FETCHER['FetchDeadline'],'total'):
-            with FETCHER['FetchClock'](lambda:now[0]):pass
+            with mock.patch.object(FETCHER['FetchClock'],'__exit__',teardown):
+                with FETCHER['FetchClock'](lambda:now[0]):pass
         self.assertEqual(mock.call(module.SIGALRM,module.SIG_DFL),self.signal.call_args)
+
+    def test_early_total_callback_rearms_same_end_without_total_failure(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);module=FETCHER['signal']
+        now[0]=20
+        clock._expired()
+        self.assertEqual(('total',120),clock.state)
+        self.assertEqual(mock.call(module.ITIMER_REAL,100),self.setitimer.call_args)
+        self.fatal_exit.assert_not_called()
+
+    def test_old_attempt_before_retry_marker_keeps_next_attempt_and_verified_fallback(self):
+        Clock=FETCHER['FetchClock'];original=Clock._replace;now=[0.0];calls=[];injected=[]
+        def replace(clock,desired):
+            if desired[0]=='total' and clock.state[0]=='attempt' and not injected:
+                injected.append(desired)
+                clock._expired()  # Due old callback BEFORE replacement can claim its marker.
+            return original(clock,desired)
+        def opener(request,**kwargs):
+            calls.append(request.full_url)
+            if len(calls)==1:
+                now[0]=20
+                raise urllib.error.URLError('authored attempt boundary')
+            return FakeResponse(request.full_url,self.payload)
+        with mock.patch.object(Clock,'_replace',replace), tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT/'build',prefix='fetch-transition-') as temporary:
+            target=self.fetch(Path(temporary),opener,now)
+            self.assertEqual(self.payload,target.read_bytes())
+        self.assertEqual([('total',120)],injected)
+        self.assertEqual(2,len(calls))
+        self.assertEqual(calls[0],calls[1])
+        self.assertEqual(21,now[0])
+
+    def test_old_attempt_continuation_keeps_precomputed_new_attempt_end(self):
+        Clock=FETCHER['FetchClock'];now=[0.0];clock=Clock(lambda:now[0]);clock.arm(attempt=True)
+        now[0]=20;original=clock._replace;seen=[]
+        def replace(desired):
+            seen.append(desired)
+            if len(seen)==1:
+                clock._expired()
+            return original(desired)
+        with mock.patch.object(clock,'_replace',side_effect=replace):clock.arm(attempt=True)
+        self.assertEqual([('attempt',40),('attempt',40)],seen)
+        self.assertEqual(('attempt',40),clock.state)
+        self.assertEqual(20,clock.check())
+
+    def test_attempt_due_while_arming_never_reaches_opener_and_next_attempt_is_bounded(self):
+        Clock=FETCHER['FetchClock'];original=Clock.arm;now=[0.0];calls=[];attempt_ends=[];injected=[]
+        def arm(clock,attempt=False):
+            if attempt:attempt_ends.append(min(clock.total_end,now[0]+20))
+            return original(clock,attempt)
+        def timer(which,delay):
+            if delay==20 and not injected:
+                injected.append(True);now[0]=20
+                self.signal.call_args.args[1]()
+        def opener(request,**kwargs):
+            calls.append((request.full_url,kwargs['timeout']))
+            return FakeResponse(request.full_url,self.payload)
+        self.setitimer.side_effect=timer
+        with mock.patch.object(Clock,'arm',arm), tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT/'build',prefix='fetch-admission-') as temporary:
+            target=self.fetch(Path(temporary),opener,now)
+            self.assertEqual(self.payload,target.read_bytes())
+        self.assertEqual([20,41],attempt_ends)
+        self.assertEqual([(self.specification['url'],20)],calls)
+        self.assertEqual(21,now[0])
+
+    def test_uncommitted_attempt_anchor_cannot_be_recomputed_after_callback(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);clock.arm(attempt=True)
+        now[0]=20;injected=[]
+        def current():
+            if not injected:
+                injected.append(True)
+                clock._expired()
+            return now[0]
+        clock.now=current
+        with self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):clock.arm(attempt=True)
+        self.assertEqual(('total',120),clock.state)
+        self.assertEqual(100,self.setitimer.call_args.args[1])
+
+    def test_attempt_consumed_during_rearm_or_before_clear_installs_total_before_refusal(self):
+        for stage in ('rearm','before-clear'):
+            for when in (20.0,20.25):
+                with self.subTest(stage=stage,when=when):
+                    now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);original=clock._adjudicate
+                    observations=[];injected=[];inherited={FETCHER['signal'].SIGUSR1}
+                    self.pthread_sigmask.return_value=inherited
+                    def callback():
+                        injected.append(True);now[0]=when
+                        self.assertTrue(clock.replacing)
+                        clock._expired()  # No OS pending bit is needed for a Python callback.
+                    def timer(which,delay):
+                        if delay==20 and stage=='rearm' and not injected:callback()
+                    def observe(desired):
+                        observations.append(clock.replacing)
+                        result=original(desired)
+                        if len(observations)==2 and stage=='before-clear':callback()
+                        return result
+                    self.setitimer.side_effect=timer
+                    with mock.patch.object(clock,'_adjudicate',side_effect=observe), self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):
+                        clock.arm(attempt=True)
+                    self.assertEqual([True],injected)
+                    self.assertEqual(('total',120),clock.state)
+                    self.assertFalse(clock.replacing)
+                    self.assertEqual(120-when,self.setitimer.call_args.args[1])
+                    self.assertEqual(mock.call(FETCHER['signal'].SIG_SETMASK,inherited),self.pthread_sigmask.call_args)
+                    self.fatal_exit.assert_not_called()
+
+    def test_postclear_callback_is_caught_with_coherent_total_guard_and_mask(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);original=clock._adjudicate;injected=[]
+        inherited={FETCHER['signal'].SIGUSR1};self.pthread_sigmask.return_value=inherited
+        def observe(desired):
+            if not clock.replacing and not injected:
+                injected.append(True);now[0]=20
+                clock._expired()
+            return original(desired)
+        with mock.patch.object(clock,'_adjudicate',side_effect=observe), self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):
+            clock.arm(attempt=True)
+        self.assertEqual([True],injected)
+        self.assertEqual(('total',120),clock.state)
+        self.assertEqual(100,self.setitimer.call_args.args[1])
+        self.assertFalse(clock.replacing)
+        self.assertEqual(mock.call(FETCHER['signal'].SIG_SETMASK,inherited),self.pthread_sigmask.call_args)
+
+    def test_total_expiry_in_transition_is_fatal_even_when_pending_set_is_empty(self):
+        class FatalExit(BaseException):pass
+        self.fatal_exit.side_effect=FatalExit
+        for stage in ('drain','rearm','before-clear','after-clear'):
+            for when in (120.0,120.25):
+                with self.subTest(stage=stage,when=when):
+                    self.fatal_exit.reset_mock();now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0])
+                    original=clock._adjudicate;observations=[];injected=[]
+                    def callback():
+                        injected.append(True);now[0]=when;clock._expired()
+                    def drain(*unused):
+                        if stage=='drain' and not injected:callback()
+                    def timer(which,delay):
+                        if stage=='rearm' and delay==20 and not injected:callback()
+                    def observe(desired):
+                        observations.append(clock.replacing)
+                        if stage=='after-clear' and not clock.replacing and not injected:callback()
+                        result=original(desired)
+                        if stage=='before-clear' and len(observations)==2 and not injected:callback()
+                        return result
+                    self.sigtimedwait.side_effect=drain;self.setitimer.side_effect=timer
+                    with mock.patch.object(clock,'_adjudicate',side_effect=observe), self.assertRaises(FatalExit):
+                        clock.arm(attempt=True)
+                    self.assertEqual([True],injected)
+                    self.assertTrue(self.fatal_exit.called)
+                    self.assertTrue(all(call==mock.call(124) for call in self.fatal_exit.call_args_list))
+                    self.assertFalse(clock.replacing)
+                    self.assertEqual(mock.call(FETCHER['signal'].SIG_SETMASK,set()),self.pthread_sigmask.call_args)
+
+    def test_total_expiry_during_attempt_retirement_never_grants_unwind_grace(self):
+        class FatalExit(BaseException):pass
+        self.fatal_exit.side_effect=FatalExit
+        for when in (120.0,120.25):
+            with self.subTest(when=when):
+                now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);injected=[]
+                def timer(which,delay):
+                    if delay==20:now[0]=20
+                    elif delay==100 and not injected:
+                        injected.append(True);now[0]=when
+                self.setitimer.side_effect=timer
+                with self.assertRaises(FatalExit):clock.arm(attempt=True)
+                self.assertEqual([True],injected)
+                self.assertEqual(('total',120),clock.state)
+                self.assertFalse(clock.replacing)
+                self.assertTrue(all(call==mock.call(124) for call in self.fatal_exit.call_args_list))
+
+    def test_attempt_retirement_preserves_fractional_original_total(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);now[0]=99.75
+        def timer(which,delay):
+            if delay==20:now[0]=119.75
+        self.setitimer.side_effect=timer
+        with self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):clock.arm(attempt=True)
+        self.assertEqual(('total',120),clock.state)
+        self.assertEqual(.25,self.setitimer.call_args.args[1])
+        self.fatal_exit.assert_not_called()
+
+    def test_early_callbacks_on_both_sides_of_clear_preserve_same_attempt_end(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);original=clock._adjudicate;seen=[]
+        def observe(desired):
+            stage='before' if clock.replacing else 'after'
+            if stage not in seen:
+                seen.append(stage);now[0]=5
+                clock._expired()
+            return original(desired)
+        with mock.patch.object(clock,'_adjudicate',side_effect=observe):clock.arm(attempt=True)
+        self.assertEqual(['before','after'],seen)
+        self.assertEqual(('attempt',20),clock.state)
+        self.assertEqual(15,clock.check())
+        self.assertEqual(15,self.setitimer.call_args.args[1])
+        self.fatal_exit.assert_not_called()
+
+    def test_attempt_callback_during_mask_restore_completes_exact_restore(self):
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);module=FETCHER['signal'];inherited={module.SIGUSR1};restores=[]
+        def mask(how,value):
+            if how==module.SIG_SETMASK:
+                restores.append(value)
+                if len(restores)==1:
+                    self.assertFalse(clock.replacing);now[0]=20;clock._expired()
+            return inherited
+        self.pthread_sigmask.side_effect=mask
+        with self.assertRaisesRegex(FETCHER['FetchDeadline'],'attempt'):clock.arm(attempt=True)
+        self.assertEqual([inherited,inherited],restores)
+        self.assertEqual(('total',120),clock.state)
+        self.assertEqual(100,self.setitimer.call_args.args[1])
+
+    def test_transition_uses_one_zero_drain_and_preserves_primary_syscall_failures(self):
+        module=FETCHER['signal']
+        for stage in ('block','disarm','drain','rearm'):
+            with self.subTest(stage=stage):
+                clock=FETCHER['FetchClock'](lambda:0);failure=OSError('authored transition failure');events=[]
+                inherited={module.SIGUSR1}
+                def mask(how,value):
+                    events.append(('mask',how,value))
+                    if how==module.SIG_BLOCK and stage=='block':raise failure
+                    return inherited
+                def timer(which,delay):
+                    events.append(('timer',delay))
+                    if (stage=='disarm' and delay==0) or (stage=='rearm' and delay>0):raise failure
+                def drain(signals,timeout):
+                    events.append(('drain',signals,timeout))
+                    if stage=='drain':raise failure
+                self.pthread_sigmask.side_effect=mask;self.setitimer.side_effect=timer;self.sigtimedwait.side_effect=drain
+                with self.assertRaises(OSError) as raised:clock.arm(attempt=True)
+                self.assertIs(failure,raised.exception)
+                self.assertFalse(clock.replacing)
+                self.assertLessEqual(sum(event[0]=='drain' for event in events),1)
+                if stage!='block':self.assertEqual(('mask',module.SIG_SETMASK,inherited),events[-1])
+                else:self.assertEqual(1,len(events))
+
+    def test_total_callback_during_mask_restore_is_fatal_not_another_attempt(self):
+        class FatalExit(BaseException):pass
+        self.fatal_exit.side_effect=FatalExit
+        now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);module=FETCHER['signal'];restores=[]
+        def mask(how,value):
+            if how==module.SIG_SETMASK:
+                restores.append(value)
+                self.assertFalse(clock.replacing);now[0]=120;clock._expired()
+            return set()
+        self.pthread_sigmask.side_effect=mask
+        with self.assertRaises(FatalExit):clock.arm(attempt=True)
+        self.assertEqual([set()],restores)
+        self.fatal_exit.assert_called_once_with(124)
+
+    def test_deferred_attempt_does_not_hide_original_transition_failure(self):
+        module=FETCHER['signal']
+        for stage in ('postclear','restore'):
+            with self.subTest(stage=stage):
+                self.setitimer.side_effect=None;self.pthread_sigmask.side_effect=None
+                self.pthread_sigmask.return_value=set()
+                now=[0.0];clock=FETCHER['FetchClock'](lambda:now[0]);clock.arm(attempt=True)
+                now[0]=20;failure=OSError('authored failed disarm');failed=[];injected=[]
+                def timer(which,delay):
+                    if delay==0 and not failed:
+                        failed.append(True);raise failure
+                def current():
+                    if stage=='postclear' and not clock.replacing and failed and not injected:
+                        injected.append(True);clock._expired()
+                    return now[0]
+                def mask(how,value):
+                    if stage=='restore' and how==module.SIG_SETMASK and not injected:
+                        injected.append(True);clock._expired()
+                    return set()
+                clock.now=current;self.setitimer.side_effect=timer;self.pthread_sigmask.side_effect=mask
+                with self.assertRaises(OSError) as raised:clock.arm(attempt=True)
+                self.assertIs(failure,raised.exception)
+                self.assertEqual([True],injected)
+                self.assertEqual(('total',120),clock.state)
+                self.assertFalse(clock.replacing)
+                self.assertEqual(mock.call(module.SIG_SETMASK,set()),self.pthread_sigmask.call_args)
+
+    def test_successful_transition_blocks_disarms_drains_once_and_restores_exact_mask(self):
+        clock=FETCHER['FetchClock'](lambda:0);module=FETCHER['signal'];events=[];inherited={module.SIGUSR1}
+        self.pthread_sigmask.side_effect=lambda how,value:events.append(('mask',how,value)) or inherited
+        self.setitimer.side_effect=lambda which,delay:events.append(('timer',delay))
+        self.sigtimedwait.side_effect=lambda signals,timeout:events.append(('drain',signals,timeout)) or SimpleNamespace(si_signo=module.SIGALRM)
+        clock.arm(attempt=True)
+        self.assertEqual([('mask',module.SIG_BLOCK,{module.SIGALRM}),('timer',0),
+                          ('drain',{module.SIGALRM},0),('timer',20),('mask',module.SIG_SETMASK,inherited)],events)
+        self.assertEqual(('attempt',20),clock.state)
+        self.assertFalse(clock.replacing)
 
     def test_primary_failure_uses_verified_official_fallback(self) -> None:
         attempted: list[str] = []
