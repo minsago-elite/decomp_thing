@@ -364,6 +364,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     rollback.targetRevisionId == derivedHead &&
                     rollback.expectedSourceRevisionSha256 == revisionSha256(accepted.values)
                 ) { "repair release rollback outcome is cross-paired with its attempt or target: ${node.id}" }
+                if (rollback.legacyPendingStateUnknown && node.changes.isNotEmpty()) {
+                    require(rollback.candidateSourceInstallStarted == null) {
+                        "repair release legacy changed attempt has a fabricated source-install marker: ${node.id}"
+                    }
+                }
                 if (rollback.state == "not_required_verified") {
                     require(rollback.candidateSourceInstallStarted == false) {
                         "repair release rollback is marked unnecessary after a source exchange may have started: ${node.id}"

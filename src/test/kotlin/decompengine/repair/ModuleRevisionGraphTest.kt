@@ -3533,6 +3533,255 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `recovery profile cache owns copies and charges distinct source bytes before retention`() {
+        val paths = listOf("a.src", "b.src")
+        val budget = RepairResourceBudget(maximumSourceFiles = 2, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 8, maximumContextFiles = 2, maximumContextBytes = 8,
+            maximumStagingDirectories = 2, maximumStagingBytes = 8, maximumPatchFiles = 1, maximumPatchBytes = 8)
+        val bytes = mutableMapOf("a.src" to "aaaa".toByteArray(), "b.src" to "bbbb".toByteArray())
+        var physicalReads = 0
+        val view = object : RepairRecoverySourceView {
+            override val sourcePaths = paths
+            override val editablePaths = paths
+            override fun readSource(relative: String): ByteArray { physicalReads++; return bytes.getValue(relative) }
+        }
+        val type = Class.forName("decompengine.repair.RecoveryProfileSourceCache")
+        val constructor = type.getDeclaredConstructor(RepairRecoverySourceView::class.java, RepairResourceBudget::class.java)
+            .apply { isAccessible = true }
+        val read = type.getDeclaredMethod("readSource", String::class.java).apply { isAccessible = true }
+        fun source(cache: Any, path: String): ByteArray = try { read.invoke(cache, path) as ByteArray }
+            catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val cache = constructor.newInstance(view, budget)
+        for (path in listOf("unknown.src", "../a.src")) assertFailsWith<IllegalArgumentException> { source(cache, path) }
+        assertEquals(0, physicalReads)
+        val first = source(cache, "a.src")
+        first.fill(0)
+        bytes.getValue("a.src").fill(1) // Neither callback nor reader aliases may retarget the retained bytes.
+        repeat(8) { assertContentEquals("aaaa".toByteArray(), source(cache, "a.src")) }
+        assertEquals(1, physicalReads)
+        assertContentEquals("bbbb".toByteArray(), source(cache, "b.src"))
+        assertEquals(2, physicalReads) // Exactly8 admitted bytes across two distinct paths.
+
+        bytes["a.src"] = ByteArray(9)
+        val refused = constructor.newInstance(view, budget)
+        assertFailsWith<RepairBudgetExceededException> { source(refused, "a.src") }
+        bytes["a.src"] = ByteArray(8)
+        assertEquals(8, source(refused, "a.src").size)
+        assertFailsWith<RepairBudgetExceededException> { source(refused, "b.src") } // Eight plus four is over cap.
+        bytes["b.src"] = byteArrayOf()
+        assertContentEquals(byteArrayOf(), source(refused, "b.src")) // Failed admission retained no partial entry.
+        assertEquals(6, physicalReads)
+    }
+
+    @Test
+    fun `concurrent recovery profile lookups admit same path once and return independent copies`() {
+        val paths = listOf("code.src")
+        val expected = "original".toByteArray()
+        val budget = RepairResourceBudget(maximumSourceFiles = 1, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 8, maximumContextFiles = 1, maximumContextBytes = 8,
+            maximumStagingDirectories = 1, maximumStagingBytes = 8, maximumPatchFiles = 1, maximumPatchBytes = 8)
+        val ready = java.util.concurrent.CountDownLatch(2)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val physicalEntered = java.util.concurrent.CountDownLatch(1)
+        val releasePhysical = java.util.concurrent.CountDownLatch(1)
+        val physicalReads = java.util.concurrent.atomic.AtomicInteger()
+        lateinit var cache: Any
+        val view = object : RepairRecoverySourceView {
+            override val sourcePaths = paths
+            override val editablePaths = paths
+            override fun readSource(relative: String): ByteArray {
+                physicalReads.incrementAndGet()
+                physicalEntered.countDown()
+                // Observe actual monitor ownership, not a delay guessed to imply exclusion.
+                assertTrue(Thread.holdsLock(cache))
+                assertTrue(releasePhysical.await(2, TimeUnit.SECONDS))
+                return expected
+            }
+        }
+        val type = Class.forName("decompengine.repair.RecoveryProfileSourceCache")
+        cache = type.getDeclaredConstructor(RepairRecoverySourceView::class.java, RepairResourceBudget::class.java)
+            .apply { isAccessible = true }.newInstance(view, budget)
+        val read = type.getDeclaredMethod("readSource", String::class.java).apply { isAccessible = true }
+        fun lookup(): ByteArray = try { read.invoke(cache, "code.src") as ByteArray }
+            catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val results = (0..1).map {
+                executor.submit<ByteArray> {
+                    ready.countDown()
+                    assertTrue(start.await(2, TimeUnit.SECONDS))
+                    lookup()
+                }
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS))
+            start.countDown()
+            assertTrue(physicalEntered.await(2, TimeUnit.SECONDS))
+            // Do not wait for a second physical admission: correctly serialized misses forbid it.
+            releasePhysical.countDown()
+            val first = results[0].get(2, TimeUnit.SECONDS)
+            val second = results[1].get(2, TimeUnit.SECONDS)
+            assertEquals(1, physicalReads.get())
+            assertTrue(first !== second)
+            assertContentEquals(expected, first)
+            assertContentEquals(expected, second)
+            first.fill(0)
+            assertContentEquals(expected, second)
+            assertContentEquals(expected, lookup())
+            assertEquals(1, physicalReads.get())
+        } finally {
+            start.countDown(); releasePhysical.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `recovery profile may repeat immutable lookups while two physical snapshots still detect blob mutation`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val paths = listOf("a.src", "b.src")
+        val originals = mapOf("a.src" to "aaaaaaaa".toByteArray(), "b.src" to "bbbbbbbb".toByteArray())
+        val candidate = "cccccccc".toByteArray()
+        val budget = RepairResourceBudget(maximumSourceFiles = 2, maximumSourceFileBytes = 8,
+            maximumSourceBytes = 16, maximumContextFiles = 2, maximumContextBytes = 16,
+            maximumStagingDirectories = 2, maximumStagingBytes = 16,
+            maximumPatchFiles = 1, maximumPatchBytes = 8)
+        for (mutateBlob in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "repeated-recovery-lookup-")
+            originals.forEach { (path, bytes) -> root.resolve(path).writeBytes(bytes) }
+            val layout = RepairIndexLayout(paths, paths, modules = listOf(
+                RepairModuleEvidence("a", listOf("a.src")), RepairModuleEvidence("b", listOf("b.src"))))
+            var profileFinished = false
+            var lookups = 0
+            var blobMutated = false
+            val profile = object : RepairIndexProfile {
+                override fun profileId() = "repeated-authenticated-recovery-profile"
+                override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
+                    originals.forEach { (path, bytes) ->
+                        require(projectRoot.resolve(path).readBytes().contentEquals(bytes)) { "source-sensitive layout requires target bytes" }
+                    }
+                    return layout
+                }
+                override fun authorizesRecoveryLayout(sourcePaths: List<String>, editablePaths: List<String>,
+                    budget: RepairResourceBudget) = sourcePaths == paths && editablePaths == paths
+                override fun resolveForRecovery(projectRoot: Path, budget: RepairResourceBudget,
+                    sourcePaths: List<String>, editablePaths: List<String>, readSource: (String) -> ByteArray): RepairIndexLayout {
+                    assertEquals(paths, sourcePaths)
+                    repeat(6) {
+                        paths.forEach { path ->
+                            val bytes = readSource(path)
+                            lookups++
+                            assertContentEquals(originals.getValue(path), bytes)
+                            bytes.fill(0) // A caller may mutate its copy, never the retained cache.
+                        }
+                    }
+                    profileFinished = true
+                    return layout
+                }
+                override fun validateSourceContent(path: String, bytes: ByteArray) {
+                    if (mutateBlob && profileFinished && !blobMutated && path == "a.src") {
+                        // Runs after the profile returns, during the first uncached snapshot.
+                        // A cached second snapshot would miss this physical content replacement.
+                        root.resolve("reports/repair-revisions/blobs/" + sha256(originals.getValue(path)))
+                            .writeBytes("xxxxxxxx".toByteArray())
+                        blobMutated = true
+                    }
+                }
+            }
+            class CandidateCrash : Error()
+            ModuleRevisionGraph.openForTesting(root, profile, budget, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "candidate") throw CandidateCrash()
+            }).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("a.src"))
+                assertFailsWith<CandidateCrash> { graph.installCandidate(attempt, mapOf("a.src" to candidate)) }
+            }
+            val graphPath = root.resolve("reports/repair-revisions/graph.json")
+            val beforeGraph = graphPath.readBytes()
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val sourceKey = Files.readAttributes(root.resolve("a.src"), BasicFileAttributes::class.java).fileKey()
+            var exchanges = 0
+            if (mutateBlob) {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    ModuleRevisionGraph.openForTesting(root, profile, budget, ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") exchanges++
+                    }).close()
+                }
+                assertEquals("recovery source view preimage digest or size differs", failure.message)
+                assertTrue(blobMutated)
+                assertEquals(12, lookups)
+                assertEquals(0, exchanges)
+                assertContentEquals(beforeGraph, graphPath.readBytes())
+                assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+                assertContentEquals(candidate, root.resolve("a.src").readBytes())
+                assertEquals(sourceKey, Files.readAttributes(root.resolve("a.src"), BasicFileAttributes::class.java).fileKey())
+            } else {
+                ModuleRevisionGraph.open(root, profile, budget).use { graph ->
+                    assertEquals(12, lookups)
+                    originals.forEach { (path, bytes) -> assertContentEquals(bytes, root.resolve(path).readBytes()) }
+                    assertEquals(RepairRollbackState.RESTORED_VERIFIED, graph.snapshot.nodes.last().rollbackRecord?.state)
+                    assertTrue(graph.snapshot.runs.isEmpty())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `legacy changed pending and finalized records require unknown install marker while no change remains false`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val profile = DeclarativeRepairIndexProfile("legacy-install-marker",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        for (hasChanges in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "legacy-install-marker-")
+            val source = root.resolve("code.c").also { it.writeText("before") }
+            ModuleRevisionGraph.open(root, profile).use { graph ->
+                val attempt = graph.beginAttempt(listOf("code.c")) // Schema2, before the install-marker wire existed.
+                if (hasChanges) graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            }
+            assertFailsWith<SimulatedRepairCrash> {
+                ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                }).close()
+            }
+            val path = root.resolve("reports/repair-revisions/graph.json")
+            fun refuseFalseCertainty(canonical: String, currentState: String) {
+                for (marker in listOf("false", "true")) {
+                    val forged = canonical.replace("\"candidateSourceInstallStarted\":null", "\"candidateSourceInstallStarted\":$marker")
+                        .let { if (marker == "false") it.replace("\"state\":\"$currentState\"", "\"state\":\"not_required_verified\"") else it }
+                    assertNotEquals(canonical, forged)
+                    path.writeText(forged)
+                    val bytes = source.readBytes()
+                    val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                    val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                    val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                    assertEquals("legacy changed attempt has a fabricated source-install marker", failure.message)
+                    assertEquals(forged, path.readText())
+                    assertContentEquals(bytes, source.readBytes())
+                    assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                    assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                }
+                path.writeText(canonical)
+            }
+            val pending = path.readText()
+            val pendingRecord = Json.parseToJsonElement(pending).jsonObject.getValue("pending").jsonObject
+                .getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(true), pendingRecord.getValue("legacyPendingStateUnknown"))
+            assertEquals(if (hasChanges) JsonNull else JsonPrimitive(false), pendingRecord.getValue("candidateSourceInstallStarted"))
+            if (hasChanges) refuseFalseCertainty(pending, "restore_in_progress")
+            ModuleRevisionGraph.open(root, profile).use { graph ->
+                val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+                assertTrue(record.legacyPendingStateUnknown)
+                assertEquals(if (hasChanges) null else false, record.candidateSourceInstallStarted)
+                assertEquals(if (hasChanges) RepairRollbackState.RESTORED_VERIFIED else RepairRollbackState.NOT_REQUIRED_VERIFIED, record.state)
+                assertEquals("before", source.readText())
+                assertTrue(graph.snapshot.runs.isEmpty())
+            }
+            if (hasChanges) refuseFalseCertainty(path.readText(), "restored_verified")
+            ModuleRevisionGraph.open(root, profile).close()
+        }
+    }
+
+    @Test
     fun `generated adapter recovers dirty C bodies and changed includes from authenticated virtual preimages`() {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
         for (changeIncludes in listOf(false, true)) {
@@ -3700,6 +3949,47 @@ class ModuleRevisionGraphTest {
             val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
             assertTrue(failure.message.orEmpty().contains("rollback"), failure.message)
             assertFalse(output.exists())
+        }
+    }
+
+    @Test
+    fun `archive distinguishes genuine legacy unknown install from native and no change false markers`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (mode in listOf("legacy-changed", "legacy-unchanged", "native-changed")) {
+            val fixture = releaseRepairFixture(temporaryParent = parent,
+                rejectedAttempts = if (mode == "native-changed") 1 else 0,
+                legacyRejectedPrefix = mode != "native-changed", legacyPrefixHasChanges = mode != "legacy-unchanged")
+            val document = Json.parseToJsonElement(fixture.project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+            val rejected = document.getValue("nodes").jsonArray.single { it.jsonObject.getValue("status").jsonPrimitive.content == "rejected" }.jsonObject
+            val record = rejected.getValue("rollbackRecord").jsonObject
+            assertEquals(mode != "legacy-unchanged", rejected.getValue("changes").jsonArray.isNotEmpty())
+            assertEquals(JsonPrimitive(mode != "native-changed"), record.getValue("legacyPendingStateUnknown"))
+            assertEquals(if (mode == "legacy-changed") JsonNull else JsonPrimitive(false), record.getValue("candidateSourceInstallStarted"))
+            assertEquals(if (mode == "legacy-changed") "restored_verified" else "not_required_verified", record.getValue("state").jsonPrimitive.content)
+            val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("$mode-marker.zip"))
+            val extracted = fixture.project.parent.resolve("$mode-marker-control")
+            ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+            assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+            if (mode != "legacy-changed") continue
+            for (started in listOf(false, true)) {
+                val forged = fixture.project.parent.resolve("legacy-marker-$started.zip")
+                rewriteArchive(bundle.archivePath, forged) { entries ->
+                    val path = "reports/repair-revisions/graph.json"
+                    val graph = Json.parseToJsonElement(entries.getValue(path).toString(Charsets.UTF_8)).jsonObject
+                    val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                        val node = element.jsonObject
+                        if (node.getValue("id") != rejected.getValue("id")) node else JsonObject(node +
+                            ("rollbackRecord" to JsonObject(node.getValue("rollbackRecord").jsonObject + mapOf(
+                                "candidateSourceInstallStarted" to JsonPrimitive(started),
+                                "state" to JsonPrimitive(if (started) "restored_verified" else "not_required_verified")))))
+                    }
+                    entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+                }
+                val output = fixture.project.parent.resolve("legacy-marker-$started-refused")
+                val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
+                assertTrue(failure.message.orEmpty().contains("repair release legacy changed attempt has a fabricated source-install marker"), failure.message)
+                assertFalse(output.exists())
+            }
         }
     }
 
@@ -4909,6 +5199,8 @@ class ModuleRevisionGraphTest {
         temporaryParent: Path? = null,
         recoveredRollbackPrefix: Boolean = false,
         budget: RepairResourceBudget = RepairResourceBudget(),
+        legacyRejectedPrefix: Boolean = false,
+        legacyPrefixHasChanges: Boolean = true,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
         val project = generatedProject(undispatchedFallback, profile, temporaryParent)
@@ -4919,7 +5211,39 @@ class ModuleRevisionGraphTest {
         val target = project.resolve(relative)
         val before = target.readBytes()
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
-        val prefixAttempts = if (recoveredRollbackPrefix) 1 else 0
+        require(!(recoveredRollbackPrefix && legacyRejectedPrefix))
+        val prefixAttempts = if (recoveredRollbackPrefix || legacyRejectedPrefix) 1 else 0
+        if (legacyRejectedPrefix) {
+            require(!includeProvisional && rejectedAttempts == 0)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
+                graph.beginRun(1, 60_000)
+                val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
+                    1, "compile", "bounded legacy prefix", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after))
+                if (legacyPrefixHasChanges) graph.installCandidate(attempt, mapOf(relative to after))
+                // Detached candidate installation does not exchange the canonical source tree.
+            }
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            val current = graphPath.readText()
+            val defaults = ",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null"
+            assertTrue(defaults in current)
+            val schema3 = current.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3").replace(defaults, "")
+            assertNotEquals(current, schema3)
+            graphPath.writeText(schema3)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile), budget).use { graph ->
+                val rejected = graph.snapshot.nodes.last()
+                val record = requireNotNull(rejected.rollbackRecord)
+                assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+                assertEquals(legacyPrefixHasChanges, rejected.changes.isNotEmpty())
+                assertTrue(record.legacyPendingStateUnknown)
+                assertEquals(if (legacyPrefixHasChanges) null else false, record.candidateSourceInstallStarted)
+                assertEquals(if (legacyPrefixHasChanges) RepairRollbackState.RESTORED_VERIFIED
+                    else RepairRollbackState.NOT_REQUIRED_VERIFIED, record.state)
+                assertContentEquals(before, target.readBytes())
+                graph.synchronizeRepairHistory()
+            }
+        }
         if (recoveredRollbackPrefix) {
             require(!includeProvisional && rejectedAttempts == 0)
             var prefixAttemptId = ""

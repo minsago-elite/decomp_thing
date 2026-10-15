@@ -636,6 +636,46 @@ internal interface RepairRecoverySourceView {
     fun readSource(relative: String): ByteArray
 }
 
+/** Profile lookups may repeat; retain only distinct authenticated inputs, never snapshot reads. */
+private class RecoveryProfileSourceCache(
+    private val sourceView: RepairRecoverySourceView,
+    private val budget: RepairResourceBudget,
+) {
+    private val allowed: Set<String>
+    private val sources = hashMapOf<String, ByteArray>()
+    private var retainedBytes = 0L
+
+    init {
+        val paths = sourceView.sourcePaths
+        require(paths.size <= budget.maximumSourceFiles &&
+            paths == paths.map(::normalizedRelative).distinct().sorted()) {
+            "recovery profile source inventory is unnormalized or over budget"
+        }
+        allowed = paths.toHashSet()
+    }
+
+    @Synchronized
+    fun readSource(relative: String): ByteArray {
+        require(relative == normalizedRelative(relative) && relative in allowed) {
+            "recovery profile source path is not authorized"
+        }
+        sources[relative]?.let { return it.copyOf() }
+        require(sources.size < budget.maximumSourceFiles) { "recovery profile exceeds its source-file budget" }
+        val observed = sourceView.readSource(relative)
+        if (observed.size.toLong() > budget.maximumSourceFileBytes) {
+            throw RepairBudgetExceededException("recovery profile source exceeds its per-file byte budget")
+        }
+        val nextBytes = Math.addExact(retainedBytes, observed.size.toLong())
+        if (nextBytes > budget.maximumSourceBytes) {
+            throw RepairBudgetExceededException("recovery profile sources exceed their aggregate byte budget")
+        }
+        retainedBytes = nextBytes
+        val owned = observed.copyOf()
+        sources[relative] = owned
+        return owned.copyOf() // Never expose the retained bytes to a mutable profile callback.
+    }
+}
+
 /** Sparse index constructed only for a gate-authenticated, lock-owning graph. */
 internal class ModuleRepairIndex private constructor(
     projectRootCandidate: Path?,
@@ -1036,9 +1076,11 @@ internal class ModuleRepairIndex private constructor(
             }
             val profileId = profile.profileId()
             require(profileId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) { "invalid repair profile ID" }
-            val layout = (if (sourceView == null) profile.resolve(root, budget) else
+            val layout = (if (sourceView == null) profile.resolve(root, budget) else {
+                val profileSources = RecoveryProfileSourceCache(sourceView, budget)
                 profile.resolveForRecovery(root, budget, sourceView.sourcePaths, sourceView.editablePaths,
-                    sourceView::readSource)).deepFrozenCopy()
+                    profileSources::readSource)
+            }).deepFrozenCopy()
             if (sourceView != null) require(layout.sourcePaths == sourceView.sourcePaths &&
                 layout.editablePaths == sourceView.editablePaths) { "recovery index source view changed its authorized paths" }
             val sourcePaths = layout.sourcePaths
@@ -3135,6 +3177,7 @@ internal class ModuleRevisionGraph private constructor(
                 require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values)) {
                     "rollback expected digest differs from its target revision: ${node.id}"
                 }
+                requireLegacyRollbackInstallMarker(record, node.changes.isNotEmpty())
                 if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
                     require(record.failureCode == null && record.candidateSourceInstallStarted == false)
                 }
@@ -4471,6 +4514,12 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
     }
 }
 
+private fun requireLegacyRollbackInstallMarker(record: RepairRollbackRecord, hasChanges: Boolean) {
+    require(!record.legacyPendingStateUnknown || !hasChanges || record.candidateSourceInstallStarted == null) {
+        "legacy changed attempt has a fabricated source-install marker"
+    }
+}
+
 private fun validatePendingRollbackRecord(
     record: RepairRollbackRecord,
     pending: PendingAttempt,
@@ -4482,6 +4531,7 @@ private fun validatePendingRollbackRecord(
         "pending rollback record is not bound to its exact target revision"
     }
     require(record.legacyPendingStateUnknown == pending.legacyRecoveryRequired)
+    requireLegacyRollbackInstallMarker(record, pending.candidateChanges.isNotEmpty())
     if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
         require(record.candidateSourceInstallStarted == false && record.failureCode == null) {
             "rollback was marked unnecessary after a source exchange may have started"
@@ -4679,6 +4729,7 @@ private fun validateGraphBeforeRecovery(
             }
             val targetSources = revisionSourcesAt(state.nodes.take(nodeIndex), record.targetRevisionId)
             require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values))
+            requireLegacyRollbackInstallMarker(record, node.changes.isNotEmpty())
             if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
                 require(record.candidateSourceInstallStarted == false)
             }
@@ -4810,19 +4861,12 @@ private fun restorePendingPreimagesBeforeIndex(
     require(targetSources.keys.sorted() == binding.sourcePaths)
     val targetBytes = targetSources.values.fold(0L) { total, source -> Math.addExact(total, source.bytes) }
     require(targetBytes <= requestedBudget.maximumSourceBytes) { "recovery source view exceeds source-byte budget" }
-    val readCounts = hashMapOf<String, Int>()
     val sourceView = object : RepairRecoverySourceView {
         override val sourcePaths: List<String> get() = binding.sourcePaths
         override val editablePaths: List<String> get() = binding.editablePaths
         override fun readSource(relative: String): ByteArray {
             val source = requireNotNull(targetSources[relative]) { "recovery source view path is absent" }
-            val priorReads = readCounts[relative] ?: 0
-            // At most one profile include/layout read and the two authenticated index snapshots.
-            require(relative == normalizedRelative(relative) && priorReads < 3 &&
-                (relative in readCounts || readCounts.size < requestedBudget.maximumSourceFiles)) {
-                "recovery source view read is unnormalized or exceeds its fixed three-pass budget"
-            }
-            readCounts[relative] = priorReads + 1
+            require(relative == normalizedRelative(relative)) { "recovery source view read is unnormalized" }
             val blob = readStableRegularFile(store.blobsPath, source.sha256, requestedBudget.maximumSourceFileBytes)
             require(blob.sha256 == source.sha256 && blob.bytes.size.toLong() == source.bytes) {
                 "recovery source view preimage digest or size differs"
@@ -4833,8 +4877,9 @@ private fun restorePendingPreimagesBeforeIndex(
     }
     // Index identity depends on the resolved dependency evidence, not the dirty source digest.
     // The virtual view substitutes authenticated preimages and excludes paths absent from the
-    // immutable source set. Both index snapshots use this same authenticated target view; an
-    // oversized unaccepted dirty aggregate cannot prevent recovery or become snapshot authority.
+    // immutable source set. Profile lookups alone are cached by the loader; both index snapshots
+    // still reread authenticated preimages physically. No callback-count limit substitutes for
+    // distinct source bounds, and dirty candidate bytes never become recovery index authority.
     val recoveryIndex = SecureRepairRuntime.loadRecoveryIndex(graphAuthority, projectRoot, profile, requestedBudget, sourceView)
     require(recoveryIndex.belongsTo(projectRoot) && recoveryIndex.budget == requestedBudget &&
         recoveryBinding(recoveryIndex) == binding) { "startup recovery dependency index is not bound to persisted authority" }
