@@ -1119,6 +1119,13 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
     private var reader: Thread? = null
     private val bytes = ByteArrayOutputStream()
     private val readerFailed = AtomicBoolean()
+    private val readerEof = AtomicBoolean()
+    private val readerFinished = AtomicBoolean()
+    private val readerOverflow = AtomicBoolean()
+    private val outputObservedBytes = AtomicInteger()
+    private var hostPhase = "NOT_STARTED"
+    private var expectedMarker = "NONE"
+    private var primaryDiagnostic: Map<String, String>? = null
     private var retainedReference: NativeDnsOwnedFd? = null
     private var releaseAttempted = false
     private var exhaustiveNativeProof = false
@@ -1138,9 +1145,45 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
         values.forEach { checkNotNull(nativeObserverBudgetOwner.current).pid() }
         return values
     }
-    private fun marker(expected: String) = nativeAwait(endMillis - 5000) {
-        checkpoint(); check(!readerFailed.get())
-        synchronized(bytes) { bytes.toString(Charsets.US_ASCII).contains(expected) }
+    private fun marker(expected: String) {
+        expectedMarker = when (expected) {
+            "OWNED_HOST_GATE_V2\n" -> "HOST_GATE"
+            "OWNED_PID1_GATE_V2\n" -> "PID1_GATE"
+            else -> "OTHER_FIXED_MARKER"
+        }
+        nativeAwait(endMillis - 5000) {
+            checkpoint(); check(!readerFailed.get())
+            synchronized(bytes) { bytes.toString(Charsets.US_ASCII).contains(expected) }
+        }
+    }
+
+    /** Diagnostic only: never persist arbitrary bwrap/JVM stderr, paths or exception messages. */
+    private fun failureSnapshot(failure: Throwable?): Map<String, String> {
+        val raw = synchronized(bytes) { bytes.toByteArray() }
+        val stages = raw.toString(Charsets.US_ASCII).lineSequence().filter { line ->
+            val fields = line.split(':')
+            fields.size == 3 && fields[0] == "ND1" &&
+                fields[1].toIntOrNull() in setOf(10, 11, 12, 20, 21, 22, 23, 25, 30, 31,
+                    33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 53, 54, 55, 56, 57,
+                    58, 60, 61, 62, 63, 64) && fields[1].toIntOrNull()?.toString() == fields[1] &&
+                fields[2].toIntOrNull()?.let { it in 0..4095 && it.toString() == fields[2] } == true &&
+                line.all { it.code in 32..126 }
+        }.take(32).toList()
+        val child = process
+        val alive = child?.isAlive
+        val exit = if (child != null && alive == false) runCatching { child.exitValue().toString() }.getOrDefault("UNAVAILABLE") else "UNAVAILABLE"
+        return linkedMapOf("schema" to "1", "role" to "DIAGNOSTIC_ONLY_UNQUALIFIED",
+            "primaryFailure" to nativeFailureCategory(failure), "hostPhase" to hostPhase,
+            "expectedMarker" to expectedMarker, "outputRetainedBytes" to raw.size.toString(),
+            "outputObservedBytes" to outputObservedBytes.get().toString(), "outputSha256" to nativeSha(raw),
+            "readerFailed" to readerFailed.get().toString(), "readerEof" to readerEof.get().toString(),
+            "readerFinished" to readerFinished.get().toString(), "readerOverflow" to readerOverflow.get().toString(),
+            "rootAliveAtFailure" to (alive?.toString() ?: "UNAVAILABLE"), "rootExitAtFailure" to exit,
+            "hostGateObserved" to raw.toString(Charsets.US_ASCII).contains("OWNED_HOST_GATE_V2\n").toString(),
+            "pid1GateObserved" to raw.toString(Charsets.US_ASCII).contains("OWNED_PID1_GATE_V2\n").toString(),
+            "fixedStageCount" to stages.size.toString()).also { values ->
+            stages.forEachIndexed { index, stage -> values["fixedStage" + index] = stage.replace(':', '-') }
+        }
     }
     private fun properties(name: String) = nativeOwnedProperties(nativeRead(output.resolve(name), MAXIMUM_CONTROL_FILE))
     private fun bindNamespace(pid: Long, kind: String, identity: NativeNamespace): NativeDnsOwnedFd {
@@ -1249,6 +1292,8 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
         var primary: Throwable? = null
         var result: NativeDnsOwnedResult? = null
         var rootReaped = false; var scopeAbsent = false; var streamsClosed = false
+        var cleanupDiagnosticKinds = "NONE"
+        var cleanupDiagnosticCount = 0
         var rootHostPid = 0L; var innerHostPid = 0L
         try {
             check(nativeDnsUnresolvedOwners.isEmpty()) { "native owned-domain cleanup is quarantined" }
@@ -1281,25 +1326,31 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
             val child = ProcessBuilder(backend.wrap(command)).directory(output.toFile()).redirectErrorStream(true).apply {
                 environment().clear(); environment().putAll(bus.controlEnvironment)
             }.start()
-            process = child; rootHostPid = child.pid()
+            process = child; rootHostPid = child.pid(); hostPhase = "PROCESS_STARTED"
             root = LinuxFilesystemSyscalls.openProcessHandle(rootHostPid)
             reader = Thread({
                 try {
                     val buffer = ByteArray(64)
                     while (true) {
-                        val n = child.inputStream.read(buffer); if (n < 0) break
-                        synchronized(bytes) { check(bytes.size() + n <= MAXIMUM_CONTROL_OUTPUT); bytes.write(buffer, 0, n) }
+                        val n = child.inputStream.read(buffer)
+                        if (n < 0) { readerEof.set(true); break }
+                        outputObservedBytes.addAndGet(n)
+                        synchronized(bytes) {
+                            if (bytes.size() + n > MAXIMUM_CONTROL_OUTPUT) { readerOverflow.set(true); error("native control output bound") }
+                            bytes.write(buffer, 0, n)
+                        }
                     }
                 } catch (_: Throwable) { readerFailed.set(true) }
+                finally { readerFinished.set(true) }
             }, "native-dns-owned-output").also { it.isDaemon = true; it.start() }
             marker("OWNED_HOST_GATE_V2\n")
-            facts["firstGateObservedNanos"] = System.nanoTime()
+            facts["firstGateObservedNanos"] = System.nanoTime(); hostPhase = "HOST_GATE_OBSERVED"
             check(child.isAlive && !LinuxFilesystemSyscalls.processExited(checkNotNull(root)))
             val rootStart = start(rootHostPid)
             LinuxFilesystemSyscalls.openProcessExecutable(rootHostPid).use { check(it.identity.key == key(helper)) }
             requireExactRlimits(rootHostPid, limits) { checkpoint() }.also { check(it.processesSoft == nproc.toLong()) }
             val acquired = backend.verifyAttached(child) { checkpoint() }; scope = acquired; acquired.bindCleanupDeadline(cleanupEnd)
-            facts["scopeBoundObservedNanos"] = System.nanoTime()
+            facts["scopeBoundObservedNanos"] = System.nanoTime(); hostPhase = "SCOPE_ATTACHED"
             scopeFd = NativeDnsOwnedFd.open(acquired.identity.cgroupPath.toString(), 0xb0000)
             val identity = checkNotNull(scopeFd).identity
             val identityHash = nativeSha(("acp-cgroup-v1:" + identity.key.device + ":" + identity.key.inode + ":" + identity.mountId).toByteArray())
@@ -1312,8 +1363,8 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
                 "memoryOomGroup" to acquired.controllers.memoryOomGroup, "runtimeMaxMicros" to acquired.controllers.runtimeMaxMicros,
                 "timeoutStopMicros" to acquired.controllers.timeoutStopMicros, "cpuQuota" to acquired.controllers.cpuQuotaMicros,
                 "cpuPeriod" to acquired.controllers.cpuPeriodMicros, "nproc" to nproc, "fixedRlimitsVerified" to true))
-            checkpoint(); child.outputStream.write('H'.code); child.outputStream.flush()
-            marker("OWNED_PID1_GATE_V2\n")
+            checkpoint(); child.outputStream.write('H'.code); child.outputStream.flush(); hostPhase = "HOST_RELEASE_FLUSHED"
+            marker("OWNED_PID1_GATE_V2\n"); hostPhase = "PID1_GATE_OBSERVED"
             val gate = properties("gate.properties")
             NativeDnsOwnedDomainContract.requireGateShape(gate.stringPropertyNames().associateWith(gate::getProperty), caseName, control, nproc)
             check(gate.getProperty("schema") == "2" && gate.getProperty("caseName") == caseName && gate.getProperty("control") == control)
@@ -1353,7 +1404,7 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
             namespaces.forEach { (kind, value) -> facts[kind + "Device"] = value.device; facts[kind + "Inode"] = value.inode }
             if (control == "retained-reference") retainedReference = bindNamespace(innerHostPid, "net", namespaces.getValue("net"))
             checkpoint(); releaseAttempted = true; facts["payloadReleased"] = true; facts["payloadReleaseNanos"] = System.nanoTime()
-            child.outputStream.write('P'.code); child.outputStream.flush()
+            child.outputStream.write('P'.code); child.outputStream.flush(); hostPhase = "PAYLOAD_RELEASE_FLUSHED"
             val executionRemaining = executionEnd - System.nanoTime(); check(executionRemaining > 0)
             check(child.waitFor(executionRemaining, TimeUnit.NANOSECONDS))
             checkpoint(); rootReaped = true; facts["rootReapedObservedNanos"] = System.nanoTime()
@@ -1415,9 +1466,15 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
             exhaustiveNativeProof = true
             facts["nativeEchild"] = true; facts["nativeReferencesClosed"] = true
             result = NativeDnsOwnedResult(inner, control.takeUnless { it == "positive" })
-        } catch (failure: Throwable) { primary = failure }
+        } catch (failure: Throwable) {
+            primary = failure
+            try { primaryDiagnostic = failureSnapshot(failure) } catch (diagnosticFailure: Throwable) { failure.addSuppressed(diagnosticFailure) }
+        }
         finally {
             val failures = mutableListOf<Throwable>()
+            // Capture before cleanup changes root liveness, including cleanup-only failures.
+            if (primaryDiagnostic == null) try { primaryDiagnostic = failureSnapshot(primary) }
+            catch (diagnosticFailure: Throwable) { primary?.addSuppressed(diagnosticFailure) }
             facts["scopeKillAttempted"] = false; facts["scopeKillRemovedDuringSignal"] = false
             fun attempt(action: () -> Unit) { try { action(); checkpoint(true) } catch (failure: Throwable) { failures += failure } }
             attempt { process?.outputStream?.close() }
@@ -1507,11 +1564,33 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
                     facts["referencesClosed"] == true, facts["hostStateUnchanged"] == true, failures.isNotEmpty(), System.nanoTime(), cleanupEnd) ||
                 facts["observationTimely"] != true)
                 failures += IllegalStateException("native owned-domain cleanup unverified")
+            cleanupDiagnosticCount = failures.size
+            cleanupDiagnosticKinds = failures.map(::nativeFailureCategory).joinToString(".").ifEmpty { "NONE" }
             if (failures.isNotEmpty()) {
                 val first = primary ?: failures.removeAt(0); failures.filterNot { it === first }.forEach(first::addSuppressed); primary = first
             }
         }
-        primary?.let { throw it }
+        primary?.let { failure ->
+            try {
+                val diagnostic = (primaryDiagnostic ?: failureSnapshot(failure)).toMutableMap()
+                // Existing cleanup observations only; a diagnostic never upgrades an unknown outcome.
+                for (key in listOf("rootReaped", "scopeAbsent", "streamsJoinedClosed", "referencesClosed",
+                    "hostStateUnchanged", "observationTimely", "scopeKillAttempted", "scopeKillRemovedDuringSignal")) {
+                    diagnostic["cleanup" + key.replaceFirstChar { it.uppercaseChar() }] =
+                        (facts[key] as? Boolean)?.toString() ?: "UNAVAILABLE"
+                }
+                diagnostic["cleanupFailureCount"] = cleanupDiagnosticCount.toString()
+                diagnostic["cleanupFailureKinds"] = cleanupDiagnosticKinds
+                // A C refusal can arrive while the original timeout enters cleanup. Keep its
+                // final whitelisted stages separately, without replacing the primary snapshot.
+                failureSnapshot(null).filterKeys { key -> key.startsWith("output") || key.startsWith("reader") ||
+                    key.startsWith("fixedStage") || key in setOf("hostGateObserved", "pid1GateObserved") }.forEach { (key, value) ->
+                    diagnostic["final" + key.replaceFirstChar { it.uppercaseChar() }] = value
+                }
+                nativeWriteProperties(output.parent.parent.resolve(output.parent.fileName.toString() + "-owned-diagnostic.properties"), diagnostic)
+            } catch (diagnosticFailure: Throwable) { failure.addSuppressed(diagnosticFailure) }
+            throw failure
+        }
         facts["cleanupVerified"] = true
         facts.putAll(checkNotNull(nativeObserverBudgetOwner.current).counters())
         return checkNotNull(result).copy(domainFacts = facts.toMap())
