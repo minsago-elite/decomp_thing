@@ -2294,7 +2294,7 @@ private class RuntimePrivateControlScope private constructor(
         synchronized(ACTIVE_PRIVATE_CONTROLS) {
             checkpointLocked()
             val location = if (fast) descriptor.whileOpen { fd ->
-                val identity = LinuxFilesystemSyscalls.identity(fd)
+                val identity = rootIdentity.identity(fd)
                 if (identity.key != descriptor.identity.key || identity.mountId != rootDescriptor.identity.mountId ||
                     identity.mode != descriptor.identity.mode) throw IOException("runtime manifest descriptor changed or crossed a mount")
                 val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
