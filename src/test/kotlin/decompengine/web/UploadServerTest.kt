@@ -669,13 +669,16 @@ class UploadServerTest {
     fun `completion publication racing the stop signal is repaired to failed`() {
         val root = createTempDirectory("web-completion-fence-")
         val analyzing = java.util.concurrent.CountDownLatch(1)
+        val completed = java.util.concurrent.CountDownLatch(1)
         lateinit var server: UploadServer
         server = UploadServer("127.0.0.1", 0, root,
             analyzer = JobAnalyzer { _, _ ->
                 analyzing.countDown()
                 check(server.requestStopSignalled().await(15, java.util.concurrent.TimeUnit.SECONDS))
             }, executor = Executor { task ->
-                Thread(task, "web-stop-race-worker").apply { isDaemon = true; start() }
+                Thread({
+                    try { task.run() } finally { completed.countDown() }
+                }, "web-stop-race-worker").apply { isDaemon = true; start() }
             })
         server.start()
         try {
@@ -685,12 +688,8 @@ class UploadServerTest {
             server.requestStop()
             // The stop signal is published while the worker is mid-operation; the completion
             // decision observes it and persists failed instead of a completed publication.
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
-            var job = decompengine.jobs.JobStore(root).get(id)
-            while (job.status != "failed" && System.nanoTime() < deadline) {
-                Thread.sleep(20)
-                job = decompengine.jobs.JobStore(root).get(id)
-            }
+            assertTrue(completed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val job = decompengine.jobs.JobStore(root).get(id)
             assertEquals("failed", job.status)
             assertEquals("Server stopped before the operation reported completion", job.statusMessage)
         } finally {
