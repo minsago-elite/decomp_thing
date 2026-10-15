@@ -162,7 +162,7 @@ internal class AcpProviderBroker private constructor(
     val policy: AcpProviderTransportPolicy.Enabled,
     private val requestBinding: AgentExecutionRequestBinding,
     private val cancellation: AgentCancellation,
-    private val credentials: AcpProviderCredentialMaterial,
+    credentialMaterial: AcpProviderCredentialMaterial,
     remaining: Duration,
     private val maximumInvocationOutputTokens: Int,
     private val maximumInvocationInputTokens: Long?,
@@ -177,6 +177,8 @@ internal class AcpProviderBroker private constructor(
         }
     } else Unit
     private val lock = ReentrantLock()
+    // Guarded by lock. Already-admitted backend work retains its own bounded owner.
+    private var credentials: AcpProviderCredentialMaterial? = credentialMaterial
     private val changed = lock.newCondition()
     private val allowedNanos = minOf(remaining.toNanos(), policy.bounds.overallTimeout.toNanos())
     private val deadlineAdmission = if (System.nanoTime() - startedNanos >= allowedNanos) {
@@ -272,7 +274,9 @@ internal class AcpProviderBroker private constructor(
                 throw AcpProviderBrokerFailure(AcpProviderTerminalKind.RESOURCE_EXHAUSTED)
             }
             checkActive()
-            val exchange = AcpProviderBrokerExchange(sequence, session, turn, brokerDigest(admittedBody), wire, checked.maximumOutputTokens)
+            val dispatchCredentials = credentials ?: throw AcpProviderBrokerFailure(AcpProviderTerminalKind.REVOKED)
+            val exchange = AcpProviderBrokerExchange(sequence, session, turn, brokerDigest(admittedBody), wire,
+                checked.maximumOutputTokens, dispatchCredentials)
             admittedWireBytes += wire.size
             active = exchange
             nextSequence++
@@ -280,7 +284,7 @@ internal class AcpProviderBroker private constructor(
                 // The concrete backend queues one bounded HTTP/1.1 exchange without blocking this owner.
                 // Test implementations have the same nonblocking contract; no caller callback is public.
                 exchange.attachOwner(backend.start(
-                    AcpProviderBackendRequest(policy.endpoint, wire, credentials, Duration.ofMillis(remainingMillis()), startedNanos + allowedNanos), exchange,
+                    AcpProviderBackendRequest(policy.endpoint, wire, dispatchCredentials, Duration.ofMillis(remainingMillis()), startedNanos + allowedNanos), exchange,
                 ))
             } catch (failure: AcpProviderBrokerFailure) {
                 exchange.finishFailure(failure.kind)
@@ -296,10 +300,16 @@ internal class AcpProviderBroker private constructor(
     }
 
     fun revoke(kind: AcpProviderTerminalKind = AcpProviderTerminalKind.REVOKED) = lock.withLock {
-        revoked = true
-        capability.fill(0)
+        revokeDispatch()
         active?.finishFailure(kind)
         changed.signalAll()
+    }
+
+    /** Called with lock held, before cancellation callbacks can reenter dispatch. */
+    private fun revokeDispatch() {
+        revoked = true
+        credentials = null
+        capability.fill(0)
     }
 
     fun snapshot(): AcpProviderBrokerSnapshot = lock.withLock {
@@ -350,14 +360,12 @@ internal class AcpProviderBroker private constructor(
             throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TRANSPORT)
         }
         if (cancellationRequested) {
-            revoked = true
-            capability.fill(0)
+            revokeDispatch()
             active?.finishFailure(AcpProviderTerminalKind.CANCELLED)
             throw AcpProviderBrokerFailure(AcpProviderTerminalKind.CANCELLED)
         }
         if (remainingMillisOrZero() <= 0) {
-            revoked = true
-            capability.fill(0)
+            revokeDispatch()
             active?.finishFailure(AcpProviderTerminalKind.TIMEOUT)
             throw AcpProviderBrokerFailure(AcpProviderTerminalKind.TIMEOUT)
         }
@@ -545,6 +553,7 @@ internal class AcpProviderBroker private constructor(
         private val admittedDigest: String,
         private val wire: ByteArray,
         maximumRequestOutputTokens: Int,
+        credentials: AcpProviderCredentialMaterial,
     ) : AcpProviderBackendReceiver {
         internal var owner: AcpProviderBackendRequestOwner? = null
         internal var terminal: AcpProviderTerminalKind? = null
@@ -705,8 +714,7 @@ internal class AcpProviderBroker private constructor(
         internal fun finishFailure(kind: AcpProviderTerminalKind) {
             if (recorded || terminal != null && terminal != AcpProviderTerminalKind.COMPLETED) return
             terminal = kind
-            revoked = true
-            capability.fill(0)
+            revokeDispatch()
             parser.abort(kind)
             runCatching { subscription?.cancel() }
             runCatching { owner?.cancel() }
