@@ -604,6 +604,7 @@ class UploadServerTest {
             release.countDown()
             executor.shutdownNow()
         }
+    }
     @Test
     fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
         val root = createTempDirectory("web-listing-admission-")
@@ -626,7 +627,6 @@ class UploadServerTest {
         } finally { server.stop() }
     }
 
-    }
 
     @Test
     fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
