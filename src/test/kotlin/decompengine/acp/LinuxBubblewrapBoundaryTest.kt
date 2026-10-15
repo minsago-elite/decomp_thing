@@ -172,6 +172,148 @@ class LinuxBubblewrapBoundaryTest {
             assertEquals("host mounts changed during runtime manifest", lostDiagnostic.message)
             assertTrue(lostDiagnostic.suppressed.isEmpty())
         }
+
+        // The private-control guards compare parsed tables, not the runtime scope's poll result.
+        val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+        val tableParser = boundaryType.getDeclaredMethod("parseHostPhysicalMounts", List::class.java, Function0::class.java)
+        val tableComparison = boundaryType.getDeclaredMethod("requirePrivateControlMountTablesUnchanged",
+            List::class.java, List::class.java, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE, LinuxFileKey::class.java)
+        fun parseTables(lines: List<String>): List<*> = invokePrivate(null, tableParser, lines, {}) as List<*>
+        fun compareTables(before: List<*>, after: List<*>, pathGuard: Boolean = true,
+            recursive: Boolean = false, selfExcluded: Boolean = false) {
+            invokePrivate(null, tableComparison, before, after, pathGuard, recursive,
+                if (selfExcluded) LinuxFileKey(987654321L, 123456789L) else null)
+        }
+        val tableContainsCleanup = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("containsCleanupProofFailure", Throwable::class.java)
+        val firstRow = "123456789 1 9:10 /table-root-canary /table-point-canary rw - tmpfs tmpfs rw"
+        val secondRow = "987654321 1 9:11 /second-root-canary /second-point-canary rw - tmpfs tmpfs rw"
+        val table = parseTables(listOf(firstRow, secondRow))
+        compareTables(table, table)
+        compareTables(table, parseTables(listOf(firstRow, secondRow)))
+        compareTables(emptyList<Any>(), emptyList<Any>())
+        val changedTables = listOf(
+            parseTables(listOf(firstRow)), // Count shrink.
+            parseTables(listOf(firstRow, secondRow, "333333333 1 9:12 /third-root-canary /third-point-canary rw - tmpfs tmpfs rw")),
+            parseTables(listOf(firstRow.replace("123456789", "223456789"), secondRow)),
+            parseTables(listOf(firstRow.replace("9:10", "8:10"), secondRow)),
+            parseTables(listOf(firstRow.replace("9:10", "9:12"), secondRow)),
+            parseTables(listOf(firstRow.replace("/table-root-canary", "/changed-root-canary"), secondRow)),
+            parseTables(listOf(firstRow.replace("/table-point-canary", "/changed-point-canary"), secondRow)),
+            parseTables(listOf(secondRow, firstRow)), // Ordered equality remains strict.
+        )
+        for (pathGuard in listOf(true, false)) {
+            for (recursive in if (pathGuard) listOf(false, true) else listOf(false)) {
+                for (selfExcluded in listOf(false, true)) {
+                    for (changed in changedTables) {
+                        val refused = assertFailsWith<IOException> {
+                            compareTables(table, changed, pathGuard, recursive, selfExcluded)
+                        }
+                        assertEquals(IOException::class.java, refused.javaClass)
+                        assertEquals("host mounts changed during private-control protection", refused.message)
+                        assertEquals(null, refused.cause)
+                        val witness = refused.suppressed.single()
+                        assertEquals("decompengine.acp.PrivateControlMountTableDiagnostic", witness.javaClass.name)
+                        val record = requireNotNull(witness.message)
+                        assertEquals("private-control-mount-v1 kind=TABLE_COMPARISON reason=PARSED_TABLE_INEQUALITY site=" +
+                            (if (pathGuard) "PATH_GUARD_POST_COVERAGE" else "DESCRIPTOR_GUARD_POST_COVERAGE") +
+                            " beforeEntries=2 afterEntries=" + changed.size + " recursive=" + recursive +
+                            " selfExclusionSpecified=" + selfExcluded + " finalControls=NOT_REVALIDATED" +
+                            " poll=NOT_PERFORMED generation=NOT_EVALUATED", record)
+                        assertTrue(record.toByteArray(Charsets.US_ASCII).size <= 512 && record.all { it.code in 32..126 })
+                        assertFalse(record.contains("canary") || record.contains("123456789") || record.contains("987654321"))
+                        assertEquals(null, witness.cause)
+                        assertTrue(witness.stackTrace.isEmpty())
+                        witness.addSuppressed(IOException("not retained"))
+                        assertTrue(witness.suppressed.isEmpty())
+                        assertFalse(AcpCleanupProofFailure::class.java.isInstance(witness))
+                        assertEquals(false, invokePrivate(null, tableContainsCleanup, refused))
+                        val cleanup = AcpCleanupProofFailure("authored later table cleanup")
+                        refused.addSuppressed(cleanup)
+                        assertTrue(refused.suppressed[0] === witness && refused.suppressed[1] === cleanup)
+                        assertEquals(true, invokePrivate(null, tableContainsCleanup, refused))
+                    }
+                }
+            }
+        }
+        val maximumRows = List(4096) { index ->
+            (100000L + index).toString() + " 1 9:10 /maximum-root-canary /maximum-point-canary rw - tmpfs tmpfs rw"
+        }
+        val maximumBefore = parseTables(maximumRows)
+        val maximumAfter = parseTables(maximumRows.toMutableList().also { it[0] = it[0].replace("100000", "999999") })
+        val maximumFailure = assertFailsWith<IOException> { compareTables(maximumBefore, maximumAfter) }
+        assertTrue(requireNotNull(maximumFailure.suppressed.single().message).contains("beforeEntries=4096 afterEntries=4096"))
+
+        // An equal result must not observe diagnostic sizes, format text or scan rows.
+        var equalCalls = 0
+        var equalSizeCalls = 0
+        var rowReads = 0
+        val equalWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { equalSizeCalls++; error("diagnostic size observed on equality") }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean { equalCalls++; return true }
+        }
+        compareTables(equalWithoutSize, emptyList<Any>())
+        assertEquals(1, equalCalls)
+        assertEquals(0, equalSizeCalls)
+        assertEquals(0, rowReads)
+
+        // The original fresh refusal exists before any fallible diagnostic size observation.
+        val sizeFailure = IOException("authored table diagnostic size failure")
+        var unequalCalls = 0
+        var failedSizeCalls = 0
+        val unequalWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { failedSizeCalls++; throw sizeFailure }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean { unequalCalls++; return false }
+        }
+        val omitted = assertFailsWith<IOException> { compareTables(unequalWithoutSize, emptyList<Any>()) }
+        assertTrue(omitted !== sizeFailure)
+        assertEquals(IOException::class.java, omitted.javaClass)
+        assertEquals("host mounts changed during private-control protection", omitted.message)
+        assertEquals(null, omitted.cause)
+        assertTrue(omitted.suppressed.isEmpty())
+        assertEquals(1, unequalCalls)
+        assertEquals(1, failedSizeCalls)
+        assertEquals(0, rowReads)
+
+        var afterSizeCalls = 0
+        val unequalWithSize = object : AbstractList<Any?>() {
+            override val size: Int get() = 1
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = false
+        }
+        val afterWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { afterSizeCalls++; throw sizeFailure }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+        }
+        val afterOmitted = assertFailsWith<IOException> { compareTables(unequalWithSize, afterWithoutSize) }
+        assertTrue(afterOmitted !== sizeFailure)
+        assertEquals(IOException::class.java, afterOmitted.javaClass)
+        assertEquals("host mounts changed during private-control protection", afterOmitted.message)
+        assertEquals(null, afterOmitted.cause)
+        assertTrue(afterOmitted.suppressed.isEmpty())
+        assertEquals(1, afterSizeCalls)
+        assertEquals(0, rowReads)
+
+        val outOfBoundSize = object : AbstractList<Any?>() {
+            override val size: Int get() = 4097
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = false
+        }
+        val outOfBound = assertFailsWith<IOException> { compareTables(outOfBoundSize, emptyList<Any>()) }
+        assertEquals("host mounts changed during private-control protection", outOfBound.message)
+        assertTrue(outOfBound.suppressed.isEmpty()) // Never clamp or fabricate an admitted count.
+        assertEquals(0, rowReads)
+        val comparisonFailure = IOException("authored original comparison failure")
+        val throwsDuringComparison = object : AbstractList<Any?>() {
+            override val size: Int get() { error("diagnostic size after foreign comparison failure") }
+            override fun get(index: Int): Any? { error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = throw comparisonFailure
+        }
+        val foreign = assertFailsWith<IOException> { compareTables(throwsDuringComparison, emptyList<Any>()) }
+        assertTrue(foreign === comparisonFailure)
+        assertTrue(foreign.suppressed.isEmpty())
     }
 
     private class MountDiagnosticSuppressionDisabled : Throwable("authored suppression disabled", null, false, false)

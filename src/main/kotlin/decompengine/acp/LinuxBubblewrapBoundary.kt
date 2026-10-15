@@ -2015,6 +2015,47 @@ private fun requirePrivateControlLocationUnexposed(
     }
 }
 
+/** Only the two already-admitted tables are observed; no poll/query or diagnostic row scan. */
+private fun requirePrivateControlMountTablesUnchanged(
+    before: List<HostPhysicalMount>,
+    after: List<HostPhysicalMount>,
+    pathGuard: Boolean,
+    recursive: Boolean,
+    privateSnapshotOwner: LinuxFileKey?,
+) {
+    if (before != after) {
+        val failure = IOException("host mounts changed during private-control protection")
+        try {
+            // Observe sizes/flags only after the original ordered comparison has refused.
+            val beforeEntries = before.size
+            val afterEntries = after.size
+            if (beforeEntries >= 0 && beforeEntries <= MAXIMUM_PROC_MOUNTINFO_LINES &&
+                afterEntries >= 0 && afterEntries <= MAXIMUM_PROC_MOUNTINFO_LINES) {
+                failure.addSuppressed(PrivateControlMountTableDiagnostic(
+                    pathGuard, beforeEntries, afterEntries, recursive, privateSnapshotOwner != null,
+                ))
+            }
+        } catch (_: Throwable) { /* Unavailable diagnostic facts cannot replace the exact primary. */ }
+        throw failure
+    }
+}
+
+/** Closed scalar vocabulary only; not mount/control identity, generation or cleanup authority. */
+private class PrivateControlMountTableDiagnostic(
+    pathGuard: Boolean,
+    beforeEntries: Int,
+    afterEntries: Int,
+    recursive: Boolean,
+    selfExclusionSpecified: Boolean,
+) : Throwable(
+    "private-control-mount-v1 kind=TABLE_COMPARISON reason=PARSED_TABLE_INEQUALITY site=" +
+        (if (pathGuard) "PATH_GUARD_POST_COVERAGE" else "DESCRIPTOR_GUARD_POST_COVERAGE") +
+        " beforeEntries=$beforeEntries afterEntries=$afterEntries recursive=$recursive" +
+        " selfExclusionSpecified=$selfExclusionSpecified finalControls=NOT_REVALIDATED" +
+        " poll=NOT_PERFORMED generation=NOT_EVALUATED",
+    null, false, false,
+)
+
 internal fun requireAcpPrivateControlsUnexposed(
     source: Path,
     recursive: Boolean,
@@ -2032,9 +2073,8 @@ internal fun requireAcpPrivateControlsUnexposed(
             recursive, mounts, cancellationCheck, privateSnapshotOwner,
         )
     }
-    if (mounts != hostPhysicalMounts(cancellationCheck)) {
-        throw IOException("host mounts changed during private-control protection")
-    }
+    val currentMounts = hostPhysicalMounts(cancellationCheck)
+    requirePrivateControlMountTablesUnchanged(mounts, currentMounts, true, recursive, privateSnapshotOwner)
     ACTIVE_PRIVATE_CONTROLS.forEach { it.physicalLocations(mounts, cancellationCheck) }
 }
 
@@ -2049,9 +2089,8 @@ internal fun requireAcpPrivateControlDescriptorUnexposed(
     val mounts = hostPhysicalMounts(cancellationCheck)
     val location = hostPhysicalLocation(descriptor, mounts, cancellationCheck)
     requirePrivateControlLocationUnexposed(location, false, mounts, cancellationCheck, privateSnapshotOwner)
-    if (mounts != hostPhysicalMounts(cancellationCheck)) {
-        throw IOException("host mounts changed during private-control protection")
-    }
+    val currentMounts = hostPhysicalMounts(cancellationCheck)
+    requirePrivateControlMountTablesUnchanged(mounts, currentMounts, false, false, privateSnapshotOwner)
     ACTIVE_PRIVATE_CONTROLS.forEach { it.physicalLocations(mounts, cancellationCheck) }
 }
 
