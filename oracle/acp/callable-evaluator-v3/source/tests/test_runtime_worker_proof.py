@@ -1042,7 +1042,9 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertEqual('OSError',result['failureClass'])
                 if mutation is None:
                     self.assertEqual('removed',result['_receiptCleanup']['status'])
-                    self.assertFalse(receipt['directory'].exists());self.assertTrue(runtime.worker_execution_complete(result))
+                    self.assertFalse(receipt['directory'].exists())
+                    with patch.object(runtime,'BASE',base):
+                        self.assertTrue(runtime.worker_execution_complete(result))
                 else:
                     self.assertTrue(receipt['directory'].exists());self.assertNotEqual('removed',result['_receiptCleanup']['status'])
                 if mutation not in ('prelaunch','absence'):
