@@ -181,50 +181,179 @@ class Resolver:
             return
         if len(self.directories) >= MAX_FILES:
             raise Refusal('configuration directory budget before enumeration')
-        real, links = self.resolve(name)
-        physical = self.root / real.lstrip('/')
-        if not physical.is_dir():
-            raise Refusal('link search/config root is not a directory')
-        entries = []
-        with os.scandir(physical) as children:
-            for entry in children:
-                child = Path(entry.path)
-                if len(entries) >= MAX_FILES or self.entry_work >= MAX_FILES:
-                    raise Refusal('directory entry budget before materialization')
-                self.entry_work += 1
-                self.tick()
-                metadata = child.lstat()
-                kind = ('symlink' if stat.S_ISLNK(metadata.st_mode) else 'directory' if stat.S_ISDIR(metadata.st_mode)
-                        else 'file' if stat.S_ISREG(metadata.st_mode) else 'unsupported')
-                if kind == 'unsupported':
-                    raise Refusal('unsupported link configuration entry')
-                row = {'name': child.name, 'kind': kind}
-                if kind == 'symlink':
-                    row['target'] = os.readlink(child)
-                entries.append(row)
-                if len(entries) > MAX_FILES:
-                    raise Refusal('directory entry budget')
-        entries.sort(key=lambda row: row['name'])
-        self.directories[key] = {'logicalPath': name, 'realpath': real, 'symlinks': links, 'entries': entries}
-        if len(self.directories) > MAX_FILES:
-            raise Refusal('configuration directory budget')
-        if recursive:
-            for row in entries:
-                child = logical(row['name'], name)
-                # Directory symlinks are resolved and traversed, with active-path
-                # recursion protection; target substitutions remain in closure.
-                real_child, _ = self.resolve(child)
-                target = self.root / real_child.lstrip('/')
-                if target.is_dir():
-                    if real_child in self.active:
-                        raise Refusal('configuration directory cycle')
-                    self.active.add(real_child)
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        def identity(metadata): return tuple(getattr(metadata, field) for field in fields)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        self.tick()
+        root = os.open(self.root, flags)
+        directory = None
+        installed = False
+        try:
+            try:
+                root_identity = identity(os.fstat(root))
+                def root_unchanged():
+                    self.tick()
+                    if (identity(os.fstat(root)) != root_identity or
+                            identity(os.stat(self.root, follow_symlinks=False)) != root_identity):
+                        raise Refusal('configuration root identity changed')
+                def opened(real, require_directory=False):
+                    # Only canonical resolved components cross this retained root.
+                    parts = real.split('/')[1:]
+                    if real == '/': parts = []
+                    if not real.startswith('/') or any(part in ('', '.', '..') for part in parts):
+                        raise Refusal('invalid resolved configuration path')
+                    current, owned = root, False
+                    chain = [('/', root_identity)]
                     try:
-                        self.directory(child, True)
+                        for index, part in enumerate(parts):
+                            self.tick()
+                            metadata = os.stat(part, dir_fd=current, follow_symlinks=False)
+                            location = '/' + '/'.join(parts[:index + 1])
+                            if stat.S_ISLNK(metadata.st_mode):
+                                raise Refusal('resolved configuration component became a symlink')
+                            if index < len(parts) - 1 or stat.S_ISDIR(metadata.st_mode):
+                                child = os.open(part, flags, dir_fd=current)
+                                try:
+                                    admitted = os.fstat(child)
+                                    if not stat.S_ISDIR(admitted.st_mode) or identity(metadata) != identity(admitted):
+                                        raise Refusal('configuration component changed before descriptor admission')
+                                except BaseException:
+                                    os.close(child)
+                                    raise
+                                previous, previous_owned = current, owned
+                                current, owned = child, True
+                                if previous_owned: os.close(previous)
+                                metadata = admitted
+                            elif require_directory:
+                                raise Refusal('link search/config root is not a directory')
+                            chain.append((location, identity(metadata)))
+                        if parts and not stat.S_ISDIR(metadata.st_mode):
+                            return None, metadata, tuple(chain)
+                        result = (current, os.fstat(current), tuple(chain))
+                        owned = False
+                        return result
                     finally:
-                        self.active.remove(real_child)
-                else:
-                    self.file(child)
+                        if owned: os.close(current)
+                def close_directory(descriptor):
+                    if descriptor is not None and descriptor != root: os.close(descriptor)
+                def capture(spelling):
+                    root_unchanged()
+                    real, links = self.resolve(spelling)
+                    descriptor, metadata, chain = opened(real)
+                    link_identities = []
+                    try:
+                        for link in links:
+                            self.tick()
+                            parent, leaf = posixpath.split(link['path'])
+                            parent_fd, _, parent_chain = opened(parent or '/', True)
+                            try:
+                                first = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                                if not stat.S_ISLNK(first.st_mode) or os.readlink(leaf, dir_fd=parent_fd) != link['target']:
+                                    raise Refusal('configuration logical symlink changed')
+                                if identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != identity(first):
+                                    raise Refusal('configuration logical symlink identity changed')
+                                link_identities.append((link['path'], link['target'], identity(first), parent_chain))
+                            finally:
+                                close_directory(parent_fd)
+                        if self.resolve(spelling) != (real, links):
+                            raise Refusal('configuration logical resolution changed')
+                        root_unchanged()
+                        return descriptor, metadata, (real, links, chain, tuple(link_identities))
+                    except BaseException:
+                        close_directory(descriptor)
+                        raise
+                directory, before, observed = capture(name)
+                if directory is None or not stat.S_ISDIR(before.st_mode):
+                    raise Refusal('link search/config root is not a directory')
+                real, links = observed[:2]
+                def checkpoint():
+                    if identity(os.fstat(directory)) != identity(before):
+                        raise Refusal('held configuration directory changed')
+                    descriptor, metadata, current = capture(name)
+                    try:
+                        if current != observed or identity(metadata) != identity(before):
+                            raise Refusal('named configuration directory or resolution changed')
+                    finally:
+                        close_directory(descriptor)
+                entries, entry_identities = [], {}
+                with os.scandir(directory) as children:
+                    for entry in children:
+                        if len(entries) >= MAX_FILES or self.entry_work >= MAX_FILES:
+                            raise Refusal('directory entry budget before materialization')
+                        self.entry_work += 1
+                        self.tick()
+                        leaf = entry.name
+                        if type(leaf) is not str or leaf in ('', '.', '..') or '/' in leaf or '\0' in leaf:
+                            raise Refusal('invalid configuration entry name')
+                        metadata = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                        kind = ('symlink' if stat.S_ISLNK(metadata.st_mode) else 'directory' if stat.S_ISDIR(metadata.st_mode)
+                                else 'file' if stat.S_ISREG(metadata.st_mode) else 'unsupported')
+                        if kind == 'unsupported':
+                            raise Refusal('unsupported link configuration entry')
+                        row = {'name': leaf, 'kind': kind}
+                        if kind == 'symlink': row['target'] = os.readlink(leaf, dir_fd=directory)
+                        if identity(os.stat(leaf, dir_fd=directory, follow_symlinks=False)) != identity(metadata):
+                            raise Refusal('configuration entry changed during enumeration')
+                        entry_identities[leaf] = identity(metadata)
+                        entries.append(row)
+                        if len(entries) > MAX_FILES:
+                            raise Refusal('directory entry budget')
+                checkpoint()
+                entries.sort(key=lambda row: row['name'])
+                self.directories[key] = {'logicalPath': name, 'realpath': real, 'symlinks': links, 'entries': entries}
+                installed = True
+                if len(self.directories) > MAX_FILES:
+                    raise Refusal('configuration directory budget')
+                def entry_unchanged(row):
+                    self.tick()
+                    first = os.stat(row['name'], dir_fd=directory, follow_symlinks=False)
+                    if identity(first) != entry_identities[row['name']]:
+                        raise Refusal('configuration entry changed before or after recursion')
+                    if row['kind'] == 'symlink' and os.readlink(row['name'], dir_fd=directory) != row['target']:
+                        raise Refusal('configuration entry link target changed')
+                    if identity(os.stat(row['name'], dir_fd=directory, follow_symlinks=False)) != identity(first):
+                        raise Refusal('configuration entry changed during recursive decision')
+                if recursive:
+                    for row in entries:
+                        checkpoint()
+                        entry_unchanged(row)
+                        child = logical(row['name'], name)
+                        target_fd, target_metadata, target_observed = capture(child)
+                        try:
+                            real_child = target_observed[0]
+                            if row['kind'] != 'symlink' and identity(target_metadata) != entry_identities[row['name']]:
+                                raise Refusal('configuration child resolution identity changed')
+                            # The type decision comes from the nofollow held-root chain,
+                            # never Path.is_dir on a mutable target pathname.
+                            if stat.S_ISDIR(target_metadata.st_mode):
+                                if real_child in self.active:
+                                    raise Refusal('configuration directory cycle')
+                                self.active.add(real_child)
+                                try: self.directory(child, True)
+                                finally: self.active.remove(real_child)
+                            else:
+                                self.file(child)
+                            entry_unchanged(row)
+                            checkpoint()
+                            if target_fd is not None and identity(os.fstat(target_fd)) != identity(target_metadata):
+                                raise Refusal('held recursive configuration target changed')
+                            current_fd, current_metadata, current_observed = capture(child)
+                            try:
+                                if current_observed != target_observed or identity(current_metadata) != identity(target_metadata):
+                                    raise Refusal('recursive configuration target resolution changed')
+                            finally:
+                                close_directory(current_fd)
+                        finally:
+                            close_directory(target_fd)
+                checkpoint()
+            finally:
+                try:
+                    if directory is not None and directory != root: os.close(directory)
+                finally:
+                    os.close(root)
+        except BaseException:
+            if installed: self.directories.pop(key, None)
+            raise
 
     def choose(self, token, directories, *, library=False, static=False):
         self.tick()

@@ -1,6 +1,7 @@
 """Pure filesystem fixtures; native subprocess paths are forbidden."""
 import copy,contextlib,hashlib,importlib.util,json,os,shlex,struct,subprocess,tempfile,unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 SOURCE=Path(__file__).resolve().parents[1]
 SPEC=importlib.util.spec_from_file_location('pin_environment',SOURCE/'toolchain-001/pin_environment.py')
@@ -553,5 +554,250 @@ class X86PltMetadataTests(unittest.TestCase):
    with self.subTest(address=address,size=size,entry=entry),self.assertRaises(l.Refusal):pin.monitor_inputs.elf(self.image([(0x70000000,address),(0x70000001,size),(0x70000003,entry)]),l)
   for kwargs in [{'flags':4},{'filesz':0x380,'memsz':1024},{'overlap':True}]:
    with self.subTest(kwargs=kwargs),self.assertRaises(l.Refusal):pin.monitor_inputs.elf(self.image(**kwargs),l)
+
+
+
+class RetainedDirectoryTests(unittest.TestCase):
+    """The actual directory method runs over authored nodes/FDs, never real paths."""
+    def directory_vector(self, defect=None, recursive=False, name='/tools/alias/../config'):
+        serial = [100]
+        def node(kind, children=None, target=None):
+            serial[0] += 1
+            mode = {'directory': l.stat.S_IFDIR | 0o700, 'file': l.stat.S_IFREG | 0o400,
+                    'symlink': l.stat.S_IFLNK | 0o777}[kind]
+            return {'kind': kind, 'children': children or {}, 'target': target,
+                    'metadata': dict(st_dev=7, st_ino=serial[0], st_mode=mode, st_uid=1000,
+                                     st_gid=1000, st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)}
+        nested = node('directory', {'leaf': node('file')})
+        config = node('directory', {'plain': node('file'), 'nested': nested,
+                                    'alias-dir': node('symlink', target='../other')})
+        other = node('directory', {'more': node('file')})
+        target = node('directory', {'deep': node('directory'), 'config': config, 'other': other})
+        tools = node('directory', {'alias': node('symlink', target='../target/deep')})
+        original_root = node('directory', {'tools': tools, 'target': target})
+        named_root = [original_root]
+        if defect == 'cycle': config['children']['alias-dir']['target'] = '.'
+        resolver = l.Resolver(Path('/authored/root'))
+        handles, opened, closed, events, scans, files = {}, [], [], [], [], []
+        injected = OSError(13, 'authored directory operation refusal')
+        primary_scan = [None]
+        mutated = [False]
+        failed = [False]
+        def metadata(item): return SimpleNamespace(**item['metadata'])
+        def lookup(parts):
+            item = named_root[0]
+            for part in parts:
+                if item['kind'] != 'directory' or part not in item['children']:
+                    raise FileNotFoundError(2, 'authored missing component')
+                item = item['children'][part]
+            return item
+        def resolved(spelling):
+            pending, parts, links = spelling.split('/')[1:], [], []
+            while pending:
+                part = pending.pop(0)
+                if part in ('', '.'): continue
+                if part == '..':
+                    if not parts: raise l.Refusal('authored logical escape')
+                    parts.pop(); continue
+                item = lookup(parts + [part])
+                if item['kind'] == 'symlink':
+                    location = '/' + '/'.join(parts + [part])
+                    links.append({'path': location, 'target': item['target']})
+                    if len(links) > 40: raise l.Refusal('authored symlink cycle')
+                    if item['target'].startswith('/'): parts = []
+                    pending = item['target'].split('/') + pending
+                else:
+                    if pending and item['kind'] != 'directory': raise l.Refusal('authored non-directory')
+                    parts.append(part)
+            return '/' + '/'.join(parts), links
+        def child_at(path, dir_fd):
+            self.assertIn(dir_fd, handles)
+            self.assertIsInstance(path, str)
+            self.assertNotIn('/', path)
+            parent = handles[dir_fd]
+            self.assertEqual('directory', parent['kind'])
+            if path not in parent['children']: raise FileNotFoundError(2, 'authored missing entry')
+            return parent['children'][path]
+        def fail_once(stage):
+            if defect == stage and not failed[0]:
+                failed[0] = True
+                raise injected
+        def opened_at(path, flags, *, dir_fd=None):
+            self.assertTrue(flags & l.os.O_NOFOLLOW); self.assertTrue(flags & l.os.O_DIRECTORY)
+            if dir_fd is None:
+                self.assertEqual(Path('/authored/root'), path)
+                item = named_root[0]
+            else:
+                item = child_at(path, dir_fd)
+                if item is config: fail_once('open-error')
+            if item['kind'] != 'directory': raise NotADirectoryError(20, 'authored nofollow directory')
+            number = 1000 + len(opened)
+            handles[number] = item; opened.append(number)
+            events.append(('open', number, item['metadata']['st_ino']))
+            return number
+        fstat_calls = {}
+        def fstat_at(number):
+            self.assertIn(number, handles)
+            fstat_calls[number] = fstat_calls.get(number, 0) + 1
+            if handles[number] is config:
+                fail_once('fstat-error')
+                if defect == 'late-fstat-error' and fstat_calls[number] == 2:
+                    events.append(('config-fstat', number, 2, 'injected'))
+                    fail_once('late-fstat-error')
+                events.append(('config-fstat', number, fstat_calls[number], 'success'))
+            return metadata(handles[number])
+        def stat_at(path, *, dir_fd=None, follow_symlinks=True):
+            self.assertFalse(follow_symlinks)
+            if dir_fd is None:
+                self.assertEqual(Path('/authored/root'), path)
+                return metadata(named_root[0])
+            if handles[dir_fd] is config and path == 'plain': fail_once('stat-error')
+            return metadata(child_at(path, dir_fd))
+        def readlink_at(path, *, dir_fd=None):
+            item = child_at(path, dir_fd)
+            self.assertEqual('symlink', item['kind'])
+            if handles[dir_fd] is config: fail_once('readlink-error')
+            return item['target']
+        def close_at(number):
+            self.assertIn(number, handles, 'no double close or borrowed unknown FD')
+            item = handles[number]
+            del handles[number]; closed.append(number)
+            events.append(('close', number))
+            if item is target: fail_once('parent-close-error')
+            if item is original_root: fail_once('root-close-error')
+            if number == primary_scan[0]: fail_once('close-error')
+        def mutate():
+            if mutated[0]: return
+            mutated[0] = True
+            if defect == 'rename':
+                target['children']['renamed'] = target['children'].pop('config')
+            elif defect == 'replace': target['children']['config'] = node('directory', {'injected': node('file')})
+            elif defect == 'held-metadata': config['metadata']['st_mtime_ns'] += 1
+            elif defect == 'parent-replace':
+                original_root['children']['target'] = node('directory', dict(target['children']))
+            elif defect == 'root-replace': named_root[0] = node('directory', dict(original_root['children']))
+            elif defect == 'link-replace': tools['children']['alias'] = node('symlink', target='../target/deep')
+            elif defect == 'link-target': tools['children']['alias']['target'] = '../target/deep/.'
+        class Entry:
+            def __init__(self, value): self.name = value
+            @property
+            def path(self): raise AssertionError('directory entry path authority forbidden')
+        class Scan:
+            def __init__(self, number):
+                self.number = number; self.item = handles[number]
+                self.names = iter(list(self.item['children'])); self.closed = False; self.advances = 0
+            def __enter__(self): return self
+            def __exit__(self, *unused): self.closed = True
+            def __iter__(self): return self
+            def __next__(self):
+                self.advances += 1
+                if self.item is config:
+                    if self.advances == 1: mutate()
+                    if self.advances == 2: fail_once('scan-next-error')
+                return Entry(next(self.names))
+        def scanned(number):
+            self.assertIsInstance(number, int, 'enumeration must use the held descriptor')
+            self.assertIn(number, handles)
+            if handles[number] is config:
+                if primary_scan[0] is None: primary_scan[0] = number
+                fail_once('scandir-error')
+            scan = Scan(number); scans.append(scan); events.append(('scan', number))
+            return scan
+        def recorded_file(spelling):
+            files.append(spelling)
+            fail_once('file-error')
+            if defect in ('recursive-replace', 'recursive-kind') and spelling.endswith('/nested/leaf'):
+                config['children']['nested'] = node('directory') if defect == 'recursive-replace' else node('file')
+            return b'authored unused bytes'
+        result = error = None
+        with contextlib.ExitStack() as stack:
+            for item, method, value in ((l.os, 'open', opened_at), (l.os, 'fstat', fstat_at),
+                    (l.os, 'stat', stat_at), (l.os, 'readlink', readlink_at), (l.os, 'close', close_at),
+                    (l.os, 'scandir', scanned), (resolver, 'resolve', resolved), (resolver, 'file', recorded_file)):
+                stack.enter_context(patch.object(item, method, side_effect=value))
+            for method in ('is_dir', 'lstat', 'stat'):
+                stack.enter_context(patch.object(Path, method, side_effect=AssertionError('no pathname metadata authority')))
+            try:
+                resolver.directory(name, recursive)
+                result = resolver.directories[('recursive:' if recursive else 'search:') + name]
+            except BaseException as caught: error = caught
+        return result, error, resolver, opened, closed, handles, scans, files, events, injected
+
+    def assert_closed(self, vector):
+        _, _, _, opened, closed, handles, scans, _, _, _ = vector
+        self.assertEqual({}, handles); self.assertEqual(sorted(opened), sorted(closed))
+        self.assertEqual(len(closed), len(set(closed)))
+        self.assertTrue(all(scan.closed for scan in scans))
+
+    def test_held_directory_search_keeps_logical_spelling_entries_and_relative_fd_ops(self):
+        vector = self.directory_vector()
+        result, error, resolver, _, _, _, scans, files, _, _ = vector
+        self.assertIsNone(error); self.assertEqual('/tools/alias/../config', result['logicalPath'])
+        self.assertEqual('/target/config', result['realpath'])
+        self.assertEqual([{'path': '/tools/alias', 'target': '../target/deep'}], result['symlinks'])
+        self.assertEqual([{'name': 'alias-dir', 'kind': 'symlink', 'target': '../other'},
+                          {'name': 'nested', 'kind': 'directory'}, {'name': 'plain', 'kind': 'file'}], result['entries'])
+        self.assertEqual(3, resolver.entry_work); self.assertEqual([], files); self.assertEqual(1, len(scans))
+        self.assert_closed(vector)
+
+    def test_recursive_type_decisions_use_retained_chain_and_keep_symlink_search_semantics(self):
+        vector = self.directory_vector(recursive=True)
+        result, error, resolver, _, _, _, _, files, _, _ = vector
+        self.assertIsNone(error); self.assertEqual('/target/config', result['realpath'])
+        prefix = '/tools/alias/../config'
+        self.assertEqual([prefix + '/alias-dir/more', prefix + '/nested/leaf', prefix + '/plain'], files)
+        self.assertIn('recursive:' + prefix + '/alias-dir', resolver.directories)
+        self.assertIn('recursive:' + prefix + '/nested', resolver.directories)
+        self.assertEqual(set(), resolver.active); self.assert_closed(vector)
+
+    def test_directory_root_parent_leaf_link_and_held_mutations_refuse_without_cached_success(self):
+        for defect in ('rename', 'replace', 'held-metadata', 'parent-replace', 'root-replace', 'link-replace', 'link-target'):
+            with self.subTest(defect=defect):
+                vector = self.directory_vector(defect)
+                result, error, resolver, _, _, _, _, files, _, _ = vector
+                self.assertIsNone(result); self.assertIsInstance(error, (l.Refusal, OSError))
+                self.assertNotIn('search:/tools/alias/../config', resolver.directories)
+                self.assertEqual([], files); self.assert_closed(vector)
+
+    def test_recursive_target_replacement_kind_change_cycle_and_file_error_stay_unknown(self):
+        for defect in ('recursive-replace', 'recursive-kind', 'cycle', 'file-error'):
+            with self.subTest(defect=defect):
+                vector = self.directory_vector(defect, recursive=True)
+                result, error, resolver, _, _, _, _, _, _, _ = vector
+                self.assertIsNone(result); self.assertIsInstance(error, (l.Refusal, OSError))
+                self.assertNotIn('recursive:/tools/alias/../config', resolver.directories)
+                self.assertEqual(set(), resolver.active); self.assert_closed(vector)
+
+    def test_partial_open_metadata_enumeration_link_and_close_errors_release_all_owned_fds(self):
+        for defect in ('open-error', 'fstat-error', 'late-fstat-error', 'stat-error', 'readlink-error', 'scandir-error', 'scan-next-error',
+                       'parent-close-error', 'close-error', 'root-close-error'):
+            with self.subTest(defect=defect):
+                vector = self.directory_vector(defect)
+                result, error, resolver, _, _, _, scans, files, events, injected = vector
+                self.assertIsNone(result); self.assertIs(error, injected)
+                self.assertNotIn('search:/tools/alias/../config', resolver.directories)
+                if defect == 'late-fstat-error':
+                    observations = [event for event in events if event[0] == 'config-fstat']
+                    self.assertEqual(2, len(observations))
+                    descriptor = observations[0][1]
+                    self.assertEqual([('config-fstat', descriptor, 1, 'success'),
+                                      ('config-fstat', descriptor, 2, 'injected')], observations)
+                    self.assertEqual({}, resolver.directories); self.assertEqual(set(), resolver.active)
+                    self.assertEqual([], scans); self.assertEqual([], files)
+                self.assert_closed(vector)
+
+    def test_existing_work_and_entry_caps_refuse_before_extra_acquisition_or_materialization(self):
+        with patch.object(l, 'MAX_WORK', 0): vector = self.directory_vector()
+        self.assertIsInstance(vector[1], l.Refusal); self.assertEqual([], vector[3]); self.assert_closed(vector)
+        with patch.object(l, 'MAX_FILES', 1): vector = self.directory_vector()
+        self.assertIsInstance(vector[1], l.Refusal); self.assertEqual(1, vector[2].entry_work)
+        self.assertEqual(2, vector[6][0].advances); self.assert_closed(vector)
+
+    def test_logical_root_directory_borrows_and_closes_the_retained_root_only_once(self):
+        vector = self.directory_vector(name='/')
+        result, error, _, _, _, _, _, _, _, _ = vector
+        self.assertIsNone(error); self.assertEqual('/', result['realpath']); self.assertEqual([], result['symlinks'])
+        self.assertEqual([{'name': 'target', 'kind': 'directory'}, {'name': 'tools', 'kind': 'directory'}], result['entries'])
+        self.assert_closed(vector)
 
 if __name__=='__main__':unittest.main()
