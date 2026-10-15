@@ -1,10 +1,23 @@
 {
   "analysis": {
+    "cc1RuntimeDiagnostics": {
+      "analysisThreadCount": 4,
+      "decompilerWorkerCount": 4,
+      "diagnosticPolicy": "jvm-mxbean-stdout-v1",
+      "maximumJavaHeapBytes": 2147483648,
+      "maximumResidentBytes": 17179869184,
+      "processorCount": 4,
+      "provider": "gcc-cc1-runtime-diagnostics-v1",
+      "runtimeInvocationVersion": 7,
+      "schemaVersion": 1,
+      "wallClockSeconds": 9000,
+      "workerOperation": "analyze-diagnostics-v1"
+    },
     "exporter": {
       "id": "decompengine-ghidra-program-model",
       "recoveryMode": "planning",
-      "sha256": "5bb042af49917ca6cfee26a3b04638d7ebe815813d0608d5a11da19757270e8d",
-      "version": 12
+      "sha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29",
+      "version": 16
     },
     "ghidra": {
       "archiveBytes": 569445154,

@@ -342,8 +342,13 @@ jobs:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
+          RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          git fetch --no-tags --depth=1 origin 7eedc5c59cb1bca08f32d92cb18047a6b368ce65
+          mkdir -p build/exporter-rendering-v16
+          git show 7eedc5c59cb1bca08f32d92cb18047a6b368ce65:src/main/resources/ghidra_scripts/ExportProgramModel.java > build/exporter-rendering-v16/ExportProgramModel-v15.java
+          printf '%s  %s\n' 9c0411b9a6fdf9ad358a93b07b5973d1abbc1b9b3189382cab3630a7d2867612 build/exporter-rendering-v16/ExportProgramModel-v15.java | sha256sum --check --strict
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
@@ -363,6 +368,13 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-rendering-parity
+          path: |
+            build/exporter-rendering-v16/native/equality-*/baseline-v15/reports
+            build/exporter-rendering-v16/native/equality-*/candidate-v16/reports
 
   archival-ghidra:
     runs-on: ubuntu-24.04

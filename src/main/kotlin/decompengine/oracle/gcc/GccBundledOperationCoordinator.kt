@@ -228,12 +228,12 @@ internal class GccBundledPreparedOperation internal constructor(
     /** Executes the versioned full-recovery exporter and snapshots its output after worker absence. */
     @Synchronized
     fun executeFullExport(): GccBundledFullExportOperation {
-        check(intent.bundledRuntime.recoveryMode == "full") { "full export execution requires the full-recovery runtime" }
-        check(intent.bundledRuntime.invocationVersion != 8) { "native call runtime cannot enter ordinary full-export publication" }
+        intent.requireFullExportExecution()
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val captured = borrowed.withPinnedDescriptor { descriptor ->
-                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts,
+                    expectedDecompilerWorkers = intent.bundledRuntime.decompilerWorkerCount)
             }
             inputs.verify("after GCC full export snapshot")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -243,6 +243,18 @@ internal class GccBundledPreparedOperation internal constructor(
                 GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
             )
         }.also { completedFullExport = it }
+    }
+
+    /** Diagnostic execution produces only contained execution evidence, never a full-export capability. */
+    @Synchronized
+    fun executeRuntimeDiagnostic(): Path {
+        check(intent.bundledRuntime.runtimeDiagnostics) { "runtime diagnostics require the explicit diagnostic runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { _, execution ->
+            journal.recordExecution(execution.canonicalBytes)
+            inputs.verify("after GCC diagnostic execution")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            journal.path.resolve("execution.json")
+        }
     }
 
     /** Captures both outputs only after the contained worker and its cgroup are absent. */
@@ -734,7 +746,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in setOf(5, 8)) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..8) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -781,6 +793,7 @@ internal class GccBundledPreparedOperation internal constructor(
                         checkNotNull(operationDeadline).remainingWholeSecondsMillis(intent.budgets.wallClockMillis),
                         intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
                         minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
+                        processorCount = intent.bundledRuntime.processorCount,
                     ),
                     deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     interruption = interruption,

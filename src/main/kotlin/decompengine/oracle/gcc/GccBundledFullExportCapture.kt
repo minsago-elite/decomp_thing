@@ -151,7 +151,8 @@ internal object GccBundledFullExportCapture {
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false)
+        expectedDecompilerWorkers: Int = 1,
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, false, expectedDecompilerWorkers)
 
     /** Fixed native-operation sibling only; ordinary full exports retain their exact inventory. */
     internal fun captureWithNativeCallSibling(
@@ -160,7 +161,7 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
         checkpoint: () -> Unit = {},
-    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, checkpoint)
+    ): GccBundledFullExportSnapshot = captureExact(run, expectedReports, artifacts, limits, true, 1, checkpoint)
 
     private fun captureExact(
         run: LinuxDescriptor,
@@ -168,9 +169,14 @@ internal object GccBundledFullExportCapture {
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits,
         nativeCallSibling: Boolean,
+        expectedDecompilerWorkers: Int,
         checkpoint: () -> Unit = {},
     ): GccBundledFullExportSnapshot {
         checkpoint()
+        require(expectedDecompilerWorkers == 1 || expectedDecompilerWorkers == 4) {
+            "GCC full export capture worker count is unsupported"
+        }
+        require(!nativeCallSibling || expectedDecompilerWorkers == 1) { "native call capture requires its serial runtime" }
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "GCC full export capture contains duplicate invocation roles" }
         val expectedInput = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256
@@ -211,7 +217,7 @@ internal object GccBundledFullExportCapture {
                                         run, reports, export, planning, functions, globals, types, failures,
                                         expectedReports, expectedInput, expectedExporter, expectedAnalysisTool,
                                         expectedInputBytes, expectedExporterBytes, expectedAnalysisToolBytes,
-                                        topNames, limits, expectedReportNames, checkpoint,
+                                        topNames, limits, expectedDecompilerWorkers, expectedReportNames, checkpoint,
                                     )
                                 }
                             }
@@ -240,12 +246,13 @@ internal object GccBundledFullExportCapture {
         expectedAnalysisToolBytes: Long,
         expectedTop: Set<String>,
         limits: GccResumeByteValidationLimits,
+        expectedDecompilerWorkers: Int,
         expectedReportNames: Set<String>,
         checkpoint: () -> Unit,
     ): GccBundledFullExportSnapshot {
         val capture = GccBoundExportFiles(limits.transitionAggregateBytes, checkpoint)
         val stateBytes = capture.read(export, "state.json", limits.exporterStateBytes)
-        val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool)
+        val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool, expectedDecompilerWorkers)
         val progressBytes = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
         val progress = requireFullProgress(progressBytes)
         require(progress.reused == 0L) { "fresh full GCC export unexpectedly reused function records" }
@@ -409,16 +416,18 @@ internal object GccBundledFullExportCapture {
         expectedInput: String,
         expectedExporter: String,
         expectedAnalysisTool: String,
+        expectedDecompilerWorkers: Int,
     ): GccBundledFullExportTarget {
         require(bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() && bytes.none { it == '\r'.code.toByte() }) {
             "GCC full exporter state is not a complete LF-terminated record"
         }
         val root = OracleJson.parse(bytes).jsonObject
         require(root.keys == setOf(
-            "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
+            "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode", "decompilationWorkers",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 12L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 16L &&
+            number(root, "decompilationWorkers") == expectedDecompilerWorkers.toLong() &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool
@@ -434,7 +443,8 @@ internal object GccBundledFullExportCapture {
             append("{\"schemaVersion\":2,\"exporterVersion\":").append(number(root, "exporterVersion"))
             append(",\"exporterSha256\":\"").append(expectedExporter)
             append("\",\"analysisToolSha256\":\"").append(expectedAnalysisTool)
-            append("\",\"recoveryMode\":\"full\",\"inputSha256\":\"").append(expectedInput)
+            append("\",\"recoveryMode\":\"full\",\"decompilationWorkers\":").append(expectedDecompilerWorkers)
+            append(",\"inputSha256\":\"").append(expectedInput)
             append("\",\"language\":\"").append(target.language)
             append("\",\"compilerSpec\":\"").append(target.compilerSpec)
             append("\",\"semanticStateBinding\":null}\n")

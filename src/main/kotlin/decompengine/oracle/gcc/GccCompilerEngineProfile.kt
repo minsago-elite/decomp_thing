@@ -60,6 +60,68 @@ data class GccCompilerEngineArtifactBinding(
     val sha256: String,
 )
 
+/** Closed, checked policy for bounded cc1 full-recovery throughput; no caller-selected counts. */
+data class GccCompilerEngineThroughputPolicy(
+    val schemaVersion: Int,
+    val runtimeInvocationVersion: Int,
+    val processorCount: Int,
+    val analysisThreadCount: Int,
+    val decompilerWorkerCount: Int,
+) {
+    init {
+        require(schemaVersion == 1 && runtimeInvocationVersion == 6 && processorCount == 4 &&
+            analysisThreadCount == 4 && decompilerWorkerCount == 4
+        ) { "compiler-engine throughput policy is unsupported" }
+    }
+
+    internal fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "schemaVersion" to JsonPrimitive(schemaVersion),
+        "runtimeInvocationVersion" to JsonPrimitive(runtimeInvocationVersion),
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ))
+}
+
+/** Diagnostic execution admission only; this policy cannot select ordinary full-export recovery. */
+data class GccCompilerEngineDiagnosticPolicy(
+    val provider: String,
+    val schemaVersion: Int,
+    val runtimeInvocationVersion: Int,
+    val workerOperation: String,
+    val diagnosticPolicy: String,
+    val processorCount: Int,
+    val analysisThreadCount: Int,
+    val decompilerWorkerCount: Int,
+    val maximumJavaHeapBytes: Long,
+    val maximumResidentBytes: Long,
+    val wallClockSeconds: Long,
+) {
+    init {
+        require(provider == "gcc-cc1-runtime-diagnostics-v1" && schemaVersion == 1 &&
+            runtimeInvocationVersion == 7 && workerOperation == "analyze-diagnostics-v1" &&
+            diagnosticPolicy == "jvm-mxbean-stdout-v1" && processorCount == 4 &&
+            analysisThreadCount == 4 && decompilerWorkerCount == 4 &&
+            maximumJavaHeapBytes == 2L * 1024 * 1024 * 1024 &&
+            maximumResidentBytes == 16L * 1024 * 1024 * 1024 && wallClockSeconds == 9_000L
+        ) { "compiler-engine diagnostic policy is unsupported" }
+    }
+
+    internal fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "provider" to JsonPrimitive(provider),
+        "schemaVersion" to JsonPrimitive(schemaVersion),
+        "runtimeInvocationVersion" to JsonPrimitive(runtimeInvocationVersion),
+        "workerOperation" to JsonPrimitive(workerOperation),
+        "diagnosticPolicy" to JsonPrimitive(diagnosticPolicy),
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+        "maximumJavaHeapBytes" to JsonPrimitive(maximumJavaHeapBytes),
+        "maximumResidentBytes" to JsonPrimitive(maximumResidentBytes),
+        "wallClockSeconds" to JsonPrimitive(wallClockSeconds),
+    ))
+}
+
 data class AuthenticatedGccCompilerEngineArtifact(
     val path: Path,
     val bytes: Long,
@@ -140,6 +202,8 @@ data class GccCompilerEngineSuite(
     val analysis: GccCompilerEngineAnalysisToolchain,
     val budgets: GccCompilerEngineBudgets,
     val engines: List<GccCompilerEngine>,
+    val fullRecoveryCc1Throughput: GccCompilerEngineThroughputPolicy? = null,
+    val cc1RuntimeDiagnostics: GccCompilerEngineDiagnosticPolicy? = null,
 ) {
     init {
         require(engines.map(GccCompilerEngine::id) == listOf("cc1", "lto1"))
@@ -227,6 +291,32 @@ internal class GccCompilerEngineProfileLoader(
             plannerId = planner.stringField("id"),
             plannerVersion = planner.intField("version"),
         )
+        val throughput = analysisDocument["fullRecoveryCc1Throughput"]?.let {
+            val policy = analysisDocument.objectField("fullRecoveryCc1Throughput")
+            GccCompilerEngineThroughputPolicy(
+                schemaVersion = policy.intField("schemaVersion"),
+                runtimeInvocationVersion = policy.intField("runtimeInvocationVersion"),
+                processorCount = policy.intField("processorCount"),
+                analysisThreadCount = policy.intField("analysisThreadCount"),
+                decompilerWorkerCount = policy.intField("decompilerWorkerCount"),
+            )
+        }
+        val diagnostics = analysisDocument["cc1RuntimeDiagnostics"]?.let {
+            val policy = analysisDocument.objectField("cc1RuntimeDiagnostics")
+            GccCompilerEngineDiagnosticPolicy(
+                provider = policy.stringField("provider"),
+                schemaVersion = policy.intField("schemaVersion"),
+                runtimeInvocationVersion = policy.intField("runtimeInvocationVersion"),
+                workerOperation = policy.stringField("workerOperation"),
+                diagnosticPolicy = policy.stringField("diagnosticPolicy"),
+                processorCount = policy.intField("processorCount"),
+                analysisThreadCount = policy.intField("analysisThreadCount"),
+                decompilerWorkerCount = policy.intField("decompilerWorkerCount"),
+                maximumJavaHeapBytes = policy.longField("maximumJavaHeapBytes"),
+                maximumResidentBytes = policy.longField("maximumResidentBytes"),
+                wallClockSeconds = policy.longField("wallClockSeconds"),
+            )
+        }
         authenticateAnalysisToolchain(analysis)
 
         val sourceLock = readBoundDependency(
@@ -279,6 +369,8 @@ internal class GccCompilerEngineProfileLoader(
             analysis = analysis,
             budgets = budgets,
             engines = Collections.unmodifiableList(engines),
+            fullRecoveryCc1Throughput = throughput,
+            cc1RuntimeDiagnostics = diagnostics,
         )
     }
 
@@ -316,7 +408,7 @@ internal class GccCompilerEngineProfileLoader(
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 12 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 16 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -625,7 +717,7 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
-        private const val DRIVER_COMPILER_PROFILE_SHA256 = "59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc"
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab"
         private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"

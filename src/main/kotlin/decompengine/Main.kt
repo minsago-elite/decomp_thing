@@ -45,6 +45,7 @@ fun main(args: Array<String>) {
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
+        "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
@@ -97,26 +98,32 @@ private fun runGccEngineFullExport(args: List<String>) {
     runGccEngineCommand(args, fullRecoveryExport = true)
 }
 
-private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean, nativeCallObservations: Boolean = false) {
+private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
+    runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false) {
     val options = try {
-        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport, nativeCallObservations)
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport = fullRecoveryExport,
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
         val command = when {
             nativeCallObservations -> "gcc-engine-native-calls"
+            runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
             fullRecoveryExport -> "gcc-engine-full-export"
             else -> "gcc-engine-plan"
         }
-        val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineArgumentUsage(fullRecoveryExport, nativeCallObservations)
         val resumeOption = if (fullRecoveryExport || nativeCallObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
-        System.err.println("usage: llm_bin_patch $command <$engines> <stripped-binary> " +
+        val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport = fullRecoveryExport,
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
+        System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
             "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)
     }
     val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
     println("engine: ${options.engineId}")
     println("operation result: $result")
-    if (nativeCallObservations) {
+    if (runtimeDiagnostics) {
+        println("Diagnostic execution journal retained; no qualification, scoring, or release authority is emitted.")
+    } else if (nativeCallObservations) {
         println("Native call observations and model provenance are retained in the result; structural scoring remains unavailable.")
     } else if (fullRecoveryExport) {
         println("Full model provenance is recorded in the result; structural scoring remains unavailable and scratch is retained.")
@@ -592,6 +599,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-runtime-diagnostic cc1 <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
@@ -605,6 +613,7 @@ private fun printHelp() {
           Doctor's --profile selects generated-c-make-v1 (default) or generated-c-ninja-v1.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
           gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
+          gcc-engine-runtime-diagnostic retains a diagnostic execution journal without qualification, scoring, or release authority.
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           gcc-engine-native-calls retains native call observations alongside an unchanged full model; results remain unscored and release-ineligible.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.

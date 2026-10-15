@@ -13,15 +13,34 @@ internal data class GccBundledCliOptions(
     val engineId: String, val binary: Path, val profile: Path, val archive: Path,
     val output: Path, val scratch: Path, val diskPolicy: FullTreeDiskScratchPolicy,
     val resumeAfterCheckpoint: Long?, val fullRecoveryExport: Boolean = false,
+    val runtimeDiagnostics: Boolean = false,
     val nativeCallObservations: Boolean = false,
 ) {
+    val commandName: String get() = when {
+        nativeCallObservations -> "gcc-engine-native-calls"
+        runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
+        fullRecoveryExport -> "gcc-engine-full-export"
+        else -> "gcc-engine-plan"
+    }
+
     companion object {
+        fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false,
+            nativeCallObservations: Boolean = false): String = when {
+            runtimeDiagnostics || nativeCallObservations -> "cc1"
+            fullRecoveryExport -> "<cc1|driver>"
+            else -> "<cc1|lto1>"
+        }
+
         fun engineArgumentUsage(fullRecoveryExport: Boolean, nativeCallObservations: Boolean = false): String =
-            if (nativeCallObservations) "cc1" else if (fullRecoveryExport) "cc1|driver" else "cc1|lto1"
+            engineUsage(fullRecoveryExport = fullRecoveryExport, nativeCallObservations = nativeCallObservations)
+                .removeSurrounding("<", ">")
 
         fun parse(arguments: List<String>, fullRecoveryExport: Boolean = false,
-            nativeCallObservations: Boolean = false): GccBundledCliOptions {
-            require(!fullRecoveryExport || !nativeCallObservations) { "distinct export commands cannot be combined" }
+            runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false): GccBundledCliOptions {
+            require(!runtimeDiagnostics || fullRecoveryExport) { "runtime diagnostics require full recovery" }
+            require(!nativeCallObservations || (!fullRecoveryExport && !runtimeDiagnostics)) {
+                "distinct export commands cannot be combined"
+            }
             require(arguments.size in 2..32 && arguments.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536)
             val positionals = mutableListOf<String>()
             val values = linkedMapOf<String, String>()
@@ -45,6 +64,7 @@ internal data class GccBundledCliOptions(
             require(!fullRecoveryExport || positionals[0] in setOf("cc1", "driver")) {
                 "full-recovery structural export requires cc1 or driver"
             }
+            require(!runtimeDiagnostics || positionals[0] == "cc1") { "runtime diagnostics require cc1" }
             require(positionals[0] != "driver" || fullRecoveryExport) {
                 "driver admission requires a fresh full-recovery export"
             }
@@ -65,7 +85,8 @@ internal data class GccBundledCliOptions(
                     number("--scratch-min-bytes", 8L * 1024 * 1024 * 1024)!!,
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
                     number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
-                fullRecoveryExport, nativeCallObservations).also {
+                fullRecoveryExport = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics,
+                nativeCallObservations = nativeCallObservations).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!it.output.startsWith(it.scratch) && !it.scratch.startsWith(it.output)) { "output and scratch must be disjoint" }
@@ -84,11 +105,7 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
         "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v1"), "schemaVersion" to JsonPrimitive(1),
-        "argv" to JsonArray((listOf(when {
-            options.nativeCallObservations -> "gcc-engine-native-calls"
-            options.fullRecoveryExport -> "gcc-engine-full-export"
-            else -> "gcc-engine-plan"
-        }) + arguments)
+        "argv" to JsonArray((listOf(options.commandName) + arguments)
             .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),
         "profile" to JsonPrimitive(options.profile.toString()), "archive" to JsonPrimitive(options.archive.toString()),
@@ -105,7 +122,8 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
 
     init {
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
-        require(GccBundledCliOptions.parse(arguments, options.fullRecoveryExport, options.nativeCallObservations) == options) {
+        require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
+            runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options) {
             "CLI argv differs from its selected options"
         }
     }

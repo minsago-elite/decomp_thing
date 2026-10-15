@@ -33,9 +33,9 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc-cc1-16.2.0", profile.profileId)
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
-        assertEquals("59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc",
+        assertEquals("5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab",
             profile.compilerEngineProfileSha256)
-        assertEquals("13a06679600970d93b5226f9774ef5d610675a9ab018e6d5fc777b88e546a370",
+        assertEquals("e9642742f1ecde0fe63088d3e416a3a2ffab97be86f2988282d05d88eba0bbc7",
             profile.fullExportProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
@@ -189,6 +189,30 @@ class GccDriverStructuralProfileTest {
             document.getValue("receiptLineageSha256").jsonPrimitive.content,
         )
         assertEquals(64, binding.sha256.length)
+    }
+
+    @Test
+    fun `checked serial full export rejects unapproved parallel runtime and execution substitution`() {
+        val profile = profile()
+        val snapshot = fullSnapshot(profile, modelBytes(profile, executableAddress(profile)))
+        for (count in listOf(1, 2, 3, 4, 5)) {
+            assertFailsWith<IllegalArgumentException> {
+                profile.bindFullExport(fullOperation(profile, snapshot, runtimeWorkers = count, forceParallel = true))
+            }
+        }
+        assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceParallelExecution = true)) }
+    }
+
+    @Test
+    fun `diagnostic intent and runtime cannot become structural full export authority`() {
+        val profile = profile()
+        val snapshot = fullSnapshot(profile, modelBytes(profile, executableAddress(profile)))
+        for ((diagnosticIntent, diagnosticRuntime) in listOf(true to false, false to true, true to true)) {
+            assertFailsWith<IllegalArgumentException> {
+                profile.bindFullExport(fullOperation(profile, snapshot,
+                    diagnosticIntent = diagnosticIntent, diagnosticRuntime = diagnosticRuntime))
+            }
+        }
     }
 
     @Test
@@ -493,19 +517,30 @@ class GccDriverStructuralProfileTest {
         intentExporterSha256: String = snapshot.exporterSha256,
         intentEngineId: String = profile.engineId,
         plannerEngineId: String = profile.engineId,
+        runtimeWorkers: Int = 4,
+        forceParallel: Boolean = false,
+        forceParallelExecution: Boolean = false,
+        diagnosticIntent: Boolean = false,
+        diagnosticRuntime: Boolean = false,
     ): GccBundledFullExportOperation {
         val operationId = "a".repeat(64)
         val plannerProfile = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines.json"), plannerEngineId).use {
             OracleJson.parseCanonical(it.policyBytes()) as JsonObject
         }
+        val parallel = profile.engineId == "cc1" && forceParallel
         val intent = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-operation-intent-v2"),
-            "schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive(if (diagnosticIntent) "gcc-bundled-operation-intent-v4"
+                else if (parallel) "gcc-bundled-operation-intent-v3" else "gcc-bundled-operation-intent-v2"),
+            "schemaVersion" to JsonPrimitive(if (diagnosticIntent) 4 else if (parallel) 3 else 2),
             "operationId" to JsonPrimitive(operationId),
             "engineId" to JsonPrimitive(intentEngineId),
             "runKind" to JsonPrimitive("fresh-control"),
             "plannerProfile" to plannerProfile,
-            "bundledRuntime" to JsonObject(mapOf("provider" to JsonPrimitive("bundled-ghidra-java-api-runtime-v5"))),
+            "bundledRuntime" to JsonObject(mapOf("provider" to JsonPrimitive(if (diagnosticRuntime) "bundled-ghidra-java-api-runtime-v7"
+                else if (parallel) "bundled-ghidra-java-api-runtime-v6"
+                else "bundled-ghidra-java-api-runtime-v5")) + if (parallel) mapOf(
+                "processorCount" to JsonPrimitive(runtimeWorkers), "analysisThreadCount" to JsonPrimitive(runtimeWorkers),
+                "decompilerWorkerCount" to JsonPrimitive(runtimeWorkers)) else emptyMap()),
             "artifacts" to JsonArray(listOf(
                 artifact("engine-binary", profile.strippedBinary.bytes, profile.strippedBinary.sha256),
                 artifact("exporter-source", snapshot.exporterBytes, intentExporterSha256),
@@ -515,8 +550,8 @@ class GccDriverStructuralProfileTest {
         val intentBytes = OracleJson.canonicalBytes(intent)
         val intentSha256 = OracleArtifacts.sha256(intentBytes)
         val executionUnsigned = JsonObject(mapOf(
-            "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v1"),
-            "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive(if (parallel || forceParallelExecution) "kotlin-lease-contained-command-execution-v2" else "kotlin-lease-contained-command-execution-v1"),
+            "schemaVersion" to JsonPrimitive(if (parallel || forceParallelExecution) 2 else 1),
             "childExitCode" to JsonPrimitive(0),
             "unitAbsent" to JsonPrimitive(true),
             "cgroupAbsent" to JsonPrimitive(true),

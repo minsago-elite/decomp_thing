@@ -954,11 +954,19 @@ internal data class KotlinSystemdCgroupCommandResources(
     val maximumResidentBytes: Long,
     val pidsMax: Long,
     val maximumFileBytes: Long,
+    val processorCount: Int = 1,
 ) {
+    // Throughput changes concurrency, never the admitted total compute budget.
+    internal val aggregateCpuSeconds: Long
+        get() = isolatedObservationServiceRuntimeSeconds(wallClockMillis / 1_000L)
+
     init {
         require(wallClockMillis in 1_000L..86_400_000L && wallClockMillis % 1_000L == 0L)
         require(maximumResidentBytes in 256L * 1024 * 1024..64L * 1024 * 1024 * 1024)
         require(pidsMax in 4L..4096L && maximumFileBytes in 1L..1024L * 1024 * 1024)
+        require(processorCount in 1..MAXIMUM_CONTAINED_COMMAND_PROCESSORS) {
+            "contained command processor count exceeds the independent host ceiling"
+        }
     }
 
     internal fun json(): JsonObject = JsonObject(mapOf(
@@ -966,7 +974,7 @@ internal data class KotlinSystemdCgroupCommandResources(
         "maximumResidentBytes" to JsonPrimitive(maximumResidentBytes),
         "pidsMax" to JsonPrimitive(pidsMax),
         "maximumFileBytes" to JsonPrimitive(maximumFileBytes),
-    ))
+    ) + if (processorCount == 1) emptyMap() else mapOf("processorCount" to JsonPrimitive(processorCount)))
 }
 
 internal class KotlinSystemdCgroupCommandAttachment(bytes: ByteArray) {
@@ -1057,7 +1065,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
             val additionalMounts = java.util.List.copyOf(runtimeMounts)
             val additionalInputs = java.util.List.copyOf(readOnlyInputs)
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v1"),
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v${if (resources.processorCount == 1) 1 else 2}"),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
                 "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
                 "runtimeMounts" to JsonArray(additionalMounts.map { it.canonicalIdentity() }),
@@ -1077,7 +1085,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 "readOnlyControlDirectories" to retainedDirectories.controlsToJson(),
             )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
                 (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
-                (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()))))
+                (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()) +
+                (if (resources.processorCount == 1) emptyMap() else mapOf("resources" to resources.json())))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1242,9 +1251,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
                 val result = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(1),
-                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v1"
-                        else "kotlin-lease-contained-command-interrupted-v1"),
+                    "schemaVersion" to JsonPrimitive(if (resources.processorCount == 1) 1 else 2),
+                    "provider" to JsonPrimitive(if (interruption == null) "kotlin-lease-contained-command-execution-v${if (resources.processorCount == 1) 1 else 2}"
+                        else "kotlin-lease-contained-command-interrupted-v${if (resources.processorCount == 1) 1 else 2}"),
                     "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment.canonicalBytes)),
                     "requestSha256" to JsonPrimitive(request.sha256),
                     "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
@@ -3241,6 +3250,7 @@ private data class IsolatedObservationResources(
     val tasksMax: Long,
     val timeoutStopMillis: Long,
     val cleanupLimits: AcpRuntimeClosureLimits,
+    val processorCount: Int = 1,
 ) {
     companion object {
         fun derive(
@@ -3316,7 +3326,7 @@ private data class IsolatedObservationResources(
                 maximumDatabaseBytes = requested.maximumFileBytes,
                 maximumFileBytes = requested.maximumFileBytes,
                 maximumEntities = 1L,
-                cpuSeconds = isolatedObservationServiceRuntimeSeconds(wallSeconds),
+                cpuSeconds = requested.aggregateCpuSeconds,
                 wallSeconds = wallSeconds,
                 serviceRuntimeSeconds = isolatedObservationServiceRuntimeSeconds(wallSeconds),
                 tasksMax = requested.pidsMax,
@@ -3326,6 +3336,7 @@ private data class IsolatedObservationResources(
                     maximumUserOwnedFileBytes = requested.maximumFileBytes,
                     maximumDepth = MAXIMUM_PRIVATE_DEPTH,
                 ),
+                processorCount = requested.processorCount,
             )
         }
 
@@ -4614,7 +4625,7 @@ private class TrustedObservationBoundary(
         add("--property=MemoryMax=${resources.maximumResidentBytes}")
         add("--property=MemorySwapMax=0")
         add("--property=OOMPolicy=kill")
-        add("--property=CPUQuota=100%")
+        add("--property=CPUQuota=${resources.processorCount * 100}%")
         add("--property=KillMode=control-group")
         add("--property=SendSIGKILL=yes")
         add("--property=RuntimeMaxSec=${resources.serviceRuntimeSeconds}s")
@@ -6152,8 +6163,13 @@ private class ManagedObservationUnit(
         commandBootPopulation?.let { require(it == snapshot.population) { "contained command keeper identities changed" } }
         commandBootPopulation = snapshot.population
         commandKeeperNamespacePid = keeperNamespacePid
+        val hostCpuCapacity = if (requested.processorCount == 1) null else captureContainedCommandCpuCapacity(mainPid).also {
+            require(it.controlGroup == expectedControlGroup) { "CPU capacity observation differs from the attached cgroup" }
+            it.requireCapacity(requested.processorCount)
+        }
         val unsigned = JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v1"),
+            "schemaVersion" to JsonPrimitive(if (requested.processorCount == 1) 1 else 2),
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v${if (requested.processorCount == 1) 1 else 2}"),
             "unitName" to JsonPrimitive(unitName), "nonce" to JsonPrimitive(nonce),
             "bootId" to JsonPrimitive(systemdBootIdToKernelUuid(snapshot.bootId)),
             "invocationId" to JsonPrimitive(snapshot.invocationId), "controlGroup" to JsonPrimitive(snapshot.controlGroup),
@@ -6174,7 +6190,7 @@ private class ManagedObservationUnit(
                 "executableDevice" to JsonPrimitive(process.executableDevice), "executableInode" to JsonPrimitive(process.executableInode),
                 "executableMountId" to JsonPrimitive(process.executableMountId),
             )) }),
-        ))
+        ) + (hostCpuCapacity?.let { mapOf("hostCpuCapacity" to it.json()) } ?: emptyMap()))
         return KotlinSystemdCgroupCommandAttachment(containedCommandRecord(unsigned, "attachmentSha256"))
     }
 
@@ -6182,11 +6198,27 @@ private class ManagedObservationUnit(
         require(bootTopology == ObservationBootProcessTopology.SINGLE_KOTLIN_COMMAND_KEEPER)
         val deadline = deadlineAfter(Duration.ofMillis(wallClockMillis), "contained command completion")
         var nextStatus = 0L
+        val cpuMonitor = if (resources.processorCount == 1) null else ContainedCommandCpuBudgetMonitor(
+            resources.cpuSeconds, resources.processorCount,
+            STATUS_POLL_INTERVAL.toMillis() + SERVICE_CLEANUP_TIMEOUT.toMillis() + 1_000L,
+        )
         while (System.nanoTime() < deadline) {
             readContainedCommandProtocol(runTree, KotlinContainedCommandProtocol.OUTCOME_FILE)?.let { return it }
             pollControl()
             val now = System.nanoTime()
             if (now >= nextStatus) {
+                if (cpuMonitor != null) {
+                    val cgroup = cgroupPath ?: isolationFail("contained CPU monitor lacks its retained cgroup")
+                    val before = requirePinnedCgroupSelection(cgroup)
+                    requireActualControllers(cgroup, resources)
+                    val usage = parseFlatCounters(
+                        readBoundedText(cgroup.resolve("cpu.stat"), CGROUP_TEXT_BYTES), "cpu.stat",
+                    )["usage_usec"] ?: isolationFail("contained CPU monitor lacks aggregate usage")
+                    require(requirePinnedCgroupSelection(cgroup) == before) {
+                        "contained aggregate CPU accounting changed identity"
+                    }
+                    cpuMonitor.observe(usage, ::killRetainedProcessHandles, ::stopAndProveRemoved)
+                }
                 requireUnitStillRunning(controller.show(), "during contained command execution")
                 nextStatus = addNanos(now, STATUS_POLL_INTERVAL.toNanos(), "contained command status poll")
             }
@@ -6560,13 +6592,9 @@ private class ManagedObservationUnit(
         val swapMax = readRequiredLong(cgroup.resolve("memory.swap.max"), "isolated memory.swap.max")
         val oomGroup = readBoundedText(cgroup.resolve("memory.oom.group"), CGROUP_TEXT_BYTES).trim()
         val cpu = readBoundedText(cgroup.resolve("cpu.max"), CGROUP_TEXT_BYTES)
-            .trim().split(Regex("\\s+"))
-        val quota = cpu.getOrNull(0)?.toLongOrNull()
-        val period = cpu.getOrNull(1)?.toLongOrNull()
         if (
             pidsMax != expected.tasksMax || memoryMax != expected.maximumResidentBytes ||
-            swapMax != 0L || oomGroup != "1" || cpu.size != 2 || quota == null || period == null ||
-            quota <= 0L || quota != period
+            swapMax != 0L || oomGroup != "1" || !containedCommandCpuQuotaMatches(cpu, expected.processorCount)
         ) isolationFail("isolated cgroup controllers differ from the authenticated runtime policy")
         val procs = readCgroupProcesses(cgroup)
         if (mainPid !in procs) isolationFail("isolated bubblewrap leader is absent from its cgroup")
@@ -7075,7 +7103,7 @@ private class ManagedObservationUnit(
         if (properties["MemoryMax"] != expected.maximumResidentBytes.toString()) add("MemoryMax")
         if (properties["MemorySwapMax"] != "0") add("MemorySwapMax")
         if (properties["OOMPolicy"] != "kill") add("OOMPolicy")
-        if (properties["CPUQuotaPerSecUSec"] !in setOf("1s", "1000000us")) add("CPUQuota")
+        if (parseSystemdMicros(properties["CPUQuotaPerSecUSec"]) != expected.processorCount * 1_000_000L) add("CPUQuota")
         if (properties["KillMode"] != "control-group") add("KillMode")
         if (properties["SendSIGKILL"] != "yes") add("SendSIGKILL")
         if (properties["Delegate"] != "no") add("Delegate")

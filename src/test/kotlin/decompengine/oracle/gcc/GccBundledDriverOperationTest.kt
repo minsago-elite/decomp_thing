@@ -72,7 +72,13 @@ class GccBundledDriverOperationTest {
                 for (engine in listOf("cc1", "lto1")) {
                     intent(engines, engine = engine, version = 3, artifacts = profileArtifacts(engines, engine))
                 }
-                intent(engines, engine = "cc1", artifacts = profileArtifacts(engines, "cc1"))
+                // The default profile admits serial full export, not unqualified parallel throughput.
+                assertEquals(null, engines.suite.fullRecoveryCc1Throughput)
+                intent(engines, engine = "cc1", version = 5, artifacts = profileArtifacts(engines, "cc1"))
+                val parallel = assertFailsWith<IllegalArgumentException> {
+                    intent(engines, engine = "cc1", version = 6, artifacts = profileArtifacts(engines, "cc1"))
+                }
+                assertEquals("parallel full recovery requires the retained cc1 throughput policy", parallel.message)
                 assertFailsWith<IllegalArgumentException> {
                     intent(engines, engine = "lto1", artifacts = profileArtifacts(engines, "lto1"))
                 }
