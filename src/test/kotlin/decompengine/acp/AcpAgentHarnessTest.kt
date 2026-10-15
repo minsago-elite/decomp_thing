@@ -739,7 +739,16 @@ class AcpAgentHarnessTest {
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
-            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, case.label)
+            val phaseContext = if (invocation.phaseReached == AcpExecutionLifecyclePhase.SESSION_CREATED) {
+                case.label
+            } else {
+                try {
+                    sessionPreferencePhaseFailureContext(case.label, failure, invocation)
+                } catch (_: Throwable) {
+                    case.label // Diagnostic construction cannot replace the original phase check.
+                }
+            }
+            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, phaseContext)
             assertNull(invocation.wirePromptSha256, case.label)
             assertFalse(failure.stackTraceToString().contains(case.secretCanary), case.label)
             assertFalse(invocation.toString().contains(case.secretCanary), case.label)
@@ -2350,6 +2359,61 @@ class AcpAgentHarnessTest {
                 maxOutputBytes = 128L * 1024,
             ),
         )
+
+    // Failure-only context: fixed labels and line numbers, never throwable messages or raw frames.
+    // getStackTrace still snapshots the whole array; only inspected/rendered entries are bounded here.
+    private fun sessionPreferencePhaseFailureContext(
+        label: String,
+        failure: AgentExecutionException,
+        invocation: AcpInvocationEvidenceSnapshot,
+    ): String = buildString {
+        append(label)
+        append(" [phase=").append(invocation.phaseReached.name)
+        append(";kind=").append(failure.failure.kind.name)
+        append(";cleanup=").append(invocation.cleanupDisposition.name)
+        var current: Throwable? = failure
+        var depth = 0
+        var emitted = 0
+        while (current != null && depth < 8) {
+            val observed = current ?: break
+            val category = when (observed) {
+                is java.io.IOException -> "IOException"
+                is java.util.concurrent.CancellationException -> "CancellationException"
+                is IllegalArgumentException -> "IllegalArgumentException"
+                is IllegalStateException -> "IllegalStateException"
+                is SecurityException -> "SecurityException"
+                is java.util.concurrent.TimeoutException -> "TimeoutException"
+                is InterruptedException -> "InterruptedException"
+                is ExecutionException -> "ExecutionException"
+                is AssertionError -> "AssertionError"
+                is Error -> "Error"
+                is RuntimeException -> "RuntimeException"
+                is Exception -> "Exception"
+                else -> "Throwable"
+            }
+            append(";cause[").append(depth).append("]=").append(category)
+            if (emitted < 64) {
+                val frames = observed.stackTrace
+                var index = 0
+                while (index < minOf(frames.size, 64) && emitted < 64) {
+                    val frame = frames[index++]
+                    if (frame.className.startsWith("decompengine.")) {
+                        val component = when (frame.fileName) {
+                            "AcpAgentHarness.kt" -> "Harness"
+                            "LinuxBubblewrapBoundary.kt" -> "Boundary"
+                            "LinuxFilesystemSyscalls.kt" -> "Syscalls"
+                            else -> "Other"
+                        }
+                        append(',').append(component).append(':').append(frame.lineNumber)
+                        emitted++
+                    }
+                }
+            }
+            depth++
+            current = if (depth < 8) observed.cause else null
+        }
+        append(']')
+    }
 
     private fun fixture(
         idleMillis: Long = 1_000,
