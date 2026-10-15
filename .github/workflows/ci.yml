@@ -258,12 +258,9 @@ jobs:
         run: |
           mv build/test-results/test build/test-results/full-suite
           mv build/reports/tests/test build/reports/tests/full-suite
-      - name: Verify installed native analysis I/O
-        if: matrix.shard == 'core'
-        run: ./gradlew --no-daemon verifyAnalysisIoHelperInstalled | tee build/analysis-native-installed-verification.txt
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
-        run: bash scripts/test-repair-validation-snapshot.sh
+        run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
       - name: Release root-owned application-bundled Ghidra
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
