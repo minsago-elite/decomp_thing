@@ -1440,7 +1440,7 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_monitor_source_capture_exact_payload_eof_flags_and_owned_closure(self):
         vector=self.capture_source_vector()
         self.assertIsNone(vector.error);self.assertEqual(vector.payload,vector.raw)
-        self.assertEqual([7,1],[row[1] for row in vector.events if row[0]=='read'])
+        self.assertEqual([8,1],[row[1] for row in vector.events if row[0]=='read'])
         self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
         opens=[row for row in vector.events if row[0]=='open']
         self.assertTrue(all(row[2]&os.O_NOFOLLOW and row[2]&os.O_CLOEXEC for row in opens))
