@@ -471,6 +471,30 @@ def validated_observations(path, caller, preparation):
     return observations
 
 
+def _reference_caller_pin(observations, caller):
+    """Retain the caller identity already bound by all24 validated reference rows."""
+    name=str(caller)
+    try:
+        pin=deepcopy(observations[0]['process']['launchInputPins'][name])
+        if (len(observations)!=24 or type(pin) is not dict
+                or set(pin)!={'device','inode','mode','sha256'}
+                or any(row['process']['launchInputPins'].get(name)!=pin for row in observations)):
+            raise ValueError('validated reference caller identity differs across observations')
+    except (IndexError,KeyError,TypeError) as error:
+        raise ValueError('validated reference caller identity missing') from error
+    return pin
+
+
+def _require_reference_caller(caller, expected):
+    """A later pathname cannot replace the validated caller's identity or digest."""
+    from freeze_v3 import admit_files, TreeBudget
+    record=admit_files((caller,),TreeBudget(files=1,bytes=load_profile()['bounds']['fileSizeBytes']),root=caller.parent)['files'][str(caller)]
+    actual={'device':record['identity'][0],'inode':record['identity'][1],
+            'mode':stat.S_IMODE(record['identity'][2]),'sha256':record['sha256']}
+    if actual!=expected:
+        raise ValueError('runtime caller differs from validated reference caller')
+
+
 def evaluate(candidate, output, helper, caller, visible, observations_path):
     scope = WorkerLeaves()
     token = _LEAF_SCOPE.set(scope)
@@ -548,15 +572,20 @@ def _evaluate(candidate, output, helper, caller, visible, observations_path):
             if hasattr(error,'bounded_result'):failure['execution']=public_result(error.bounded_result)
             phases['exports']=phase_receipt('exports',failure)
     admitted=all(phases[n]['status']=='passed' for n in ('preprocess','compile','link','exports','declarations','gccAssertions'))
-    runtime_inputs=({'caller':{'path':str(caller.resolve(strict=True)),'sha256':digest(caller)},
+    reference_caller_pin=_reference_caller_pin(observations,caller) if admitted else None
+    runtime_inputs=({'caller':{'path':str(caller),'sha256':reference_caller_pin['sha256']},
                      'library':{'path':str(artifacts['link'].resolve(strict=True)),'sha256':digest(artifacts['link'])}} if admitted else None)
     scenarios=[]
     for obs in observations:
         result=None;sha=None
         if admitted:
+            _require_reference_caller(caller,reference_caller_pin)
             runtime_work=new_worker_leaf('runtime')
             status,result=run(runtime_command(caller,artifacts['link'],obs['id']),runtime_work,timeout=p['bounds']['runtimeSeconds'],phase='runtime',runtime_library=runtime_inputs['library'])
             sha=retain('scenario-'+str(obs['id']),status)
+            if (process_observation(result)['completed']
+                    and result['launchInputPins'].get(str(caller))!=reference_caller_pin):
+                raise ValueError('runtime proof caller differs from validated reference caller')
         scenarios.append(scenario_entry(obs,result,admitted,sha))
     summary=summarize(scenarios,admitted)
     phases['load']={'status':'unverified' if summary['runtimeRequestCount'] else 'not-attempted','value':None}
