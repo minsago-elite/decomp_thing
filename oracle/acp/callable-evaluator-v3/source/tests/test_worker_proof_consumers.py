@@ -1031,5 +1031,403 @@ class ProducerLaunchInputJoins(unittest.TestCase):
                     join(execution,other_name,row,'helper-build',profile_sha)
 
 
+class _InspectionOperationalFixture:
+    """Authored static closure; only Resolver('/') is transported to local files."""
+    def __init__(self,base,module):
+        import hashlib,shlex
+        self.base=base;self.root=base.parent/'operational-files';self.root.mkdir(mode=0o700)
+        self.module=module;self.instances=[];self.roots=[]
+        self.original_resolver=module.link_inputs.Resolver
+        for name in ('/usr/bin/gcc','/tools/cc1','/tools/collect2','/tools/as','/tools/ld'):
+            self.write(name,bytes.fromhex('7f454c46')+b' inert tool')
+        self.write('/etc/gcc/specs',b'authored specs')
+        for name in ('crti.o','crtn.o','crtbeginS.o','crtendS.o','libgcc_s.so'):
+            self.write('/gcc/lib/'+name,bytes.fromhex('7f454c46')+b' inert input')
+        self.write('/gcc/lib/libgcc.a',b'!<arch>'+bytes([10])+b'inert')
+        self.write('/lib/libc.so',b'GROUP ( /lib/libc.so.6 )')
+        self.write('/lib/libc.so.6',bytes.fromhex('7f454c46')+b' inert libc')
+        for name in ('/runtime/monitor','/bin/bash'):
+            self.write(name,self.elf(needed=('libfixture.so.1',),interpreter='/runtime/ld-runtime.so'))
+        self.write('/runtime/libfixture.so.1',self.elf(soname='libfixture.so.1'))
+        self.write('/runtime/ld-runtime.so',self.elf(soname='ld-runtime.so'))
+        self.write('/usr/bin/ldd',b'#!/bin/bash'+bytes([10])+b'# authored inert fixture'+bytes([10]))
+        self.write('/etc/ld.so.cache',b'authored inert cache');self.write('/headers/stdio.h',b'authored header')
+        public={'sourcePath':str(base/'worker_exec_monitor.c'),'parserPath':str(base/'worker_exec_proof.py'),
+                'protocolPath':str(base/'contracts/worker-exec-proof-schema.json'),
+                'buildScriptPath':str(base/'toolchain-001/build_worker_monitor.py'),
+                'provisioningManifestPath':str(base/'toolchain-001/worker-exec-monitor.json')}
+        for key,name in public.items():
+            if key!='provisioningManifestPath':self.write(name,('authored public '+key).encode())
+        monitor={'schemaVersion':1,'binaryPath':'/runtime/monitor',**public,
+            'buildInputs':[{'role':role,'path':name}for role,name in (('header','/headers/stdio.h'),
+                ('tool','/usr/bin/gcc'),('startup','/gcc/lib/crti.o'),('library','/lib/libc.so.6'),('configuration','/etc/gcc/specs'))],
+            'runtimeLibraries':[{'soname':'libfixture.so.1','path':'/runtime/libfixture.so.1'}],'cachePath':'/etc/ld.so.cache'}
+        digest=lambda name:hashlib.sha256(self.path(name).read_bytes()).hexdigest()
+        provision={'schemaVersion':1,'status':'provisioning-only-unqualified','binaryPath':monitor['binaryPath'],
+            **{field:digest(monitor[key])for field,key in (('binarySha256','binaryPath'),('sourceSha256','sourcePath'),
+                ('parserSha256','parserPath'),('protocolSha256','protocolPath'))},'dependencies':[],
+            'buildCommand':['/usr/bin/gcc','-D_GNU_SOURCE','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                '-Wl,-z,relro,-z,now,-z,noexecstack',monitor['sourcePath'],'-o',monitor['binaryPath']],'execution':{}}
+        self.write(monitor['provisioningManifestPath'],json.dumps(provision).encode())
+        argv=['/tools/collect2','-shared','-m','elf_x86_64','-o','/work/libcandidate.so','-L/gcc/lib','-L/lib',
+              '/gcc/lib/crti.o','/gcc/lib/crtbeginS.o','/work/candidate.o','-lgcc','-lgcc_s','-lc',
+              '/gcc/lib/crtendS.o','/gcc/lib/crtn.o']
+        self.manifest={'schemaVersion':3,'driverArgv':['/usr/bin/gcc','-shared',
+            '-Wl,-z,relro,-z,now,-z,noexecstack,--no-undefined','/work/candidate.o','-o','/work/libcandidate.so'],
+            'dryRun':'Using built-in specs.'+chr(10)+' '+shlex.join(argv)+chr(10),'workingDirectory':'/work',
+            'environment':{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C','TMPDIR':'/tmp'},
+            'tools':dict(gcc='/usr/bin/gcc',cc1='/tools/cc1',collect2='/tools/collect2',
+                         **{'as':'/tools/as','ld':'/tools/ld'}),
+            'specs':['/etc/gcc/specs'],'configurationRoots':['/etc/gcc'],
+            'generatedFiles':['/work/candidate.o','/work/libcandidate.so'],'monitor':monitor,
+            'inspection':{'schemaVersion':1,'bashPath':'/bin/bash','scriptPath':'/usr/bin/ldd',
+                'cachePath':'/etc/ld.so.cache','runtimeLibraries':copy.deepcopy(monitor['runtimeLibraries'])}}
+
+    def path(self,name):return self.root/name.lstrip('/')
+
+    def write(self,name,data):
+        path=self.path(name);path.parent.mkdir(mode=0o700,parents=True,exist_ok=True);path.write_bytes(data)
+
+    @staticmethod
+    def elf(needed=(),soname=None,interpreter=None):
+        import struct
+        base=0x400000;raw=bytearray(1024);strings=bytearray(bytes([0]));tags=[]
+        for name in needed:tags.append((1,len(strings)));strings.extend(name.encode()+bytes([0]))
+        if soname is not None:tags.append((14,len(strings)));strings.extend(soname.encode()+bytes([0]))
+        tags.extend(((5,base+0x300),(10,len(strings)),(0,0)))
+        raw[:16]=bytes.fromhex('7f454c46020101')+bytes(9)
+        struct.pack_into('<HHIQQQIHHHHHH',raw,16,2 if interpreter else 3,62,1,0,64,0,0,64,56,3 if interpreter else 2,0,0,0)
+        struct.pack_into('<IIQQQQQQ',raw,64,1,4,0,base,base,1024,1024,4096)
+        struct.pack_into('<IIQQQQQQ',raw,120,2,4,0x200,base+0x200,base+0x200,len(tags)*16,len(tags)*16,8)
+        if interpreter:
+            value=interpreter.encode()+bytes([0]);raw[0x180:0x180+len(value)]=value
+            struct.pack_into('<IIQQQQQQ',raw,176,3,4,0x180,base+0x180,base+0x180,len(value),len(value),1)
+        for index,row in enumerate(tags):struct.pack_into('<qQ',raw,0x200+index*16,*row)
+        raw[0x300:0x300+len(strings)]=strings
+        return bytes(raw)
+
+    def transport(self,module):
+        # Only the constructor's exact root operand changes; every original
+        # Resolver method/limit and actual collect/revalidate/JSON body remains.
+        original=module.link_inputs.Resolver
+        def local_root(root):
+            if root!=Path('/'):raise AssertionError('unexpected operational resolver root')
+            self.roots.append(root);instance=original(self.root);self.instances.append(instance);return instance
+        module.link_inputs.Resolver=local_root
+        return module
+
+    def record(self):
+        import hashlib
+        self.transport(self.module)
+        value=self.module.collect_pin(self.manifest,Path('/'))
+        raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+        output=self.base/'toolchain-001/environment-pin.json';output.write_bytes(raw)
+        return value,raw,{'toolchainEnvironmentPinSha256':hashlib.sha256(raw).hexdigest()}
+
+
+class InspectionLoaderAuthentication(unittest.TestCase):
+    def setUp(self):
+        import bounded_runtime as runtime
+        # Trusted stdlib imports are not repository policy authentication.
+        import argparse,io,posixpath,shlex,struct
+        from contextlib import ExitStack
+        self.effects=ExitStack();self.addCleanup(self.effects.close)
+        for name in ('Popen','run','call','check_call','check_output'):
+            self.effects.enter_context(patch.object(runtime.subprocess,name,side_effect=AssertionError('no native subprocess')))
+        for name in ('kill','killpg','pidfd_open'):
+            self.effects.enter_context(patch.object(runtime.os,name,side_effect=AssertionError('no signal/process authority')))
+        self.runtime=runtime
+        self.functions=runpy.run_path(str(ROOT/'toolchain-001/pin_helper.py'),run_name='inert_import')
+        self.g=self.functions['pin'].__globals__;self.wrapper=self.functions['load_inspection_binding']
+        self.sources={relative:(ROOT/relative).read_bytes()for relative,_,_ in runtime._MONITOR_LOADER_SOURCES}
+
+    def tree(self):
+        temporary=tempfile.TemporaryDirectory(prefix='.inspection-loader-',dir=ROOT);self.addCleanup(temporary.cleanup)
+        base=Path(temporary.name)/'policy';(base/'toolchain-001').mkdir(parents=True,mode=0o700)
+        for relative,raw in self.sources.items():(base/relative).write_bytes(raw)
+        return base
+
+    def storage(self,paths=None):
+        paths=paths or {'bash':'/bin/bash','script':'/usr/bin/ldd','cache':'/etc/ld.so.cache'}
+        record={'bashPath':'/bin/bash','scriptPath':'/usr/bin/ldd','cachePath':'/etc/ld.so.cache'}
+        files={record[key+'Path']:{'realpath':paths[key],'sha256':str(index)*64}
+               for index,key in enumerate(('bash','script','cache'),1)}
+        return {'inspectionClosure':{'record':record,'files':files}}
+
+    def test_loader_wrapper_authenticates_every_source_before_any_compile_or_policy(self):
+        runtime=self.runtime
+        for relative,size,_ in runtime._MONITOR_LOADER_SOURCES:
+            for mutation in ('missing','empty','oversize','same-length-hostile'):
+                with self.subTest(source=relative,mutation=mutation):
+                    base=self.tree();path=base/relative
+                    if mutation=='missing':path.unlink()
+                    else:path.write_bytes(b'' if mutation=='empty' else b'X'*(size+1) if mutation=='oversize' else
+                        (b'raise AssertionError(123)'+bytes([10])).ljust(size,b' '))
+                    with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base), \
+                            patch.object(runtime,'compile',create=True,side_effect=AssertionError('no compile before all hashes')) as compiling, \
+                            patch.object(runtime,'exec',create=True,side_effect=AssertionError('no exec before all hashes')) as executing:
+                        with self.assertRaises((OSError,ValueError)):self.wrapper({})
+                    compiling.assert_not_called();executing.assert_not_called()
+
+    def test_loader_executes_only_captured_whole_globals_despite_source_cache_and_ambient_replacement(self):
+        import importlib.util,types,hashlib
+        runtime=self.runtime;base=self.tree();captured=[];real_capture=runtime._capture_monitor_source
+        cache=base/'toolchain-001/__pycache__';cache.mkdir()
+        for name in ('pin_environment','link_inputs','monitor_inputs'):
+            (cache/(name+'.'+sys.implementation.cache_tag+'.pyc')).write_bytes(b'inert poisoned cache')
+        def capture(path,size,deadline):
+            raw=real_capture(path,size,deadline);captured.append(Path(path).name)
+            if len(captured)==3:
+                for relative,original in self.sources.items():
+                    (base/relative).write_bytes((b'raise AssertionError(456)'+bytes([10])).ljust(len(original),b' '))
+            return raw
+        ambient={name:types.ModuleType(name)for name in ('_v3_monitor_link_inputs','_v3_monitor_inputs',
+            '_v3_monitor_pin_environment','callable_v3_link_inputs','callable_v3_monitor_inputs')}
+        previous=sys.modules.get('_v3_monitor_link_inputs')
+        try:
+            with patch.object(runtime,'BASE',base),patch.object(runtime,'_capture_monitor_source',side_effect=capture), \
+                    patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('no pathname/pyc loader')), \
+                    patch.dict(sys.modules,ambient):module=runtime._authenticated_monitor_loader()
+            self.assertEqual(['pin_environment.py','link_inputs.py','monitor_inputs.py'],captured)
+            self.assertIsNot(module.link_inputs,ambient['_v3_monitor_link_inputs'])
+            self.assertIs(module.link_inputs,module._runtime_dependencies['link_inputs'])
+            self.assertIs(module.monitor_inputs,module._runtime_dependencies['monitor_inputs'])
+            self.assertIs(module.collect_pin.__globals__['link_inputs'],module.link_inputs)
+            self.assertEqual('/leaf',module.link_inputs.logical('leaf'))
+            resolver=module.link_inputs.Resolver('/authored');resolver.tick();self.assertEqual(1,resolver.work)
+            self.assertEqual(20000,module.link_inputs.MAX_FILES);self.assertEqual(16777216,module.monitor_inputs.MAX_IMAGE)
+            self.assertEqual(hashlib.sha256(b'authored').hexdigest(),module.link_inputs.sha(b'authored'))
+            self.assertEqual({},module.monitor_inputs.strict_json(b'{}',module.link_inputs))
+            with self.assertRaises(module.link_inputs.Refusal):module.monitor_inputs.path('/bad/../path',module.link_inputs)
+            self.assertIs(sys.modules.get('_v3_monitor_link_inputs'),previous)
+        finally:
+            for relative,raw in self.sources.items():(base/relative).write_bytes(raw)
+
+    def test_wrapper_checks_exact_root_interface_none_and_same_original_end_around_policy(self):
+        runtime=self.runtime;actual_loader=runtime._authenticated_monitor_loader
+        for mutation in (None,'file','base','name','interface','loader-late','policy-late','policy-error'):
+            with self.subTest(mutation=mutation):
+                base=self.tree();now=[0.0];ends=[];modules=[];primary=ValueError('authored policy refusal')
+                def loaded(end):
+                    ends.append(end);module=actual_loader(end);modules.append(module)
+                    module._load_operational=Mock(return_value=(self.storage(),'a'*64))
+                    policy=module.load_inspection_binding
+                    def binding(profile):
+                        if mutation=='policy-error':raise primary
+                        value=policy(profile)
+                        if mutation=='policy-late':now[0]=10.0
+                        return value
+                    module.load_inspection_binding=binding
+                    if mutation=='file':module.__file__=str(base/'other.py')
+                    elif mutation=='base':module.BASE=base/'other'
+                    elif mutation=='name':module.__name__='_wrong_name'
+                    elif mutation=='interface':module.load_inspection_binding=None
+                    elif mutation=='loader-late':now[0]=10.0
+                    return module
+                with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base,_authenticated_monitor_loader=loaded), \
+                        patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]):
+                    if mutation is None:
+                        value=self.wrapper({},deadline=10.0);self.assertEqual('a'*64,value['environmentPinSha256'])
+                    else:
+                        with self.assertRaises((ValueError,TimeoutError,TypeError)) as caught:self.wrapper({},deadline=10.0)
+                        if mutation=='policy-error':self.assertIs(primary,caught.exception)
+                self.assertEqual([10.0],ends)
+                if mutation in ('file','base','name','interface','loader-late'):modules[0]._load_operational.assert_not_called()
+        base=self.tree();ends=[]
+        def no_end(end):
+            ends.append(end);module=actual_loader(end)
+            module._load_operational=Mock(return_value=(self.storage(),'a'*64));return module
+        with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base,_authenticated_monitor_loader=no_end), \
+                patch.object(runtime.time,'monotonic',side_effect=AssertionError('None adds no timer')):
+            self.assertEqual('a'*64,self.wrapper({})['environmentPinSha256'])
+        self.assertEqual([None],ends)
+        for invalid in (True,float('nan'),float('inf'),'10'):
+            with patch.dict(self.g,_authenticated_monitor_loader=Mock(side_effect=AssertionError('before loader'))), \
+                    self.assertRaises(ValueError):self.wrapper({},deadline=invalid)
+
+    def test_actual_loader_late_capture_hash_compile_exec_refuses_and_closes_owned_descriptors_once(self):
+        import builtins
+        runtime=self.runtime
+        for stage in ('capture','hash','compile','exec','close'):
+            with self.subTest(stage=stage):
+                base=self.tree();now=[0.0];active=set();acquired=[];closed=[]
+                capture=runtime._capture_monitor_source;hashing=runtime.hashlib.sha256
+                opening=runtime.os.open;closing=runtime.os.close
+                def opened(*args,**kwargs):
+                    descriptor=opening(*args,**kwargs);self.assertNotIn(descriptor,active)
+                    active.add(descriptor);acquired.append(descriptor);return descriptor
+                def close(descriptor):
+                    self.assertIn(descriptor,active);active.remove(descriptor);closed.append(descriptor);closing(descriptor)
+                    if stage=='close':now[0]=10.0
+                def captured(*args,**kwargs):
+                    value=capture(*args,**kwargs)
+                    if stage=='capture':now[0]=10.0
+                    return value
+                def hashed(value=b'',*args,**kwargs):
+                    result=hashing(value,*args,**kwargs)
+                    if stage=='hash' and value in self.sources.values():now[0]=10.0
+                    return result
+                def compiled(*args,**kwargs):
+                    value=builtins.compile(*args,**kwargs)
+                    if stage=='compile':now[0]=10.0
+                    return value
+                def executed(*args,**kwargs):
+                    value=builtins.exec(*args,**kwargs)
+                    if stage=='exec':now[0]=10.0
+                    return value
+                with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base), \
+                        patch.object(runtime.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(runtime.os,'open',side_effect=opened),patch.object(runtime.os,'close',side_effect=close), \
+                        patch.object(runtime,'_capture_monitor_source',side_effect=captured), \
+                        patch.object(runtime.hashlib,'sha256',side_effect=hashed), \
+                        patch.object(runtime,'compile',create=True,side_effect=compiled),patch.object(runtime,'exec',create=True,side_effect=executed):
+                    with self.assertRaises(TimeoutError):self.wrapper({},deadline=10.0)
+                self.assertFalse(active);self.assertEqual(len(acquired),len(closed))
+
+    def test_real_operational_policy_uses_actual_json_collect_revalidate_resolver_and_binding(self):
+        runtime=self.runtime;base=self.tree()
+        with patch.object(runtime,'BASE',base):module=runtime._authenticated_monitor_loader()
+        fixture=_InspectionOperationalFixture(base,module);original,raw,profile=fixture.record()
+        real_loader=runtime._authenticated_monitor_loader;modules=[]
+        def loaded(end):
+            fresh=real_loader(end);modules.append(fresh);return fixture.transport(fresh)
+        with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base,_authenticated_monitor_loader=loaded):
+            binding=self.wrapper(profile)
+        self.assertEqual(profile['toolchainEnvironmentPinSha256'],binding['environmentPinSha256'])
+        self.assertEqual('/bin/bash',binding['bashPath']);self.assertEqual('/usr/bin/ldd',binding['scriptPath'])
+        self.assertEqual('/etc/ld.so.cache',binding['cachePath'])
+        self.assertEqual({'/bin/bash','/usr/bin/ldd','/etc/ld.so.cache','/runtime/ld-runtime.so','/runtime/libfixture.so.1'},
+            {row['path']for row in binding['dependencies']})
+        self.assertEqual(original['inspectionClosure'],binding['closure'])
+        self.assertEqual('static-recording-unqualified',original['status'])
+        self.assertTrue(all(root==Path('/')for root in fixture.roots));self.assertEqual(2,len(fixture.instances))
+        self.assertIsNot(modules[0],module);self.assertIsNot(modules[0].link_inputs,module.link_inputs)
+        self.assertTrue(all(instance.work<=200000 and instance.io_bytes<=536870912 for instance in fixture.instances))
+        self.assertEqual(raw,(base/'toolchain-001/environment-pin.json').read_bytes())
+
+    def test_real_operational_policy_rejects_missing_tampered_json_and_changed_runtime_without_policy_stubs(self):
+        import hashlib
+        runtime=self.runtime
+        for mutation in ('missing','wrong-hash','duplicate-json','malformed-json','changed-runtime','wrong-public-path'):
+            with self.subTest(mutation=mutation):
+                base=self.tree()
+                with patch.object(runtime,'BASE',base):module=runtime._authenticated_monitor_loader()
+                fixture=_InspectionOperationalFixture(base,module)
+                if mutation=='wrong-public-path':
+                    fixture.manifest['monitor']['sourcePath']='/authored/wrong-public-source'
+                    fixture.write('/authored/wrong-public-source',b'authored wrong source')
+                    provision=json.loads(fixture.path(fixture.manifest['monitor']['provisioningManifestPath']).read_bytes())
+                    provision['sourceSha256']=hashlib.sha256(b'authored wrong source').hexdigest()
+                    provision['buildCommand'][-3]='/authored/wrong-public-source'
+                    fixture.write(fixture.manifest['monitor']['provisioningManifestPath'],json.dumps(provision).encode())
+                original,raw,profile=fixture.record();path=base/'toolchain-001/environment-pin.json'
+                if mutation=='missing':path.unlink()
+                elif mutation=='wrong-hash':path.write_bytes(raw+b' ')
+                elif mutation in ('duplicate-json','malformed-json'):
+                    data=b'{"x":1,"x":2}' if mutation=='duplicate-json' else b'{'
+                    path.write_bytes(data);profile['toolchainEnvironmentPinSha256']=hashlib.sha256(data).hexdigest()
+                elif mutation=='changed-runtime':fixture.write('/runtime/libfixture.so.1',fixture.path('/runtime/libfixture.so.1').read_bytes()+b'changed')
+                actual=runtime._authenticated_monitor_loader
+                def loaded(end):return fixture.transport(actual(end))
+                with patch.object(runtime,'BASE',base),patch.dict(self.g,ROOT=base,_authenticated_monitor_loader=loaded):
+                    with self.assertRaises(ValueError):self.wrapper(profile)
+                if mutation in ('missing','wrong-hash','duplicate-json','malformed-json'):self.assertEqual(1,len(fixture.instances))
+
+
+    def pinner_loader_vector(self,deadline,attack=None):
+        import hashlib,stat
+        runtime=self.runtime;profile,profile_sha=gate.load_profile_with_digest()
+        fs=_PinFilesystem();root=Path('/fixture');work=root/'toolchain-001'
+        fs.add('/etc',mode=stat.S_IFDIR|0o700)
+        source=root/'record_identity_probe.cpp';schema=root/'contracts/helper-schema.json';binary=work/'record_identity_probe'
+        clang=Path('/usr/lib/llvm/23/bin/clang')
+        for path,data in ((source,b'authored source'),(schema,b'{}'),(binary,b'helper A'),(clang,b'clang A'),
+                (work/'build_helper.py',b'builder'),(Path(self.g['__file__']),b'pinner'),
+                (work/'helper-dependencies.d',('output: '+str(source)).encode()),
+                (root/'worker_exec_proof.py',(ROOT/'worker_exec_proof.py').read_bytes())):fs.add(path,data)
+        for relative,raw in self.sources.items():fs.add(root/relative,raw)
+        def row(path):
+            node=fs.metadata(fs.nodes[str(path)])
+            return {'device':node.st_dev,'inode':node.st_ino,'mode':stat.S_IMODE(node.st_mode),
+                    'sha256':hashlib.sha256(bytes(fs.nodes[str(path)]['data'])).hexdigest()}
+        with patch.object(runtime,'BASE',root):
+            build=_producer_execution({str(source):row(source)},phase='helper-build',profile_sha=profile_sha)
+        build=gate.public_result(build);build.update(schemaVersion=3,sourceSha256=row(source)['sha256'],
+            helperSchemaSha256=row(schema)['sha256'],binarySha256=row(binary)['sha256'])
+        fs.add(work/'build.json',json.dumps(build).encode())
+        paths={};record={'bashPath':'/bin/bash','scriptPath':'/usr/bin/ldd','cachePath':'/etc/ld.so.cache'};files={}
+        for role,data in (('bash',bytes.fromhex('7f454c46')+b'bash'),
+                ('script',b'#!/bin/bash'+bytes([10])+b'# inert'),('cache',b'cache')):
+            path=root/role;paths[role]=str(path);fs.add(path,data)
+            files[record[role+'Path']]={'realpath':str(path),'sha256':row(path)['sha256']}
+        for name in ('/usr/lib/llvm/23/bin/clang++','/usr/bin/ld','/usr/bin/as'):fs.add(name,b'host tool')
+        fs.add('/selected/dependency',b'authored selected input')
+        operational={'inspectionClosure':{'record':record,'files':files}}
+        actual_loader=runtime._authenticated_monitor_loader;modules=[];ends=[];order=[];parses=[]
+        def loaded(end):
+            order.append('load');ends.append(end);module=actual_loader(end);modules.append(module)
+            # This integration case isolates authenticated policy selection;
+            # real operational JSON/revalidation is exercised separately above.
+            module._load_operational=Mock(return_value=(operational,profile['toolchainEnvironmentPinSha256']))
+            return module
+        def corrupt():
+            name=root/'toolchain-001/pin_environment.py';node=fs.nodes[str(name)]
+            node['data']=bytearray((b'raise AssertionError(789)'+bytes([10])).ljust(node['size'],b' '))
+        if attack=='before-load':corrupt()
+        executions=[]
+        def run(argv,*args,**kwargs):
+            order.append('worker')
+            tool=(binary,clang)[len(executions)]
+            self.assertEqual(paths['bash'],argv[0]);self.assertEqual(str(tool),argv[2])
+            if deadline is None:self.assertNotIn('phase_deadline',kwargs)
+            else:self.assertEqual(deadline,kwargs['phase_deadline'])
+            result=_producer_execution({str(tool):row(tool)},phase='elf-inspection',profile_sha=profile_sha,
+                target=(paths['bash'],row(paths['bash'])),stdout=b'/selected/dependency'+bytes([10]))
+            executions.append(result)
+            if attack=='post-worker-load':corrupt()
+            return result
+        class Leaf:
+            path=root/'inspection'
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def run(self,operation,*args,**kwargs):return operation(*args,**kwargs)
+        actual_recipe=self.g['inspection_recipe'];actual_paths=self.g['_stdout_paths']
+        def recipe(*args,**kwargs):order.append('recipe');return actual_recipe(*args,**kwargs)
+        def parsed(raw,ledger):parses.append(raw);return actual_paths(raw,ledger)
+        profiles=Mock(side_effect=[profile,(profile,profile_sha)]);recipes=Mock(side_effect=recipe)
+        with patch.object(runtime,'BASE',root),fs.effects(self.g), \
+                patch.object(runtime.os,'lstat',side_effect=lambda path,*args,**kwargs:fs.stat(path,**kwargs)), \
+                patch.dict(self.g,ROOT=root,load_profile=profiles,load_profile_with_digest=profiles,
+                    _authenticated_monitor_loader=loaded,owned_worker_leaf=Mock(return_value=Leaf()),
+                    contained_command=lambda argv,*args,**kwargs:argv,bounded_run=run,inspection_recipe=recipes,_stdout_paths=parsed):
+            error=result=None
+            try:result=self.functions['pin']('pin.json','build.json',**({'deadline':deadline}if deadline is not None else {}))
+            except ValueError as failure:error=failure
+        if attack is not None:
+            self.assertIsNotNone(error);self.assertEqual('authenticated monitor loader source bytes differ',str(error))
+            self.assertIsNone(result);self.assertNotIn(str(work/'pin.json'),fs.nodes);self.assertEqual([],parses)
+            self.assertEqual(0 if attack=='before-load' else 1,len(executions))
+            if attack=='post-worker-load':self.assertIs(executions[0],error.bounded_result)
+            self.assertFalse(fs.fds);return
+        self.assertIsNone(error)
+        self.assertEqual([deadline]*5,ends);self.assertEqual(5,len(modules));self.assertEqual(4,recipes.call_count)
+        self.assertEqual(2,profiles.call_count);self.assertEqual(2,len(executions))
+        self.assertEqual(['load','load','recipe','worker','load','recipe','load','recipe','worker','load','recipe'],order)
+        self.assertEqual(2,len(parses))
+        self.assertEqual(5,len({id(module)for module in modules}))
+        self.assertTrue(all(module.link_inputs is module._runtime_dependencies['link_inputs']for module in modules))
+        self.assertTrue(all(module._load_operational.call_count==1 for module in modules))
+        self.assertIn('/selected/dependency',result['dependencies']);self.assertIn(str(work/'pin.json'),fs.nodes)
+        policy_names={str(root/relative)for relative in self.sources}
+        reads=[event for event in fs.events if event[0]=='read' and event[1]in policy_names]
+        self.assertEqual(318155,sum(event[2]for event in reads if event[2]>1))
+        self.assertEqual(15,sum(event[2]==1 for event in reads));self.assertFalse(fs.fds)
+
+    def test_actual_pinner_uses_five_real_authenticated_loads_with_explicit_storage_boundary(self):
+        for deadline in (None,10.0):
+            for attack in (None,'before-load','post-worker-load'):
+                with self.subTest(deadline=deadline,attack=attack):self.pinner_loader_vector(deadline,attack)
+
+
 if __name__ == '__main__':
     unittest.main()

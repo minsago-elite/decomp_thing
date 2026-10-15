@@ -1,6 +1,5 @@
 """Pin helper inputs with finite direct work; nested resolver/worker bounds stay separate."""
 from pathlib import Path
-import importlib.util
 import hashlib
 import json
 import math
@@ -12,7 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from interface_gate_v3 import _complete_execution, owned_worker_leaf, MAXIMUM_HELPER_SCHEMA_BYTES
-from bounded_runtime import bounded_run, contained_command, public_result
+from bounded_runtime import bounded_run, contained_command, public_result, _authenticated_monitor_loader
 from build_contract import load_profile, load_profile_with_digest, _decode_json
 
 # Explicit caller policy selected from existing link/profile ceilings. This is
@@ -296,11 +295,25 @@ def digest(path, *, maximum=None, ledger=None, deadline=None):
                     ledger=ledger, aliases=True, deadline=deadline).sha256
 
 
-def load_inspection_binding(profile):
-    spec = importlib.util.spec_from_file_location('v3_inspection_pin', Path(__file__).with_name('pin_environment.py'))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.load_inspection_binding(profile)
+def load_inspection_binding(profile, *, deadline=None):
+    """Execute only the runtime's independently authenticated whole policy closure."""
+    def timely():
+        if deadline is not None:
+            if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                raise ValueError('finite original inspection loader end required')
+            if time.monotonic() >= deadline:
+                raise TimeoutError('inspection loader original deadline expired')
+    timely()
+    module = _authenticated_monitor_loader(deadline)
+    timely()
+    if (type(module) is not type(os) or module.__name__ != '_v3_monitor_pin_environment' or
+            module.__dict__.get('__file__') != str(ROOT/'toolchain-001/pin_environment.py') or
+            module.__dict__.get('BASE') != ROOT):
+        raise ValueError('authenticated inspection loader root differs')
+    timely()
+    value = module.load_inspection_binding(profile)
+    timely()
+    return value
 
 
 def inspection_recipe(binding, tool, *, ledger=None, deadline=None):
@@ -541,7 +554,7 @@ def pin(output_name,build_receipt_name,*,deadline=None):
     bounds=ledger.call(load_profile)['bounds']
     inspections=[]
     profile,profile_sha=ledger.call(load_profile_with_digest)
-    binding=ledger.call(load_inspection_binding,profile)
+    binding=ledger.call(load_inspection_binding,profile,**({'deadline':deadline} if deadline is not None else {}))
     with owned_worker_leaf(ROOT,'helper-inspection-') as leaf:
         inspection_work=leaf.path
         environment={'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C','TMPDIR':str(inspection_work)}
@@ -551,7 +564,7 @@ def pin(output_name,build_receipt_name,*,deadline=None):
             ledger.step()
             original_row={'device':original.version[0],'inode':original.version[1],
                           'mode':stat.S_IMODE(original.version[2]),'sha256':original.sha256}
-            if ledger.call(load_inspection_binding,profile)!=binding:raise ValueError('inspection admitted closure changed before execution')
+            if ledger.call(load_inspection_binding,profile,**({'deadline':deadline} if deadline is not None else {}))!=binding:raise ValueError('inspection admitted closure changed before execution')
             logical,argv,inputs=inspection_recipe(binding,tool,ledger=ledger,deadline=deadline)
             timeout=bounds['elfInspectionSeconds']
             if deadline is not None:
@@ -565,7 +578,7 @@ def pin(output_name,build_receipt_name,*,deadline=None):
                 if not _complete_execution(execution) or execution['exitCode']!=0:
                     error=ValueError('incomplete helper dependency inspection');error.bounded_result=execution;raise error
                 ledger.call(_require_input_join,execution,original.canonical,original_row,'elf-inspection',profile_sha)
-                if ledger.call(load_inspection_binding,profile)!=binding:raise ValueError('inspection admitted closure changed during execution')
+                if ledger.call(load_inspection_binding,profile,**({'deadline':deadline} if deadline is not None else {}))!=binding:raise ValueError('inspection admitted closure changed during execution')
                 inspection_recipe(binding,tool,ledger=ledger,deadline=deadline)
                 inspections.append({'logicalArgv':logical,'actualArgv':argv,'environmentPinSha256':binding['environmentPinSha256'],'execution':public_result(execution)})
                 for path in _stdout_paths(execution['stdout'],ledger):add(path)
