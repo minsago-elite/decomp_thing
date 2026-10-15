@@ -710,8 +710,14 @@ class LinuxBubblewrapBoundaryTest {
     private fun runPrivateControlBindProbe(base: Path) {
         fun command(vararg argv: String) {
             val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
-            assertTrue(process.waitFor(5, TimeUnit.SECONDS))
-            assertEquals(0, process.exitValue(), process.inputStream.readNBytes(4096).toString(Charsets.UTF_8))
+            process.outputStream.use {
+                process.errorStream.use {
+                    process.inputStream.use { input ->
+                        assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                        assertEquals(0, process.exitValue(), input.readNBytes(4096).toString(Charsets.UTF_8))
+                    }
+                }
+            }
         }
         command("mount", "--make-rprivate", "/")
         val parent = Files.createDirectory(base.resolve("controls"))
