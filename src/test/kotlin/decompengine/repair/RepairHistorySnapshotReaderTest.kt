@@ -656,7 +656,13 @@ class RepairHistorySnapshotReaderTest {
                 Files.createSymbolicLink(third, declared.first().fileName)
                 val candidates = session(revisions)
                 assertEquals("recorded history declared graph candidate count exceeds its entry budget",
-                    assertFailsWith<IllegalArgumentException> { call(candidates, "readWithHistory", parent) }.message)
+                    assertFailsWith<IllegalArgumentException> { call(candidates, "names", selected) }.message)
+                assertEquals(0L, field(field(candidates, "ledger")!!, "used"))
+                val refusal = assertFailsWith<RepairHistorySnapshotRefusal> { call(candidates, "readWithHistory", parent) }
+                assertEquals("Recorded repair metadata is invalid or exceeds its bound.", refusal.message)
+                assertNull(refusal.cause)
+                assertTrue(refusal.suppressed.isEmpty())
+                assertTrue(refusal.stackTrace.isEmpty())
                 assertEquals(graphBytes.size.toLong() + bindingBytes.size, field(field(candidates, "ledger")!!, "used"))
                 unavailable(readProjectRecordedRepairHistory(root))
                 Files.delete(third)

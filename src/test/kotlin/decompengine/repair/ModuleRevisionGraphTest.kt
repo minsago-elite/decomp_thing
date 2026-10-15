@@ -6621,12 +6621,18 @@ class ModuleRevisionGraphTest {
         val fixture = releaseRepairFixture(temporaryParent = parent, budget = selected)
         val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("role-bound-archive.zip"))
         val exact = fixture.project.parent.resolve("role-bound-declarations-exact.zip")
+        val declaredGraph = Regex("reports/repair-revisions/legacy-graph-[0-9a-f]{64}\\.json")
         rewriteArchive(bundle.archivePath, exact) { entries ->
+            val retained = entries.filterKeys(declaredGraph::matches)
+            assertTrue(retained.isNotEmpty()) // Actual producer preserved its pre-upgrade schema2 graph.
+            assertTrue(retained.size <= selected.maximumStateDirectoryEntries)
             // Resource-only authored declarations, NOT evidence of historical writer origin.
-            repeat(selected.maximumStateDirectoryEntries) { index ->
+            repeat(selected.maximumStateDirectoryEntries - retained.size) { index ->
                 val bytes = "{\"schemaVersion\":3,\"authoredIndex\":$index}".toByteArray()
                 entries["reports/repair-revisions/legacy-graph-" + sha256(bytes) + ".json"] = bytes
             }
+            assertEquals(selected.maximumStateDirectoryEntries, entries.keys.count(declaredGraph::matches))
+            retained.forEach { (name, bytes) -> assertContentEquals(bytes, entries.getValue(name)) }
         }
         val output = fixture.project.parent.resolve("role-bound-declarations-exact-output")
         val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(exact, output)
@@ -6636,6 +6642,7 @@ class ModuleRevisionGraphTest {
         rewriteArchive(exact, overflow) { entries ->
             // Lexically first matching candidate would fail size/hash admission if any body opened.
             entries["reports/repair-revisions/legacy-graph-" + "0".repeat(64) + ".json"] = byteArrayOf()
+            assertEquals(selected.maximumStateDirectoryEntries + 1, entries.keys.count(declaredGraph::matches))
             val total = entries.keys.count { it.startsWith("reports/repair-revisions/") &&
                 '/' !in it.removePrefix("reports/repair-revisions/") } + 1 // blobs directory
             assertTrue(total <= repairRevisionDirectoryEntryLimit(selected))

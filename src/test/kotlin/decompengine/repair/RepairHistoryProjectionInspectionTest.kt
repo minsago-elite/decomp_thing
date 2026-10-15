@@ -67,8 +67,13 @@ class RepairHistoryProjectionInspectionTest {
     fun emittedMetadataCorpusPatchAndRunValueMutationsCannotMatch() {
         val captured = produce(current = true, accepted = true)
         val source = captured.history.decodeToString()
+        val prompt = Json.parseToJsonElement(source).jsonObject.getValue("iterations").jsonArray.single()
+            .jsonObject.getValue("prompt").jsonPrimitive.content
+        assertEquals(sha256("bounded private prompt".toByteArray()), prompt)
+        val changedPrompt = sha256("different private prompt".toByteArray())
+        assertNotEquals(prompt, changedPrompt)
         val mutations = listOf(
-            source.replace("bounded private prompt", "different private prompt"),
+            source.replace("\"prompt\": \"$prompt\"", "\"prompt\": \"$changedPrompt\""),
             source.replace("PRIVATE-summary", "PRIVATE-changed"),
             source.replace("PRIVATE-case", "PRIVATE-other"),
             source.replace("505249564154452d737464696e", "505249564154452d737464696f"),
