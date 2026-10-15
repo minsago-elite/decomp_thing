@@ -4958,6 +4958,46 @@ internal fun recordedRepairHistorySnapshot(
     recoveryBindingPayload: ByteArray,
     requestedBudget: RepairResourceBudget,
     declaredGraphs: List<RepairHistoryDeclaredGraph> = emptyList(),
+): RepairHistorySnapshot = recordedRepairHistorySnapshot(graphPayload, recoveryBindingPayload, requestedBudget) { consume ->
+    declaredGraphs.forEach { input -> consume(input.name, input.bytes) }
+}
+
+/** Fixed-envelope bootstrap only; the returned recorded configuration grants no runtime authority. */
+internal fun recordedRepairHistoryReadBudget(graphPayload: ByteArray): RepairResourceBudget = try {
+    require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= Int.MAX_VALUE.toLong() - 1)
+    val budget = parseCanonicalGraph(graphPayload, "recorded repair graph bootstrap").state.budget.copy()
+    val envelope = minOf(Int.MAX_VALUE.toLong() - 1, Math.addExact(budget.maximumGraphBytes,
+        Math.multiplyExact(Math.addExact(budget.maximumRevisionNodes.toLong(), 1L), MAXIMUM_MIGRATION_BYTES_PER_NODE)))
+    require(graphPayload.size.toLong() <= envelope)
+    budget
+} catch (_: Throwable) {
+    throw RepairHistorySnapshotRefusal()
+}
+
+/** Exact G1/B1 correlation before declaration I/O; no state or authority escapes. */
+internal fun requireRecordedRepairHistoryBinding(
+    graphPayload: ByteArray,
+    recoveryBindingPayload: ByteArray,
+    requestedBudget: RepairResourceBudget,
+) {
+    try {
+        require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= revisionGraphReadLimit(requestedBudget))
+        require(recoveryBindingPayload.isNotEmpty() && recoveryBindingPayload.size.toLong() <= requestedBudget.maximumGraphBytes)
+        val state = parseCanonicalGraph(graphPayload, "recorded repair binding preflight").state
+        require(state.budget == requestedBudget)
+        val binding = parseCanonicalRecoveryBinding(recoveryBindingPayload)
+        validateRecordedGraphHeader(state, binding)
+    } catch (_: Throwable) {
+        throw RepairHistorySnapshotRefusal()
+    }
+}
+
+/** The scanner owns each already-captured body until its synchronous consumer returns. */
+internal fun recordedRepairHistorySnapshot(
+    graphPayload: ByteArray,
+    recoveryBindingPayload: ByteArray,
+    requestedBudget: RepairResourceBudget,
+    scanDeclaredGraphs: (consume: (String, ByteArray) -> Unit) -> Unit,
 ): RepairHistorySnapshot = try {
     require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= revisionGraphReadLimit(requestedBudget))
     require(recoveryBindingPayload.isNotEmpty() &&
@@ -4971,14 +5011,14 @@ internal fun recordedRepairHistorySnapshot(
         var examined = 0
         var remaining = requestedBudget.maximumIndexEvidenceBytes
         val names = HashSet<String>()
-        for (input in declaredGraphs) {
+        scanDeclaredGraphs { name, bytes ->
             examined = Math.addExact(examined, 1)
             require(examined <= requestedBudget.maximumStateDirectoryEntries)
-            require(DECLARED_LEGACY_GRAPH_NAME.matches(input.name) && names.add(input.name))
-            require(input.bytes.isNotEmpty() &&
-                input.bytes.size.toLong() <= minOf(requestedBudget.maximumGraphBytes, remaining))
-            remaining -= input.bytes.size.toLong()
-            consume(input.name, input.bytes.copyOf())
+            require(DECLARED_LEGACY_GRAPH_NAME.matches(name) && names.add(name))
+            require(bytes.isNotEmpty() &&
+                bytes.size.toLong() <= minOf(requestedBudget.maximumGraphBytes, remaining))
+            remaining -= bytes.size.toLong()
+            consume(name, bytes.copyOf())
         }
     }
     val binding = parseCanonicalRecoveryBinding(bindingBytes)

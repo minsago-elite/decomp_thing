@@ -296,6 +296,80 @@ class JobStoreTest {
         assertEquals("failed", recovered.status)
         assertTrue(recovered.statusMessage.orEmpty().contains("interrupted"))
     }
+    @Test
+    fun `recorded history selects only the exact legacy or named run layout`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val run = historyProject(root.resolve("$id/reports/runs/selected-run/source-tree"), "run-base")
+        val store = JobStore(root)
+        val legacyResult = store.readRecordedRepairHistory(id, null)
+        val runResult = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, legacyResult.status)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, runResult.status)
+        assertEquals(decompengine.project.sha256(legacy.resolve("reports/repair-revisions/graph.json").readBytes()), legacyResult.snapshot?.graphSha256)
+        assertEquals(decompengine.project.sha256(run.resolve("reports/repair-revisions/graph.json").readBytes()), runResult.snapshot?.graphSha256)
+        assertTrue(legacyResult.snapshot?.graphSha256 != runResult.snapshot?.graphSha256)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, store.readRecordedRepairHistory(id, "missing-run").status)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, store.readRecordedRepairHistory("b".repeat(32), null).status)
+        for (bad in listOf("../selected-run", "", "a/b", "a".repeat(129))) {
+            val refused = store.readRecordedRepairHistory(id, bad)
+            assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, refused.status)
+            kotlin.test.assertNull(refused.snapshot)
+        }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, store.readRecordedRepairHistory("../outside", null).status)
+    }
+
+    @Test
+    fun `recorded history absence is read only and never constructs store or recovery`() {
+        val root = historyTestRoot()
+        val absent = root.resolve("absent-store")
+        val missingRoot = JobStore(absent).readRecordedRepairHistory("a".repeat(32), null)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, missingRoot.status)
+        assertTrue(!java.nio.file.Files.exists(absent))
+        val selected = root.resolve("a".repeat(32))
+        java.nio.file.Files.createDirectory(selected)
+        val store = JobStore(root)
+        val missingHistory = store.readRecordedRepairHistory("a".repeat(32), null)
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, missingHistory.status)
+        java.nio.file.Files.list(selected).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `recorded history rejects selected symlink and cancellation without fallback or private failures`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val legacy = historyProject(root.resolve("$id/reports/source-tree"))
+        val before = legacy.resolve("reports/repair-revisions/graph.json").readBytes()
+        val runs = root.resolve("$id/reports/runs")
+        java.nio.file.Files.createDirectory(runs)
+        java.nio.file.Files.createSymbolicLink(runs.resolve("selected-run"), root.resolve("$id/reports"))
+        val store = JobStore(root)
+        val link = store.readRecordedRepairHistory(id, "selected-run")
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, link.status)
+        kotlin.test.assertNull(link.snapshot)
+        val cancelled = store.readRecordedRepairHistory(id, null) { throw IllegalStateException("PRIVATE-job-path-token") }
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.UNAVAILABLE, cancelled.status)
+        kotlin.test.assertNull(cancelled.snapshot)
+        kotlin.test.assertContentEquals(before, legacy.resolve("reports/repair-revisions/graph.json").readBytes())
+        assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED, store.readRecordedRepairHistory(id, null).status)
+    }
+
+    private fun historyTestRoot(): java.nio.file.Path {
+        val parent = java.nio.file.Path.of("build/test-tmp").toAbsolutePath().normalize()
+        java.nio.file.Files.createDirectories(parent)
+        return java.nio.file.Files.createTempDirectory(parent, "job-history-reader-")
+    }
+
+    private fun historyProject(root: java.nio.file.Path, source: String = "base"): java.nio.file.Path {
+        java.nio.file.Files.createDirectories(root)
+        root.resolve("code.c").writeText(source)
+        val profile = decompengine.repair.DeclarativeRepairIndexProfile("job-history-reader",
+            decompengine.repair.RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        decompengine.repair.ModuleRevisionGraph.open(root, profile).use { it.enableRunContract() }
+        return root
+    }
+
 }
 
 fun elfFixture(): ByteArray {
