@@ -2849,11 +2849,11 @@ internal class ModuleRevisionGraph private constructor(
 
     @Synchronized
     fun derivedRepairIterations(): List<RepairIteration> = graphOperation {
-        derivedRepairIterations(state.nodes, state.budget)
+        derivedRepairIterations(state)
     }
 
-    private fun derivedRepairIterations(nodes: List<ModuleRevisionNode>, budget: RepairResourceBudget): List<RepairIteration> =
-        deriveRepairIterations(nodes, budget, state.schemaVersion, ::readBlob)
+    private fun derivedRepairIterations(candidate: RevisionGraphState): List<RepairIteration> =
+        deriveRepairIterations(candidate.nodes, candidate.budget, candidate.schemaVersion, ::readBlob)
 
     @Synchronized
     fun synchronizeCompatibilityLog() = graphOperation {
@@ -2925,7 +2925,7 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun requireProjectableState(candidate: RevisionGraphState) {
         renderRepairHistoryProjection(
-            derivedRepairIterations(candidate.nodes, candidate.budget),
+            derivedRepairIterations(candidate),
             candidate.retainedRegressionInputs,
             candidate.budget.maximumProjectionBytes,
             minOf(candidate.schemaVersion, 3),

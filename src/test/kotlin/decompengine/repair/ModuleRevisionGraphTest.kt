@@ -4995,8 +4995,18 @@ class ModuleRevisionGraphTest {
         )
         val blobs = project.resolve("reports/repair-revisions/blobs")
 
-        assertFailsWith<RepairBudgetExceededException> {
+        val sourceBytes = layout.sourcePaths.associateWith { project.resolve(it).readBytes() }
+        val sourceKeys = layout.sourcePaths.associateWith {
+            Files.readAttributes(project.resolve(it), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey()
+        }
+        val failure = assertFailsWith<RepairBudgetExceededException> {
             ModuleRevisionGraph.open(project, profile, failedBudget).close()
+        }
+        assertEquals("repair history exceeds its 1-byte limit", failure.message)
+        layout.sourcePaths.forEach { relative ->
+            assertContentEquals(sourceBytes.getValue(relative), project.resolve(relative).readBytes())
+            assertEquals(sourceKeys.getValue(relative),
+                Files.readAttributes(project.resolve(relative), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey())
         }
         assertFalse(project.resolve("reports/repair-revisions/graph.json").exists())
         assertEquals(2L, Files.list(blobs).use { it.count() })
@@ -5005,6 +5015,9 @@ class ModuleRevisionGraphTest {
 
         val validBudget = RepairResourceBudget(maximumStateDirectoryEntries = 2)
         ModuleRevisionGraph.open(project, profile, validBudget).use { reopened ->
+            assertEquals(2, reopened.snapshot.schemaVersion)
+            assertEquals(ModuleRevisionStatus.ROOT, reopened.snapshot.nodes.single().status)
+            assertTrue(reopened.derivedRepairIterations().isEmpty())
             assertEquals(null, reopened.snapshot.pendingAttemptId)
         }
         assertEquals(2L, Files.list(blobs).use { it.count() })
