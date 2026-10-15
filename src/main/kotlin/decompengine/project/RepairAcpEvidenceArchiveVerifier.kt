@@ -368,6 +368,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     require(rollback.candidateSourceInstallStarted == null) {
                         "repair release legacy changed attempt has a fabricated source-install marker: ${node.id}"
                     }
+                } else if (rollback.legacyPendingStateUnknown) {
+                    require(rollback.candidateSourceInstallStarted == false) {
+                        "repair release legacy unchanged attempt has a fabricated source-install marker: ${node.id}"
+                    }
                 }
                 if (rollback.state == "not_required_verified") {
                     require(rollback.candidateSourceInstallStarted == false) {
@@ -1157,13 +1161,21 @@ private data class ReleaseRollbackRecord(
             "restore_operation_failed", "unrecognized_source_state", "target_digest_mismatch",
         ))
         require((failureStage == null) == (failureCode == null))
+        require(legacyPendingStateUnknown || candidateSourceInstallStarted != null) {
+            "repair release native rollback requires a known source-install marker"
+        }
         require(observedSourceRevisionSha256 == null || observedSourceRevisionSha256.matches(SHA256))
         if (state == "restored_after_failure") require(failureCode != null)
         if (state in setOf("restored_verified", "not_required_verified")) require(failureCode == null)
         if (state in setOf("restored_verified", "restored_after_failure", "not_required_verified")) {
             require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
         }
-        if (state == "not_required_verified") require(candidateSourceInstallStarted == false)
+        if (state == "not_required_verified") require(candidateSourceInstallStarted == false) {
+            "repair release not-required rollback requires an unstarted source-install marker"
+        }
+        if (state == "restored_verified") require(candidateSourceInstallStarted != false) {
+            "repair release failure-free restored rollback has an unstarted source-install marker"
+        }
     }
 }
 

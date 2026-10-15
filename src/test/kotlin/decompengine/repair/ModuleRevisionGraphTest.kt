@@ -3726,6 +3726,173 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `native rollback marker state matrix preserves in progress and failure outcomes`() {
+        val digest = "a".repeat(64)
+        val record = RepairRollbackRecord(attemptId = "revision_marker", runId = null,
+            targetRevisionId = "root_marker", expectedSourceRevisionSha256 = digest,
+            state = RepairRollbackState.NOT_REQUIRED_VERIFIED, observedSourceRevisionSha256 = digest)
+        for (started in listOf(false, true)) {
+            record.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS,
+                candidateSourceInstallStarted = started, observedSourceRevisionSha256 = null)
+            for (state in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+                val failed = record.copy(state = state, candidateSourceInstallStarted = started,
+                    failureStage = RepairRollbackStage.SOURCE_RESTORE,
+                    failureCode = RepairRollbackFailureCode.RESTORE_OPERATION_FAILED)
+                assertEquals(started, failed.candidateSourceInstallStarted)
+                assertEquals(state, failed.state)
+            }
+        }
+        assertEquals(false, record.candidateSourceInstallStarted)
+        assertEquals(true, record.copy(state = RepairRollbackState.RESTORED_VERIFIED,
+            candidateSourceInstallStarted = true).candidateSourceInstallStarted)
+        // Null belongs to a genuinely changed legacy migration, checked with its node context on load.
+        assertNull(record.copy(state = RepairRollbackState.RESTORED_VERIFIED,
+            legacyPendingStateUnknown = true, candidateSourceInstallStarted = null).candidateSourceInstallStarted)
+        for (state in RepairRollbackState.entries) {
+            val failureState = state in setOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                record.copy(state = state, candidateSourceInstallStarted = null,
+                    failureStage = if (failureState) RepairRollbackStage.SOURCE_RESTORE else null,
+                    failureCode = if (failureState) RepairRollbackFailureCode.RESTORE_OPERATION_FAILED else null)
+            }
+            assertEquals("native rollback requires a known source-install marker", failure.message)
+        }
+        assertEquals("failure-free restored rollback has an unstarted source-install marker",
+            assertFailsWith<IllegalArgumentException> {
+                record.copy(state = RepairRollbackState.RESTORED_VERIFIED)
+            }.message)
+        assertEquals("not-required rollback requires an unstarted source-install marker",
+            assertFailsWith<IllegalArgumentException> {
+                record.copy(candidateSourceInstallStarted = true)
+            }.message)
+    }
+
+    @Test
+    fun `native pending and finalized records bind known install marker to actual restoration`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val profile = DeclarativeRepairIndexProfile("native-install-marker",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        for (installed in listOf(false, true)) {
+            val root = Files.createTempDirectory(parent, "native-install-marker-")
+            val source = root.resolve("code.c").also { it.writeText("before") }
+            val path = root.resolve("reports/repair-revisions/graph.json")
+            var armed = false
+            val graph = ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+            })
+            try {
+                graph.enableRunContract() // Native schema4 without an active run uses actual non-detached source installation.
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                if (installed) graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+                armed = true
+                assertFailsWith<SimulatedRepairCrash> { graph.reject(attempt, RepairEvidence("rejected", "marker recovery")) }
+            } finally {
+                graph.close()
+            }
+            fun refuseForgedRecord(canonical: String, pending: Boolean) {
+                val document = Json.parseToJsonElement(canonical).jsonObject
+                val record = if (pending) document.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+                    else document.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+                val terminal = if (installed) "not_required_verified" else "restored_verified"
+                val cases = listOf(
+                    Triple<JsonElement, String, String>(JsonNull, record.getValue("state").jsonPrimitive.content,
+                        "native rollback requires a known source-install marker"),
+                    Triple(JsonPrimitive(installed), terminal, if (installed)
+                        "not-required rollback requires an unstarted source-install marker"
+                        else "failure-free restored rollback has an unstarted source-install marker"))
+                for ((marker, state, expectedMessage) in cases) {
+                    val forgedRecord = JsonObject(record + mapOf("candidateSourceInstallStarted" to marker,
+                        "state" to JsonPrimitive(state),
+                        "observedSourceRevisionSha256" to record.getValue("expectedSourceRevisionSha256")))
+                    val forgedDocument = if (pending) JsonObject(document + ("pending" to JsonObject(
+                        document.getValue("pending").jsonObject + ("rollbackRecord" to forgedRecord))))
+                        else JsonObject(document + ("nodes" to JsonArray(document.getValue("nodes").jsonArray.mapIndexed { index, node ->
+                            if (index == document.getValue("nodes").jsonArray.lastIndex)
+                                JsonObject(node.jsonObject + ("rollbackRecord" to forgedRecord)) else node
+                        })))
+                    val forged = forgedDocument.toString()
+                    assertNotEquals(canonical, forged)
+                    path.writeText(forged)
+                    val sourceBytes = source.readBytes()
+                    val sourceKey = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                    val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                    val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                    assertEquals(expectedMessage, failure.message)
+                    assertEquals(forged, path.readText())
+                    assertContentEquals(sourceBytes, source.readBytes())
+                    assertEquals(sourceKey, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                    assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                }
+                path.writeText(canonical)
+            }
+            val pending = path.readText()
+            val pendingRecord = Json.parseToJsonElement(pending).jsonObject.getValue("pending").jsonObject
+                .getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(false), pendingRecord.getValue("legacyPendingStateUnknown"))
+            assertEquals(JsonPrimitive(installed), pendingRecord.getValue("candidateSourceInstallStarted"))
+            assertEquals("restore_in_progress", pendingRecord.getValue("state").jsonPrimitive.content)
+            refuseForgedRecord(pending, true)
+            ModuleRevisionGraph.open(root, profile).use { recovered ->
+                val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+                assertFalse(outcome.legacyPendingStateUnknown)
+                assertEquals(installed, outcome.candidateSourceInstallStarted)
+                assertEquals(if (installed) RepairRollbackState.RESTORED_VERIFIED else RepairRollbackState.NOT_REQUIRED_VERIFIED, outcome.state)
+                assertEquals("before", source.readText())
+                assertTrue(recovered.snapshot.runs.isEmpty())
+            }
+            refuseForgedRecord(path.readText(), false)
+            ModuleRevisionGraph.open(root, profile).close()
+        }
+    }
+
+    @Test
+    fun `native unstarted rollback retains an actual verification failure through successful recovery`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "native-unstarted-failure-")
+        val source = root.resolve("code.c").also { it.writeText("before") }
+        val profile = DeclarativeRepairIndexProfile("native-unstarted-failure",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("code", listOf("code.c")))))
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (armed && point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                point.scope == "revision-state" && point.name == "graph.json") {
+                armed = false
+                // An unrelated edit after the write-ahead marker must fail verification without claiming an install.
+                source.writeText("foreign")
+            }
+        })
+        try {
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf("code.c"))
+            armed = true
+            assertFailsWith<IllegalStateException> { graph.reject(attempt, RepairEvidence("rejected", "unstarted failure")) }
+            val pending = Json.parseToJsonElement(root.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+                .getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            assertEquals(JsonPrimitive(false), pending.getValue("legacyPendingStateUnknown"))
+            assertEquals(JsonPrimitive(false), pending.getValue("candidateSourceInstallStarted"))
+            assertEquals("restore_failed_unresolved", pending.getValue("state").jsonPrimitive.content)
+            assertEquals("source_verification", pending.getValue("failureStage").jsonPrimitive.content)
+            assertEquals("target_digest_mismatch", pending.getValue("failureCode").jsonPrimitive.content)
+            assertEquals("foreign", source.readText())
+        } finally {
+            graph.close()
+        }
+        // The fixture restores the unrelated edit; recovery must retain the genuine failure instead of NOT_REQUIRED.
+        source.writeText("before")
+        ModuleRevisionGraph.open(root, profile).use { recovered ->
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertFalse(outcome.legacyPendingStateUnknown)
+            assertEquals(false, outcome.candidateSourceInstallStarted)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, outcome.state)
+            assertEquals(RepairRollbackStage.SOURCE_VERIFICATION, outcome.failureStage)
+            assertEquals(RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH, outcome.failureCode)
+            assertEquals(outcome.expectedSourceRevisionSha256, outcome.observedSourceRevisionSha256)
+            assertEquals("before", source.readText())
+        }
+    }
+
+    @Test
     fun `legacy changed pending and finalized records require unknown install marker while no change remains false`() {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
         val profile = DeclarativeRepairIndexProfile("legacy-install-marker",
@@ -3747,7 +3914,8 @@ class ModuleRevisionGraphTest {
             fun refuseFalseCertainty(canonical: String, currentState: String) {
                 for (marker in listOf("false", "true")) {
                     val forged = canonical.replace("\"candidateSourceInstallStarted\":null", "\"candidateSourceInstallStarted\":$marker")
-                        .let { if (marker == "false") it.replace("\"state\":\"$currentState\"", "\"state\":\"not_required_verified\"") else it }
+                        .let { if (marker == "false" && currentState != "restore_in_progress")
+                            it.replace("\"state\":\"$currentState\"", "\"state\":\"not_required_verified\"") else it }
                     assertNotEquals(canonical, forged)
                     path.writeText(forged)
                     val bytes = source.readBytes()
@@ -3762,12 +3930,29 @@ class ModuleRevisionGraphTest {
                 }
                 path.writeText(canonical)
             }
+            fun refuseUnknownForUnchanged(canonical: String, finalized: Boolean) {
+                val forged = canonical.replace("\"candidateSourceInstallStarted\":false", "\"candidateSourceInstallStarted\":null")
+                    .let { if (finalized) it.replace("\"state\":\"not_required_verified\"", "\"state\":\"restored_verified\"") else it }
+                assertNotEquals(canonical, forged)
+                path.writeText(forged)
+                val bytes = source.readBytes()
+                val key = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+                val graphKey = Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()
+                val failure = assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).close() }
+                assertEquals("legacy unchanged attempt has a fabricated source-install marker", failure.message)
+                assertEquals(forged, path.readText())
+                assertContentEquals(bytes, source.readBytes())
+                assertEquals(key, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+                assertEquals(graphKey, Files.readAttributes(path, BasicFileAttributes::class.java).fileKey())
+                path.writeText(canonical)
+            }
             val pending = path.readText()
             val pendingRecord = Json.parseToJsonElement(pending).jsonObject.getValue("pending").jsonObject
                 .getValue("rollbackRecord").jsonObject
             assertEquals(JsonPrimitive(true), pendingRecord.getValue("legacyPendingStateUnknown"))
             assertEquals(if (hasChanges) JsonNull else JsonPrimitive(false), pendingRecord.getValue("candidateSourceInstallStarted"))
             if (hasChanges) refuseFalseCertainty(pending, "restore_in_progress")
+            else refuseUnknownForUnchanged(pending, false)
             ModuleRevisionGraph.open(root, profile).use { graph ->
                 val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
                 assertTrue(record.legacyPendingStateUnknown)
@@ -3777,6 +3962,7 @@ class ModuleRevisionGraphTest {
                 assertTrue(graph.snapshot.runs.isEmpty())
             }
             if (hasChanges) refuseFalseCertainty(path.readText(), "restored_verified")
+            else refuseUnknownForUnchanged(path.readText(), true)
             ModuleRevisionGraph.open(root, profile).close()
         }
     }
@@ -3970,9 +4156,21 @@ class ModuleRevisionGraphTest {
             val extracted = fixture.project.parent.resolve("$mode-marker-control")
             ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
             assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
-            if (mode != "legacy-changed") continue
-            for (started in listOf(false, true)) {
-                val forged = fixture.project.parent.resolve("legacy-marker-$started.zip")
+            val forgeries: List<Triple<JsonElement, String, String>> = when (mode) {
+                "legacy-changed" -> listOf(
+                    Triple(JsonPrimitive(false), "not_required_verified", "repair release legacy changed attempt has a fabricated source-install marker"),
+                    Triple(JsonPrimitive(true), "restored_verified", "repair release legacy changed attempt has a fabricated source-install marker"))
+                "legacy-unchanged" -> listOf(
+                    Triple(JsonNull, "restored_verified", "repair release legacy unchanged attempt has a fabricated source-install marker"),
+                    Triple(JsonPrimitive(true), "restored_verified", "repair release legacy unchanged attempt has a fabricated source-install marker"))
+                else -> listOf(
+                    Triple(JsonNull, "not_required_verified", "repair release native rollback requires a known source-install marker"),
+                    Triple(JsonPrimitive(false), "restored_verified", "repair release failure-free restored rollback has an unstarted source-install marker"),
+                    Triple(JsonPrimitive(true), "not_required_verified", "repair release not-required rollback requires an unstarted source-install marker"))
+            }
+            for ((index, forgery) in forgeries.withIndex()) {
+                val (started, state, expectedMessage) = forgery
+                val forged = fixture.project.parent.resolve("$mode-marker-$index.zip")
                 rewriteArchive(bundle.archivePath, forged) { entries ->
                     val path = "reports/repair-revisions/graph.json"
                     val graph = Json.parseToJsonElement(entries.getValue(path).toString(Charsets.UTF_8)).jsonObject
@@ -3980,14 +4178,14 @@ class ModuleRevisionGraphTest {
                         val node = element.jsonObject
                         if (node.getValue("id") != rejected.getValue("id")) node else JsonObject(node +
                             ("rollbackRecord" to JsonObject(node.getValue("rollbackRecord").jsonObject + mapOf(
-                                "candidateSourceInstallStarted" to JsonPrimitive(started),
-                                "state" to JsonPrimitive(if (started) "restored_verified" else "not_required_verified")))))
+                                "candidateSourceInstallStarted" to started,
+                                "state" to JsonPrimitive(state)))))
                     }
                     entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
                 }
-                val output = fixture.project.parent.resolve("legacy-marker-$started-refused")
+                val output = fixture.project.parent.resolve("$mode-marker-$index-refused")
                 val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(forged, output) }
-                assertTrue(failure.message.orEmpty().contains("repair release legacy changed attempt has a fabricated source-install marker"), failure.message)
+                assertTrue(failure.message.orEmpty().contains(expectedMessage), failure.message)
                 assertFalse(output.exists())
             }
         }
@@ -5232,7 +5430,7 @@ class ModuleRevisionGraphTest {
                 val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
                 graph.beginRun(1, 60_000)
                 val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
-                    1, "compile", "bounded legacy prefix", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
+                    1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
                 graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after))
                 if (legacyPrefixHasChanges) graph.installCandidate(attempt, mapOf(relative to after))
                 // Detached candidate installation does not exchange the canonical source tree.

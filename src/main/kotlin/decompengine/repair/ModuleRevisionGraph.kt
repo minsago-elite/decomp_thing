@@ -1402,6 +1402,9 @@ data class RepairRollbackRecord(
         require(observedSourceRevisionSha256 == null ||
             observedSourceRevisionSha256.matches(Regex("[0-9a-f]{64}")))
         require((failureStage == null) == (failureCode == null))
+        require(legacyPendingStateUnknown || candidateSourceInstallStarted != null) {
+            "native rollback requires a known source-install marker"
+        }
         when (state) {
             RepairRollbackState.RESTORE_FAILED_UNRESOLVED -> require(failureCode != null)
             RepairRollbackState.RESTORED_AFTER_FAILURE -> require(failureCode != null)
@@ -1414,7 +1417,14 @@ data class RepairRollbackRecord(
             require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
         }
         if (state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
-            require(candidateSourceInstallStarted == false)
+            require(candidateSourceInstallStarted == false) {
+                "not-required rollback requires an unstarted source-install marker"
+            }
+        }
+        if (state == RepairRollbackState.RESTORED_VERIFIED) {
+            require(candidateSourceInstallStarted != false) {
+                "failure-free restored rollback has an unstarted source-install marker"
+            }
         }
     }
 }
@@ -4515,8 +4525,12 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
 }
 
 private fun requireLegacyRollbackInstallMarker(record: RepairRollbackRecord, hasChanges: Boolean) {
-    require(!record.legacyPendingStateUnknown || !hasChanges || record.candidateSourceInstallStarted == null) {
-        "legacy changed attempt has a fabricated source-install marker"
+    if (record.legacyPendingStateUnknown) {
+        if (hasChanges) require(record.candidateSourceInstallStarted == null) {
+            "legacy changed attempt has a fabricated source-install marker"
+        } else require(record.candidateSourceInstallStarted == false) {
+            "legacy unchanged attempt has a fabricated source-install marker"
+        }
     }
 }
 
