@@ -16,6 +16,182 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
+        var clock = 0L
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {
+            val elapsed = clock++
+            longArrayOf(elapsed, 100L - elapsed)
+        })
+        val prepare = RuntimeCopyStatistics()
+        prefix.retain(RuntimeCopyStatistics.Prefix.Owner.PREPARE, prepare)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+            prepare.copy.started(); prepare.copy.read(13); prepare.copy.written(13); prepare.copy.completed()
+        }
+        val validation = requireNotNull(prefix.statistics(RuntimeCopyStatistics.Prefix.Owner.VALIDATE))
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.VALIDATE) {
+            validation.hash.started(); validation.hash.read(7); validation.hash.completed()
+        }
+        val primary = IllegalStateException("authored action failure")
+        val caught = assertFailsWith<IllegalStateException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) {
+                prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING) {
+                    prefix.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+                    throw primary
+                }
+            }
+        }
+        assertTrue(caught === primary)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { Unit }
+        val mapped = mappedPrefixFailure(prefix, primary)
+        assertTrue(mapped.cause === primary)
+        assertTrue(mappedPrefixFailure(prefix, primary).suppressed.isEmpty())
+        assertTrue(primary.suppressed.isEmpty())
+        val summary = mapped.suppressed.single().message.orEmpty()
+        assertTrue(summary.contains("firstObservedFailure=LAUNCH_PINNING,kind=TIMEOUT"), summary)
+        assertTrue(summary.contains("failureElapsedNs=8,failureRemainingNs=92"), summary)
+        assertTrue(summary.contains("PREPARE:COPY[observed=true,supported=true,files=1/1,readBytes=13"), summary)
+        assertTrue(summary.contains("VALIDATE:COPY[observed=false"), summary)
+        assertTrue(summary.contains("HASH[observed=true,supported=true,files=1/1,readBytes=7"), summary)
+        assertTrue(summary.contains("LAUNCH:3") && summary.contains("inclusiveNs=unknown"), summary)
+        assertTrue(summary.contains("BOUNDARY_CLOSE:2"), summary)
+        assertTrue(summary.contains("inclusive-overlap-do-not-sum"), summary)
+    }
+
+    @Test
+    fun `unavailable diagnostic clock cannot change action result or primary failure`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { error("unavailable observation clock") })
+        var actions = 0
+        assertEquals(37, prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++; 37 })
+        assertEquals(1, actions)
+        val primary = IOException("authored primary")
+        assertTrue(assertFailsWith<IOException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { throw primary }
+        } === primary)
+        val mapped = mappedPrefixFailure(prefix, primary)
+        assertTrue(mapped.suppressed.single().message.orEmpty().contains("supported=false"))
+        assertTrue(primary.suppressed.isEmpty())
+        assertEquals("authored primary", primary.message)
+    }
+
+    @Test
+    fun `repeated phase observations remain bounded and never skip the action`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        var actions = 0
+        repeat(1000) { prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++ } }
+        assertEquals(1000, actions)
+        val primary = IOException("bounded diagnostic")
+        val mapped = mappedPrefixFailure(prefix, primary)
+        val summary = mapped.suppressed.single().message.orEmpty()
+        assertTrue(primary.suppressed.isEmpty())
+        assertTrue(RuntimeCopyStatistics.Prefix.Phase.entries.size <= 32)
+        assertTrue(summary.length <= 16 * 1024)
+        assertTrue(summary.contains("supported=false"))
+        assertFalse(summary.contains("bounded diagnostic"))
+    }
+
+    @Test
+    fun `fresh prefix mapping never inspects foreign causes or appends fallback records`() {
+        val cause = OpaquePrefixCause()
+        val existing = List(9) { IOException("existing foreign $it") }
+        existing.forEach(cause::addSuppressed)
+        val facts = decompengine.agent.AgentFailure(
+            decompengine.agent.AgentFailureKind.CONFIGURATION, "authored mapped failure",
+            retryable = true, details = mapOf("fixed" to "control"),
+        )
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        val first = mappedPrefixFailure(prefix, cause, facts)
+        assertTrue(first.failure === facts && first.cause === cause)
+        assertEquals(null, first.receipt)
+        assertEquals(facts.message, first.message)
+        assertEquals(1, first.suppressed.size)
+        assertFalse(first.suppressed.single().message.orEmpty().contains("foreign"))
+        assertTrue(mappedPrefixFailure(prefix, cause, facts).suppressed.isEmpty())
+        assertTrue(mappedPrefixFailure(null, cause, facts).suppressed.isEmpty())
+        val wrongOwner = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        wrongOwner.javaClass.getDeclaredField("ownerThread").apply { isAccessible = true }
+            .set(wrongOwner, Thread("unstarted-observation-owner")) // Never start a thread.
+        assertTrue(mappedPrefixFailure(wrongOwner, cause, facts).suppressed.isEmpty())
+        assertEquals(existing, cause.suppressed.toList())
+        assertTrue(RuntimeCopyStatistics.Prefix::class.java.declaredMethods.none { method ->
+            method.parameterTypes.any { Throwable::class.java.isAssignableFrom(it) }
+        }) // No caller-supplied carrier publication API remains.
+    }
+
+    @Test
+    fun `optional owner allocation failure does not skip or repeat the original action`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        var allocations = 0
+        val allocate: () -> RuntimeCopyStatistics = { allocations++; throw OutOfMemoryError("authored allocation failure") }
+        val statisticsWith = prefix.javaClass.getDeclaredMethod("statisticsWith",
+            RuntimeCopyStatistics.Prefix.Owner::class.java, Function0::class.java).apply { isAccessible = true }
+        val statistics = statisticsWith.invoke(prefix, RuntimeCopyStatistics.Prefix.Owner.PREPARE, allocate)
+        assertEquals(null, statistics)
+        assertEquals(1, allocations)
+        var actions = 0
+        assertEquals(37, prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++; 37 })
+        assertEquals(1, actions)
+        val original = IOException("authored product failure")
+        assertTrue(assertFailsWith<IOException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { actions++; throw original }
+        } === original)
+        assertEquals(2, actions)
+        assertTrue(original.suppressed.isEmpty())
+        val summary = mappedPrefixFailure(prefix, original).suppressed.single().message.orEmpty()
+        assertTrue(summary.contains("supported=false"), summary)
+        assertTrue(summary.contains("PREPARE:unobserved"), summary)
+    }
+
+    @Test
+    fun `unavailable prefix entry argument preserves leaf action once and original failure`() {
+        var entries = 0
+        val unavailable = OutOfMemoryError("authored entry argument failure")
+        val budgetArgument: () -> ((Long) -> LongArray) = { throw unavailable }
+        val create: () -> RuntimeCopyStatistics.Prefix? = {
+            entries++
+            RuntimeCopyStatistics.Prefix.create(budgetArgument())
+        }
+        val entry = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("createOptionalPrelaunchObservation", Function0::class.java)
+            .apply { isAccessible = true }
+        assertNull(entry.invoke(null, create)) // Failure occurs before Prefix.create is entered.
+        assertEquals(1, entries)
+
+        val leaf = Class.forName("decompengine.acp.LinuxFilesystemSyscallsKt")
+            .getDeclaredMethod("measuredCopyOperation", RuntimeCopyStatistics.Bucket::class.java,
+                RuntimeCopyStatistics.Operation::class.java, Function0::class.java)
+            .apply { isAccessible = true }
+        fun invokeLeaf(bucket: RuntimeCopyStatistics.Bucket?, action: () -> Int): Any? = try {
+            leaf.invoke(null, bucket, RuntimeCopyStatistics.Operation.CHECK, action)
+        } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val statistics = RuntimeCopyStatistics()
+        val primary = IOException("authored leaf primary")
+        var actions = 0
+        for (bucket in listOf(null, statistics.copy)) {
+            assertEquals(37, invokeLeaf(bucket) { actions++; 37 })
+            assertTrue(assertFailsWith<IOException> {
+                invokeLeaf(bucket) { actions++; throw primary }
+            } === primary)
+        }
+        assertEquals(4, actions)
+        assertTrue(primary.suppressed.isEmpty())
+        assertTrue(statistics.copy.summary().contains("CHECK=2/"))
+    }
+
+    private class OpaquePrefixCause : IOException("foreign graph must remain opaque") {
+        override val cause: Throwable? get() = error("foreign cause graph was read")
+    }
+
+    private fun mappedPrefixFailure(
+        prefix: RuntimeCopyStatistics.Prefix?,
+        cause: Throwable,
+        failure: decompengine.agent.AgentFailure = decompengine.agent.AgentFailure(
+            decompengine.agent.AgentFailureKind.CONFIGURATION, "authored mapped failure"),
+    ): decompengine.agent.AgentExecutionException = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+        .getDeclaredMethod("mappedPrelaunchFailure", decompengine.agent.AgentFailure::class.java,
+            Throwable::class.java, RuntimeCopyStatistics.Prefix::class.java)
+        .apply { isAccessible = true }.invoke(null, failure, cause, prefix) as decompengine.agent.AgentExecutionException
+
+    @Test
     fun `owned statx scratch resets all bytes and retains fresh immutable identities across scopes`() {
         LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
             LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->

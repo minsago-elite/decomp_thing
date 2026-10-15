@@ -507,6 +507,12 @@ internal class LinuxBubblewrapBoundary private constructor(
     private val successfulLaunches =
         Collections.synchronizedList(mutableListOf<LaunchEvidenceReservation>())
     private var launchEvidenceRuntimeMounts = 0
+    private var prefixObservation: RuntimeCopyStatistics.Prefix? = null
+    internal fun finishPrelaunchObservation() { prefixObservation = null }
+    private inline fun <T> observePrefix(phase: RuntimeCopyStatistics.Prefix.Phase, action: () -> T): T {
+        val observation = prefixObservation
+        return if (observation == null) action() else observation.measure(phase, action)
+    }
     private val closed = AtomicBoolean(false)
     private val closeFailure = AtomicReference<AcpCleanupProofFailure?>()
 
@@ -690,6 +696,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         }
         launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
         requireBoundaryUnchanged(cancellationCheck)
+        val statistics = prefixObservation?.statistics(RuntimeCopyStatistics.Prefix.Owner.LAUNCH)
         var launchMounts = emptyList<PinnedReadOnlyMount>()
         var retainedStagingRoots = emptyList<RetainedHostStagingRoot>()
         var environmentFile: SandboxEnvironmentFile? = null
@@ -700,18 +707,19 @@ internal class LinuxBubblewrapBoundary private constructor(
         var launchEvidenceReservation: LaunchEvidenceReservation? = null
         try {
             retainedStagingRoots = retainHostStagingRoots(launch.stagingRoots, cancellationCheck)
-            launchMounts = pinMounts(
+            launchMounts = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING) { pinMounts(
                 listOf(sandboxGateHelperMount) + launch.readOnlyMounts,
                 configuration.runtimeClosureLimits,
                 forbiddenRuntimeFiles,
                 controlDirectory,
+                statistics = statistics,
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
                 },
-            )
+            ) }
             launchMounts.forEach { mount ->
                 cancellationCheck()
-                mount.requireUnchanged(cancellationCheck)
+                mount.requireUnchanged(cancellationCheck, statistics)
             }
             val launchGateHelper = launchMounts.singleOrNull {
                 it.mount.destination == ACP_SANDBOX_GATE_HELPER_PATH
@@ -819,7 +827,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchHook?.at(AcpSandboxLaunchStage.AFTER_SETUP_WAITER_BEFORE_BIND_ATTESTATION)
             cancellationCheck()
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -845,7 +853,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchHook?.at(AcpSandboxLaunchStage.AFTER_SETUP_BIND_ATTESTATION_BEFORE_RELEASE)
             cancellationCheck()
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -881,7 +889,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchGateHelper.sealMountedSingleFileSnapshot(cancellationCheck)
             executableMount.sealMountedSingleFileSnapshot(cancellationCheck)
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -972,76 +980,84 @@ internal class LinuxBubblewrapBoundary private constructor(
             commitSandboxAuthorization(authorizationStream)
             return created
         } catch (failure: Throwable) {
-            launchEvidenceReservation?.let(::releaseSuccessfulLaunchEvidence)
-            val cleanupFailures = mutableListOf<Throwable>()
-            val created = sandboxed
-            if (created != null) {
-                try {
-                    created.destroyForcibly()
-                } catch (cleanupFailure: Throwable) {
-                    cleanupFailures += cleanupFailure
-                }
-                try {
-                    created.awaitCleanup(CLEANUP_TIMEOUT)
-                } catch (cleanupFailure: Throwable) {
-                    cleanupFailures += cleanupFailure
-                }
-            } else {
-                val started = process
-                val scopeCleaned = if (started != null) {
-                    val cleaned = runCleanupStep(
-                        cleanupFailures,
-                        AcpSandboxCleanupStage.SCOPE,
-                        cleanupHook,
-                    ) {
-                        requireNotNull(scopeController).requireKilledAndRemovedIfPresent(
+            prefixObservation?.failureCurrent()
+            prefixObservation?.start(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_CLEANUP)
+            var cleanupReturned = false
+            try {
+                launchEvidenceReservation?.let(::releaseSuccessfulLaunchEvidence)
+                val cleanupFailures = mutableListOf<Throwable>()
+                val created = sandboxed
+                if (created != null) {
+                    try {
+                        created.destroyForcibly()
+                    } catch (cleanupFailure: Throwable) {
+                        cleanupFailures += cleanupFailure
+                    }
+                    try {
+                        created.awaitCleanup(CLEANUP_TIMEOUT)
+                    } catch (cleanupFailure: Throwable) {
+                        cleanupFailures += cleanupFailure
+                    }
+                } else {
+                    val started = process
+                    val scopeCleaned = if (started != null) {
+                        val cleaned = runCleanupStep(
+                            cleanupFailures,
+                            AcpSandboxCleanupStage.SCOPE,
+                            cleanupHook,
+                        ) {
+                            requireNotNull(scopeController).requireKilledAndRemovedIfPresent(
+                                started,
+                                rootProcessHandle,
+                            )
+                        }
+                        cleaned
+                    } else true
+                    val snapshotsCleaned = if (scopeCleaned) {
+                        runCleanupStep(
+                            cleanupFailures,
+                            AcpSandboxCleanupStage.RUNTIME_SNAPSHOTS,
+                            cleanupHook,
+                        ) { cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots) }
+                    } else {
+                        cleanupFailures += IOException(
+                            "launch runtime snapshots retained because scope cleanup was not proven",
+                        )
+                        false
+                    }
+                    if (!scopeCleaned || !snapshotsCleaned) {
+                        unresolvedLaunches += RetainedLaunchCleanup(
                             started,
                             rootProcessHandle,
+                            scopeController,
+                            launchMounts,
+                            environmentFile,
+                            retainedStagingRoots,
                         )
+                        rootProcessHandle = null
+                    } else {
+                        rootProcessHandle?.close()
+                        rootProcessHandle = null
                     }
-                    cleaned
-                } else true
-                val snapshotsCleaned = if (scopeCleaned) {
-                    runCleanupStep(
-                        cleanupFailures,
-                        AcpSandboxCleanupStage.RUNTIME_SNAPSHOTS,
-                        cleanupHook,
-                    ) { cleanupLaunchResources(launchMounts, environmentFile, retainedStagingRoots) }
-                } else {
-                    cleanupFailures += IOException(
-                        "launch runtime snapshots retained because scope cleanup was not proven",
-                    )
-                    false
                 }
-                if (!scopeCleaned || !snapshotsCleaned) {
-                    unresolvedLaunches += RetainedLaunchCleanup(
-                        started,
-                        rootProcessHandle,
-                        scopeController,
-                        launchMounts,
-                        environmentFile,
-                        retainedStagingRoots,
+                if (cleanupFailures.isNotEmpty()) {
+                    val cleanup = AcpCleanupProofFailure(
+                        "sandbox launch failed and cleanup could not be proven",
+                        cleanupFailures.first(),
                     )
-                    rootProcessHandle = null
-                } else {
-                    rootProcessHandle?.close()
-                    rootProcessHandle = null
+                    cleanupFailures.drop(1).forEach(cleanup::addSuppressed)
+                    cleanup.addSuppressed(failure)
+                    closeFailure.compareAndSet(null, cleanup)
+                    throw cleanup
                 }
+                cleanupReturned = true
+                if (failure is AcpCleanupProofFailure) {
+                    closeFailure.compareAndSet(null, failure)
+                }
+                throw failure
+            } finally {
+                prefixObservation?.finish(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_CLEANUP, cleanupReturned)
             }
-            if (cleanupFailures.isNotEmpty()) {
-                val cleanup = AcpCleanupProofFailure(
-                    "sandbox launch failed and cleanup could not be proven",
-                    cleanupFailures.first(),
-                )
-                cleanupFailures.drop(1).forEach(cleanup::addSuppressed)
-                cleanup.addSuppressed(failure)
-                closeFailure.compareAndSet(null, cleanup)
-                throw cleanup
-            }
-            if (failure is AcpCleanupProofFailure) {
-                closeFailure.compareAndSet(null, failure)
-            }
-            throw failure
         }
     }
 
@@ -1348,7 +1364,9 @@ internal class LinuxBubblewrapBoundary private constructor(
             cleanupHook: AcpSandboxCleanupHook? = null,
             scopeObserver: AcpSandboxScopeObserver? = null,
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+            prefixObservation: RuntimeCopyStatistics.Prefix? = null,
         ): LinuxBubblewrapBoundary {
+            val statistics = prefixObservation?.statistics(RuntimeCopyStatistics.Prefix.Owner.PREPARE)
             cancellationCheck()
             val controlTemporaryParent = sandboxControlTemporaryParent()
             return try {
@@ -1360,7 +1378,8 @@ internal class LinuxBubblewrapBoundary private constructor(
                     scopeObserver,
                     cancellationCheck,
                     controlTemporaryParent,
-                )
+                    statistics,
+                ).also { it.prefixObservation = prefixObservation }
             } finally {
                 controlTemporaryParent.close()
             }
@@ -1374,6 +1393,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             scopeObserver: AcpSandboxScopeObserver?,
             cancellationCheck: () -> Unit,
             controlTemporaryParent: PinnedSandboxControlTemporaryParent,
+            statistics: RuntimeCopyStatistics?,
         ): LinuxBubblewrapBoundary {
             requireLinuxCgroupV2()
             LinuxFilesystemSyscalls.requirePidfdSupported()
@@ -1442,6 +1462,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     controlDirectory,
                     allowUserOwnedSnapshot = true,
                     cancellationCheck = cancellationCheck,
+                    statistics = statistics,
                 ).single()
                 requireNotNull(helperValidation).requireStaticGateHelper(
                     configuration.expectedSandboxGateHelperSha256,
@@ -1458,6 +1479,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     controlDirectory,
                     allowUserOwnedSnapshot = false,
                     cancellationCheck = cancellationCheck,
+                    statistics = statistics,
                 )
                 cancellationCheck()
             } catch (failure: Throwable) {
@@ -4259,7 +4281,8 @@ private class PinnedReadOnlyMount private constructor(
         expectedLinkCount = expectedLinkCount,
     )
 
-    fun requireUnchanged(cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT) {
+    fun requireUnchanged(cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+                         statistics: RuntimeCopyStatistics? = null) {
         cancellationCheck()
         val current = LinuxFilesystemSyscalls.identity(sourceDescriptor.fd)
         if (current.key.device != manifest.rootIdentity.device ||
@@ -4274,7 +4297,7 @@ private class PinnedReadOnlyMount private constructor(
         if (mountedSnapshotUnlinked) {
             val expectedDigest = descriptorSha256
                 ?: throw IOException("sealed runtime snapshot lacks a pinned content digest")
-            if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck) != expectedDigest) {
+            if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics) != expectedDigest) {
                 throw IOException("sealed runtime snapshot bytes changed")
             }
             return
@@ -4290,6 +4313,7 @@ private class PinnedReadOnlyMount private constructor(
                 allowPrivateControlSource = snapshotContainer != null,
                 cancellationCheck = cancellationCheck,
                 privateSnapshotOwner = snapshotContainer?.controlKey,
+                statistics = statistics,
             ) != manifest
         ) {
             throw IOException("authenticated runtime closure changed: ${mount.destination}")
@@ -4359,6 +4383,7 @@ private class PinnedReadOnlyMount private constructor(
             controlDirectory: PinnedControlDirectory,
             allowUserOwnedSnapshot: Boolean,
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+            statistics: RuntimeCopyStatistics? = null,
         ): PinnedReadOnlyMount {
             cancellationCheck()
             val configuredManifest = buildRuntimeManifest(
@@ -4366,6 +4391,7 @@ private class PinnedReadOnlyMount private constructor(
                 limits,
                 forbidden,
                 cancellationCheck = cancellationCheck,
+                statistics = statistics,
             )
             if (configuredManifest.recursivelyRootOwnedAndImmutable) {
                 requireCanonicalRootOwnedPath(mount.source, cancellationCheck)
@@ -4397,6 +4423,7 @@ private class PinnedReadOnlyMount private constructor(
                 limits,
                 controlDirectory,
                 cancellationCheck,
+                statistics,
             )
             try {
                 val copiedManifest = buildRuntimeManifestOwned(
@@ -4406,6 +4433,7 @@ private class PinnedReadOnlyMount private constructor(
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
+                    statistics = statistics,
                 )
                 if (copiedManifest.manifestSha256 != expected) {
                     throw IOException("user-owned runtime snapshot does not match its expected SHA-256")
@@ -4418,10 +4446,11 @@ private class PinnedReadOnlyMount private constructor(
                     allowPrivateControlSource = true,
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
+                    statistics = statistics,
                 )
                 val descriptor = requirePinnedDescriptor(snapshot.source, hardenedManifest.rootIdentity)
                 val descriptorDigest = if (hardenedManifest.rootDirectory) null else {
-                    sha256(descriptor, limits.maximumUserOwnedFileBytes, cancellationCheck)
+                    sha256(descriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics)
                 }
                 return PinnedReadOnlyMount(
                     mount,
@@ -4745,8 +4774,9 @@ internal fun buildRuntimeManifest(
     forbidden: Set<ForbiddenRuntimeFile>,
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): RuntimeManifest = buildRuntimeManifestOwned(source, limits, forbidden, allowPrivateControlSource,
-    cancellationCheck, privateSnapshotOwner = null)
+    cancellationCheck, privateSnapshotOwner = null, statistics = statistics)
 
 private fun buildRuntimeManifestOwned(
     source: Path,
@@ -4755,6 +4785,7 @@ private fun buildRuntimeManifestOwned(
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     privateSnapshotOwner: LinuxFileKey? = null,
+    statistics: RuntimeCopyStatistics? = null,
 ): RuntimeManifest {
     cancellationCheck()
     if (allowPrivateControlSource && privateSnapshotOwner == null) {
@@ -4846,7 +4877,7 @@ private fun buildRuntimeManifestOwned(
                         }
                         val check = protection.descriptorCheck(authenticated, path)
                         check()
-                        sha256(authenticated, identity.size, check)
+                        sha256(authenticated, identity.size, check, statistics)
                     }
                     // Screening must not change an immutable root-owned runtime's provisioning
                     // manifest merely because an unrelated security tool has the same byte size.
@@ -4898,6 +4929,7 @@ private fun pinMounts(
     controlDirectory: PinnedControlDirectory,
     allowUserOwnedSnapshot: Boolean = true,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): List<PinnedReadOnlyMount> {
     cancellationCheck()
     if (mounts.size > MAXIMUM_SANDBOX_MOUNTS + 1) {
@@ -4927,6 +4959,7 @@ private fun pinMounts(
                 controlDirectory,
                 allowUserOwnedSnapshot,
                 cancellationCheck,
+                statistics,
             )
         }
         return pinned
@@ -4998,6 +5031,7 @@ private fun stagePrivateRuntimeSnapshot(
     limits: AcpRuntimeClosureLimits,
     controlDirectory: PinnedControlDirectory,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): PrivateRuntimeSnapshot {
     cancellationCheck()
     val container = controlDirectory.createChild("runtime-")
@@ -5020,6 +5054,7 @@ private fun stagePrivateRuntimeSnapshot(
                     budget = budget,
                     protection = protection,
                     cancellationCheck = cancellationCheck,
+                    statistics = statistics,
                 )
                 protection.finish()
             }
@@ -5048,6 +5083,7 @@ private fun copyRuntimeNode(
     budget: RuntimeSnapshotBudget,
     protection: RuntimePrivateControlScope,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ) {
     cancellationCheck()
     protection.requireDescriptor(descriptor, sourcePath)
@@ -5091,6 +5127,7 @@ private fun copyRuntimeNode(
                             budget,
                             protection,
                             cancellationCheck,
+                            statistics,
                         )
                     }
                 }
@@ -5111,7 +5148,8 @@ private fun copyRuntimeNode(
                         descriptor,
                         output,
                         remaining,
-                        { protection.requireDescriptor(descriptor, sourcePath) },
+                        statistics = statistics?.copy,
+                        cancellationCheck = { protection.requireDescriptor(descriptor, sourcePath) },
                     ),
                 )
                 LinuxFilesystemSyscalls.chmod(output, descriptor.identity.mode.permissions)
@@ -6380,6 +6418,7 @@ private fun sha256(
     descriptor: LinuxDescriptor,
     maximumBytes: Long,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+    statistics: RuntimeCopyStatistics? = null,
 ): String {
     val digest = MessageDigest.getInstance("SHA-256")
     LinuxFilesystemSyscalls.copyReadableTo(
@@ -6394,7 +6433,8 @@ private fun sha256(
             }
         },
         maximumBytes,
-        cancellationCheck,
+        statistics = statistics?.hash,
+        cancellationCheck = cancellationCheck,
     )
     return digest.digest().toHex()
 }

@@ -253,6 +253,9 @@ class AcpAgentHarness(
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
+        val prefixObservation = createOptionalPrelaunchObservation {
+            RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
+        }
         val binding = AgentExecutionRequestBinding.capture(request)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
         var schedulingPermit: AcpExecutionScheduler.Permit? = null
@@ -296,6 +299,7 @@ class AcpAgentHarness(
                     wallDeadline,
                     sessionJournal,
                     authenticationInventory,
+                    prefixObservation,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -370,6 +374,7 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         sessionJournal: AgentSessionJournal?,
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
+        prefixObservation: RuntimeCopyStatistics.Prefix?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -464,6 +469,7 @@ class AcpAgentHarness(
                 request,
                 translator.activity,
                 wallDeadline,
+                prefixObservation,
             )
         } catch (cancelled: RequestedAcpCancellation) {
             return AgentExecutionResult(
@@ -1885,14 +1891,27 @@ private class ProductionAcpSandboxExecution(
     request: AgentExecutionRequest,
     activity: ProtocolActivity,
     wallDeadline: MonotonicDeadline,
+    private val prefixObservation: RuntimeCopyStatistics.Prefix?,
 ) : AutoCloseable {
     private val boundary: LinuxBubblewrapBoundary
     private val executionCheck: () -> Unit = {
-        if (request.cancellation.isCancellationRequested()) {
-            throw RequestedAcpCancellation("sandbox launch")
+        try {
+            if (request.cancellation.isCancellationRequested()) {
+                throw RequestedAcpCancellation("sandbox launch")
+            }
+            if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
+        } catch (failure: Throwable) {
+            prefixObservation?.failureCurrent(when (failure) {
+                is AcpPhaseTimeout -> RuntimeCopyStatistics.Prefix.Failure.TIMEOUT
+                is RequestedAcpCancellation -> RuntimeCopyStatistics.Prefix.Failure.CANCELLED
+                is Error -> RuntimeCopyStatistics.Prefix.Failure.ERROR
+                else -> RuntimeCopyStatistics.Prefix.Failure.OTHER
+            })
+            throw failure
         }
-        if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
     }
+    private inline fun <T> observePrefix(phase: RuntimeCopyStatistics.Prefix.Phase, action: () -> T): T =
+        if (prefixObservation == null) action() else prefixObservation.measure(phase, action)
     val running: RunningAcpProcess
     val networkIsolated: Boolean get() = boundary.networkIsolated
 
@@ -1913,39 +1932,45 @@ private class ProductionAcpSandboxExecution(
             ),
         )
         boundary = try {
-            LinuxBubblewrapBoundary.prepare(
-                sandboxConfiguration,
-                cancellationCheck = executionCheck,
-            )
+            observePrefix(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+                LinuxBubblewrapBoundary.prepare(
+                    sandboxConfiguration,
+                    cancellationCheck = executionCheck,
+                    prefixObservation = prefixObservation,
+                )
+            }
         } catch (failure: Exception) {
             if (failure is RequestedAcpCancellation) throw failure
             if (failure is AcpPhaseTimeout) {
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.TIMEOUT,
                         failure.message ?: "ACP execution exceeded its wall-clock timeout during sandbox preparation",
                         retryable = true,
                     ),
                     failure,
+                    prefixObservation,
                 )
             }
             if (failure is AgentExecutionException) throw failure
             if (failure.containsCleanupProofFailure()) {
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.INTERNAL,
                         "ACP sandbox preparation failed and cleanup was not proven",
                     ),
                     failure,
+                    prefixObservation,
                 )
             }
-            throw AgentExecutionException(
+            throw mappedPrelaunchFailure(
                 AgentFailure(
                     AgentFailureKind.CONFIGURATION,
                     "ACP process sandbox boundary is unavailable or could not be verified",
                     details = mapOf("provider" to "bubblewrap+systemd-cgroup-v2"),
                 ),
                 failure,
+                prefixObservation,
             )
         }
         running = try {
@@ -1954,7 +1979,7 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
-            val sandboxed = boundary.launch(
+            val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
                     command = configuration.command(),
                     environment = configuration.environmentValues(),
@@ -1968,7 +1993,9 @@ private class ProductionAcpSandboxExecution(
                 ),
                 mergeError = false,
                 cancellationCheck = executionCheck,
-            )
+            ) }
+            // Retain completed owner statistics without mixing later broker launches.
+            boundary.finishPrelaunchObservation()
             RunningAcpProcess(
                 process = sandboxed.process,
                 sandboxed = sandboxed,
@@ -1979,7 +2006,7 @@ private class ProductionAcpSandboxExecution(
             )
         } catch (failure: Throwable) {
             val cleanupFailure = try {
-                boundary.close()
+                observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
                 null
             } catch (cleanup: Throwable) {
                 cleanup
@@ -1994,12 +2021,13 @@ private class ProductionAcpSandboxExecution(
             }
             if (cleanupFailure != null) {
                 cleanupFailure.addSuppressed(failure)
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.INTERNAL,
                         "ACP launch failed and sandbox cleanup was not proven",
                     ),
                     cleanupFailure,
+                    prefixObservation,
                 )
             }
             throw mapLaunchFailure(failure)
@@ -2032,46 +2060,70 @@ private class ProductionAcpSandboxExecution(
         executionCheck,
     )
 
-    override fun close() = boundary.close()
+    override fun close() = observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
 
     private fun mapLaunchFailure(failure: Throwable): Throwable = when (failure) {
         is RequestedAcpCancellation, is AgentExecutionException -> failure
-        is AcpPhaseTimeout -> AgentExecutionException(
+        is AcpPhaseTimeout -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.TIMEOUT,
                 failure.message ?: "ACP execution exceeded its wall-clock timeout during sandbox launch",
                 retryable = true,
             ),
             failure,
+            prefixObservation,
         )
-        is AcpCleanupProofFailure -> AgentExecutionException(
+        is AcpCleanupProofFailure -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.INTERNAL,
                 "ACP launch failed and sandbox cleanup was not proven",
             ),
             failure,
+            prefixObservation,
         )
-        is IOException -> AgentExecutionException(
+        is IOException -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
                 "failed to launch configured ACP executable: ${configuration.executable}",
                 details = mapOf("executable" to configuration.executable.toString()),
             ),
             failure,
+            prefixObservation,
         )
-        is IllegalArgumentException -> AgentExecutionException(
+        is IllegalArgumentException -> mappedPrelaunchFailure(
             AgentFailure(AgentFailureKind.CONFIGURATION, "configured ACP sandbox authority is invalid"),
             failure,
+            prefixObservation,
         )
-        is IllegalStateException -> AgentExecutionException(
+        is IllegalStateException -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
                 "configured ACP sandbox authority changed before launch",
             ),
             failure,
+            prefixObservation,
         )
         else -> failure
     }
+}
+
+/** Inlined diagnostic-only guard includes construction of the bound budget argument. */
+private inline fun createOptionalPrelaunchObservation(
+    create: () -> RuntimeCopyStatistics.Prefix?,
+): RuntimeCopyStatistics.Prefix? = try { create() } catch (_: Throwable) { null }
+
+/** Only an existing mapping's freshly constructed typed exception can receive this record. */
+private fun mappedPrelaunchFailure(
+    failure: AgentFailure,
+    cause: Throwable,
+    observation: RuntimeCopyStatistics.Prefix?,
+): AgentExecutionException {
+    val mapped = AgentExecutionException(failure, cause)
+    try {
+        val diagnostic = observation?.failureDiagnostic()
+        if (diagnostic != null) mapped.addSuppressed(diagnostic)
+    } catch (_: Throwable) { /* Diagnostic failure never replaces the mapped result. */ }
+    return mapped
 }
 
 private class RunningAcpProcess(
@@ -3476,6 +3528,12 @@ internal class MonotonicDeadline(timeout: Duration) {
     fun remainingMillis(now: Long = System.nanoTime()): Long {
         val remaining = (timeoutNanos - elapsedNanos(now)).coerceAtLeast(0)
         return remaining / NANOS_PER_MILLI + if (remaining % NANOS_PER_MILLI == 0L) 0 else 1
+    }
+
+    /** Observation only, using this original deadline; never a fresh budget. */
+    fun observationSample(now: Long): LongArray {
+        val elapsed = elapsedNanos(now)
+        return longArrayOf(elapsed, (timeoutNanos - elapsed).coerceAtLeast(0))
     }
 
     private fun elapsedNanos(now: Long): Long = (now - startedAt).coerceAtLeast(0)
