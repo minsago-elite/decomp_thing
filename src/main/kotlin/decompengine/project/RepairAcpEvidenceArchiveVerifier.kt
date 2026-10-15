@@ -1296,6 +1296,8 @@ private data class ReleaseRepairRun(
     val expectedObservationsSha256: String?,
     val originalBinarySha256: String?,
     val lastEvidence: ReleaseRepairEvidence?,
+    val rollbackFailureAttemptId: String?,
+    val rollbackResolution: String?,
 )
 
 private fun JsonObject.optionalSha256(field: String, label: String): String? = optionalString(field, label)?.also {
@@ -1321,8 +1323,18 @@ private fun JsonObject.optionalValidationProof(field: String, label: String): Re
 
 private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
     val root = element.requiredObject("repair release run")
-    root.requireExactKeys(RUN_FIELDS, "repair release run")
-    require(root.requiredInt("schemaVersion", "repair release run") == 1) { "unsupported repair release run schema" }
+    val version = root.requiredInt("schemaVersion", "repair release run")
+    require(version in 1..2) { "unsupported repair release run schema" }
+    root.requireExactKeys(RUN_FIELDS + if (version == 2) RUN_ROLLBACK_FIELDS else emptySet(), "repair release run")
+    val failureAttempt = if (version == 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
+    val resolution = if (version == 2) root.optionalString("rollbackResolution", "repair release run") else null
+    val status = root.requiredString("status", "repair release run")
+    require((status == "rollback_failed") == (failureAttempt != null) &&
+        (failureAttempt == null) == (resolution == null) &&
+        (failureAttempt == null || failureAttempt.matches(Regex("revision_[A-Za-z0-9_]+"))) &&
+        (resolution == null || resolution in setOf("restore_failed_unresolved", "restored_after_failure"))) {
+        "repair release rollback run fields are inconsistent"
+    }
     return ReleaseRepairRun(
         root, root.requiredString("id", "repair release run"),
         root.requiredString("status", "repair release run"),
@@ -1337,6 +1349,7 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
         root.optionalSha256("expectedObservationsSha256", "repair release run"),
         root.optionalSha256("originalBinarySha256", "repair release run"),
         root.optionalEvidence("lastEvidence", "repair release run"),
+        failureAttempt, resolution,
     )
 }
 
@@ -1397,6 +1410,22 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
             }
             if (node.status in setOf("accepted", "provisional")) require(node.validationProof != null) {
                 "repair release revision has no validation proof"
+            }
+        }
+        run.rollbackFailureAttemptId?.let { attemptId ->
+            val node = requireNotNull(nodes[attemptId]) { "repair release rollback attempt is missing" }
+            val record = requireNotNull(node.rollbackRecord) { "repair release rollback record is missing" }
+            require(node.status == "rejected" && node.repairMetadata?.runId == run.id &&
+                record.attemptId == attemptId && record.runId == run.id &&
+                run.rollbackResolution == "restored_after_failure" && record.state == run.rollbackResolution &&
+                record.failureStage != null && record.failureCode != null) {
+                "repair release rollback run is cross-paired with its finalized record"
+            }
+        }
+        if (run.document.requiredInt("schemaVersion", "repair release run") >= 2) {
+            require(attemptsByRun[run.id].orEmpty().mapNotNull { it.rollbackRecord }
+                .filter { it.failureCode != null }.all { it.attemptId == run.rollbackFailureAttemptId }) {
+                "repair release rollback record lacks its run failure link"
             }
         }
         val accepted = attemptsByRun[run.id].orEmpty().filter { it.status == "accepted" }
@@ -1724,7 +1753,8 @@ private val RUN_FIELDS = setOf(
     "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
     "expectedObservationsSha256", "originalBinarySha256", "lastEvidence",
 )
+private val RUN_ROLLBACK_FIELDS = setOf("rollbackFailureAttemptId", "rollbackResolution")
 private val TERMINAL_RUN_STATUSES = setOf(
     "fully_accepted", "compile_valid", "no_changes", "rejected", "iteration_exhausted", "resource_exhausted",
-    "cancelled", "interrupted", "validation_failed",
+    "cancelled", "interrupted", "validation_failed", "rollback_failed",
 )

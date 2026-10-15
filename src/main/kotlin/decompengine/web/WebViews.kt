@@ -562,8 +562,12 @@ fun renderRepairHistory(
         val attempted = run.historyCount("attemptedCount")
         val maximum = run.historyCount("maximumAttempts")
         val accepted = safeRevisionIdentity(run.historyText("acceptedHeadId"))
+        val rollback = decompengine.repair.repairRollbackRunLabel(
+            decompengine.repair.parseRepairRunState(run.toString()))?.let {
+            "<br>${it.escapeHtml()}"
+        }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${label.escapeHtml()} · $attempted/$maximum attempts" +
-            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code></p>"
+            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code>$rollback</p>"
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->

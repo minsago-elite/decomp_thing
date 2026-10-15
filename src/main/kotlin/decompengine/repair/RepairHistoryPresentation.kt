@@ -66,6 +66,7 @@ internal fun repairRunLabel(status: String?): String = when (status) {
     "no_changes" -> "no-change"
     "iteration_exhausted", "resource_exhausted" -> "limit-exhausted"
     "validation_failed" -> "validation-failed"
+    "rollback_failed" -> "rollback-failed"
     "rejected" -> "rejected"
     "cancelled" -> "cancelled"
     "interrupted" -> "interrupted"
@@ -74,3 +75,8 @@ internal fun repairRunLabel(status: String?): String = when (status) {
 }
 
 internal fun JsonObject.historyText(name: String): String? = (this[name] as? JsonPrimitive)?.contentOrNull
+
+/** Fixed typed facts only; peer diagnostics and exceptions never supply a rollback outcome. */
+internal fun repairRollbackRunLabel(run: RepairRunState): String? = run.rollbackFailureAttemptId?.let {
+    "rollback attempt: $it (${requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-')})"
+}

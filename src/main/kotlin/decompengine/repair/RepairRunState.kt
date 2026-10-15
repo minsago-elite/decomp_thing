@@ -10,11 +10,12 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 enum class RepairRunStatus {
     RUNNING, FULLY_ACCEPTED, COMPILE_VALID, NO_CHANGES, REJECTED, ITERATION_EXHAUSTED,
-    RESOURCE_EXHAUSTED, CANCELLED, INTERRUPTED, VALIDATION_FAILED,
+    RESOURCE_EXHAUSTED, CANCELLED, INTERRUPTED, VALIDATION_FAILED, ROLLBACK_FAILED,
 }
 
 enum class RepairAttemptDisposition { LEGACY_UNVERIFIED, PROVISIONAL, REJECTED, FULLY_ACCEPTED }
@@ -34,12 +35,23 @@ data class RepairRunState(
     val lastEvidence: RepairEvidence? = null,
     val expectedObservationsSha256: String? = null,
     val originalBinarySha256: String? = null,
+    val rollbackFailureAttemptId: String? = null,
+    val rollbackResolution: RepairRollbackState? = null,
+    // Derived index only: graph/archive validation must match the linked rollback record.
+    // Preserve schema-1 bytes on read; only new records or an actual committed failure upgrade.
+    val schemaVersion: Int = 2,
 ) {
-    val schemaVersion: Int get() = 1
     val remainingAttempts: Int get() = maximumAttempts - attemptedCount
     val terminal: Boolean get() = status != RepairRunStatus.RUNNING
 
     init {
+        require(schemaVersion in 1..2)
+        require((status == RepairRunStatus.ROLLBACK_FAILED) == (rollbackFailureAttemptId != null))
+        require((rollbackFailureAttemptId == null) == (rollbackResolution == null))
+        require(schemaVersion == 2 || rollbackFailureAttemptId == null)
+        require(rollbackFailureAttemptId == null || rollbackFailureAttemptId.matches(Regex("revision_[A-Za-z0-9_]+")))
+        require(rollbackResolution == null || rollbackResolution in setOf(
+            RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE))
         require(id.matches(Regex("run_[0-9]{8}")))
         require(maximumAttempts > 0 && attemptedCount in 0..maximumAttempts)
         require(startedEpochMillis > 0 && deadlineEpochMillis >= startedEpochMillis)
@@ -63,6 +75,10 @@ data class RepairRunState(
         put("deadlineEpochMillis", deadlineEpochMillis)
         put("expectedObservationsSha256", expectedObservationsSha256?.let(::JsonPrimitive) ?: JsonNull)
         put("originalBinarySha256", originalBinarySha256?.let(::JsonPrimitive) ?: JsonNull)
+        if (schemaVersion >= 2) {
+            put("rollbackFailureAttemptId", rollbackFailureAttemptId?.let(::JsonPrimitive) ?: JsonNull)
+            put("rollbackResolution", rollbackResolution?.name?.lowercase()?.let(::JsonPrimitive) ?: JsonNull)
+        }
         put("lastEvidence", lastEvidence?.let { evidence -> buildJsonObject {
             put("kind", evidence.kind)
             put("summary", evidence.summary)
@@ -73,9 +89,39 @@ data class RepairRunState(
 
 internal fun parseRepairRunState(payload: String): RepairRunState {
     val value = Json.parseToJsonElement(payload).jsonObject
-    require(value.getValue("schemaVersion").jsonPrimitive.int == 1)
+    val version = value.getValue("schemaVersion").jsonPrimitive.int
+    require(version in 1..2)
+    val common = setOf("schemaVersion", "id", "status", "baselineId", "acceptedHeadId", "provisionalHeadId",
+        "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
+        "expectedObservationsSha256", "originalBinarySha256", "lastEvidence")
+    val fields = common + if (version == 2) setOf("rollbackFailureAttemptId", "rollbackResolution") else emptySet()
+    require(value.keys.all { it in fields }) { "unknown repair run field" }
+    if (version == 2) {
+        require(value.keys == fields) { "incomplete schema-2 repair run" }
+        for (name in setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis")) {
+            val primitive = value.getValue(name) as? JsonPrimitive ?: error("repair run $name is not numeric")
+            require(!primitive.isString && primitive.longOrNull != null)
+        }
+        for (name in fields - setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis", "lastEvidence")) {
+            val element = value.getValue(name)
+            val nullable = name in setOf("acceptedHeadId", "provisionalHeadId", "expectedObservationsSha256",
+                "originalBinarySha256", "rollbackFailureAttemptId", "rollbackResolution")
+            require(nullable && element is JsonNull || element is JsonPrimitive && element.isString) {
+                "repair run $name is not valid text or null"
+            }
+        }
+        require(value.getValue("status").jsonPrimitive.content in RepairRunStatus.entries.map { it.name.lowercase() })
+        val resolution = value.getValue("rollbackResolution")
+        require(resolution is JsonNull || resolution.jsonPrimitive.content in setOf("restore_failed_unresolved", "restored_after_failure"))
+    }
     fun optional(name: String) = value[name]?.jsonPrimitive?.contentOrNull
     val evidence = value["lastEvidence"]?.takeUnless { it is JsonNull }?.jsonObject
+    if (version == 2 && evidence != null) {
+        require(evidence.keys == setOf("kind", "summary", "artifactPath"))
+        for (name in setOf("kind", "summary")) require((evidence.getValue(name) as? JsonPrimitive)?.isString == true)
+        val artifact = evidence.getValue("artifactPath")
+        require(artifact is JsonNull || artifact is JsonPrimitive && artifact.isString)
+    }
     return RepairRunState(
         value.getValue("id").jsonPrimitive.content,
         RepairRunStatus.valueOf(value.getValue("status").jsonPrimitive.content.uppercase()),
@@ -90,6 +136,9 @@ internal fun parseRepairRunState(payload: String): RepairRunState {
             it.getValue("summary").jsonPrimitive.content, it["artifactPath"]?.jsonPrimitive?.contentOrNull) },
         optional("expectedObservationsSha256"),
         optional("originalBinarySha256"),
+        optional("rollbackFailureAttemptId"),
+        optional("rollbackResolution")?.let { RepairRollbackState.valueOf(it.uppercase()) },
+        version,
     )
 }
 

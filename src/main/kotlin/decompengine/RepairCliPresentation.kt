@@ -4,6 +4,7 @@ import decompengine.repair.RepairRunOutcome
 import decompengine.repair.RepairRunStatus
 import decompengine.repair.repairAttemptLabel
 import decompengine.repair.repairRunLabel
+import decompengine.repair.repairRollbackRunLabel
 
 /** Concise operator output from typed workflow results; peer summaries stay out of the console. */
 internal data class RepairCliPresentation(val exitCode: Int, val lines: List<String>)
@@ -15,6 +16,7 @@ internal fun presentRepairOutcome(outcome: RepairRunOutcome): RepairCliPresentat
         report.cases.isNotEmpty() && report.matches
     val lines = buildList {
         add("repair run ${run.id}: ${repairRunLabel(run.status.name.lowercase())} [${run.status.name.lowercase()}] (${run.attemptedCount}/${run.maximumAttempts} attempts)")
+        repairRollbackRunLabel(run)?.let(::add)
         add("accepted revision: ${run.acceptedHeadId ?: "none"}")
         if (outcome.iterations.size > 20) add("${outcome.iterations.size - 20} earlier iterations omitted; see durable repair history")
         outcome.iterations.takeLast(20).forEach {

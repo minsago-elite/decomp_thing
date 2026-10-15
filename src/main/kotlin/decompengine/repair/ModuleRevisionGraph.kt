@@ -501,6 +501,17 @@ private fun exactPathModuleId(path: String): String =
 interface RepairIndexProfile {
     fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout
 
+    /** Recovery-only dependency resolution over authorized, hash-checked target preimages.
+     * Source-sensitive profiles override this; the resulting full index must still match the
+     * persisted immutable binding. This callback does not grant writes or acceptance authority. */
+    fun resolveForRecovery(
+        projectRoot: Path,
+        budget: RepairResourceBudget,
+        sourcePaths: List<String>,
+        editablePaths: List<String>,
+        readSource: (String) -> ByteArray,
+    ): RepairIndexLayout = resolve(projectRoot, budget)
+
     /** Adapter-specific admission of already bounded source bytes before validation or publication. */
     fun validateSourceContent(path: String, bytes: ByteArray) {}
 
@@ -617,6 +628,13 @@ private fun IndexedModule.deepFrozenCopy(): IndexedModule = copy(
     entityIds = immutableList(entityIds),
     dependencies = immutableList(dependencies),
 )
+
+/** Recovery-only immutable path inventory and bounded authenticated preimage reader. */
+internal interface RepairRecoverySourceView {
+    val sourcePaths: List<String>
+    val editablePaths: List<String>
+    fun readSource(relative: String): ByteArray
+}
 
 /** Sparse index constructed only for a gate-authenticated, lock-owning graph. */
 internal class ModuleRepairIndex private constructor(
@@ -974,6 +992,31 @@ internal class ModuleRepairIndex private constructor(
             projectDirCandidate: Path?,
             profileCandidate: RepairIndexProfile?,
             budgetCandidate: RepairResourceBudget?,
+        ): ModuleRepairIndex = loadIndexAuthorized(runtimeIdentity, graphAuthorityCandidate,
+            projectDirCandidate, profileCandidate, budgetCandidate, null)
+
+        /** Separate bridge retains runtime identity and registered-profile authority. */
+        fun loadRecoveryAuthorized(
+            runtimeIdentity: Any?,
+            graphAuthorityCandidate: Any?,
+            projectDirCandidate: Path?,
+            profileCandidate: RepairIndexProfile?,
+            budgetCandidate: RepairResourceBudget?,
+            sourceViewCandidate: RepairRecoverySourceView?,
+        ): ModuleRepairIndex {
+            SecureRepairRuntime.requireRuntimeIdentity(runtimeIdentity)
+            SecureRepairRuntime.requireGraphAuthority(graphAuthorityCandidate)
+            return loadIndexAuthorized(runtimeIdentity, graphAuthorityCandidate, projectDirCandidate,
+                profileCandidate, budgetCandidate, requireNotNull(sourceViewCandidate))
+        }
+
+        private fun loadIndexAuthorized(
+            runtimeIdentity: Any?,
+            graphAuthorityCandidate: Any?,
+            projectDirCandidate: Path?,
+            profileCandidate: RepairIndexProfile?,
+            budgetCandidate: RepairResourceBudget?,
+            sourceView: RepairRecoverySourceView?,
         ): ModuleRepairIndex {
             SecureRepairRuntime.requireRuntimeIdentity(runtimeIdentity)
             SecureRepairRuntime.requireGraphAuthority(graphAuthorityCandidate)
@@ -993,7 +1036,11 @@ internal class ModuleRepairIndex private constructor(
             }
             val profileId = profile.profileId()
             require(profileId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"))) { "invalid repair profile ID" }
-            val layout = profile.resolve(root, budget).deepFrozenCopy()
+            val layout = (if (sourceView == null) profile.resolve(root, budget) else
+                profile.resolveForRecovery(root, budget, sourceView.sourcePaths, sourceView.editablePaths,
+                    sourceView::readSource)).deepFrozenCopy()
+            if (sourceView != null) require(layout.sourcePaths == sourceView.sourcePaths &&
+                layout.editablePaths == sourceView.editablePaths) { "recovery index source view changed its authorized paths" }
             val sourcePaths = layout.sourcePaths
             if (sourcePaths.size > budget.maximumSourceFiles) {
                 throw RepairBudgetExceededException(
@@ -1502,6 +1549,159 @@ private data class RevisionGraphState(
     val runs: List<RepairRunState> = emptyList(),
 )
 
+/** The only failure transition: callers publish this entire candidate in one canonical write. */
+private fun withCommittedRollbackFailure(candidate: RevisionGraphState, record: RepairRollbackRecord): RevisionGraphState {
+    val pending = requireNotNull(candidate.pending)
+    require(record.state == RepairRollbackState.RESTORE_FAILED_UNRESOLVED)
+    val target = if (pending.detached) candidate.headId else pending.parentId
+    validatePendingRollbackRecord(record, pending, target,
+        revisionSha256(revisionSourcesAt(candidate.nodes, target).values))
+    val marked = candidate.copy(pending = pending.copy(rollbackRecord = record))
+    val runId = record.runId ?: return marked // Standalone attempts never fabricate runs.
+    val run = requireNotNull(candidate.runs.lastOrNull())
+    require(run.id == runId && run.status in setOf(RepairRunStatus.RUNNING,
+        RepairRunStatus.VALIDATION_FAILED, RepairRunStatus.ROLLBACK_FAILED))
+    require(run.rollbackFailureAttemptId == null || run.rollbackFailureAttemptId == pending.id)
+    return marked.copy(runs = candidate.runs.dropLast(1) + run.copy(
+        schemaVersion = 2, status = RepairRunStatus.ROLLBACK_FAILED,
+        rollbackFailureAttemptId = pending.id, rollbackResolution = record.state))
+}
+
+/** Resolution changes the derived index, never the historical failed terminal outcome. */
+private fun withFinalizedRollback(candidate: RevisionGraphState, record: RepairRollbackRecord): RevisionGraphState {
+    val run = candidate.runs.singleOrNull { it.id == record.runId } ?: return candidate
+    if (run.status != RepairRunStatus.ROLLBACK_FAILED) return candidate // No schema-1 history inference.
+    require(run.rollbackFailureAttemptId == record.attemptId && record.state == RepairRollbackState.RESTORED_AFTER_FAILURE)
+    return candidate.copy(runs = candidate.runs.map {
+        if (it.id == run.id) it.copy(rollbackResolution = record.state) else it
+    })
+}
+
+private fun reservedRollbackRecord(candidate: RevisionGraphState, pending: PendingAttempt): RepairRollbackRecord {
+    val record = pending.rollbackRecord ?: initialRollbackRecord(candidate, pending, pending.legacyRecoveryRequired)
+    return record.copy(state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
+        failureStage = RepairRollbackStage.SOURCE_VERIFICATION,
+        failureCode = RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+        observedSourceRevisionSha256 = record.expectedSourceRevisionSha256)
+}
+
+private fun deriveRepairIterations(
+    nodes: List<ModuleRevisionNode>,
+    budget: RepairResourceBudget,
+    schemaVersion: Int,
+    readBlob: (String) -> ByteArray,
+): List<RepairIteration> {
+    requireBoundedIterationProjection(nodes, budget)
+    return immutableList(nodes.mapNotNull { node ->
+        val metadata = node.repairMetadata ?: return@mapNotNull null
+        val patches = node.changes.map { change ->
+            RepairPatch(change.path, readBlob(change.afterBlobSha256))
+        }
+        RepairIteration(
+            index = metadata.iterationIndex,
+            failureKind = metadata.failureKind,
+            prompt = metadata.prompt,
+            summary = metadata.summary ?: if (node.recoveredAfterCrash) {
+                "repair attempt interrupted before the agent summary was durably recorded"
+            } else {
+                "repair attempt ${node.id}"
+            },
+            patches = patches,
+            retainedRegressionIds = metadata.retainedRegressionIds,
+            before = metadata.before,
+            after = node.evidenceKind?.let { kind ->
+                RepairEvidence(kind, node.evidenceSummary.orEmpty(), node.evidenceArtifact)
+            },
+            succeeded = node.status == ModuleRevisionStatus.ACCEPTED && node.evidenceKind == "valid",
+            agentInvocation = metadata.agentInvocation?.copy(),
+            publicationMode = metadata.publicationMode,
+            disposition = when (node.status) {
+                ModuleRevisionStatus.ACCEPTED -> if (schemaVersion >= 3) RepairAttemptDisposition.FULLY_ACCEPTED else RepairAttemptDisposition.LEGACY_UNVERIFIED
+                ModuleRevisionStatus.PROVISIONAL -> RepairAttemptDisposition.PROVISIONAL
+                ModuleRevisionStatus.REJECTED -> RepairAttemptDisposition.REJECTED
+                else -> RepairAttemptDisposition.LEGACY_UNVERIFIED
+            },
+            revisionId = node.id,
+            parentRevisionId = node.parentId,
+            runId = metadata.runId,
+        )
+    }.also { iterations ->
+        require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
+            "repair graph iteration indexes are not unique and ordered"
+        }
+    }.map(RepairIteration::deepFrozenCopy))
+}
+
+private fun requireBoundedIterationProjection(
+    nodes: List<ModuleRevisionNode>,
+    budget: RepairResourceBudget,
+) {
+    var projectedBytes = 128L
+    fun addText(value: String?) {
+        if (value == null) return
+        projectedBytes = Math.addExact(
+            projectedBytes,
+            Math.multiplyExact(value.toByteArray(Charsets.UTF_8).size.toLong(), 6L),
+        )
+    }
+    nodes.forEach { node ->
+        val metadata = node.repairMetadata ?: return@forEach
+        projectedBytes = Math.addExact(projectedBytes, 1024L)
+        addText(metadata.failureKind)
+        addText(metadata.prompt)
+        addText(metadata.summary)
+        addText(metadata.before?.kind)
+        addText(metadata.before?.summary)
+        addText(metadata.before?.artifactPath)
+        addText(node.evidenceKind)
+        addText(node.evidenceSummary)
+        addText(node.evidenceArtifact)
+        metadata.retainedRegressionIds.forEach(::addText)
+        node.changes.forEach { change ->
+            projectedBytes = Math.addExact(projectedBytes, 256L)
+            addText(change.path)
+            projectedBytes = Math.addExact(projectedBytes, Math.multiplyExact(change.afterBytes, 2L))
+        }
+        if (projectedBytes > budget.maximumProjectionBytes) {
+            throw RepairBudgetExceededException(
+                "repair history projection exceeds ${budget.maximumProjectionBytes} bytes",
+            )
+        }
+    }
+}
+
+private fun recoverPersistedInvocationBinding(
+    pending: PendingAttempt,
+    schemaVersion: Int,
+    store: RepairStateStore,
+): PendingAttempt {
+    if (schemaVersion < 2 || pending.repairMetadata?.agentInvocation != null) return pending
+    val metadata = pending.repairMetadata ?: return pending
+    val fileName = "${pending.id}.acp-receipt.json"
+    if (!store.revisionFileExists(fileName)) return pending
+    val receipt = store.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+    val verified = verifyAcpExecutionReceiptDocument(
+        receipt.bytes,
+        TRACE_REPAIR_ACP_RECEIPT_KIND,
+        TRACE_REPAIR_ACP_TASK_FIELD,
+        pending.id,
+    )
+    require(verified.promptSha256 == metadata.prompt) {
+        "recovered repair ACP receipt is cross-paired with a different workflow prompt"
+    }
+    val binding = RepairAgentInvocationBinding(
+        receiptPath = "reports/repair-revisions/$fileName",
+        receiptSha256 = receipt.sha256,
+        receiptSchemaVersion = 2,
+        requestSha256 = verified.requestSha256,
+        resultChangesSha256 = verified.resultChangesSha256,
+        terminalOutcome = verified.terminalOutcome,
+        receiptReleaseComplete = verified.releaseComplete,
+        assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+    )
+    return pending.copy(repairMetadata = metadata.copy(agentInvocation = binding))
+}
+
 private fun RevisionRepairMetadata.deepFrozenCopy(): RevisionRepairMetadata = copy(
     retainedRegressionIds = immutableList(retainedRegressionIds),
     before = before?.copy(),
@@ -1926,9 +2126,10 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun finishRun(status: RepairRunStatus, evidence: RepairEvidence?): RepairRunState = graphOperation {
         require(status != RepairRunStatus.RUNNING && status != RepairRunStatus.FULLY_ACCEPTED)
-        require(state.pending == null || status == RepairRunStatus.VALIDATION_FAILED)
         val run = requireNotNull(state.runs.lastOrNull())
         if (run.terminal) return@graphOperation run
+        require(status != RepairRunStatus.ROLLBACK_FAILED) { "rollback failure requires a committed attempt record" }
+        require(state.pending == null || status == RepairRunStatus.VALIDATION_FAILED)
         val finished = run.copy(status = status, acceptedHeadId = state.fullyAcceptedHeadId,
             provisionalHeadId = state.provisionalHeadId, lastEvidence = portableEvidence(evidence))
         persist(state.copy(runs = state.runs.dropLast(1) + finished))
@@ -2438,6 +2639,9 @@ internal class ModuleRevisionGraph private constructor(
         cancellationCheck: () -> Unit = {}): ModuleRevisionNode = graphOperation {
         cancellationCheck()
         var pending = requirePending(attempt)
+        require(state.runs.none { it.id == pending.repairMetadata?.runId && it.status == RepairRunStatus.ROLLBACK_FAILED }) {
+            "a failed rollback attempt must be restored and finalized before further acceptance"
+        }
         pending.repairMetadata?.takeIf { it.publicationMode == RepairPublicationMode.ACP_RELEASE }?.let { metadata ->
             val invocation = requireNotNull(metadata.agentInvocation) {
                 "agent-driven repair cannot be accepted without invocation-bound ACP evidence"
@@ -2575,11 +2779,12 @@ internal class ModuleRevisionGraph private constructor(
         validateEvidence(evidence)
         val rollbackState = rollbackContractState()
         val previewPending = requireNotNull(rollbackState.pending)
-        val reservedOutcome = reservedRollbackRecord(rollbackState, previewPending)
+        val reservedFailure = withCommittedRollbackFailure(rollbackState, reservedRollbackRecord(rollbackState, previewPending))
+        val reservedOutcome = requireNotNull(reservedFailure.pending?.rollbackRecord)
             .copy(state = RepairRollbackState.RESTORED_AFTER_FAILURE)
         val reservedNode = finalizeNode(previewPending, ModuleRevisionStatus.REJECTED, evidence,
             recovered = false, rollbackRecord = reservedOutcome)
-        requireCommitReadyState(rollbackState.copy(nodes = rollbackState.nodes + reservedNode, pending = null))
+        requireCommitReadyState(withFinalizedRollback(reservedFailure.copy(nodes = reservedFailure.nodes + reservedNode, pending = null), reservedOutcome))
         val rollbackRecord = rollbackPending(pending)
         val recoveredPending = requirePending(attempt)
         val node = finalizeNode(
@@ -2589,7 +2794,8 @@ internal class ModuleRevisionGraph private constructor(
             recovered = false,
             rollbackRecord = rollbackRecord,
         )
-        val preparedRejection = requireCommitReadyState(state.copy(nodes = state.nodes + node, pending = null))
+        val preparedRejection = requireCommitReadyState(withFinalizedRollback(
+            state.copy(nodes = state.nodes + node, pending = null), rollbackRecord))
         persist(preparedRejection)
         try {
             synchronizeCompatibilityLog()
@@ -2604,50 +2810,8 @@ internal class ModuleRevisionGraph private constructor(
         derivedRepairIterations(state.nodes, state.budget)
     }
 
-    private fun derivedRepairIterations(
-        nodes: List<ModuleRevisionNode>,
-        budget: RepairResourceBudget,
-    ): List<RepairIteration> {
-        requireBoundedIterationProjection(nodes, budget)
-        return immutableList(nodes.mapNotNull { node ->
-            val metadata = node.repairMetadata ?: return@mapNotNull null
-            val patches = node.changes.map { change ->
-                RepairPatch(change.path, readBlob(change.afterBlobSha256))
-            }
-            RepairIteration(
-                index = metadata.iterationIndex,
-                failureKind = metadata.failureKind,
-                prompt = metadata.prompt,
-                summary = metadata.summary ?: if (node.recoveredAfterCrash) {
-                    "repair attempt interrupted before the agent summary was durably recorded"
-                } else {
-                    "repair attempt ${node.id}"
-                },
-                patches = patches,
-                retainedRegressionIds = metadata.retainedRegressionIds,
-                before = metadata.before,
-                after = node.evidenceKind?.let { kind ->
-                    RepairEvidence(kind, node.evidenceSummary.orEmpty(), node.evidenceArtifact)
-                },
-                succeeded = node.status == ModuleRevisionStatus.ACCEPTED && node.evidenceKind == "valid",
-                agentInvocation = metadata.agentInvocation?.copy(),
-                publicationMode = metadata.publicationMode,
-                disposition = when (node.status) {
-                    ModuleRevisionStatus.ACCEPTED -> if (state.schemaVersion >= 3) RepairAttemptDisposition.FULLY_ACCEPTED else RepairAttemptDisposition.LEGACY_UNVERIFIED
-                    ModuleRevisionStatus.PROVISIONAL -> RepairAttemptDisposition.PROVISIONAL
-                    ModuleRevisionStatus.REJECTED -> RepairAttemptDisposition.REJECTED
-                    else -> RepairAttemptDisposition.LEGACY_UNVERIFIED
-                },
-                revisionId = node.id,
-                parentRevisionId = node.parentId,
-                runId = metadata.runId,
-            )
-        }.also { iterations ->
-            require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
-                "repair graph iteration indexes are not unique and ordered"
-            }
-        }.map(RepairIteration::deepFrozenCopy))
-    }
+    private fun derivedRepairIterations(nodes: List<ModuleRevisionNode>, budget: RepairResourceBudget): List<RepairIteration> =
+        deriveRepairIterations(nodes, budget, state.schemaVersion, ::readBlob)
 
     @Synchronized
     fun synchronizeCompatibilityLog() = graphOperation {
@@ -2715,44 +2879,6 @@ internal class ModuleRevisionGraph private constructor(
             append(",\"afterSha256\":\"").append(change.afterSha256).append("\"}")
         }
         append("]}\n")
-    }
-
-    private fun requireBoundedIterationProjection(
-        nodes: List<ModuleRevisionNode>,
-        budget: RepairResourceBudget,
-    ) {
-        var projectedBytes = 128L
-        fun addText(value: String?) {
-            if (value == null) return
-            projectedBytes = Math.addExact(
-                projectedBytes,
-                Math.multiplyExact(value.toByteArray(Charsets.UTF_8).size.toLong(), 6L),
-            )
-        }
-        nodes.forEach { node ->
-            val metadata = node.repairMetadata ?: return@forEach
-            projectedBytes = Math.addExact(projectedBytes, 1024L)
-            addText(metadata.failureKind)
-            addText(metadata.prompt)
-            addText(metadata.summary)
-            addText(metadata.before?.kind)
-            addText(metadata.before?.summary)
-            addText(metadata.before?.artifactPath)
-            addText(node.evidenceKind)
-            addText(node.evidenceSummary)
-            addText(node.evidenceArtifact)
-            metadata.retainedRegressionIds.forEach(::addText)
-            node.changes.forEach { change ->
-                projectedBytes = Math.addExact(projectedBytes, 256L)
-                addText(change.path)
-                projectedBytes = Math.addExact(projectedBytes, Math.multiplyExact(change.afterBytes, 2L))
-            }
-            if (projectedBytes > budget.maximumProjectionBytes) {
-                throw RepairBudgetExceededException(
-                    "repair history projection exceeds ${budget.maximumProjectionBytes} bytes",
-                )
-            }
-        }
     }
 
     private fun requireProjectableState(candidate: RevisionGraphState) {
@@ -3238,37 +3364,12 @@ internal class ModuleRevisionGraph private constructor(
             recovered = true,
             rollbackRecord = rollbackRecord,
         )
-        val recoveredState = state.copy(nodes = state.nodes + node, pending = null)
+        val recoveredState = withFinalizedRollback(state.copy(nodes = state.nodes + node, pending = null), rollbackRecord)
         persist(requireCommitReadyState(recoveredState))
     }
 
-    private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt {
-        if (state.schemaVersion < 2 || pending.repairMetadata?.agentInvocation != null) return pending
-        val metadata = pending.repairMetadata ?: return pending
-        val fileName = "${pending.id}.acp-receipt.json"
-        if (!stateStore.revisionFileExists(fileName)) return pending
-        val receipt = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
-        val verified = verifyAcpExecutionReceiptDocument(
-            receipt.bytes,
-            TRACE_REPAIR_ACP_RECEIPT_KIND,
-            TRACE_REPAIR_ACP_TASK_FIELD,
-            pending.id,
-        )
-        require(verified.promptSha256 == metadata.prompt) {
-            "recovered repair ACP receipt is cross-paired with a different workflow prompt"
-        }
-        val binding = RepairAgentInvocationBinding(
-            receiptPath = "reports/repair-revisions/$fileName",
-            receiptSha256 = receipt.sha256,
-            receiptSchemaVersion = 2,
-            requestSha256 = verified.requestSha256,
-            resultChangesSha256 = verified.resultChangesSha256,
-            terminalOutcome = verified.terminalOutcome,
-            receiptReleaseComplete = verified.releaseComplete,
-            assessmentStatus = RepairAgentAssessmentStatus.PENDING,
-        )
-        return pending.copy(repairMetadata = metadata.copy(agentInvocation = binding))
-    }
+    private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt =
+        recoverPersistedInvocationBinding(pending, state.schemaVersion, stateStore)
 
     private fun finalizeNode(
         pending: PendingAttempt,
@@ -3318,23 +3419,15 @@ internal class ModuleRevisionGraph private constructor(
         )
     }
 
-    private fun reservedRollbackRecord(candidate: RevisionGraphState, pending: PendingAttempt): RepairRollbackRecord {
-        val record = pending.rollbackRecord ?: initialRollbackRecord(candidate, pending, pending.legacyRecoveryRequired)
-        return record.copy(
-            state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
-            failureStage = RepairRollbackStage.SOURCE_VERIFICATION,
-            failureCode = RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
-            observedSourceRevisionSha256 = record.expectedSourceRevisionSha256,
-        )
-    }
-
     private fun requireRecoverablePendingState(candidate: RevisionGraphState) {
         val pending = requireNotNull(candidate.pending) { "recoverability check requires a pending repair" }
+        var reservedState = candidate
         val recoveryRecord = if (candidate.schemaVersion >= 4) {
             val failed = reservedRollbackRecord(candidate, pending)
             // Reserve both a durable failure marker and a terminal recovery outcome before any
             // candidate installation can make either publication necessary.
-            prepareStateForPersistence(candidate.copy(pending = pending.copy(rollbackRecord = failed)))
+            reservedState = withCommittedRollbackFailure(candidate, failed)
+            requireCommitReadyState(reservedState)
             failed.copy(state = RepairRollbackState.RESTORED_AFTER_FAILURE)
         } else null
         val recoveredNode = finalizeNode(
@@ -3344,7 +3437,8 @@ internal class ModuleRevisionGraph private constructor(
             recovered = true,
             rollbackRecord = recoveryRecord,
         )
-        requireCommitReadyState(candidate.copy(nodes = candidate.nodes + recoveredNode, pending = null))
+        val finalized = reservedState.copy(nodes = reservedState.nodes + recoveredNode, pending = null)
+        requireCommitReadyState(if (recoveryRecord == null) finalized else withFinalizedRollback(finalized, recoveryRecord))
     }
 
     private fun rollbackPending(pending: PendingAttempt): RepairRollbackRecord {
@@ -3356,7 +3450,9 @@ internal class ModuleRevisionGraph private constructor(
             activePending,
             activePending.legacyRecoveryRequired,
         )
-        val inProgress = priorRecord.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
+        // A historical failure stays durable during a retry; a new IN_PROGRESS would erase its witness.
+        val inProgress = if (priorRecord.failureCode != null) priorRecord
+            else priorRecord.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
         persist(state.copy(pending = activePending.copy(rollbackRecord = inProgress)))
         val markedPending = requireNotNull(state.pending)
         var stage = RepairRollbackStage.SOURCE_RESTORE
@@ -3391,7 +3487,7 @@ internal class ModuleRevisionGraph private constructor(
                 observedSourceRevisionSha256 = observed,
             )
             try {
-                persist(state.copy(pending = markedPending.copy(rollbackRecord = failedRecord)))
+                persist(withCommittedRollbackFailure(state, failedRecord))
             } catch (publicationFailure: Exception) {
                 failure.addSuppressed(publicationFailure)
             }
@@ -4119,7 +4215,7 @@ internal class ModuleRevisionGraph private constructor(
                             budget.maximumSourceFileBytes,
                         )
                     }
-                    restorePendingPreimagesBeforeIndex(projectRoot, stateStore, profile, budget, faultInjector)
+                    restorePendingPreimagesBeforeIndex(projectRoot, stateStore, profile, budget, faultInjector, graphAuthority)
                     val currentIndex = SecureRepairRuntime.loadIndex(graphAuthority, projectRoot, profile, budget)
                     require(currentIndex.belongsTo(projectRoot) && currentIndex.budget == budget) {
                         "repair dependency index belongs to a different project or resource budget"
@@ -4304,6 +4400,26 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
         val attempts = state.nodes.count { it.repairMetadata?.runId == run.id } +
             if (state.pending?.repairMetadata?.runId == run.id) 1 else 0
         require(run.attemptedCount == attempts) { "repair run attempt count differs from its durable attempts" }
+        val failedAttempt = run.rollbackFailureAttemptId
+        if (failedAttempt != null) {
+            val pending = state.pending?.takeIf { it.id == failedAttempt }
+            val node = nodes[failedAttempt]
+            require((pending != null) != (node != null)) { "rollback failure attempt is missing or duplicated" }
+            val record = requireNotNull(pending?.rollbackRecord ?: node?.rollbackRecord)
+            require(record.attemptId == failedAttempt && record.runId == run.id &&
+                record.failureStage != null && record.failureCode != null &&
+                record.state == run.rollbackResolution &&
+                record.state == (if (pending != null) RepairRollbackState.RESTORE_FAILED_UNRESOLVED
+                    else RepairRollbackState.RESTORED_AFTER_FAILURE)) { "rollback failure run is cross-paired with its record" }
+            require((pending?.repairMetadata ?: node?.repairMetadata)?.runId == run.id)
+            require(node == null || node.status == ModuleRevisionStatus.REJECTED)
+        }
+        if (run.schemaVersion >= 2) {
+            val failedRecords = state.nodes.filter { it.repairMetadata?.runId == run.id }
+                .mapNotNull { it.rollbackRecord }.plus(listOfNotNull(state.pending?.takeIf {
+                    it.repairMetadata?.runId == run.id }?.rollbackRecord)).filter { it.failureCode != null }
+            require(failedRecords.all { it.attemptId == failedAttempt }) { "rollback record lacks its run failure link" }
+        }
         if (run.status == RepairRunStatus.FULLY_ACCEPTED) {
             require(run.originalBinarySha256 != null && run.expectedObservationsSha256 != null)
             val accepted = nodes.getValue(requireNotNull(run.acceptedHeadId))
@@ -4337,7 +4453,7 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
         val metadata = requireNotNull(pending.repairMetadata) { "pending repair lacks owning run metadata" }
         val run = requireNotNull(metadata.runId?.let(runs::get)) { "pending repair names no durable run" }
         require(run.id == state.runs.lastOrNull()?.id &&
-            run.status in setOf(RepairRunStatus.RUNNING, RepairRunStatus.VALIDATION_FAILED) &&
+            run.status in setOf(RepairRunStatus.RUNNING, RepairRunStatus.VALIDATION_FAILED, RepairRunStatus.ROLLBACK_FAILED) &&
             metadata.regressionCorpusSha256 == run.regressionCorpusSha256)
         val canonical = revisionSourcesAt(state.nodes, state.headId)
         val candidate = revisionSourcesAt(state.nodes, pending.parentId).toMutableMap()
@@ -4640,8 +4756,8 @@ private fun validateGraphBeforeRecovery(
 }
 
 /**
- * Restore a journaled source preimage before constructing any dependency index. This deliberately
- * leaves the pending record in place; the fully validated graph instance records the recovered
+ * Reserve with a read-only preimage dependency index, then restore before constructing the
+ * canonical index. This deliberately leaves the pending record in place; the fully validated graph instance records the recovered
  * rejection after the source tree is back at its parent revision.
  */
 private fun restorePendingPreimagesBeforeIndex(
@@ -4650,6 +4766,7 @@ private fun restorePendingPreimagesBeforeIndex(
     profile: RepairIndexProfile,
     requestedBudget: RepairResourceBudget,
     faultInjector: ModuleRevisionFaultInjector?,
+    graphAuthority: Any,
 ) {
     if (!store.graphExists()) return
     val (graphBytes, loaded) = readBoundedRevisionGraph(store, requestedBudget)
@@ -4666,7 +4783,8 @@ private fun restorePendingPreimagesBeforeIndex(
         store.blobsPath,
         requestedBudget,
     )
-    val oldPending = loaded.pending ?: return
+    val persistedPending = loaded.pending ?: return
+    val oldPending = recoverPersistedInvocationBinding(persistedPending, loaded.schemaVersion, store)
     val legacyRunContract = loaded.schemaVersion < 3
     if (legacyRunContract) {
         store.preserveLegacyState("graph", graphBytes, requestedBudget.maximumGraphBytes)
@@ -4689,12 +4807,40 @@ private fun restorePendingPreimagesBeforeIndex(
     val upgraded = loaded.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
     val targetId = if (upgradedPending.detached) upgraded.headId else upgradedPending.parentId
     val targetSources = revisionSourcesAt(upgraded.nodes, targetId)
+    require(targetSources.keys.sorted() == binding.sourcePaths)
+    val targetBytes = targetSources.values.fold(0L) { total, source -> Math.addExact(total, source.bytes) }
+    require(targetBytes <= requestedBudget.maximumSourceBytes) { "recovery source view exceeds source-byte budget" }
+    val readPaths = hashSetOf<String>()
+    val sourceView = object : RepairRecoverySourceView {
+        override val sourcePaths: List<String> get() = binding.sourcePaths
+        override val editablePaths: List<String> get() = binding.editablePaths
+        override fun readSource(relative: String): ByteArray {
+            val source = requireNotNull(targetSources[relative]) { "recovery source view path is absent" }
+            require(relative == normalizedRelative(relative) && readPaths.add(relative) &&
+                readPaths.size <= requestedBudget.maximumSourceFiles) {
+                "recovery source view read is repeated, unnormalized, or over budget"
+            }
+            val blob = readStableRegularFile(store.blobsPath, source.sha256, requestedBudget.maximumSourceFileBytes)
+            require(blob.sha256 == source.sha256 && blob.bytes.size.toLong() == source.bytes) {
+                "recovery source view preimage digest or size differs"
+            }
+            profile.validateSourceContent(relative, blob.bytes)
+            return blob.bytes
+        }
+    }
+    // Index identity depends on the resolved dependency evidence, not the dirty source digest.
+    // The virtual view substitutes authenticated preimages and excludes paths absent from the
+    // immutable source set. Actual-file snapshots are stability checks only, never source truth.
+    val recoveryIndex = SecureRepairRuntime.loadRecoveryIndex(graphAuthority, projectRoot, profile, requestedBudget, sourceView)
+    require(recoveryIndex.belongsTo(projectRoot) && recoveryIndex.budget == requestedBudget &&
+        recoveryBinding(recoveryIndex) == binding) { "startup recovery dependency index is not bound to persisted authority" }
     val initial = upgradedPending.rollbackRecord ?: initialRollbackRecord(
         upgraded,
         upgradedPending,
         upgradedPending.legacyRecoveryRequired,
     )
-    val inProgress = initial.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
+    val inProgress = if (initial.failureCode != null) initial
+        else initial.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
     val pending = upgradedPending.copy(rollbackRecord = inProgress)
     val marked = upgraded.copy(pending = pending)
 
@@ -4705,6 +4851,41 @@ private fun restorePendingPreimagesBeforeIndex(
         store.writeGraph(payload)
     }
 
+    // Reserve the coupled failure fields before recovery can exchange source bytes.
+    val reservedFailure = withCommittedRollbackFailure(marked, reservedRollbackRecord(marked, pending))
+    val reservedBytes = renderGraph(reservedFailure).toByteArray(Charsets.UTF_8)
+    requireRevisionGraphByteBudget(reservedFailure, reservedBytes.size.toLong())
+    validateGraphBeforeRecovery(reservedFailure, profile, binding, store.blobsPath, requestedBudget)
+    fun reserveHistory(candidate: RevisionGraphState) {
+        val iterations = deriveRepairIterations(candidate.nodes, candidate.budget, candidate.schemaVersion) { digest ->
+            val blob = readStableRegularFile(store.blobsPath, digest, requestedBudget.maximumSourceFileBytes)
+            require(blob.sha256 == digest)
+            blob.bytes
+        }
+        renderRepairHistoryProjection(iterations, candidate.retainedRegressionInputs,
+            candidate.budget.maximumProjectionBytes, minOf(candidate.schemaVersion, 3), candidate.runs)
+    }
+    reserveHistory(reservedFailure)
+    // Reserve the actual terminal graph BEFORE any source exchange, including real dependency
+    // projections and any independently recovered invocation binding. The post-restore canonical
+    // index must still match this same immutable binding; no guessed empty module lists suffice.
+    val recoveryRecord = requireNotNull(reservedFailure.pending?.rollbackRecord)
+        .copy(state = RepairRollbackState.RESTORED_AFTER_FAILURE)
+    val recoveryNode = ModuleRevisionNode(pending.id, pending.parentId, pending.ordinal,
+        ModuleRevisionStatus.REJECTED, pending.candidateSourceRevisionSha256 ?: pending.parentSourceRevisionSha256,
+        pending.candidateChanges,
+        recoveryIndex.changedModules(pending.candidateChanges.map { it.path }),
+        recoveryIndex.downstreamInvalidations(pending.candidateChanges.map { it.path }),
+        "crash-recovery", null, true,
+        "restored pending repair preimages after restart",
+        pending.repairMetadata?.let { it.copy(agentInvocation = it.agentInvocation?.copy(
+            assessmentStatus = RepairAgentAssessmentStatus.REJECTED)) }, rollbackRecord = recoveryRecord)
+    val reservedTerminal = withFinalizedRollback(reservedFailure.copy(
+        nodes = reservedFailure.nodes + recoveryNode, pending = null), recoveryRecord)
+    val terminalBytes = renderGraph(reservedTerminal).toByteArray(Charsets.UTF_8)
+    requireRevisionGraphByteBudget(reservedTerminal, terminalBytes.size.toLong())
+    validateGraphBeforeRecovery(reservedTerminal, profile, binding, store.blobsPath, requestedBudget)
+    reserveHistory(reservedTerminal)
     // This atomic, synced marker is durable before source preflight can proceed to an exchange.
     persistRecoveryState(marked)
     var stage = RepairRollbackStage.SOURCE_RESTORE
@@ -4780,7 +4961,7 @@ private fun restorePendingPreimagesBeforeIndex(
             observedSourceRevisionSha256 = observed,
         )
         try {
-            persistRecoveryState(marked.copy(pending = pending.copy(rollbackRecord = failedRecord)))
+            persistRecoveryState(withCommittedRollbackFailure(marked, failedRecord))
         } catch (publicationFailure: Exception) {
             failure.addSuppressed(publicationFailure)
         }

@@ -114,6 +114,23 @@ class RepairHistoryPresentationTest {
         }
     }
 
+    @Test fun `pending and resolved rollback failures are run level and shared by CLI and web`() {
+        for (resolution in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+            val failed = run.copy(status = RepairRunStatus.ROLLBACK_FAILED,
+                rollbackFailureAttemptId = "revision_00000002_bbbbbbbbbbbbbbbb", rollbackResolution = resolution)
+            val payload = Json.parseToJsonElement(renderRepairHistoryProjection(emptyList(), emptyList(),
+                MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(failed))).jsonObject
+            val label = requireNotNull(repairRollbackRunLabel(failed))
+            val html = renderRepairHistory(job, payload = payload)
+            assertTrue(html.contains("Repair run: rollback-failed"), html)
+            assertTrue(html.contains(label), html)
+            val shown = presentRepairOutcome(RepairRunOutcome(emptyList(), null, failed))
+            assertEquals(1, shown.exitCode)
+            assertTrue(shown.lines.contains(label))
+            assertFalse(html.contains("history-item")) // No invented finalized iteration for a pending failure.
+        }
+    }
+
     @Test fun `legacy success alone is unverified and revision identities are escaped`() {
         val payload = Json.parseToJsonElement("""{"iterations":[{"index":9,
             "failureKind":"behavior","prompt":"","summary":"","succeeded":true,

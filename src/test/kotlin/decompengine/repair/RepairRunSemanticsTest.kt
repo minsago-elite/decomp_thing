@@ -549,6 +549,320 @@ class RepairRunSemanticsTest {
         }
     }
 
+    @Test
+    fun `schema one run stays schema one and schema two failure requires typed link and resolution`() {
+        val legacy = RepairRunState("run_00000001", RepairRunStatus.VALIDATION_FAILED,
+            "baseline", null, null, "a".repeat(64), 2, 1, 1, 2, schemaVersion = 1)
+        val bytes = legacy.toJson()
+        assertFalse(bytes.contains("rollbackFailureAttemptId"))
+        assertEquals(bytes, parseRepairRunState(bytes).toJson())
+        assertNull(parseRepairRunState(bytes).rollbackFailureAttemptId)
+        val failed = legacy.copy(schemaVersion = 2, status = RepairRunStatus.ROLLBACK_FAILED,
+            rollbackFailureAttemptId = "revision_00000001_aaaaaaaaaaaaaaaa",
+            rollbackResolution = RepairRollbackState.RESTORE_FAILED_UNRESOLVED)
+        assertEquals(failed, parseRepairRunState(failed.toJson()))
+        assertFailsWith<IllegalArgumentException> { failed.copy(rollbackFailureAttemptId = null) }
+        assertFailsWith<IllegalArgumentException> { failed.copy(rollbackResolution = RepairRollbackState.RESTORED_VERIFIED) }
+        assertFailsWith<IllegalArgumentException> { failed.copy(status = RepairRunStatus.VALIDATION_FAILED) }
+        assertFailsWith<IllegalArgumentException> { parseRepairRunState(failed.toJson().replace("\"schemaVersion\":2", "\"schemaVersion\":3")) }
+        assertFailsWith<IllegalArgumentException> { parseRepairRunState(failed.toJson().replace("\"schemaVersion\":2", "\"schemaVersion\":1")) }
+    }
+
+    @Test
+    fun `live rollback failure atomically links pending run and survives independent process recovery`() {
+        val root = rollbackRoot()
+        var armed = false
+        var attemptId = ""
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
+            if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackRefusal()
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") {
+                throw RestorationRefusal()
+            }
+        }).use { graph ->
+            val promoted = leavePromotedPending(graph, crash = false)
+            val attempt = promoted.attempt
+            attemptId = attempt.id
+            val before = graph.snapshot
+            armed = true
+            val failure = assertFailsWith<RestorationRefusal> { graph.reject(attempt, RepairEvidence("rejected", "authored failure")) }
+            assertEquals("authored restoration refusal", failure.message)
+            val failed = graph.snapshot.runs.single()
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, failed.status)
+            assertEquals(attempt.id, failed.rollbackFailureAttemptId)
+            assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, failed.rollbackResolution)
+            assertEquals(before.runs.single().attemptedCount, failed.attemptedCount)
+            assertEquals(before.fullyAcceptedHeadId, graph.snapshot.fullyAcceptedHeadId)
+            assertEquals(before.provisionalHeadId, graph.snapshot.provisionalHeadId)
+            assertEquals(before.headId, graph.snapshot.headId)
+            assertTrue(graph.derivedRepairIterations().isEmpty()) // Failure is run-level, not a fabricated finalized node.
+            val durable = Json.parseToJsonElement(root.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+            val record = durable.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            assertEquals("restore_failed_unresolved", record.getValue("state").jsonPrimitive.content)
+            assertEquals(attempt.id, record.getValue("attemptId").jsonPrimitive.content)
+            val durableBeforeAcceptance = root.resolve("reports/repair-revisions/graph.json").readBytes()
+            val sourceBeforeAcceptance = root.resolve("code.c").readBytes()
+            val acceptanceRefusal = assertFailsWith<IllegalArgumentException> {
+                graph.accept(attempt, RepairEvidence("valid", "fixture matched"), promoted.proof)
+            }
+            assertEquals("a failed rollback attempt must be restored and finalized before further acceptance", acceptanceRefusal.message)
+            assertContentEquals(durableBeforeAcceptance, root.resolve("reports/repair-revisions/graph.json").readBytes())
+            assertContentEquals(sourceBeforeAcceptance, root.resolve("code.c").readBytes())
+            assertEquals(failed, graph.finishRun(RepairRunStatus.CANCELLED, null))
+            graph.synchronizeRepairHistory()
+            assertEquals(failed, RepairHistory(root.resolve("reports/repair_history.json")).runStates().single())
+            RepairProgressProjection(root.resolve("reports")).use { it.state(graph, AgentWorkflowPhase.REJECTED) }
+            val events = AgentProgressJournal.read(root.resolve("reports"))!!.getValue("events").jsonArray
+            assertEquals("failed", events.last().jsonObject.getValue("phase").jsonPrimitive.content)
+        }
+        val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-Djava.io.tmpdir=${root}", "-cp", System.getProperty("java.class.path"),
+            RepairRunReopenProbe::class.java.name, root.toString()).redirectErrorStream(true).start()
+        try {
+            assertTrue(process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS))
+            val output = process.inputStream.readNBytes(64 * 1024).decodeToString()
+            assertEquals(0, process.exitValue(), output)
+            assertTrue(output.contains("rollback_failed"), output)
+            assertTrue(output.contains("restored_after_failure"), output)
+            assertTrue(output.contains(attemptId), output)
+        } finally {
+            if (process.isAlive) process.destroyForcibly().waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            val run = graph.snapshot.runs.single()
+            val record = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, run.status)
+            assertEquals(attemptId, run.rollbackFailureAttemptId)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, run.rollbackResolution)
+            assertEquals(run.rollbackResolution, record.state)
+            assertEquals(attemptId, record.attemptId)
+            assertEquals(run.id, record.runId)
+        }
+    }
+
+    @Test
+    fun `startup failure commits same coupled outcome and rejects forged pending links before restoration`() {
+        val root = rollbackRoot()
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
+        }).use { leavePromotedPending(it) }
+        assertFailsWith<StartupRestoreRefusal> {
+            ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") {
+                    throw StartupRestoreRefusal()
+                }
+            }).use { }
+        }
+        val path = root.resolve("reports/repair-revisions/graph.json")
+        val committed = path.readText()
+        val document = Json.parseToJsonElement(committed).jsonObject
+        val failed = parseRepairRunState(document.getValue("runs").jsonArray.single().toString())
+        assertEquals(RepairRunStatus.ROLLBACK_FAILED, failed.status)
+        assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, failed.rollbackResolution)
+        val source = root.resolve("code.c").readBytes()
+        val forgeries = listOf(
+            committed.replace("\"rollbackFailureAttemptId\":\"${failed.rollbackFailureAttemptId}\"", "\"rollbackFailureAttemptId\":null"),
+            committed.replace("\"rollbackFailureAttemptId\":\"${failed.rollbackFailureAttemptId}\"", "\"rollbackFailureAttemptId\":\"revision_missing\""),
+            committed.replace("\"rollbackResolution\":\"restore_failed_unresolved\"", "\"rollbackResolution\":\"restored_after_failure\""),
+            committed.replace("\"state\":\"restore_failed_unresolved\"", "\"state\":\"restore_in_progress\""),
+            committed.replace("\"runId\":\"run_00000001\"", "\"runId\":\"run_00000002\""),
+        )
+        forgeries.forEach { forged ->
+            assertNotEquals(committed, forged)
+            path.writeText(forged)
+            assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(root, profile).use { } }
+            assertEquals(forged, path.readText())
+            assertContentEquals(source, root.resolve("code.c").readBytes())
+        }
+        path.writeText(committed)
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, graph.snapshot.runs.single().status)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, graph.snapshot.runs.single().rollbackResolution)
+        }
+    }
+
+    @Test
+    fun `uncommitted failure and generic pending validation cannot mint rollback terminal history`() {
+        val root = rollbackRoot()
+        var armed = false
+        var writes = 0
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
+            if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackRefusal()
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") {
+                throw RestorationRefusal()
+            }
+            if (armed && point is ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync &&
+                point.scope == "revision-state" && point.name == "graph.json" && ++writes == 2) {
+                throw FailurePublicationRefusal()
+            }
+        }).use { graph ->
+            val promoted = leavePromotedPending(graph, crash = false)
+            val attempt = promoted.attempt
+            assertFailsWith<IllegalArgumentException> { graph.finishRun(RepairRunStatus.ROLLBACK_FAILED, null) }
+            armed = true
+            val failure = assertFailsWith<RestorationRefusal> { graph.reject(attempt, null) }
+            assertTrue(failure.suppressed.any { it is FailurePublicationRefusal })
+            assertEquals(2, writes)
+            val durable = root.resolve("reports/repair-revisions/graph.json").readText()
+            assertFalse(durable.contains("restore_failed_unresolved"))
+            assertFalse(durable.contains("rollback_failed"))
+            val document = Json.parseToJsonElement(durable).jsonObject
+            assertEquals(RepairRunStatus.RUNNING, parseRepairRunState(document.getValue("runs").jsonArray.single().toString()).status)
+            assertEquals("restore_in_progress", document.getValue("pending").jsonObject
+                .getValue("rollbackRecord").jsonObject.getValue("state").jsonPrimitive.content)
+            assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
+            armed = false
+            assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.finishRun(RepairRunStatus.VALIDATION_FAILED, null).status)
+        }
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.snapshot.runs.single().status)
+            assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, graph.snapshot.nodes.last().rollbackRecord?.state)
+        }
+    }
+
+    @Test
+    fun `generic workflow exception preserves canonical rollback failure instead of validation failure`() {
+        lateinit var fixture: Fixture
+        fixture = fixture("broken", "pass3", temporaryParent = Path.of("build/test-tmp").toAbsolutePath().normalize()
+            .also { Files.createDirectories(it) }, afterValidation = { source ->
+            if (source == "pass3") fixture.root.resolve("code.c").writeText("foreign replacement")
+        })
+        val result = fixture.loop.runRepair(fixture.root, fixture.original, inputs, maxIterations = 1)
+        assertEquals(RepairRunStatus.ROLLBACK_FAILED, result.runState.status)
+        assertNotNull(result.runState.rollbackFailureAttemptId)
+        assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, result.runState.rollbackResolution)
+        assertNull(result.runState.acceptedHeadId)
+        assertTrue(result.iterations.isEmpty())
+        assertEquals("foreign replacement", fixture.root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun `startup legacy run reserves real dependency lists and derived run fields before source exchange`() {
+        val modules = listOf(RepairModuleEvidence("a_owner_" + "x".repeat(120), listOf("code.c"))) +
+            (0 until 30).map { number -> RepairModuleEvidence("z_dep_${number.toString().padStart(2, '0')}_" + "y".repeat(120),
+                emptyList(), dependencyModuleIds = listOf("a_owner_" + "x".repeat(120))) }
+        val wideProfile = DeclarativeRepairIndexProfile("recovery-reservation-wide",
+            RepairIndexLayout(listOf("code.c"), listOf("code.c"), modules = modules))
+        for (graphLimit in listOf(true, false)) {
+            val limit = 16L * 1024
+            val budget = if (graphLimit) RepairResourceBudget(maximumGraphBytes = limit)
+                else RepairResourceBudget(maximumProjectionBytes = limit)
+            fun legacyPending(root: Path): String {
+                ModuleRevisionGraph.openForTesting(root, wideProfile, budget, ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
+                }).use { graph ->
+                    leavePromotedPending(graph, "RESERVATION_PADDING")
+                }
+                val path = root.resolve("reports/repair-revisions/graph.json")
+                val run = parseRepairRunState(Json.parseToJsonElement(path.readText()).jsonObject
+                    .getValue("runs").jsonArray.single().toString())
+                assertEquals(RepairRunStatus.RUNNING, run.status)
+                val legacy = path.readText().replace(run.toJson(), run.copy(schemaVersion = 1).toJson())
+                assertNotEquals(path.readText(), legacy)
+                path.writeText(legacy)
+                return legacy
+            }
+            val reference = rollbackRoot()
+            legacyPending(reference)
+            assertFailsWith<StartupRestoreRefusal> {
+                ModuleRevisionGraph.openForTesting(reference, wideProfile, budget, ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") {
+                        throw StartupRestoreRefusal()
+                    }
+                }).use { }
+            }
+            val failureGraphBytes = reference.resolve("reports/repair-revisions/graph.json").readBytes().size
+            ModuleRevisionGraph.open(reference, wideProfile, budget).use { graph ->
+                val node = graph.snapshot.nodes.last()
+                assertEquals(listOf(modules.first().id), node.changedModules)
+                assertEquals(modules.drop(1).map { it.id }, node.invalidatedModules)
+                assertEquals(RepairRunStatus.ROLLBACK_FAILED, graph.snapshot.runs.single().status)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, graph.snapshot.runs.single().rollbackResolution)
+            }
+            val terminalGraphBytes = reference.resolve("reports/repair-revisions/graph.json").readBytes().size
+            val terminalHistoryBytes = reference.resolve("reports/repair_history.json").readBytes().size
+            val padding = (limit - (if (graphLimit) terminalGraphBytes else terminalHistoryBytes) + 1).toInt()
+            assertTrue(padding > 0)
+            if (graphLimit) {
+                assertTrue(failureGraphBytes + padding <= limit) // Pending failure fits; actual terminal graph cannot.
+                assertTrue(terminalGraphBytes + padding > limit)
+            } else assertTrue(terminalHistoryBytes + padding > limit)
+
+            val root = rollbackRoot()
+            val legacy = legacyPending(root)
+            val padded = legacy.replace("RESERVATION_PADDING", "RESERVATION_PADDING" + "p".repeat(padding))
+            val graphPath = root.resolve("reports/repair-revisions/graph.json")
+            graphPath.writeText(padded)
+            assertTrue(padded.toByteArray().size <= budget.maximumGraphBytes)
+            val sourcePath = root.resolve("code.c")
+            val sourceBytes = sourcePath.readBytes()
+            val graphBytes = graphPath.readBytes()
+            val sourceKey = Files.readAttributes(sourcePath, BasicFileAttributes::class.java).fileKey()
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            var exchanges = 0
+            val failure = assertFailsWith<RepairBudgetExceededException> {
+                ModuleRevisionGraph.openForTesting(root, wideProfile, budget, ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "startup-rollback") exchanges++
+                }).use { }
+            }
+            assertTrue(failure.message.orEmpty().contains(if (graphLimit) "revision graph" else "projection"), failure.message)
+            assertEquals(0, exchanges)
+            assertContentEquals(sourceBytes, sourcePath.readBytes())
+            assertContentEquals(graphBytes, graphPath.readBytes())
+            assertEquals(sourceKey, Files.readAttributes(sourcePath, BasicFileAttributes::class.java).fileKey())
+            assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+        }
+    }
+
+    private class PromotionCrash : Error()
+    private class PromotionFailure : IllegalStateException("authored promotion failure")
+    private class PromotionRollbackRefusal : IllegalStateException("authored promotion CAS rollback refusal")
+    private class RestorationRefusal : IllegalStateException("authored restoration refusal")
+    private class FailurePublicationRefusal : IllegalStateException("authored failure-publication refusal")
+    private class StartupRestoreRefusal : IllegalStateException("authored startup restoration refusal")
+    private data class PromotedPending(val attempt: ModuleRevisionAttempt, val proof: RepairValidationProof)
+
+    private fun rollbackRoot(): Path {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        return Files.createTempDirectory(parent, "rollback-run-").also { it.resolve("code.c").writeText("broken") }
+    }
+
+    private fun leavePromotedPending(graph: ModuleRevisionGraph, summary: String? = null, crash: Boolean = true): PromotedPending {
+        graph.enableRunContract()
+        val corpus = graph.retainRegressionInputs(inputs)
+        graph.beginRun(2, 60_000)
+        val reference = sha256("reference".toByteArray())
+        graph.bindOriginalBinary(reference)
+        graph.bindExpectedObservations(sha256("fixture-expected".toByteArray()))
+        val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus).copy(summary = summary))
+        graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+        val proof = rollbackProof(graph, attempt)
+        if (crash) {
+            assertFailsWith<PromotionCrash> { graph.accept(attempt, RepairEvidence("valid", "fixture matched"), proof) }
+            // Poisoned after Error: callers may close and inspect disk, never reuse this graph.
+        } else {
+            val failure = assertFailsWith<PromotionFailure> {
+                graph.accept(attempt, RepairEvidence("valid", "fixture matched"), proof)
+            }
+            assertTrue(failure.suppressed.any { it is PromotionRollbackRefusal })
+            assertEquals(RepairRunStatus.RUNNING, graph.snapshot.runs.single().status)
+            assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        }
+        return PromotedPending(attempt, proof)
+    }
+
+    private fun rollbackProof(graph: ModuleRevisionGraph, attempt: ModuleRevisionAttempt): RepairValidationProof {
+        val state = graph.snapshot
+        return RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources(attempt)),
+            state.profileSha256, state.indexSha256, graph.retainedRegressionCorpus().sha256,
+            sha256("reference".toByteArray()), sha256("pass3".toByteArray()),
+            sha256("fixture-runtime".toByteArray()), sha256("fixture-evidence".toByteArray()),
+            true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS)
+    }
+
     private fun metadata(corpus: RetainedRegressionCorpus) = RevisionRepairMetadata(1, "compile", "bounded repair", null,
         corpus.inputs.map { it.id }, RepairEvidence("compile", "code.c:1: syntax error"), corpus.sha256,
         publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
@@ -557,8 +871,9 @@ class RepairRunSemanticsTest {
         val history: RepairHistory, val seenSources: MutableList<String>, val canonicalDuringPrompts: MutableList<String>)
 
     private fun fixture(initial: String, vararg replacements: String, cancellation: AgentCancellationSource = AgentCancellationSource(),
-        afterValidation: (String) -> Unit = {}, omitCase: Boolean = false): Fixture {
-        val root = Files.createTempDirectory("repair-run-semantics-")
+        afterValidation: (String) -> Unit = {}, omitCase: Boolean = false, temporaryParent: Path? = null): Fixture {
+        val root = if (temporaryParent == null) Files.createTempDirectory("repair-run-semantics-")
+            else Files.createTempDirectory(temporaryParent, "repair-run-semantics-")
         root.resolve("code.c").writeText(initial)
         val original = root.resolve("reference.fixture").also { it.writeText("reference") }
         val seen = mutableListOf<String>()

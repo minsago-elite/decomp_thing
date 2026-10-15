@@ -45,3 +45,34 @@ Archive tests use synthetic receipt documents to exercise serialization, cross-b
 `RepairRunSemanticsTest` exercises compile failure to provisional behavior progress to success, multiple provisional improvements followed by exhaustion, retained-regression rejection, cancellation after validation, resource exhaustion, compile-only behavior, missing cases, changed reference identity, pending recovery, interrupted canonical publication, verified provisional restart, exact legacy-byte preservation, full baseline assessment, projection failure, and composed manifest attribution. It reopens a retained provisional chain in a separate JVM. Its deterministic validator is explicitly `TEST_ONLY_HOST_PROCESS`; these tests verify control flow and persistence, not production containment.
 
 Run the semantic suite alongside `ModuleRevisionGraphTest`, `RepairStateStoreTest`, `TraceGuidedRepairTest`, `SecureRepairSessionProjectionTest` and `SecureRepairRuntimeSurfaceTest`. Record the command, commit, environment prerequisites, counts and skips with the checkpoint; a skipped required containment lane is not a release pass.
+
+## Derived rollback-failure run state
+
+Run schema 2 adds `rollback_failed`, `rollbackFailureAttemptId`, and `rollbackResolution`.
+The latter two fields are a derived index of the exact attempt's rollback record, not independent
+restoration authority. A source-restoration failure publishes the pending
+`restore_failed_unresolved` record and its owning run's terminal status/link in one canonical graph
+write. Both live rollback and pre-index startup recovery use the same transition. A failed graph
+publication leaves the prior committed state authoritative; a throwable, suppressed exception,
+generic pending attempt, or validation failure cannot manufacture this outcome. Standalone attempts
+without a run retain their rollback record without inventing a run.
+
+The failed run retains its attempt count and accepted/provisional identities. Its pending attempt
+is not fabricated as a finalized iteration. On verified recovery, finalizing that same attempt as
+rejected and changing its rollback record to `restored_after_failure` updates the run's derived
+resolution in the same graph publication. The historical run remains `rollback_failed`.
+Canonical graph validation and the independent archive reader reject missing/cross-paired attempt,
+run, record, or resolution links. Release still requires a fully accepted final run and complete
+source-bound validation; a historical rollback-failure record grants no acceptance authority.
+
+Schema-1 run reads preserve schema-1 serialization and do not infer historical failure from old
+records or generic statuses. A new actually committed restoration failure may upgrade its owning
+run to schema 2. Outer graph schema 4 and history schema 3 remain unchanged. Before source
+mutation, reservation charges both derived fields and failure/recovery projections under the
+existing graph/projection limits. CLI and web share fixed rollback labels and show pending failure
+at run level; optional progress events remain non-authoritative projections.
+
+This is a focused source capability. Its new controls are authored but not executed at this source
+checkpoint; compilation, independent review, restart and release qualification remain verification
+gates. It does not establish all repair terminal outcomes, aggregate budget accounting, or complete
+operator-workflow acceptance.
