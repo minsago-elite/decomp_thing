@@ -780,6 +780,7 @@ class RepairRunSemanticsTest {
                 assertEquals(modules.drop(1).map { it.id }, node.invalidatedModules)
                 assertEquals(RepairRunStatus.ROLLBACK_FAILED, graph.snapshot.runs.single().status)
                 assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, graph.snapshot.runs.single().rollbackResolution)
+                graph.synchronizeRepairHistory()
             }
             val terminalGraphBytes = reference.resolve("reports/repair-revisions/graph.json").readBytes().size
             val terminalHistoryBytes = reference.resolve("reports/repair_history.json").readBytes().size

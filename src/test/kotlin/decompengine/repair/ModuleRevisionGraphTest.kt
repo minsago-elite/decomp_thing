@@ -1267,6 +1267,13 @@ class ModuleRevisionGraphTest {
         val parent = byteArrayOf(1, 3, 5, 7)
         val candidate = byteArrayOf(2, 4, 6, 8)
         source.writeBytes(parent)
+        val layout = RepairIndexLayout(
+            sourcePaths = listOf("code/program.bin"),
+            editablePaths = listOf("code/program.bin"),
+            fallbackModuleIdsByPath = mapOf("code/program.bin" to "program"),
+        )
+        var liveResolutions = 0
+        var recoveryResolutions = 0
         val profile = object : RepairIndexProfile {
             override fun profileId() = "content-sensitive-binary-v1"
             override fun configurationSha256() = "7".repeat(64)
@@ -1279,11 +1286,20 @@ class ModuleRevisionGraphTest {
                 require(!projectRoot.resolve("code/program.bin").readBytes().contentEquals(candidate)) {
                     "profile cannot resolve a dirty candidate"
                 }
-                return RepairIndexLayout(
-                    sourcePaths = listOf("code/program.bin"),
-                    editablePaths = listOf("code/program.bin"),
-                    fallbackModuleIdsByPath = mapOf("code/program.bin" to "program"),
-                )
+                assertContentEquals(parent, projectRoot.resolve("code/program.bin").readBytes())
+                liveResolutions++
+                return layout
+            }
+            override fun resolveForRecovery(
+                projectRoot: Path, budget: RepairResourceBudget,
+                sourcePaths: List<String>, editablePaths: List<String>, readSource: (String) -> ByteArray,
+            ): RepairIndexLayout {
+                assertEquals(layout.sourcePaths, sourcePaths)
+                assertEquals(layout.editablePaths, editablePaths)
+                assertContentEquals(candidate, projectRoot.resolve("code/program.bin").readBytes())
+                assertContentEquals(parent, readSource("code/program.bin"))
+                recoveryResolutions++
+                return layout
             }
         }
         val graph = ModuleRevisionGraph.openForTesting(
@@ -1302,7 +1318,10 @@ class ModuleRevisionGraphTest {
         graph.close()
         assertContentEquals(candidate, source.readBytes())
 
+        val beforeRecoveryLiveResolutions = liveResolutions
         ModuleRevisionGraph.open(project, profile).use { recovered ->
+            assertTrue(recoveryResolutions > 0)
+            assertTrue(liveResolutions > beforeRecoveryLiveResolutions)
             assertContentEquals(parent, source.readBytes())
             assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
         }
@@ -3431,12 +3450,19 @@ class ModuleRevisionGraphTest {
         val sourcePath = fixture.project.resolve(fixture.relativePath)
         val source = sourcePath.readBytes()
         val compact = graphPath.readText()
-        val legacy = compact.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+        val nativePrefix = "{\n  \"schemaVersion\": 4,"
+        val legacyPrefix = "{\n  \"schemaVersion\": 3,"
+        assertTrue(compact.startsWith(nativePrefix)) // Select only the root; nested schemas stay unchanged.
+        val legacy = legacyPrefix + compact.removePrefix(nativePrefix)
+        assertEquals(JsonPrimitive(3), Json.parseToJsonElement(legacy).jsonObject.getValue("schemaVersion"))
         val summary = "synthetic archive fixture observations matched"
-        assertEquals(1, Regex(Regex.escape(summary)).findAll(legacy).count())
+        val summaryField = "      \"evidenceSummary\": \"$summary\","
+        assertEquals(1, Regex(Regex.escape(summaryField)).findAll(legacy).count())
         val padding = (budget.maximumGraphBytes - legacy.toByteArray().size).toInt()
         assertTrue(padding > 0)
-        val saturated = legacy.replace(summary, summary + "p".repeat(padding))
+        val paddedSummary = summary + "p".repeat(padding)
+        val paddedSummaryField = "      \"evidenceSummary\": \"$paddedSummary\","
+        val saturated = legacy.replace(summaryField, paddedSummaryField)
         assertEquals(budget.maximumGraphBytes, saturated.toByteArray().size.toLong())
         graphPath.writeText(saturated)
         val artifacts = Files.list(graphPath.parent).use { files -> files.map { it.fileName.toString() }.sorted().toList() }
@@ -3450,7 +3476,8 @@ class ModuleRevisionGraphTest {
             assertEquals(before.runs, graph.snapshot.runs)
             graph.synchronizeRepairHistory()
         }
-        val native = saturated.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 4")
+        assertTrue(saturated.startsWith(legacyPrefix))
+        val native = nativePrefix + saturated.removePrefix(legacyPrefix)
         assertEquals(native, graphPath.readText())
         assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong())
         assertEquals(artifacts, Files.list(graphPath.parent).use { files -> files.map { it.fileName.toString() }.sorted().toList() })
@@ -3462,7 +3489,8 @@ class ModuleRevisionGraphTest {
             assertFailsWith<RepairBudgetExceededException> { graph.beginAttempt(listOf(fixture.relativePath)) }
             assertEquals(native, graphPath.readText())
         }
-        val plusOne = native.replace(summary, summary + "q")
+        assertEquals(1, Regex(Regex.escape(paddedSummaryField)).findAll(native).count())
+        val plusOne = native.replace(paddedSummaryField, paddedSummaryField.replace(paddedSummary, paddedSummary + "q"))
         assertEquals(budget.maximumGraphBytes + 1, plusOne.toByteArray().size.toLong())
         assertFailsWith<RepairBudgetExceededException> { requireRepairGraphByteBudget(plusOne.toByteArray(), budget) }
         // Explicit-null native4 bytes are also fully charged: only real legacy pending origins
@@ -5471,8 +5499,8 @@ class ModuleRevisionGraphTest {
                 prefixAttemptId = attempt.id
                 graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after))
                 graph.installCandidate(attempt, mapOf(relative to after))
-                val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs,
-                    receiptName = "archive-rollback-prefix.validation.json")
+                // This source/input/runtime tuple is genuinely identical to the later accepted proof.
+                val proof = archiveValidationProofFixture(graph, attempt, project, corpus.inputs)
                 graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
                 graph.bindExpectedObservations(sha256(buildString {
                     append(proof.originalBinarySha256).append('\n')
@@ -5684,7 +5712,14 @@ class ModuleRevisionGraphTest {
             "outcome" to "behavior-checked", "caseCount" to inputs.size, "matches" to matched,
             "cleanupVerified" to true, "assurance" to "strict-contained")
         val bytes = canonical(receipt)
-        project.resolve("reports/$receiptName").writeBytes(bytes)
+        val receiptPath = project.resolve("reports/$receiptName")
+        if (Files.exists(receiptPath, LinkOption.NOFOLLOW_LINKS)) {
+            // Reuse only an identical, currently bound payload; never rewrite an earlier proof.
+            assertTrue(Files.isRegularFile(receiptPath, LinkOption.NOFOLLOW_LINKS))
+            assertContentEquals(bytes, receiptPath.readBytes(), "archive fixture receipt path has different bound bytes")
+        } else {
+            Files.write(receiptPath, bytes, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+        }
         return RepairValidationProof(sourceDigest, snapshot.profileSha256, snapshot.indexSha256,
             repairRegressionCorpusSha256(inputs), referenceDigest, rebuiltDigest, runtimeDigest, sha256(bytes), true,
             RepairValidationAssurance.STRICT_CONTAINED)
