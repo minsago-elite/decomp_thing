@@ -23,6 +23,40 @@ def report_fixture():
     return {'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':'a'*64,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json'),'runtimeInputs':{'caller':{'path':'/synthetic/caller','sha256':'a'*64},'library':{'path':'/synthetic/libcandidate.so','sha256':'c'*64}},'phases':phases,'admitted':True,**summary,'scenarios':rows,'evidenceFiles':{'synthetic.json':'a'*64},'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
 
 
+def _freeze_dependency_fixture(root):
+    """Owned synthetic root with exact reviewed public sources, never native outputs."""
+    import hashlib
+    original=Path(e.__file__).parent;paths={}
+    names=[name+'.py' for name,_,_ in f._FREEZE_DEPENDENCY_SOURCES]
+    names+=['worker_exec_proof.py']
+    names+=['contracts/'+name for name in (
+        'candidate-build-profile.json','execution-bindings-schema.json','helper-schema.json',
+        'matrix-schema.json','preparation-schema.json','reference-observations-schema.json',
+        'report-schema.json','toolchain-pin-schema.json','visible-manifest-schema.json')]
+    for name in names:
+        raw=(original/name).read_bytes();target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes(raw);paths[str(target)]=hashlib.sha256(raw).hexdigest()
+    return paths
+
+
+def _freeze_process_root(value, root):
+    """Rekey authored profile/parser coordinates, preserving the actual raw worker proof."""
+    import hashlib
+    result=deepcopy(value);pins=result['launchInputPins']
+    for relative in ('contracts/candidate-build-profile.json','worker_exec_proof.py'):
+        pins[str(root/relative)]=pins.pop(str(e.BASE/relative))
+    result['workerProofBindings']['launchPinsSha256']=hashlib.sha256(
+        json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+    return result
+
+
+def _freeze_report_root(value, root):
+    result=deepcopy(value)
+    for row in result['scenarios']:
+        if row['process'] is not None:row['process']=_freeze_process_root(row['process'],root)
+    return result
+
+
 class SchemaMigration(unittest.TestCase):
     def test_preservation_supported_anchors_ignore_cwd_and_share_relative_absolute_lookup(self):
         import hashlib
@@ -152,7 +186,7 @@ class SchemaMigration(unittest.TestCase):
     def _admitted_checkpoint_fixture(self, root):
         import hashlib
         preflight=root/'preflight';preflight.mkdir();output=root/'not-created'
-        files={'synthetic':'a'*64};checkpoint=root/'source.json';checkpoint.write_text(json.dumps({'schemaVersion':3,'files':files}))
+        files={'synthetic':'a'*64,**_freeze_dependency_fixture(root)};checkpoint=root/'source.json';checkpoint.write_text(json.dumps({'schemaVersion':3,'files':files}))
         matrix={'schemaVersion':3,'status':'preflight-only-independent-review-required','freezeCreated':False,
                 'allControlsPassed':True,'executionDependenciesUnchanged':True,
                 'rows':[{'name':'synthetic','expected':'matched','expectedStage':'behavior','passed':True,'receipt':'synthetic',
@@ -817,6 +851,7 @@ class AdmittedPredicateSources(unittest.TestCase):
         import hashlib
         from test_link_inputs import LinkInputTests, pin
         paths,payloads=self.sources(root)
+        paths.update(_freeze_dependency_fixture(root))
         for name in ('helper-schema.json','candidate-build-profile.json'):
             path=root/'contracts'/name;path.parent.mkdir(exist_ok=True)
             path.write_bytes((e.BASE/'contracts'/name).read_bytes())
@@ -838,6 +873,7 @@ class AdmittedPredicateSources(unittest.TestCase):
             for row in report['scenarios']:
                 if row['evidenceSha256'] is not None:row['evidenceSha256']=evidence_sha
             e.validate_exchange('report',report)
+            report=_freeze_report_root(report,root)
             target=directory/'receipt.json';target.write_text(json.dumps(report))
             rows.append({'name':name,'expected':entry['expected'],'expectedStage':entry['stage'],'passed':True,
                          'receipt':str(target),'receiptSha256':hashlib.sha256(target.read_bytes()).hexdigest(),
@@ -1030,6 +1066,322 @@ class AdmittedPredicateSources(unittest.TestCase):
                 with self.assertRaises(OSError) as caught:f._admit_execution_predicates(paths)
                 self.assertIs(failure,caught.exception);compiler.assert_not_called()
             self.assertEqual(target,closed)
+
+
+class FreezeDependencyCapture(unittest.TestCase):
+    def fixture(self):
+        directory=tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001'))
+        self.addCleanup(directory.cleanup);root=Path(directory.name)
+        paths=_freeze_dependency_fixture(root)
+        return root,paths
+
+    def test_freezer_import_is_project_inert_and_untyped_json_keeps_duplicate_refusal(self):
+        import builtins
+        from types import ModuleType
+        source=Path(f.__file__);real_import=builtins.__import__;observed=[]
+        def imports(name,*args,**kwargs):
+            if name in ('bounded_runtime','build_contract','interface_gate_v3','evaluate_candidate_v3'):
+                observed.append(name);raise AssertionError('ordinary project import before admission')
+            return real_import(name,*args,**kwargs)
+        namespace={'__name__':'inert_freezer','__file__':str(source)}
+        code=compile(source.read_bytes(),str(source),'exec')
+        with patch.object(builtins,'__import__',side_effect=imports):exec(code,namespace)
+        self.assertEqual([],observed)
+        self.assertEqual(f.BASE,namespace['BASE'])
+        self.assertEqual({'ok':1},namespace['_decode_json'](b'{"ok":1}'))
+        with self.assertRaisesRegex(ValueError,'duplicate contract key'):
+            namespace['_decode_json'](b'{"x":1,"x":2}')
+        self.assertIsNone(namespace['_FREEZE_DEPENDENCY_SCOPE'].get())
+
+    def test_all_four_original_captures_precede_all_compile_and_first_body(self):
+        import hashlib
+        root,_=self.fixture();events=[];actual_record=f._record;actual_compile=compile;actual_exec=exec
+        def record(*args,**kwargs):
+            value=actual_record(*args,**kwargs);events.append(('capture',value['path'].name));return value
+        def compiled(raw,*args,**kwargs):
+            events.append(('compile',hashlib.sha256(raw).hexdigest()));return actual_compile(raw,*args,**kwargs)
+        def executed(code,globals):events.append(('body',Path(globals['__file__']).name));return actual_exec(code,globals)
+        with patch.object(f,'BASE',root),patch.object(f,'_record',side_effect=record), \
+                patch.object(f,'compile',create=True,side_effect=compiled),patch.object(f,'exec',create=True,side_effect=executed):
+            with f._freeze_dependency_scope() as owner:
+                validator=owner.validator();self.assertIs(validator,owner.validator())
+                self.assertEqual('READY',owner.state)
+                records=f.admit_files(owner.records,root=root)['files']
+                owner.require_sources(records,{name:row['sha256']for name,row in records.items()})
+        self.assertEqual(['capture']*4+['compile']*4+['body']*4+['capture']*4,[kind for kind,_ in events])
+        self.assertEqual([sha for _,_,sha in f._FREEZE_DEPENDENCY_SOURCES],[value for kind,value in events if kind=='compile'])
+        self.assertEqual('CLOSED',owner.state)
+        self.assertTrue(all(alias not in sys.modules for alias in owner.aliases))
+
+    def test_captured_A_survives_path_B_and_public_cache_poison_without_reimport(self):
+        from types import ModuleType
+        root,_=self.fixture();originals={name:(root/(name+'.py')).read_bytes()for name,_,_ in f._FREEZE_DEPENDENCY_SOURCES}
+        poison=ModuleType('poison');real_compile=compile;changed=[]
+        def compiling(raw,*args,**kwargs):
+            if not changed:
+                for name in originals:(root/(name+'.py')).write_bytes(b'raise AssertionError("B must not execute")')
+                changed.append(True)
+            return real_compile(raw,*args,**kwargs)
+        with patch.object(f,'BASE',root),patch.object(f,'compile',create=True,side_effect=compiling), \
+                patch.dict(sys.modules,{name:poison for name in (*originals,'freeze_v3')}):
+            with f._freeze_dependency_scope() as owner:
+                validator=owner.validator();module=owner.modules['evaluate_candidate_v3']
+                self.assertIs(validator.__globals__,module.__dict__)
+                self.assertIsNot(module,poison)
+                self.assertIs(module.summarize.__globals__,module.__dict__)
+                self.assertIs(module.worker_execution_complete,owner.modules['bounded_runtime'].worker_execution_complete)
+                for name,raw in originals.items():(root/(name+'.py')).write_bytes(raw)
+                with patch.object(f.importlib.util,'spec_from_file_location',side_effect=AssertionError('no pathname loader')):
+                    self.assertIs(validator,owner.validator())
+                self.assertEqual({'x':1},owner.modules['build_contract']._pairs([('x',1)]))
+                with self.assertRaisesRegex(ValueError,'duplicate contract key'):
+                    owner.modules['build_contract']._pairs([('x',1),('x',2)])
+        self.assertTrue(changed)
+        self.assertTrue(all((root/(name+'.py')).read_bytes()==raw for name,raw in originals.items()))
+
+        # Real captured bodies must not derive a different BASE through a post-capture symlink.
+        root,_=self.fixture();other=root/'other';other.mkdir();real_exec=exec;fired=[]
+        def execute_with_alias(code,globals):
+            if not fired:
+                path=root/'build_contract.py';path.rename(other/'build_contract.py');path.symlink_to(other/'build_contract.py')
+                fired.append(True)
+            return real_exec(code,globals)
+        with patch.object(f,'BASE',root),patch.object(f,'exec',create=True,side_effect=execute_with_alias):
+            with self.assertRaisesRegex(ValueError,'defining source root'):
+                with f._freeze_dependency_scope() as owner:owner.validator()
+            self.assertEqual([True],fired);self.assertEqual(set(),owner.ready)
+
+    def test_each_bad_source_and_capture_close_failure_refuse_before_any_compile(self):
+        for name,_,_ in f._FREEZE_DEPENDENCY_SOURCES:
+            for mutation in ('missing','size','short','same-size','symlink'):
+                root,_=self.fixture();path=root/(name+'.py');raw=path.read_bytes()
+                if mutation=='missing':path.unlink()
+                elif mutation=='size':path.write_bytes(raw+b'x')
+                elif mutation=='short':path.write_bytes(raw[:-1])
+                elif mutation=='same-size':path.write_bytes(b'#'+raw[1:])
+                else:
+                    retained=root/(name+'.retained');path.rename(retained);path.symlink_to(retained)
+                with self.subTest(name=name,mutation=mutation),patch.object(f,'BASE',root), \
+                        patch.object(f,'compile',create=True,side_effect=AssertionError('no unauthenticated compile')) as compiler:
+                    with self.assertRaises((OSError,ValueError)):
+                        with f._freeze_dependency_scope() as owner:owner.validator()
+                    compiler.assert_not_called();self.assertEqual('CLOSED',owner.state)
+                    self.assertFalse(owner.aliases)
+        # A scripted special-file metadata result is refused by the real open helper;
+        # no FIFO or host attacker is created and the payload reader is never reached.
+        import os,stat
+        from types import SimpleNamespace
+        root,_=self.fixture();actual_open=f.os.open;actual_stat=f.os.fstat;special_fd=[]
+        def opened_special(name,flags,*args,**kwargs):
+            fd=actual_open(name,flags,*args,**kwargs)
+            if name=='build_contract.py':
+                self.assertTrue(flags&os.O_NONBLOCK);special_fd.append(fd)
+            return fd
+        def special_metadata(fd):
+            value=actual_stat(fd)
+            if special_fd and fd==special_fd[0]:
+                return SimpleNamespace(st_mode=stat.S_IFIFO|0o600)
+            return value
+        with patch.object(f,'BASE',root),patch.object(f.os,'open',side_effect=opened_special), \
+                patch.object(f.os,'fstat',side_effect=special_metadata),patch.object(f.os,'read',side_effect=AssertionError('no special payload')) as payload:
+            with self.assertRaisesRegex(ValueError,'regular file required'):
+                with f._freeze_dependency_scope() as owner:owner.validator()
+            payload.assert_not_called()
+        root,_=self.fixture();real_close=f.os.close;real_open=f._open_regular;held=[];primary=OSError('authored capture close')
+        def opened(*args,**kwargs):fd=real_open(*args,**kwargs);held.append(fd);return fd
+        def close(fd):
+            real_close(fd)
+            if held and fd==held[0]:held.pop(0);raise primary
+        with patch.object(f,'BASE',root),patch.object(f,'_open_regular',side_effect=opened), \
+                patch.object(f.os,'close',side_effect=close),patch.object(f,'compile',create=True) as compiler:
+            with self.assertRaises(OSError) as caught:
+                with f._freeze_dependency_scope() as owner:owner.validator()
+            self.assertIs(primary,caught.exception);compiler.assert_not_called()
+
+    def test_real_dataclasses_private_contract_and_exact_three_export_self_facade(self):
+        root,_=self.fixture();read=f.read_regular;reads=[]
+        def reading(path,maximum):reads.append((path,maximum));return read(path,maximum)
+        with patch.object(f,'BASE',root),patch.object(f,'read_regular',side_effect=reading):
+            with f._freeze_dependency_scope() as owner:
+                validator=owner.validator();module=owner.modules['evaluate_candidate_v3'];contract=owner.modules['build_contract']
+                self.assertEqual(module.CapturedArtifact.__module__,module.__name__)
+                self.assertIs(sys.modules[module.__name__],module)
+                self.assertIs(owner.facade.read_regular,f.read_regular)
+                self.assertIs(owner.facade.admit_files,f.admit_files);self.assertIs(owner.facade.TreeBudget,f.TreeBudget)
+                snapshot=contract._ProfileSnapshot((root/'contracts/candidate-build-profile.json').read_bytes())
+                with contract.profile_scope(snapshot):
+                    artifact=module.CapturedArtifact(b'authored inert bytes')
+                    self.assertEqual(artifact.sha256,module.hashlib.sha256(artifact.data).hexdigest())
+                import build_contract as ambient
+                with self.assertRaisesRegex(ValueError,'owned profile snapshot'):
+                    with contract.profile_scope(ambient._ProfileSnapshot(snapshot.raw)):self.fail('foreign snapshot admitted')
+                copied=module.CopiedInput(Path('/authored/input'),(3,4,0o400),'a'*64)
+                self.assertEqual({'device':3,'inode':4,'mode':0o400,'sha256':'a'*64},copied.pin())
+                binding={'schemaVersion':3,'sourceCheckpointSha256':'a'*64,'initialSha256':{'synthetic':'d'*64},
+                         'helperCopySha256':'b'*64,'helperSchemaSha256':'c'*64,'helperSchemaVersion':3}
+                self.assertEqual(binding,validator('execution-bindings',binding))
+                self.assertEqual([(root/'contracts/execution-bindings-schema.json',1048576)],reads)
+                router=owner.importer('evaluate_candidate_v3')
+                self.assertIs(owner.facade,router('freeze_v3',fromlist=('read_regular',)))
+                for name,fromlist,level in [('bounded_runtime.extra',('x',),0),('bounded_runtime',('*',),0),
+                        ('bounded_runtime',('unreviewed',),0),('build_contract',('profile',),1)]:
+                    with self.assertRaises(ValueError):router(name,fromlist=fromlist,level=level)
+
+    def test_compile_body_alias_and_cleanup_faults_keep_primary_and_never_publish_partial_graph(self):
+        from types import ModuleType
+        for stage in ('compile','body','collision','changed-cleanup'):
+            root,_=self.fixture();primary=MemoryError('authored '+stage);real_exec=exec;foreign=ModuleType('foreign');aliases=[]
+            def execute(code,globals):
+                if stage=='body':raise primary
+                return real_exec(code,globals)
+            with self.subTest(stage=stage),patch.object(f,'BASE',root):
+                if stage=='compile':
+                    with patch.object(f,'compile',create=True,side_effect=primary),patch.object(f,'exec',create=True) as bodies:
+                        with self.assertRaises(MemoryError) as caught:
+                            with f._freeze_dependency_scope() as owner:owner.validator()
+                        self.assertIs(primary,caught.exception);bodies.assert_not_called()
+                elif stage=='body':
+                    with patch.object(f,'exec',create=True,side_effect=execute):
+                        with self.assertRaises(MemoryError) as caught:
+                            with f._freeze_dependency_scope() as owner:owner.validator()
+                        self.assertIs(primary,caught.exception);self.assertIsNone(owner.selected)
+                elif stage=='collision':
+                    with self.assertRaisesRegex(ValueError,'alias collision'):
+                        with f._freeze_dependency_scope() as owner:
+                            alias='_v3_freeze_'+format(id(owner),'x')+'_build_contract';sys.modules[alias]=foreign;aliases.append(alias)
+                            owner.validator()
+                    self.assertIs(sys.modules[alias],foreign)
+                else:
+                    with self.assertRaisesRegex(ValueError,'cleanup identity unknown'):
+                        with f._freeze_dependency_scope() as owner:
+                            owner.validator();alias=next(iter(owner.aliases));sys.modules[alias]=foreign;aliases.append(alias)
+                    self.assertIs(sys.modules[alias],foreign)
+                self.assertIsNone(f._FREEZE_DEPENDENCY_SCOPE.get());self.assertEqual('CLOSED',owner.state)
+                self.assertFalse(any(sys.modules.get(alias)is module for alias,module in owner.aliases.items()))
+                for alias in aliases:
+                    if sys.modules.get(alias)is foreign:del sys.modules[alias]
+
+        for compile_fails in (False,True):
+            root,_=self.fixture();primary=MemoryError('authored compile primary');cleanup=OSError('authored lock release')
+            with patch.object(f,'BASE',root):
+                with self.assertRaises((MemoryError,OSError)) as caught:
+                    with f._freeze_dependency_scope() as owner:
+                        real_lock=owner.lock
+                        class ReleaseFailure:
+                            def acquire(self,blocking):return real_lock.acquire(blocking)
+                            def release(self):real_lock.release();raise cleanup
+                        owner.lock=ReleaseFailure()
+                        if compile_fails:
+                            with patch.object(f,'compile',create=True,side_effect=primary):owner.validator()
+                        else:owner.validator()
+                self.assertIs(primary if compile_fails else cleanup,caught.exception)
+                self.assertEqual('CLOSED',owner.state);self.assertIsNone(f._FREEZE_DEPENDENCY_SCOPE.get())
+                self.assertFalse(any(sys.modules.get(key)is module for key,module in owner.aliases.items()))
+        # Alias and token cleanup failures remain secondary to the original body.
+        root,_=self.fixture();context=f._FREEZE_DEPENDENCY_SCOPE;primary=MemoryError('authored body primary')
+        cleanup=OSError('authored reset refusal');foreign=ModuleType('retained foreign');aliases=[]
+        class ResetFailure:
+            def get(self):return context.get()
+            def set(self,value):return context.set(value)
+            def reset(self,token):context.reset(token);raise cleanup
+        with patch.object(f,'BASE',root),patch.object(f,'_FREEZE_DEPENDENCY_SCOPE',ResetFailure()):
+            with self.assertRaises(MemoryError) as caught:
+                with f._freeze_dependency_scope() as owner:
+                    owner.validator();alias=next(iter(owner.aliases));aliases.append(alias);sys.modules[alias]=foreign
+                    raise primary
+            self.assertIs(primary,caught.exception);self.assertIsNone(context.get())
+            self.assertIs(sys.modules[alias],foreign)
+            self.assertFalse(any(sys.modules.get(key)is module for key,module in owner.aliases.items()))
+        for alias in aliases:
+            if sys.modules.get(alias)is foreign:del sys.modules[alias]
+
+    def test_real_report_reference_and_completion_semantics_survive_the_private_graph(self):
+        root,_=self.fixture()
+        with patch.object(f,'BASE',root),f._freeze_dependency_scope() as owner:
+            validator=owner.validator();module=owner.modules['evaluate_candidate_v3'];runtime=owner.modules['bounded_runtime']
+            report=_freeze_report_root(report_fixture(),root);self.assertEqual(report,validator('report',report))
+            for mutation in ('order','count','completion','profile','parser','target','library','evidence'):
+                changed=deepcopy(report);process=changed['scenarios'][0]['process']
+                if mutation=='order':changed['scenarios'][0],changed['scenarios'][1]=changed['scenarios'][1],changed['scenarios'][0]
+                elif mutation=='count':changed['matchedScenarioProcessCount']=0
+                elif mutation=='completion':process['workerTerminationVerified']=False
+                elif mutation=='profile':process['launchInputPins'][str(root/'contracts/candidate-build-profile.json')]['sha256']='f'*64
+                elif mutation=='parser':process['workerProofRawHex']='00'
+                elif mutation=='target':process['workerProofBindings']['targetSha256']='f'*64
+                elif mutation=='library':process['workerProofBindings']['expected']['library']['sha256']='f'*64
+                else:changed['scenarios'][0]['evidenceSha256']='f'*64
+                with self.subTest(mutation=mutation),self.assertRaises(Exception):validator('report',changed)
+            # Actual reference admission, including the distinct order check outside validate_exchange.
+            (root/'private').mkdir();(root/'private/original.c').write_bytes(b'authored original source')
+            prep=root/'preparation';(prep/'reference').mkdir(parents=True)
+            caller=prep/'caller';caller.write_bytes(b'authored inert caller')
+            library=prep/'reference/libcandidate.so';library.write_bytes(b'authored inert library')
+            pins=runtime._pin_files((caller,library));rows=[]
+            for index,family in enumerate(module.SCENARIO_FAMILIES):
+                raw=_freeze_process_root(receipt(7,caller=str(caller),caller_sha=module.digest(caller),input_pins=pins),root)
+                path=prep/('reference-process-'+str(index)+'.json')
+                path.write_text(json.dumps({'status':'failed','execution':module.public_result(raw)}))
+                rows.append({'id':index,'family':family,'process':module.process_observation(raw),'evidenceSha256':module.digest(path)})
+            value={'schemaVersion':3,'sourceSha256':module.digest(root/'private/original.c'),
+                   'callerSha256':module.digest(caller),'callerPath':str(caller),'libraryPath':str(library),
+                   'librarySha256':module.digest(library),'profileSha256':module.digest(root/'contracts/candidate-build-profile.json'),
+                   'observations':rows}
+            path=prep/'reference-observations.json';path.write_text(json.dumps(value))
+            self.assertEqual(value,validator('reference-observations',value))
+            self.assertEqual(24,len(module.validated_observations(path,caller,prep)))
+            changed=deepcopy(value);changed['observations'][0],changed['observations'][1]=changed['observations'][1],changed['observations'][0]
+            self.assertEqual(changed,validator('reference-observations',changed))
+            path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError,'scenario identity drift'):module.validated_observations(path,caller,prep)
+
+    def test_invocation_context_closed_failed_wrong_root_busy_and_cross_owner_are_not_reused(self):
+        from contextvars import copy_context
+        root,_=self.fixture();previous=f._FREEZE_DEPENDENCY_SCOPE.get()
+        with patch.object(f,'BASE',root):
+            with f._freeze_dependency_scope() as owner:
+                inherited=copy_context()
+                with self.assertRaisesRegex(ValueError,'nested'): 
+                    with f._freeze_dependency_scope():self.fail('nested owner admitted')
+                owner.lock.acquire()
+                try:
+                    with self.assertRaisesRegex(ValueError,'busy'):owner.validator()
+                    self.assertEqual('NEW',owner.state)
+                finally:owner.lock.release()
+                owner.validator();self.assertEqual('READY',owner.state)
+                with patch.object(f,'get_ident',return_value=owner.thread+1):
+                    with self.assertRaises(ValueError):owner.validator()
+                with patch.object(f,'BASE',root/'other'):
+                    with self.assertRaises(ValueError):owner.validator()
+            self.assertIs(previous,f._FREEZE_DEPENDENCY_SCOPE.get())
+            with self.assertRaises(ValueError):inherited.run(f.validate_exchange,'execution-bindings',{})
+            with f._freeze_dependency_scope() as other:
+                other.validator();self.assertIsNot(owner,other)
+                self.assertTrue(set(owner.aliases).isdisjoint(other.aliases))
+            with f._freeze_dependency_scope() as failed:
+                error=ValueError('authored compile refusal')
+                with patch.object(f,'compile',create=True,side_effect=error) as compiler:
+                    with self.assertRaises(ValueError) as caught:failed.validator()
+                    self.assertIs(error,caught.exception)
+                    with self.assertRaises(ValueError):failed.validator()
+                    self.assertEqual(1,compiler.call_count)
+
+    def test_real_freeze_dependency_join_and_qualification_refusal_never_create_output(self):
+        root,_=self.fixture()
+        # Reuse the existing genuine predicate/report fixture, with private-root completion pins.
+        case=AdmittedPredicateSources(methodName='runTest')
+        composed=root/'build/acp-decomp-effectiveness/callable-library-v3';composed.mkdir(parents=True)
+        args,paths,_=case.freeze_fixture(composed)
+        with patch.object(f,'BASE',composed),patch.object(f,'execution_source_paths',return_value=set(paths)), \
+                patch.object(f,'require_qualified_pin',wraps=f.require_qualified_pin) as qualification:
+            with self.assertRaisesRegex(ValueError,'static-only toolchain pin'):f.freeze(*args)
+            qualification.assert_called_once();self.assertFalse(args[2].exists())
+        case.doCleanups()
+        with patch.object(f,'BASE',root),f._freeze_dependency_scope() as owner:
+            owner.validator();sources=f.admit_files(owner.records,root=root)['files'];checkpoint={k:v['sha256']for k,v in sources.items()}
+            for name,_,_ in f._FREEZE_DEPENDENCY_SOURCES:
+                changed=deepcopy(sources);changed[str(root/(name+'.py'))]['identity']=(0,)*6
+                with self.subTest(name=name),self.assertRaisesRegex(ValueError,'original checkpoint join'):
+                    owner.require_sources(changed,checkpoint)
 
 
 if __name__=='__main__':unittest.main()

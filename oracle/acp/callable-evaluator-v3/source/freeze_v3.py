@@ -8,9 +8,14 @@ import os
 import stat
 from types import CodeType, FunctionType
 from inspect import CO_VARARGS, CO_VARKEYWORDS, CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR
-from bounded_runtime import BASE
-from evaluate_candidate_v3 import validate_exchange
-from build_contract import _pairs
+import builtins
+import sys
+from types import ModuleType
+from contextlib import contextmanager
+from contextvars import ContextVar
+from threading import Lock, get_ident
+
+BASE = Path(__file__).resolve().parent
 
 
 MAX_NODES = 20000
@@ -282,6 +287,195 @@ def _bind_admitted_predicates(sources, captured, checkpoint):
             FunctionType(passed,{'__builtins__':{}},'control_passed'))
 
 
+def _pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate contract key')
+        result[key] = value
+    return result
+
+
+# Closed source selection only; interpreter/stdlib/coordinator origin remains unqualified.
+_FREEZE_DEPENDENCY_SOURCES = (
+    ('build_contract',21107,'f91ce0d818acde417312df33a3b64c62f2d9d2a923999656e44f6c2f22bb0833'),
+    ('bounded_runtime',134582,'e4843e676f9157e4f507a06c84c09fd18d26d5515a4b0b975d6e14015a8e0641'),
+    ('interface_gate_v3',35101,'8328523b337b4bdb9da4d37fe10b114793928db8019debc45f154183188768b3'),
+    ('evaluate_candidate_v3',49679,'1ba0dac58a2b2840f1ad958bad5622b37159da350409b39ff27b131545a63639'),
+)
+_FREEZE_IMPORT_EDGES = {
+    'build_contract': {},
+    'bounded_runtime': {'build_contract': (
+        ('load_profile_with_digest','enforced_process_limits','digest'),)},
+    'interface_gate_v3': {
+        'bounded_runtime': (('bounded_run','public_result','digest','contained_command',
+                            'worker_execution_complete','_helper_execution_pin'),('_pin_files',)),
+        'build_contract': (('profile','load_profile','load_profile_with_digest','_bounded_json_snapshot'),)},
+    'evaluate_candidate_v3': {
+        'bounded_runtime': (('bounded_run','digest','private_directory','public_result','write_json',
+                            'worker_execution_complete','contained_command'),
+                           ('_parse_worker_proof','_WORKER_PROOF_MAX_BYTES'),('_pin_files',)),
+        'build_contract': (('profile','load_profile','load_profile_with_digest',
+                           'verified_visible_snapshot','profile_scope','_read_json'),),
+        'interface_gate_v3': (('compare_descriptors','probe','export_inventory','layout_assertions',
+                              'resolve_declaration','phase_remaining','revalidate_handoff','require_handoff_execution'),),
+        'freeze_v3': (('read_regular',),('admit_files','TreeBudget')),},
+}
+_FREEZE_ORDINARY_IMPORTS = frozenset((
+    '__future__','hashlib','json','os','stat','time','pathlib','re','contextlib','contextvars',
+    'fcntl','errno','math','resource','selectors','shutil','signal','subprocess','sys','threading',
+    'uuid','tempfile','importlib.metadata','fastjsonschema','dataclasses','copy'))
+_FREEZE_IMPORT = builtins.__import__
+_FREEZE_DEPENDENCY_SCOPE = ContextVar('freeze_dependency_owner',default=None)
+
+
+class _FreezeDependencyOwner:
+    """One synchronous invocation's captured graph; never a caller-provided permit."""
+    def __init__(self):
+        self.root=_absolute(BASE);self.thread=get_ident();self.state='NEW';self.lock=Lock()
+        self.modules={};self.aliases={};self.records={};self.ready=set();self.selected=None
+        self.facade=ModuleType('_freeze_self')
+        self.facade.read_regular=read_regular;self.facade.admit_files=admit_files
+        self.facade.TreeBudget=TreeBudget
+
+    def check(self):
+        if self.thread!=get_ident() or self.root!=_absolute(BASE) or self.state in ('FAILED','CLOSED'):
+            raise ValueError('freeze dependency owner is unavailable or outside its source root')
+
+    def check_aliases(self):
+        for alias,module in self.aliases.items():
+            if sys.modules.get(alias) is not module:
+                raise ValueError('freeze dependency private alias changed')
+
+    def importer(self, source):
+        def selected_import(name, globals=None, locals=None, fromlist=(), level=0):
+            self.check();self.check_aliases()
+            requested=tuple(fromlist or ())
+            if level or '*' in requested:
+                raise ValueError('unsupported freeze dependency import')
+            if name in _FREEZE_IMPORT_EDGES or name=='freeze_v3':
+                if requested not in _FREEZE_IMPORT_EDGES[source].get(name,()):
+                    raise ValueError('unreviewed freeze dependency edge')
+                if name=='freeze_v3':return self.facade
+                if name not in self.ready:raise ValueError('forward freeze dependency import')
+                return self.modules[name]
+            if name not in _FREEZE_ORDINARY_IMPORTS:
+                raise ValueError('unreviewed freeze ordinary import')
+            return _FREEZE_IMPORT(name,globals,locals,fromlist,level)
+        return selected_import
+
+    def validator(self):
+        self.check()
+        if self.state=='READY':
+            self.check_aliases();return self.selected
+        if self.state!='NEW' or not self.lock.acquire(False):
+            raise ValueError('freeze dependency initialization is busy or unavailable')
+        primary=None
+        try:
+            if self.state!='NEW':raise ValueError('freeze dependency initialized concurrently')
+            self.state='INITIALIZING'
+            specification={str(self.root/(name+'.py')):(size,sha)
+                           for name,size,sha in _FREEZE_DEPENDENCY_SOURCES}
+            captured={}
+            admission=_admit_files(specification,
+                TreeBudget(nodes=5,directories=1,files=4,bytes=240469,depth=1),root=self.root,
+                predicate_capture=(specification,captured))
+            if captured.keys()!=specification.keys():raise ValueError('incomplete freeze dependency capture')
+            raw={}
+            for name,size,sha in _FREEZE_DEPENDENCY_SOURCES:
+                coordinate=str(self.root/(name+'.py'));record,payload=captured[coordinate]
+                if (record is not admission['files'].get(coordinate) or record['size']!=size or
+                        record['path']!=self.root/(name+'.py') or record['sha256']!=sha or
+                        type(payload) is not bytes or len(payload)!=size or hashlib.sha256(payload).hexdigest()!=sha):
+                    raise ValueError('freeze original dependency bytes differ')
+                raw[name]=payload
+            # The entire independent catalog is authenticated before ANY compile.
+            code={name:compile(raw[name],str(self.root/(name+'.py')),'exec',dont_inherit=True,optimize=0)
+                  for name,_,_ in _FREEZE_DEPENDENCY_SOURCES}
+            self.records=admission['files']
+            for name,_,_ in _FREEZE_DEPENDENCY_SOURCES:
+                alias='_v3_freeze_'+format(id(self),'x')+'_'+name
+                module=ModuleType(alias);module.__file__=str(self.root/(name+'.py'));module.__package__=''
+                if alias in sys.modules:raise ValueError('freeze private alias collision')
+                self.modules[name]=module;self.aliases[alias]=module
+                if sys.modules.setdefault(alias,module) is not module:
+                    raise ValueError('freeze private alias collision')
+            # All code has compiled; four owned aliases support real dataclass lookups.
+            for name,_,_ in _FREEZE_DEPENDENCY_SOURCES:
+                self.check();self.check_aliases()
+                module=self.modules[name];environment=dict(vars(builtins))
+                environment['__import__']=self.importer(name);module.__dict__['__builtins__']=environment
+                exec(code[name],module.__dict__)
+                self.check();self.check_aliases()
+                if (module.__file__!=str(self.root/(name+'.py')) or
+                        sys.modules.get(module.__name__) is not module or
+                        (name!='interface_gate_v3' and module.BASE!=self.root) or
+                        (name=='build_contract' and module.PROFILE_PATH!=self.root/'contracts/candidate-build-profile.json')):
+                    raise ValueError('freeze dependency defining source root differs')
+                self.ready.add(name)
+            selected=self.modules['evaluate_candidate_v3'].validate_exchange
+            if not callable(selected) or selected.__globals__ is not self.modules['evaluate_candidate_v3'].__dict__:
+                raise ValueError('freeze validator defining globals differ')
+            self.selected=selected
+        except BaseException as failure:
+            primary=failure;self.state='FAILED';raise
+        finally:
+            try:self.lock.release()
+            except BaseException:
+                self.state='FAILED'
+                if primary is None:raise
+        self.check()
+        if self.state!='INITIALIZING':raise ValueError('freeze dependency owner changed during initialization')
+        self.state='READY'
+        return selected
+
+    def require_sources(self, sources, checkpoint):
+        self.validator()
+        for name,size,sha in _FREEZE_DEPENDENCY_SOURCES:
+            coordinate=str(self.root/(name+'.py'));original=self.records[coordinate];record=sources.get(coordinate)
+            if (record is None or record['path']!=original['path'] or record['identity']!=original['identity'] or
+                    record['size']!=size or record['sha256']!=sha or checkpoint.get(coordinate)!=sha):
+                raise ValueError('freeze dependency original checkpoint join differs')
+
+    def close(self):
+        self.state='CLOSED';failure=None
+        for alias,module in self.aliases.items():
+            try:
+                if sys.modules.get(alias) is not module:
+                    raise ValueError('freeze private alias cleanup identity unknown')
+                del sys.modules[alias]
+            except BaseException as error:
+                if failure is None:failure=error
+        if failure is not None:raise failure
+
+
+@contextmanager
+def _freeze_dependency_scope():
+    if _FREEZE_DEPENDENCY_SCOPE.get() is not None:raise ValueError('nested freeze dependency scope refused')
+    owner=_FreezeDependencyOwner();token=_FREEZE_DEPENDENCY_SCOPE.set(owner);primary=None
+    try:yield owner
+    except BaseException as failure:
+        primary=failure;raise
+    finally:
+        cleanup=None
+        try:owner.close()
+        except BaseException as failure:cleanup=failure
+        try:_FREEZE_DEPENDENCY_SCOPE.reset(token)
+        except BaseException as failure:
+            if cleanup is None:cleanup=failure
+        if primary is None and cleanup is not None:raise cleanup
+
+
+def validate_exchange(name, value):
+    owner=_FREEZE_DEPENDENCY_SCOPE.get()
+    if owner is None:
+        with _freeze_dependency_scope() as selected:
+            validator=selected.validator()
+            return validator(name,value)
+    validator=owner.validator()
+    return validator(name,value)
+
+
 def read_admitted(record, maximum=MAX_BYTES):
     if record['size']>maximum:raise ValueError('admitted read bound')
     fd=_open_regular(record['path'],record['parents'])
@@ -534,6 +728,11 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
     for path in (preflight,output,toolchain_pin,source_checkpoint,qualification,review,acceptance):
         if not _absolute(path).is_relative_to(_absolute(BASE)):raise ValueError('outside trusted v3 namespace')
     if _absolute(output).is_relative_to(_absolute(preflight)):raise ValueError('output must not be inside admitted preflight')
+    with _freeze_dependency_scope():
+        return _freeze_admitted(preflight,review,output,toolchain_pin,acceptance,source_checkpoint,qualification,filesystem_root)
+
+
+def _freeze_admitted(preflight, review, output, toolchain_pin, acceptance, source_checkpoint, qualification, filesystem_root=Path('/')):
     # Complete charged admission precedes all preflight reads and copy planning.
     tree=admit_tree(preflight);before={name:r['sha256'] for name,r in tree['files'].items()}
     def record(path):
@@ -553,6 +752,9 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
         raise ValueError('preflight must use exact prior source checkpoint')
     if set(checkpoint['files']) != execution_source_paths():raise ValueError('incomplete execution source checkpoint')
     sources,predicate_capture=_admit_execution_predicates(checkpoint['files'])
+    owner=_FREEZE_DEPENDENCY_SCOPE.get()
+    if owner is None:raise ValueError('freeze dependency scope required')
+    owner.require_sources(sources,checkpoint['files'])
     for path,sha in checkpoint['files'].items():
         if sources[str(_absolute(path))]['sha256'] != sha:raise ValueError('source changed after checkpoint:'+path)
     if sources[str(_absolute(BASE/'contracts/helper-schema.json'))]['sha256']!=bindings['helperSchemaSha256']:raise ValueError('helper schema drift')
