@@ -882,6 +882,13 @@ internal object RepairAcpEvidenceArchiveVerifier {
         require(schema in 3..4) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
         root.requireExactKeys(GRAPH_FIELDS, "repair release graph")
         val budget = parseBudget(root.requiredObject("budget", "repair release graph"))
+        val nodes = root.requiredArray("nodes", "repair release graph")
+        if (schema >= 4) {
+            val nullRecordStyles = nodes.map { it.requiredObject("repair release graph node") }
+                .filter { it["rollbackRecord"] == null || it["rollbackRecord"] is JsonNull }
+                .map { "rollbackRecord" in it }.distinct()
+            require(nullRecordStyles.size <= 1) { "repair release graph mixes null rollback node encodings" }
+        }
         return ReleaseRepairGraph(
             schemaVersion = schema,
             budget = budget,
@@ -895,7 +902,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             headId = root.requiredString("headId", "repair release graph"),
             nextOrdinal = root.requiredInt("nextOrdinal", "repair release graph"),
             storedBlobBytes = root.requiredNonNegativeLong("storedBlobBytes", "repair release graph"),
-            nodes = root.requiredArray("nodes", "repair release graph").map { parseNode(it, schema) },
+            nodes = nodes.map { parseNode(it, schema) },
             pending = root.getValue("pending").takeUnless { it is JsonNull },
             provisionalHeadId = root.optionalString("provisionalHeadId", "repair release graph"),
             fullyAcceptedHeadId = root.optionalString("fullyAcceptedHeadId", "repair release graph"),
@@ -906,7 +913,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun parseNode(element: JsonElement, schemaVersion: Int): ReleaseRepairNode {
         val root = element.requiredObject("repair release graph node")
-        root.requireExactKeys(if (schemaVersion >= 4) NODE_FIELDS_V4 else NODE_FIELDS_V3, "repair release graph node")
+        // Only a null schema4 node record may be omitted. Null presence is homogeneous above;
+        // archive whitespace remains independent of the persistent graph's canonical formatting.
+        val fields = if (schemaVersion >= 4 && "rollbackRecord" in root) NODE_FIELDS_V4 else NODE_FIELDS_V3
+        root.requireExactKeys(fields, "repair release graph node")
         return ReleaseRepairNode(
             id = root.requiredString("id", "repair release graph node"),
             parentId = root.optionalString("parentId", "repair release graph node"),

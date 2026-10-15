@@ -5533,7 +5533,13 @@ private fun synchronizeRepairDirectory(parentFd: Int) {
     LinuxFilesystemSyscalls.openDirectoryAt(parentFd, ".").use(LinuxFilesystemSyscalls::synchronize)
 }
 
-private fun renderGraph(state: RevisionGraphState): String = buildString {
+// Two exact whole-document encodings are readable. All new publications use compact nodes.
+private enum class NullRollbackNodeWire { COMPACT, EXPLICIT_NULL }
+
+private fun renderGraph(
+    state: RevisionGraphState,
+    nullNodeWire: NullRollbackNodeWire = NullRollbackNodeWire.COMPACT,
+): String = buildString {
     append("{\n  \"schemaVersion\": ").append(state.schemaVersion).append(',')
     append("\n  \"budget\": ").append(state.budget.toJson()).append(',')
     append("\n  \"profileId\": \"").append(state.profileId.jsonEscape()).append("\",")
@@ -5552,7 +5558,7 @@ private fun renderGraph(state: RevisionGraphState): String = buildString {
     append("\n  \"nextOrdinal\": ").append(state.nextOrdinal).append(',')
     append("\n  \"storedBlobBytes\": ").append(state.storedBlobBytes).append(',')
     append("\n  \"nodes\": [")
-    append(state.nodes.joinToString(",") { "\n" + it.toJson(state.schemaVersion).prependIndent("    ") })
+    append(state.nodes.joinToString(",") { "\n" + it.toJson(state.schemaVersion, nullNodeWire).prependIndent("    ") })
     append("\n  ],\n  \"pending\": ")
         .append(state.pending?.toJson(state.schemaVersion) ?: "null").append("\n}\n")
 }
@@ -5587,7 +5593,10 @@ private fun RepairResourceBudget.toJson(): String =
         "\"maximumGraphBytes\":$maximumGraphBytes," +
         "\"maximumStoredBlobBytes\":$maximumStoredBlobBytes}"
 
-private fun ModuleRevisionNode.toJson(schemaVersion: Int): String = buildString {
+private fun ModuleRevisionNode.toJson(
+    schemaVersion: Int,
+    nullNodeWire: NullRollbackNodeWire = NullRollbackNodeWire.COMPACT,
+): String = buildString {
     append("{\n  \"id\": \"").append(id.jsonEscape()).append("\",")
     append("\n  \"parentId\": ").append(parentId?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
     append("\n  \"ordinal\": ").append(ordinal).append(',')
@@ -5601,7 +5610,9 @@ private fun ModuleRevisionNode.toJson(schemaVersion: Int): String = buildString 
     append("\n  \"repairMetadata\": ")
         .append(repairMetadata?.toJson(schemaVersion) ?: "null").append(',')
     if (schemaVersion >= 3) append("\n  \"validationProof\": ").append(validationProof?.toStateJson() ?: "null").append(',')
-    if (schemaVersion >= 4) append("\n  \"rollbackRecord\": ").append(rollbackRecord?.toJson() ?: "null").append(',')
+    if (schemaVersion >= 4 && (rollbackRecord != null || nullNodeWire == NullRollbackNodeWire.EXPLICIT_NULL)) {
+        append("\n  \"rollbackRecord\": ").append(rollbackRecord?.toJson() ?: "null").append(',')
+    }
     append("\n  \"recoveredAfterCrash\": ").append(recoveredAfterCrash).append(',')
     append("\n  \"changes\": [")
     append(changes.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
@@ -5697,18 +5708,18 @@ private fun revisionGraphReadLimit(budget: RepairResourceBudget): Long = minOf(
 private fun readBoundedRevisionGraph(store: RepairStateStore, budget: RepairResourceBudget): Pair<ByteArray, RevisionGraphState> {
     val bytes = store.readGraph(revisionGraphReadLimit(budget))
     val parsed = parseCanonicalGraph(bytes, "reports/repair-revisions/graph.json")
-    require(parsed.budget == budget) { "revision graph resource budget differs from the requested budget" }
-    requireRevisionGraphByteBudget(parsed, bytes.size.toLong())
-    return bytes to parsed
+    require(parsed.state.budget == budget) { "revision graph resource budget differs from the requested budget" }
+    requireRevisionGraphByteBudget(parsed.state, bytes.size.toLong(), parsed.nullNodeWire)
+    return bytes to parsed.state
 }
 
 /** Archive readers retain their independent absolute ceiling and semantic validation. */
 internal fun requireRepairGraphByteBudget(payload: ByteArray, budget: RepairResourceBudget) {
     if (payload.size.toLong() <= budget.maximumGraphBytes) return
     require(payload.size.toLong() <= revisionGraphReadLimit(budget)) { "repair graph exceeds migration read bound" }
-    val state = parseCanonicalGraph(payload, "repair release graph")
-    require(state.budget == budget)
-    requireRevisionGraphByteBudget(state, payload.size.toLong())
+    val parsed = parseCanonicalGraph(payload, "repair release graph")
+    require(parsed.state.budget == budget)
+    requireRevisionGraphByteBudget(parsed.state, payload.size.toLong(), parsed.nullNodeWire)
 }
 
 /** A legacy graph has only one pending attempt, and no rollback records before that migration. */
@@ -5718,7 +5729,11 @@ internal fun requireSingleLegacyRollbackOrigin(legacyFlags: List<Boolean>) {
     }
 }
 
-private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Long) {
+private fun requireRevisionGraphByteBudget(
+    state: RevisionGraphState,
+    bytes: Long,
+    nullNodeWire: NullRollbackNodeWire = NullRollbackNodeWire.COMPACT,
+) {
     val records = state.nodes.mapNotNull { it.rollbackRecord } + listOfNotNull(state.pending?.rollbackRecord)
     requireSingleLegacyRollbackOrigin(records.map { it.legacyPendingStateUnknown })
     records.forEach { record ->
@@ -5729,7 +5744,7 @@ private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Lon
     if (bytes <= state.budget.maximumGraphBytes) return
     var allowance = 0L
     if (state.schemaVersion == 4 && records.any { it.legacyPendingStateUnknown }) {
-        fun size(candidate: RevisionGraphState) = renderGraph(candidate).toByteArray(Charsets.UTF_8).size.toLong()
+        fun size(candidate: RevisionGraphState) = renderGraph(candidate, nullNodeWire).toByteArray(Charsets.UTF_8).size.toLong()
         val migratedPending = state.pending?.rollbackRecord?.legacyPendingStateUnknown == true
         val migratedNodeCount = if (migratedPending) state.nodes.size else
             state.nodes.indexOfFirst { it.rollbackRecord?.legacyPendingStateUnknown == true } + 1
@@ -5739,8 +5754,8 @@ private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Lon
             // Later native attempts were never migrated. Charge their entire encoding, including
             // default fields, instead of growing the one migration's allowance with new history.
             state.nodes.drop(migratedNodeCount).forEach { node ->
-                added -= node.toJson(newVersion).prependIndent("    ").toByteArray(Charsets.UTF_8).size -
-                    node.toJson(oldVersion).prependIndent("    ").toByteArray(Charsets.UTF_8).size
+                added -= node.toJson(newVersion, nullNodeWire).prependIndent("    ").toByteArray(Charsets.UTF_8).size -
+                    node.toJson(oldVersion, nullNodeWire).prependIndent("    ").toByteArray(Charsets.UTF_8).size
             }
             if (!migratedPending) state.pending?.let { pending ->
                 added -= pending.toJson(newVersion).toByteArray(Charsets.UTF_8).size -
@@ -5771,12 +5786,19 @@ private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Lon
     }
 }
 
-private fun parseCanonicalGraph(payload: ByteArray, label: String): RevisionGraphState {
+private data class CanonicalRevisionGraph(val state: RevisionGraphState, val nullNodeWire: NullRollbackNodeWire)
+
+private fun parseCanonicalGraph(payload: ByteArray, label: String): CanonicalRevisionGraph {
     val state = parseGraph(decodeUtf8Strict(payload, label))
-    require(renderGraph(state).toByteArray(Charsets.UTF_8).contentEquals(payload)) {
-        "$label is not the exact canonical graph encoding"
+    // Select a complete encoding, never a per-node mixture. Comparing raw canonical bytes also
+    // refuses unknown/duplicate fields and whitespace changes without rewriting digest identity.
+    val wire = when {
+        renderGraph(state).toByteArray(Charsets.UTF_8).contentEquals(payload) -> NullRollbackNodeWire.COMPACT
+        renderGraph(state, NullRollbackNodeWire.EXPLICIT_NULL).toByteArray(Charsets.UTF_8)
+            .contentEquals(payload) -> NullRollbackNodeWire.EXPLICIT_NULL
+        else -> throw IllegalArgumentException("$label is not the exact canonical graph encoding")
     }
-    return state
+    return CanonicalRevisionGraph(state, wire)
 }
 
 private fun parseGraph(payload: String): RevisionGraphState {
