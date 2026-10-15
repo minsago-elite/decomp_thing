@@ -3768,7 +3768,7 @@ class ModuleRevisionGraphTest {
                 }
                 val output = fixture.project.parent.resolve("missing-record-$legacyPending-$explicitNull-refused")
                 val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
-                assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record or supported legacy origin"), failure.message)
+                assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record"), failure.message)
                 assertFalse(output.exists())
             }
         }
@@ -3780,45 +3780,62 @@ class ModuleRevisionGraphTest {
         val fixture = releaseRepairFixture(temporaryParent = parent, recoveredRollbackPrefix = true)
         val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("failure-record-present.zip"))
         ArchivalBundleVerifier.extractAndVerify(valid.archivePath, fixture.project.parent.resolve("failure-record-present-control"))
-        val tampered = fixture.project.parent.resolve("failure-record-erased.zip")
-        rewriteArchive(valid.archivePath, tampered) { entries ->
-            val path = "reports/repair-revisions/graph.json"
-            val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
-            val failed = graph.getValue("nodes").jsonArray.single { element ->
-                element.jsonObject["rollbackRecord"]?.takeUnless { it is JsonNull }?.jsonObject
-                    ?.get("failureCode")?.let { it !is JsonNull } == true }.jsonObject
-            val record = failed.getValue("rollbackRecord").jsonObject
-            assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
-            val owner = record.getValue("runId")
-            val nodes = graph.getValue("nodes").jsonArray.map { element ->
-                val node = element.jsonObject
-                if (node.getValue("id") == failed.getValue("id")) JsonObject(node - "rollbackRecord") else node
-            }
-            entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
-            for (documentPath in listOf(path, "reports/repair_history.json")) {
-                val document = Json.parseToJsonElement(entries.getValue(documentPath).decodeToString()).jsonObject
-                var rewritten = 0
-                val runs = document.getValue("runs").jsonArray.map { element ->
-                    val run = element.jsonObject
-                    if (run.getValue("id") != owner) run else {
-                        rewritten++
-                        assertEquals("rollback_failed", run.getValue("status").jsonPrimitive.content)
-                        JsonObject((run - setOf("rollbackFailureAttemptId", "rollbackResolution")) + mapOf(
-                            "schemaVersion" to JsonPrimitive(1), "status" to JsonPrimitive("validation_failed")))
+        for (mode in listOf("plain", "fabricated-legacy", "graph-schema-three")) {
+            val tampered = fixture.project.parent.resolve("failure-record-erased-$mode.zip")
+            rewriteArchive(valid.archivePath, tampered) { entries ->
+                val path = "reports/repair-revisions/graph.json"
+                val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                val failed = graph.getValue("nodes").jsonArray.single { element ->
+                    element.jsonObject["rollbackRecord"]?.takeUnless { it is JsonNull }?.jsonObject
+                        ?.get("failureCode")?.let { it !is JsonNull } == true }.jsonObject
+                val record = failed.getValue("rollbackRecord").jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                val owner = record.getValue("runId")
+                val nodes = graph.getValue("nodes").jsonArray.map { element ->
+                    val node = element.jsonObject
+                    if (node.getValue("id") == failed.getValue("id")) JsonObject(node - "rollbackRecord") else node
+                }
+                entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes))).toString().toByteArray()
+                for (documentPath in listOf(path, "reports/repair_history.json")) {
+                    val document = Json.parseToJsonElement(entries.getValue(documentPath).decodeToString()).jsonObject
+                    var rewritten = 0
+                    val runs = document.getValue("runs").jsonArray.map { element ->
+                        val run = element.jsonObject
+                        if (run.getValue("id") != owner) run else {
+                            rewritten++
+                            assertEquals("rollback_failed", run.getValue("status").jsonPrimitive.content)
+                            JsonObject((run - setOf("rollbackFailureAttemptId", "rollbackResolution")) + mapOf(
+                                "schemaVersion" to JsonPrimitive(1), "status" to JsonPrimitive("validation_failed")))
+                        }
+                    }
+                    assertEquals(1, rewritten)
+                    entries[documentPath] = JsonObject(document + ("runs" to JsonArray(runs))).toString().toByteArray()
+                }
+                if (mode != "plain") {
+                    val stripped = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                    val declared = JsonObject(stripped + mapOf(
+                        "schemaVersion" to JsonPrimitive(3),
+                        "nodes" to JsonArray(stripped.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }),
+                    )).toString().toByteArray()
+                    if (mode == "fabricated-legacy") {
+                        // Same resealed context/nodes/runs/proofs/blobs: a correct hash is not a
+                        // pre-migration commitment and must not exempt the missing failure record.
+                        entries["reports/repair-revisions/legacy-graph-${sha256(declared)}.json"] = declared
+                    } else {
+                        assertEquals("graph-schema-three", mode)
+                        entries[path] = declared // Downgrade every node, not merely the failed one.
                     }
                 }
-                assertEquals(1, rewritten)
-                entries[documentPath] = JsonObject(document + ("runs" to JsonArray(runs))).toString().toByteArray()
             }
+            val output = fixture.project.parent.resolve("failure-record-erased-$mode-refused")
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
+            assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record"), failure.message)
+            assertFalse(output.exists())
         }
-        val output = fixture.project.parent.resolve("failure-record-erased-refused")
-        val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
-        assertTrue(failure.message.orEmpty().contains("lacks a finalized rollback record or supported legacy origin"), failure.message)
-        assertFalse(output.exists())
     }
 
     @Test
-    fun `authored finalized schema three origin exempts only its exact prefix and refuses missing or inconsistent witnesses`() {
+    fun `archive local schema three declarations never exempt missing finalized rollback records`() {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
         val budget = RepairResourceBudget(maximumGraphBytes = 64L * 1024)
         val fixture = releaseRepairFixture(temporaryParent = parent, rejectedAttempts = 1, budget = budget)
@@ -3834,10 +3851,11 @@ class ModuleRevisionGraphTest {
         assertEquals(JsonNull, origin.getValue("pending"))
         assertTrue(origin.getValue("nodes").jsonArray.all { "rollbackRecord" !in it.jsonObject })
         graphPath.writeText(authored)
-        val legacyControl = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-schema-three.zip"))
-        ArchivalBundleVerifier.extractAndVerify(legacyControl.archivePath, fixture.project.parent.resolve("authored-schema-three-control"))
+        val legacyFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-schema-three-refused.zip"))
+        }
+        assertTrue(legacyFailure.message.orEmpty().contains("lacks a finalized rollback record"), legacyFailure.message)
         val originName = "legacy-graph-${sha256(authored.toByteArray())}.json"
-        val originPath = "reports/repair-revisions/$originName"
         graphPath.parent.resolve(originName).writeText(authored)
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
             graph.enableRunContract()
@@ -3845,11 +3863,14 @@ class ModuleRevisionGraphTest {
             assertEquals(4, graph.snapshot.schemaVersion)
             assertNull(graph.snapshot.nodes.single { it.status == ModuleRevisionStatus.REJECTED }.rollbackRecord)
         }
-        val upgraded = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-upgraded.zip"))
-        ArchivalBundleVerifier.extractAndVerify(upgraded.archivePath, fixture.project.parent.resolve("authored-origin-upgraded-control"))
+        assertContentEquals(fixture.after, fixture.project.resolve(fixture.relativePath).readBytes())
+        val upgradedFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-upgraded-refused.zip"))
+        }
+        assertTrue(upgradedFailure.message.orEmpty().contains("lacks a finalized rollback record"), upgradedFailure.message)
 
-        // Append actual current-writer attempts after the declared old checkpoint; neither can
-        // acquire legacy origin merely by changing labels, null encoding or the new run schema.
+        // Local compatibility reading/recovery is supported, but adding genuine current-writer
+        // attempts cannot supply the missing finalized outcome for an earlier rejected attempt.
         val appended = fixture.after + "\n/* later native origin control */\n".toByteArray()
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, budget).use { graph ->
             val corpus = graph.retainedRegressionCorpus()
@@ -3878,14 +3899,35 @@ class ModuleRevisionGraphTest {
             graph.synchronizeRepairHistory()
         }
         assertEquals(0, MakeProjectBuilder.build(fixture.project).returnCode)
-        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-native-append.zip"))
-        val control = fixture.project.parent.resolve("authored-origin-native-append-control")
-        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, control)
-        assertContentEquals(appended, control.resolve(fixture.relativePath).readBytes())
+        val mixedFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("authored-origin-native-append-refused.zip"))
+        }
+        assertTrue(mixedFailure.message.orEmpty().contains("lacks a finalized rollback record"), mixedFailure.message)
+        assertContentEquals(appended, fixture.project.resolve(fixture.relativePath).readBytes())
         assertTrue(graphPath.readBytes().size.toLong() < budget.maximumGraphBytes,
-            "origin checks must run even when byte-credit admission returns early")
+            "missing-record checks must run even when byte-credit admission returns early")
+
+        // Separate supported positive: complete current-writer records, not a nullable legacy
+        // baseline. Every resealed substitution below starts from this verified native archive.
+        val nativeFixture = releaseRepairFixture(temporaryParent = parent, rejectedAttempts = 1, budget = budget)
+        val valid = ArchivalPackager.create(nativeFixture.project, nativeFixture.project.parent.resolve("native-records-complete.zip"))
+        val control = nativeFixture.project.parent.resolve("native-records-complete-control")
+        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, control)
+        assertContentEquals(nativeFixture.after, control.resolve(nativeFixture.relativePath).readBytes())
+        val nativeGraph = Json.parseToJsonElement(nativeFixture.project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        val nativeRejected = nativeGraph.getValue("nodes").jsonArray.filter {
+            it.jsonObject.getValue("status").jsonPrimitive.content == "rejected"
+        }
+        assertEquals(1, nativeRejected.size)
+        assertTrue(nativeRejected.all { it.jsonObject.getValue("rollbackRecord") is JsonObject })
+        val nativeOrigin = JsonObject(nativeGraph + mapOf(
+            "schemaVersion" to JsonPrimitive(3),
+            "nodes" to JsonArray(nativeGraph.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }),
+        ))
+        val nativeAuthored = nativeOrigin.toString()
+        val nativeOriginPath = "reports/repair-revisions/legacy-graph-${sha256(nativeAuthored.toByteArray())}.json"
         for (mode in listOf("native-absent", "native-null", "missing", "malformed", "context", "prefix", "conflicting", "oversize")) {
-            val tampered = fixture.project.parent.resolve("authored-origin-$mode.zip")
+            val tampered = nativeFixture.project.parent.resolve("authored-origin-$mode.zip")
             rewriteArchive(valid.archivePath, tampered) { entries ->
                 if (mode.startsWith("native-")) {
                     val path = "reports/repair-revisions/graph.json"
@@ -3901,35 +3943,37 @@ class ModuleRevisionGraphTest {
                     }
                     entries[path] = JsonObject(graph + ("nodes" to JsonArray(changed))).toString().toByteArray()
                 } else {
-                    if (mode != "conflicting") entries.remove(originPath)
+                    val graphPath = "reports/repair-revisions/graph.json"
+                    val currentGraph = Json.parseToJsonElement(entries.getValue(graphPath).decodeToString()).jsonObject
+                    entries[graphPath] = JsonObject(currentGraph + ("nodes" to JsonArray(
+                        currentGraph.getValue("nodes").jsonArray.map { JsonObject(it.jsonObject - "rollbackRecord") }
+                    ))).toString().toByteArray()
+                    entries[nativeOriginPath] = nativeAuthored.toByteArray()
+                    if (mode != "conflicting") entries.remove(nativeOriginPath)
                     val changed: ByteArray? = when (mode) {
                         "missing" -> null
-                        "malformed" -> JsonObject(origin + ("unexpectedOriginField" to JsonPrimitive(true))).toString().toByteArray()
-                        "context" -> JsonObject(origin + ("indexSha256" to JsonPrimitive(
-                            if (origin.getValue("indexSha256").jsonPrimitive.content == "0".repeat(64)) "1".repeat(64) else "0".repeat(64)
+                        "malformed" -> JsonObject(nativeOrigin + ("unexpectedOriginField" to JsonPrimitive(true))).toString().toByteArray()
+                        "context" -> JsonObject(nativeOrigin + ("indexSha256" to JsonPrimitive(
+                            if (nativeOrigin.getValue("indexSha256").jsonPrimitive.content == "0".repeat(64)) "1".repeat(64) else "0".repeat(64)
                         ))).toString().toByteArray()
-                        "prefix", "conflicting" -> JsonObject(origin + ("nodes" to JsonArray(origin.getValue("nodes").jsonArray.map { element ->
+                        "prefix", "conflicting" -> JsonObject(nativeOrigin + ("nodes" to JsonArray(nativeOrigin.getValue("nodes").jsonArray.map { element ->
                             val node = element.jsonObject
                             if (node.getValue("status").jsonPrimitive.content == "rejected")
                                 JsonObject(node + ("evidenceSummary" to JsonPrimitive("different declared node"))) else node
                         }))).toString().toByteArray()
-                        "oversize" -> authored.toByteArray().copyOf((budget.maximumGraphBytes + 1).toInt()).also { bytes ->
-                            java.util.Arrays.fill(bytes, authored.toByteArray().size, bytes.size, ' '.code.toByte()) }
+                        "oversize" -> nativeAuthored.toByteArray().copyOf((budget.maximumGraphBytes + 1).toInt()).also { bytes ->
+                            java.util.Arrays.fill(bytes, nativeAuthored.toByteArray().size, bytes.size, ' '.code.toByte()) }
                         else -> error("unhandled origin control")
                     }
                     changed?.let { bytes -> entries["reports/repair-revisions/legacy-graph-${sha256(bytes)}.json"] = bytes }
                 }
-                // Only the intended graph/origin changes. All receipt/blob/validation evidence is retained.
+                // Self-declared source variants are substitution/refusal controls, not authority
+                // tests for the removed context/prefix collector. All receipt/blob/validation evidence remains.
             }
-            val output = fixture.project.parent.resolve("authored-origin-$mode-refused")
+            val output = nativeFixture.project.parent.resolve("authored-origin-$mode-refused")
             val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(tampered, output) }
-            val expected = when (mode) {
-                "native-absent", "native-null", "missing" -> "lacks a finalized rollback record or supported legacy origin"
-                "malformed" -> "missing, extra, or duplicate fields"
-                "context" -> "different recovery context"
-                "prefix", "conflicting" -> "exact finalized node prefix"
-                else -> "remaining evidence budget"
-            }
+            val expected = if (mode == "oversize") "remaining evidence budget"
+                else "lacks a finalized rollback record"
             assertTrue(failure.message.orEmpty().contains(expected), "$mode: ${failure.message}")
             assertFalse(output.exists())
         }
