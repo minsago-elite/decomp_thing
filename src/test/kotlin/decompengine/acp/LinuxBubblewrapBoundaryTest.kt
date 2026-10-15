@@ -41,6 +41,129 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `manifest statx scratch owns failed construction and transfers only admitted storage`() {
+        for (primary in listOf<Throwable>(IOException("scripted initial checkpoint failure"), AssertionError("scripted constructor failure"))) {
+            var owned: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+            val cleanup = IOException("scripted statx cleanup failure")
+            val memory = ManifestStatxMemory(cleanup)
+            val observed = try {
+                initializeManifestStatxScratch { scratch ->
+                    owned = scratch
+                    replaceManifestStatxMemory(scratch, memory)
+                    throw primary
+                }
+                error("failed admission unexpectedly returned")
+            } catch (failure: Throwable) { failure }
+            assertTrue(observed === primary)
+            assertEquals(listOf(cleanup), observed.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(owned).identity(-401) }
+            checkNotNull(owned).close()
+            assertEquals(1, memory.closes)
+        }
+        var transferred: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+        val memory = ManifestStatxMemory()
+        assertEquals("admitted", initializeManifestStatxScratch { scratch ->
+            transferred = scratch
+            replaceManifestStatxMemory(scratch, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        })
+        assertEquals(0, memory.closes)
+        checkNotNull(transferred).close(); checkNotNull(transferred).close()
+        assertEquals(1, memory.closes)
+    }
+
+    private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestStatxMemory(scratch: LinuxFilesystemSyscalls.StatxIdentityScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestStatxScratch(initialize: (LinuxFilesystemSyscalls.StatxIdentityScratch) -> Any?): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedStatxScratch", Function1::class.java)
+        return invokePrivate(companion, method, initialize)
+    }
+
+    @Test
+    fun `manifest poll scratch initialization guard frees failed admissions and preserves primary failure`() {
+        for (primary in listOf<Throwable>(IOException("authored admission failure"), AssertionError("authored constructor failure"))) {
+            val handle = scriptedManifestPollHandle(-201)
+            var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+            val cleanup = IOException("authored scratch cleanup failure")
+            val memory = ManifestPollMemory(cleanup)
+            var initializations = 0
+            val failure = try {
+                initializeManifestPollScratch(handle) { owned ->
+                    initializations++
+                    scratch = owned
+                    replaceManifestPollMemory(owned, memory)
+                    throw primary
+                }
+                error("authored admission unexpectedly returned")
+            } catch (observed: Throwable) { observed }
+            assertTrue(failure === primary)
+            assertEquals(1, initializations)
+            assertEquals(listOf(cleanup), failure.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(scratch).poll() } // Closed before any native query.
+            checkNotNull(scratch).close()
+            assertEquals(1, memory.closes)
+            assertEquals(-201, handle.whileOpen { it })
+        }
+    }
+
+    @Test
+    fun `manifest poll scratch initialization transfers only on successful admission`() {
+        val handle = scriptedManifestPollHandle(-202)
+        var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+        val memory = ManifestPollMemory()
+        val result = initializeManifestPollScratch(handle) { owned ->
+            scratch = owned
+            replaceManifestPollMemory(owned, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        }
+        assertEquals("admitted", result)
+        assertEquals(0, memory.closes)
+        checkNotNull(scratch).close(); checkNotNull(scratch).close()
+        assertEquals(1, memory.closes)
+        assertEquals(-202, handle.whileOpen { it })
+    }
+
+    private fun scriptedManifestPollHandle(fd: Int) = LinuxDescriptor(fd,
+        LinuxFileIdentity(LinuxFileKey(0, 0), 0, 0, 0, 1, 1, false, false, false))
+
+    private class ManifestPollMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(8) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestPollMemory(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("polled").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestPollScratch(
+        handle: LinuxDescriptor,
+        initialize: (LinuxFilesystemSyscalls.MountMetadataPollScratch) -> Any?,
+    ): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedPollScratch",
+            LinuxDescriptor::class.java, Function1::class.java)
+        return invokePrivate(companion, method, handle, initialize)
+    }
+
+    @Test
     fun `manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection`() {
         withRepositoryTemporaryDirectory("acp-control-concurrency-") { base ->
             val parent = Files.createDirectory(base.resolve("controls"))
@@ -1929,6 +2052,46 @@ class LinuxBubblewrapBoundaryTest {
             Files.deleteIfExists(validationSource)
         }
         assertEquals(before, controlDirectories())
+
+        val revalidationCheckpoint = AtomicBoolean(false)
+        val commandObserved = AtomicBoolean(false)
+        val startHookReached = AtomicBoolean(false)
+        val revalidationUnits = mutableListOf<String>()
+        val revalidationScopes = mutableListOf<AcpSandboxScopeIdentity>()
+        val recordUnit = unitObserver(revalidationUnits)
+        val revalidationBoundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = AcpSandboxCommandObserver { command ->
+                commandObserved.set(true)
+                recordUnit.beforeStart(command)
+            },
+            launchHook = AcpSandboxLaunchHook { stage ->
+                if (stage == AcpSandboxLaunchStage.BEFORE_SCOPE_START) startHookReached.set(true)
+            },
+            scopeObserver = AcpSandboxScopeObserver { revalidationScopes.add(it) },
+        )
+        val revalidationFailure = IOException("injected launch mount revalidation deadline")
+        try {
+            val failure = assertFailsWith<IOException> {
+                revalidationBoundary.launch(probeLaunch(listOf("netns")), true) {
+                    val stack = Thread.currentThread().stackTrace
+                    if (stack.none { it.methodName == "requireBoundaryUnchanged" } &&
+                        stack.any { it.className == "decompengine.acp.PinnedReadOnlyMount" && it.methodName == "requireUnchanged" } &&
+                        revalidationCheckpoint.compareAndSet(false, true)
+                    ) throw revalidationFailure
+                }
+            }
+            assertTrue(failure === revalidationFailure, "launch cleanup must preserve the injected primary")
+            assertTrue(revalidationCheckpoint.get(), "launch mounts must be revalidated before command construction")
+            assertFalse(commandObserved.get(), "mount revalidation must precede the command observer")
+            assertFalse(startHookReached.get(), "mount revalidation must precede scope start")
+            assertTrue(revalidationUnits.isEmpty())
+            assertTrue(revalidationScopes.isEmpty())
+            assertTrue(revalidationBoundary.evidence(null).launches.isEmpty())
+        } finally {
+            revalidationBoundary.close()
+        }
+        assertBoundaryResidueAbsent(before, revalidationUnits, revalidationScopes)
 
         val launchBoundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
         val nprocCheckpoint = AtomicBoolean(false)

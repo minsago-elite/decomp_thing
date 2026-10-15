@@ -1962,10 +1962,6 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
-            boundary.validateReadOnlyMounts(
-                listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts,
-                executionCheck,
-            )
             val sandboxed = boundary.launch(
                 AcpSandboxLaunch(
                     command = configuration.command(),
