@@ -67,7 +67,7 @@ def _close_nonstandard(keep):
 
 
 
-def _acquire_library_snapshot(record, maximum):
+def _acquire_library_snapshot(record, maximum, deadline):
     if (type(record) is not dict or set(record) != {'ownerPid','ownerStart','descriptor','library'} or
             any(type(record[k]) is not int or not 0 < record[k] <= (1 << 63) - 1 for k in ('ownerPid','ownerStart')) or
             type(record['descriptor']) is not int or not 0 <= record['descriptor'] <= (1 << 31) - 1):
@@ -81,32 +81,72 @@ def _acquire_library_snapshot(record, maximum):
     def owner_alive():
         value = Path('/proc/' + str(record['ownerPid']) + '/stat').read_text()
         return int(value[value.rfind(')') + 2:].split()[19]) == record['ownerStart']
-    if not owner_alive(): raise ValueError('snapshot owner lifetime changed')
-    fd = os.open('/proc/' + str(record['ownerPid']) + '/fd/' + str(record['descriptor']), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
-    transferred = False
+    def timely():
+        if time.monotonic() >= deadline: raise TimeoutError('snapshot handoff deadline')
+    fd = None
+    source_owned = False
+    target_owned = False
     try:
+        timely()
+        if not owner_alive(): raise ValueError('snapshot owner lifetime changed')
+        timely()
+        fd = os.open('/proc/' + str(record['ownerPid']) + '/fd/' + str(record['descriptor']), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        # Acquire ownership before the first post-open clock or admission operation.
+        if fd == 5: target_owned = True
+        else: source_owned = True
+        timely()
         metadata = os.fstat(fd)
+        timely()
         seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
         if (not stat.S_ISREG(metadata.st_mode) or
                 (metadata.st_dev,metadata.st_ino,metadata.st_size) != (library['device'],library['inode'],library['size']) or
                 fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals):
             raise ValueError('held snapshot identity or seals differ')
+        timely()
         value = hashlib.sha256(); count = 0
-        deadline = time.monotonic() + _contract()['bounds']['scopeAdmissionSeconds']
+        timely()
         while count < library['size']:
-            if time.monotonic() >= deadline: raise TimeoutError('snapshot handoff deadline')
+            timely()
             block = os.read(fd, min(65536, library['size'] - count))
+            timely()
             if not block: raise ValueError('snapshot handoff truncated')
             count += len(block); value.update(block)
-        if value.hexdigest() != library['sha256'] or not owner_alive():
+            timely()
+        digest = value.hexdigest()
+        timely()
+        if digest != library['sha256'] or not owner_alive():
             raise ValueError('snapshot handoff content or owner differs')
+        timely()
         os.lseek(fd, 0, os.SEEK_SET)
+        timely()
         os.dup2(fd, 5, inheritable=True)
+        # From this return onward, refusal owns FD5 even if later setup fails.
+        target_owned = True
+        timely()
         os.set_inheritable(5, True)
-        transferred = True
-    finally:
-        if fd != 5 or not transferred: os.close(fd)
-
+        timely()
+        if source_owned:
+            source_owned = False  # A failed close must never be retried.
+            os.close(fd)
+        timely()
+        target_owned = False  # Transfer only after every fallible step has completed.
+        return
+    except BaseException as primary:
+        if source_owned:
+            source_owned = False
+            try:
+                os.close(fd)
+            except BaseException:
+                try: primary.add_note('snapshot source descriptor cleanup failed')
+                except BaseException: pass
+        if target_owned:
+            target_owned = False
+            try:
+                os.close(5)
+            except BaseException:
+                try: primary.add_note('snapshot target descriptor cleanup failed')
+                except BaseException: pass
+        raise
 
 
 def _authenticated_config(directory_fd, expected):
@@ -334,7 +374,8 @@ def _main(config_sha, controller, controller_fd, deadline):
             if 'librarySnapshot' in config:
                 if command.count('--ro-bind-fd') != 1 or command[command.index('--ro-bind-fd') + 1:command.index('--ro-bind-fd') + 3] != ['5','/library.so']:
                     raise ValueError('snapshot fd mount missing')
-                _acquire_library_snapshot(config['librarySnapshot'], bounds['workerLaunchPinFileBytes'])
+                if directory_fd == 5: raise ValueError('snapshot fd aliases gate directory')
+                _acquire_library_snapshot(config['librarySnapshot'], bounds['workerLaunchPinFileBytes'], deadline)
                 _close_nonstandard({4,5,controller_fd,directory_fd,scope['fd']})
             else:
                 if '--ro-bind-fd' in command: raise ValueError('unowned snapshot mount')

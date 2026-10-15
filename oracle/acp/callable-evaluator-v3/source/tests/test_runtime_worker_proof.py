@@ -254,27 +254,232 @@ class RuntimeWorkerProof(unittest.TestCase):
         record={'ownerPid':123,'ownerStart':77,'descriptor':9,'library':library}
         fields=['0']*20;fields[19]='77'
         metadata=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_dev=91,st_ino=92,st_size=len(payload))
-        with patch.object(gate,'_contract',return_value=declared_profile),patch.object(Path,'read_text',return_value='123 (controller) '+' '.join(fields)),patch.object(gate.os,'open',return_value=10) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.fcntl,'fcntl',return_value=runtime._SEALED_LIBRARY) as seals,patch.object(gate.os,'read',return_value=payload) as read,patch.object(gate.os,'lseek'),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate.os,'close') as close:
-            gate._acquire_library_snapshot(record,1024)
+        with patch.object(gate,'_contract',side_effect=AssertionError('snapshot helper must not reload contract')),patch.object(gate.time,'monotonic',return_value=0),patch.object(Path,'read_text',return_value='123 (controller) '+' '.join(fields)),patch.object(gate.os,'open',return_value=10) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.fcntl,'fcntl',return_value=runtime._SEALED_LIBRARY) as seals,patch.object(gate.os,'read',return_value=payload) as read,patch.object(gate.os,'lseek'),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate.os,'close') as close:
+            gate._acquire_library_snapshot(record,1024,10.0)
             opened.assert_called_once_with('/proc/123/fd/9',gate.os.O_RDONLY|gate.os.O_NONBLOCK|gate.os.O_CLOEXEC)
             duplicate.assert_called_once_with(10,5,inheritable=True);inherit.assert_called_once_with(5,True)
             close.assert_called_once_with(10)
             # Parent FD lives in controller table, independent of child FD5/64-FD policy.
             record['descriptor']=4096
-            gate._acquire_library_snapshot(record,1024)
+            gate._acquire_library_snapshot(record,1024,10.0)
             self.assertEqual('/proc/123/fd/4096',opened.call_args.args[0])
             for invalid in (-1,True,1<<31,'4096'):
                 record['descriptor']=invalid
-                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024,10.0)
             record['descriptor']=9
             for wrong in (0,runtime._SEALED_LIBRARY & ~gate.fcntl.F_SEAL_WRITE):
                 seals.return_value=wrong
-                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+                with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024,10.0)
             seals.return_value=runtime._SEALED_LIBRARY
             read.return_value=b'wrong content'.ljust(len(payload),b'!')
-            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024,10.0)
             record['ownerStart']=78
-            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024)
+            with self.assertRaises(ValueError):gate._acquire_library_snapshot(record,1024,10.0)
+
+    def _library_handoff_control(self, source_fd=10, late=None, failures=None, expire_clock=None, clock_failure=None):
+        gate=self.config_gate()
+        payload=b'authored sealed handoff'
+        real_sha256=hashlib.sha256
+        library={'device':91,'inode':92,'size':len(payload),'sha256':real_sha256(payload).hexdigest(),'sourcePath':'/authored/library.so'}
+        record={'ownerPid':123,'ownerStart':77,'descriptor':4096,'library':library}
+        fields=['0']*20;fields[19]='77'
+        metadata=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_dev=91,st_ino=92,st_size=len(payload))
+        case=types.SimpleNamespace(gate=gate,record=record,payload=payload,events=[],closes=[],clock_calls=0,
+                                   now=10.0 if late=='entry' else 0.0,last=None,owners=0)
+        failures={} if failures is None else failures
+        def effect(stage, value=None):
+            case.events.append(stage);case.last=stage
+            if late==stage:case.now=10.0
+            if stage in failures:raise failures[stage]
+            return value
+        def clock():
+            case.clock_calls+=1
+            if clock_failure is not None and case.last=='dup':raise clock_failure
+            if expire_clock is not None and case.clock_calls>=expire_clock:case.now=10.0
+            return case.now
+        def owner(*args,**kwargs):
+            case.owners+=1
+            return effect('owner-before' if case.owners==1 else 'owner-after','123 (owner) '+' '.join(fields))
+        class Digest:
+            def __init__(self):self.value=real_sha256()
+            def update(self, block):effect('hash-update');self.value.update(block)
+            def hexdigest(self):return effect('digest',self.value.hexdigest())
+        def close(fd):
+            case.closes.append(fd)
+            return effect('source-close' if fd!=5 else 'target-close')
+        case.opened=Mock(side_effect=lambda *a,**k:effect('open',source_fd))
+        case.duplicate=Mock(side_effect=lambda *a,**k:effect('dup',5))
+        case.inherit=Mock(side_effect=lambda *a,**k:effect('inherit'))
+        case.read=Mock(side_effect=lambda *a,**k:effect('read',payload))
+        case.seek=Mock(side_effect=lambda *a,**k:effect('seek',0))
+        case.contract=Mock(side_effect=AssertionError('snapshot helper must not reload contract'))
+        def invoke(deadline=10.0):
+            with ExitStack() as stack:
+                for target,name,value in (
+                    (gate,'_contract',case.contract),(gate.time,'monotonic',Mock(side_effect=clock)),
+                    (Path,'read_text',Mock(side_effect=owner)),(gate.os,'open',case.opened),
+                    (gate.os,'fstat',Mock(side_effect=lambda *a:effect('fstat',metadata))),
+                    (gate.fcntl,'fcntl',Mock(side_effect=lambda *a:effect('seals',runtime._SEALED_LIBRARY))),
+                    (gate.hashlib,'sha256',Mock(side_effect=lambda:effect('hash-create',Digest()))),
+                    (gate.os,'read',case.read),(gate.os,'lseek',case.seek),(gate.os,'dup2',case.duplicate),
+                    (gate.os,'set_inheritable',case.inherit),(gate.os,'close',Mock(side_effect=close))):
+                    stack.enter_context(patch.object(target,name,value))
+                return gate._acquire_library_snapshot(record,1024,deadline)
+        case.invoke=invoke
+        return case
+
+    def test_gate_library_handoff_timely_aliases_keep_one_original_end_and_transfer_only_fd5(self):
+        for descriptor in (5,10):
+            with self.subTest(descriptor=descriptor):
+                case=self._library_handoff_control(descriptor)
+                self.assertIsNone(case.invoke())
+                case.contract.assert_not_called()
+                case.opened.assert_called_once_with('/proc/123/fd/4096',case.gate.os.O_RDONLY|case.gate.os.O_NONBLOCK|case.gate.os.O_CLOEXEC)
+                case.duplicate.assert_called_once_with(descriptor,5,inheritable=True)
+                case.inherit.assert_called_once_with(5,True)
+                case.seek.assert_called_once_with(descriptor,0,case.gate.os.SEEK_SET)
+                self.assertEqual([] if descriptor==5 else [10],case.closes)
+                self.assertEqual(['owner-before','open','fstat','seals','hash-create','read','hash-update',
+                                  'digest','owner-after','seek','dup','inherit']+
+                                 ([] if descriptor==5 else ['source-close']),case.events)
+
+    def test_gate_library_handoff_refuses_late_operations_and_final_transfer_with_owned_cleanup(self):
+        for stage in ('entry','owner-before','open','fstat','seals','hash-create','read','hash-update',
+                      'digest','owner-after','seek','dup','inherit','source-close'):
+            with self.subTest(stage=stage):
+                case=self._library_handoff_control(late=stage)
+                with self.assertRaisesRegex(TimeoutError,'snapshot handoff deadline'):case.invoke()
+                self.assertEqual([] if stage in ('entry','owner-before') else
+                                 [10,5] if stage in ('dup','inherit','source-close') else [10],case.closes)
+                case.contract.assert_not_called()
+                if stage=='entry':case.opened.assert_not_called()
+                if stage=='read':self.assertNotIn('hash-update',case.events)
+                if stage=='digest':self.assertNotIn('owner-after',case.events)
+                if stage not in ('dup','inherit','source-close'):case.duplicate.assert_not_called()
+        case=self._library_handoff_control()
+        case.record['library']['sha256']='0'*64
+        with self.assertRaisesRegex(ValueError,'snapshot handoff content or owner differs'):case.invoke()
+        self.assertNotIn('owner-after',case.events)
+        self.assertNotIn('seek',case.events)
+        self.assertEqual([10],case.closes)
+        for descriptor in (5,10):
+            baseline=self._library_handoff_control(descriptor);baseline.invoke()
+            case=self._library_handoff_control(descriptor,expire_clock=baseline.clock_calls)
+            with self.assertRaises(TimeoutError):case.invoke()
+            self.assertEqual([5] if descriptor==5 else [10,5],case.closes)
+            self.assertEqual(baseline.clock_calls,case.clock_calls)
+            for stage in ('dup','inherit'):
+                case=self._library_handoff_control(descriptor,late=stage)
+                with self.assertRaises(TimeoutError):case.invoke()
+                self.assertEqual([5] if descriptor==5 else [10,5],case.closes)
+
+    def test_gate_library_handoff_setup_and_close_faults_preserve_exact_primary_without_retry(self):
+        for descriptor in (5,10):
+            for stage in ('open','fstat','read','hash-update','dup','inherit'):
+                with self.subTest(descriptor=descriptor,stage=stage):
+                    primary=OSError('authored '+stage)
+                    case=self._library_handoff_control(descriptor,failures={stage:primary})
+                    with self.assertRaises(OSError) as observed:case.invoke()
+                    self.assertIs(primary,observed.exception)
+                    expected=[] if stage=='open' else [5] if descriptor==5 else [10,5] if stage=='inherit' else [10]
+                    self.assertEqual(expected,case.closes)
+        for descriptor in (5,10):
+            for malformed_notes in (False,True):
+                primary=RuntimeError('authored setup failure')
+                if malformed_notes:primary.__notes__=object()
+                case=self._library_handoff_control(descriptor,failures={'inherit':primary,'source-close':OSError('source cleanup'),
+                                                                       'target-close':OSError('target cleanup')})
+                with self.assertRaises(RuntimeError) as observed:case.invoke()
+                self.assertIs(primary,observed.exception)
+                self.assertEqual([5] if descriptor==5 else [10,5],case.closes)
+                if not malformed_notes:
+                    self.assertEqual(([] if descriptor==5 else ['snapshot source descriptor cleanup failed'])+
+                                     ['snapshot target descriptor cleanup failed'],primary.__notes__)
+        primary=OSError('authored source-close-only failure')
+        case=self._library_handoff_control(failures={'source-close':primary,'target-close':OSError('target cleanup')})
+        with self.assertRaises(OSError) as observed:case.invoke()
+        self.assertIs(primary,observed.exception)
+        self.assertEqual([10,5],case.closes)
+        self.assertEqual(['snapshot target descriptor cleanup failed'],primary.__notes__)
+        primary=RuntimeError('authored post-dup clock failure')
+        case=self._library_handoff_control(clock_failure=primary,failures={'source-close':OSError('source cleanup'),
+                                                                        'target-close':OSError('target cleanup')})
+        with self.assertRaises(RuntimeError) as observed:case.invoke()
+        self.assertIs(primary,observed.exception)
+        self.assertEqual([10,5],case.closes)
+        case.inherit.assert_not_called()
+
+    def _gate_snapshot_caller_control(self, directory_fd):
+        gate=self.config_gate()
+        directory=SOURCE/'exec-proof-receipts'/('a'*32)
+        snapshot={'authored':'fixed held snapshot'}
+        config={'schemaVersion':1,'directoryDevice':10,'directoryInode':11,'mode':'worker',
+                'argv':['/usr/bin/bwrap','--ro-bind-fd','5','/library.so'],'report':{'device':20,'inode':21},
+                'outerPidNsDevice':30,'outerPidNsInode':31,'scope':{},'librarySnapshot':snapshot}
+        directory_stat=types.SimpleNamespace(st_uid=123,st_mode=stat.S_IFDIR|0o700,st_dev=10,st_ino=11)
+        report_stat=types.SimpleNamespace(st_uid=123,st_mode=stat.S_IFREG|0o600,st_dev=20,st_ino=21,st_size=0,st_nlink=1)
+        case=types.SimpleNamespace(gate=gate,config=config,snapshot=snapshot,handoff=Mock(),closed=Mock(),sanitize=Mock())
+        def proc_text(path,*args,**kwargs):
+            if str(path)=='/proc/self/status':return '\n'.join(key+': 00000000' for key in ('CapInh','CapPrm','CapEff','CapAmb'))
+            return '12 (gate) S '+' '.join(['1']*19)+' 123 0'
+        def invoke(end):
+            with ExitStack() as stack:
+                for target,name,value in (
+                    (gate.sys,'argv',['scope_gate.py',str(directory),'--config-sha256','0'*64,'--controller','1','2','3','--phase-deadline','10']),
+                    (gate.sys,'flags',types.SimpleNamespace(isolated=True)),(gate.sys,'dont_write_bytecode',True),
+                    (gate.sys,'pycache_prefix',str(directory/'python-cache')),
+                    (gate,'_contract',Mock(return_value=build_contract.load_profile())),
+                    (gate,'_authenticated_config',Mock(return_value=config)),(gate,'_acquire_scope',Mock(return_value={'fd':7})),
+                    (gate,'_check_scope',Mock()),(gate,'_wait_release',Mock()),(gate.time,'monotonic',Mock(return_value=0)),
+                    (gate.os,'open',Mock(side_effect=lambda path,*a,**k:directory_fd if path==directory else 11)),
+                    (gate.os,'fstat',Mock(side_effect=[directory_stat,report_stat])),(gate.os,'close',case.closed),
+                    (gate.os,'write',Mock(side_effect=lambda fd,raw:len(raw))),(gate.os,'rename',Mock()),
+                    (gate.os,'getpid',Mock(return_value=12)),(gate.os,'getuid',Mock(return_value=123)),
+                    (gate.resource,'getrlimit',Mock(return_value=(64,64))),
+                    (Path,'read_text',proc_text),(Path,'stat',Mock(return_value=types.SimpleNamespace(st_dev=30,st_ino=31))),
+                    (gate.os,'dup2',Mock()),(gate.os,'set_inheritable',Mock()),
+                    (gate,'_acquire_library_snapshot',case.handoff),(gate,'_close_nonstandard',case.sanitize)):
+                    stack.enter_context(patch.object(target,name,value))
+                return gate._main('0'*64,(1,2,3),6,end)
+        case.invoke=invoke
+        return case
+
+    def test_gate_snapshot_caller_passes_same_end_and_refuses_directory_fd5_inside_owned_cleanup(self):
+        end=9.25
+        case=self._gate_snapshot_caller_control(10)
+        self.assertEqual(case.config['argv'],case.invoke(end))
+        case.handoff.assert_called_once_with(case.snapshot,build_contract.load_profile()['bounds']['workerLaunchPinFileBytes'],end)
+        case.sanitize.assert_called_once_with({4,5,6,10,7})
+        self.assertEqual([11,7,10],[call.args[0] for call in case.closed.call_args_list])
+        case=self._gate_snapshot_caller_control(5)
+        with self.assertRaisesRegex(ValueError,'snapshot fd aliases gate directory'):case.invoke(end)
+        case.handoff.assert_not_called();case.sanitize.assert_not_called()
+        self.assertEqual([11,7,5],[call.args[0] for call in case.closed.call_args_list])
+        case=self._gate_snapshot_caller_control(5)
+        del case.config['librarySnapshot'];case.config['argv']=['/usr/bin/bwrap','authored-no-library']
+        self.assertEqual(case.config['argv'],case.invoke(end))
+        case.handoff.assert_not_called();case.sanitize.assert_called_once_with({4,6,5,7})
+        self.assertEqual([11,7,5],[call.args[0] for call in case.closed.call_args_list])
+
+    def test_gate_main_forwards_existing_clamped_admission_end_without_restarting(self):
+        for phase_end,wanted in ((4,4),(10,7)):
+            gate=self.config_gate()
+            argv=['scope_gate.py','/authored','--config-sha256','a'*64,'--controller','12','99','34','--phase-deadline',str(phase_end)]
+            with ExitStack() as stack:
+                main_call=Mock(return_value=['/authored/no-execution'])
+                execute=Mock()
+                for target,name,value in (
+                    (gate.sys,'argv',argv),(gate.time,'monotonic',Mock(return_value=2)),
+                    (gate,'_contract',Mock(return_value={'bounds':{'scopeAdmissionSeconds':5}})),
+                    (gate.signal,'getsignal',Mock(return_value=gate.signal.SIG_DFL)),
+                    (gate.signal,'pthread_sigmask',Mock(return_value=set())),
+                    (gate,'_controller_identity',Mock()),(gate,'_live_controller',Mock()),
+                    (gate.os,'pidfd_open',Mock(return_value=6)),(gate.os,'close',Mock()),
+                    (gate,'_main',main_call),(gate.os,'execv',execute)):
+                    stack.enter_context(patch.object(target,name,value))
+                gate.main()
+                main_call.assert_called_once_with('a'*64,(12,99,34),6,wanted)
+                execute.assert_called_once_with('/authored/no-execution',['/authored/no-execution'])
 
     def test_runtime_consumer_requires_sealed_namespace_attestation(self):
         import evaluate_candidate_v3 as consumer
