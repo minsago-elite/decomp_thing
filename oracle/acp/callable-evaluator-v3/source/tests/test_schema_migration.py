@@ -502,6 +502,7 @@ class SchemaMigration(unittest.TestCase):
         trusted=static_temp('static-process-correction-001')
         with tempfile.TemporaryDirectory(dir=trusted) as temporary:
             root=Path(temporary);preflight=root/'preflight';preflight.mkdir();output=root/'no-seal-created'
+            _freeze_dependency_fixture(root)
             matrix={'schemaVersion':3,'status':'preflight-only-independent-review-required','freezeCreated':False,'allControlsPassed':True,'executionDependenciesUnchanged':True,'rows':[{'name':'synthetic','expected':'matched','expectedStage':'behavior','passed':True,'receipt':'synthetic','receiptSha256':'a'*64,'runtimeRequestCount':24,'completedScenarioProcessCount':24,'unknownScenarioProcessCount':0}]}
             bindings={'schemaVersion':3,'sourceCheckpointSha256':'a'*64,'initialSha256':{'synthetic':'a'*64},'helperCopySha256':'a'*64,'helperSchemaSha256':'a'*64,'helperSchemaVersion':3}
             (preflight/'matrix.json').write_text(json.dumps(matrix));(preflight/'execution-bindings.json').write_text(json.dumps(bindings))
