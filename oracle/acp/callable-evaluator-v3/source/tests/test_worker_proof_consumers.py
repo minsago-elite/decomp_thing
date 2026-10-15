@@ -395,5 +395,416 @@ class WorkerProofConsumers(unittest.TestCase):
             self.assertFalse((work / 'not-created.json').exists())
 
 
+class _PinFilesystem:
+    """Finite authored virtual metadata/FDs; never consult the actual host."""
+    def __init__(self):
+        import stat
+        self.nodes={};self.fds={};self.next_fd=100;self.events=[];self.now=0.0
+        self.after_read=self.after_open=self.after_write=None
+        self.read_error=self.close_error=self.open_error=self.metadata_error=None
+        self.after_close=None;self.write_size=None;self.iterators=[]
+        self.add('/',mode=stat.S_IFDIR|0o700)
+
+    def add(self,path,data=b'',*,mode=None,size=None,target=None):
+        import stat
+        path=str(path)
+        if path!='/':
+            parent=str(Path(path).parent)
+            if parent not in self.nodes:self.add(parent,mode=stat.S_IFDIR|0o700)
+        self.nodes[path]={'data':bytearray(data),'mode':stat.S_IFREG|0o600 if mode is None else mode,
+                          'size':len(data) if size is None else size,'target':target,
+                          'ino':len(self.nodes)+1,'mtime':1}
+        return self.nodes[path]
+
+    def name(self,path,dir_fd=None):
+        path=str(path)
+        return path if path.startswith('/') else str(Path(self.fds[dir_fd]['path'])/path)
+
+    def metadata(self,node):
+        from types import SimpleNamespace
+        return SimpleNamespace(st_dev=1,st_ino=node['ino'],st_mode=node['mode'],st_uid=1000,st_gid=1000,
+                               st_nlink=1,st_size=node['size'],st_mtime_ns=node['mtime'],st_ctime_ns=node['mtime'])
+
+    def stat(self,path,*,dir_fd=None,follow_symlinks=False):
+        name=self.name(path,dir_fd);self.events.append(('stat',name))
+        if name not in self.nodes:raise FileNotFoundError(2,'authored absent',str(path))
+        return self.metadata(self.nodes[name])
+
+    def open(self,path,flags,mode=0o777,*,dir_fd=None):
+        import os
+        name=self.name(path,dir_fd);self.events.append(('open',name,flags,mode))
+        if self.open_error is not None:raise self.open_error
+        if flags&os.O_CREAT:
+            if name in self.nodes:raise FileExistsError(name)
+            self.add(name)
+        if name not in self.nodes:raise FileNotFoundError(2,'authored absent',str(path))
+        self.next_fd+=1;fd=self.next_fd
+        self.fds[fd]={'path':name,'node':self.nodes[name],'offset':0}
+        if self.after_open is not None:self.after_open(self,name)
+        return fd
+
+    def fstat(self,fd):
+        self.events.append(('fstat',fd))
+        if self.metadata_error is not None:raise self.metadata_error
+        return self.metadata(self.fds[fd]['node'])
+
+    def read(self,fd,count):
+        entry=self.fds[fd];self.events.append(('read',entry['path'],count))
+        if self.read_error is not None:raise self.read_error
+        node=entry['node'];offset=entry['offset'];amount=min(count,max(0,node['size']-offset))
+        data=bytes(node['data'][offset:offset+amount]) if len(node['data'])==node['size'] else b'x'*amount
+        entry['offset']+=len(data)
+        if self.after_read is not None:self.after_read(self,entry,data)
+        return data
+
+    def write(self,fd,data):
+        entry=self.fds[fd];self.events.append(('write',entry['path'],len(data)))
+        count=len(data) if self.write_size is None else min(len(data),self.write_size)
+        entry['node']['data'].extend(data[:count]);entry['node']['size']+=count
+        if self.after_write is not None:self.after_write(self,entry)
+        return count
+
+    def chmod(self,fd,mode):
+        import stat
+        self.events.append(('chmod',fd,mode));self.fds[fd]['node']['mode']=stat.S_IFMT(self.fds[fd]['node']['mode'])|mode
+
+    def close(self,fd):
+        self.events.append(('close',fd));self.fds.pop(fd)
+        if self.after_close is not None:self.after_close(self,fd)
+        if self.close_error is not None:raise self.close_error
+
+    def readlink(self,path,*,dir_fd=None):
+        return self.nodes[self.name(path,dir_fd)]['target']
+
+    def scan(self,fd):
+        from types import SimpleNamespace
+        parent=self.fds[fd]['path'];names=sorted(Path(name).name for name in self.nodes if name!=parent and str(Path(name).parent)==parent)
+        class Iterator:
+            def __init__(self):self.index=0;self.closed=False;self.advances=0
+            def __next__(self):
+                self.advances+=1
+                if self.index==len(names):raise StopIteration
+                value=SimpleNamespace(name=names[self.index]);self.index+=1;return value
+            def close(self):self.closed=True
+        result=Iterator();self.iterators.append(result);return result
+
+    def effects(self,module):
+        from contextlib import ExitStack
+        stack=ExitStack();ops=module['os']
+        for name,operation in (('open',self.open),('stat',self.stat),('fstat',self.fstat),('read',self.read),
+                               ('write',self.write),('close',self.close),('fchmod',self.chmod),('readlink',self.readlink),('scandir',self.scan)):
+            stack.enter_context(patch.object(ops,name,side_effect=operation))
+        stack.enter_context(patch.object(module['time'],'monotonic',side_effect=lambda:self.now))
+        return stack
+
+
+class HelperPinBoundedInputs(unittest.TestCase):
+    def setUp(self):
+        self.module=runpy.run_path(str(ROOT/'toolchain-001/pin_helper.py'),run_name='inert_import')
+        self.g=self.module['pin'].__globals__
+
+    def capture(self,fs,path='/fixture/input',**kwargs):
+        ledger=kwargs.pop('ledger',self.g['_Ledger']())
+        with fs.effects(self.g):
+            return self.g['_capture'](path,role='authored',maximum=kwargs.pop('maximum',100),ledger=ledger,**kwargs),ledger
+
+    def test_pin_capture_same_fd_version_bytes_prefix_and_real_strict_json(self):
+        import hashlib
+        fs=_PinFilesystem();data=b'\xef\xbb\xbf{"text":"authored"}'
+        fs.add('/fixture/input',data)
+        record,ledger=self.capture(fs,retain=True,prefix_bytes=4)
+        self.assertEqual(data,record.raw);self.assertEqual(data[:4],record.prefix)
+        self.assertEqual(hashlib.sha256(data).hexdigest(),record.sha256)
+        self.assertEqual(len(data),record.size);self.assertEqual(len(data),ledger.bytes)
+        self.assertEqual({'text':'authored'},self.g['_decode_json'](record.raw))
+        with self.assertRaises(AttributeError):record.sha256='forged'
+        for raw in (b'{"x":1,"x":2}',b'{"x":NaN}',b'{',b'\xff'):
+            with self.assertRaises(ValueError):self.g['_decode_json'](raw)
+        self.assertFalse(fs.fds)
+        closes=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closes),len(set(closes)))
+
+    def test_pin_capture_special_symlink_and_role_overflow_precede_payload(self):
+        import stat
+        for mode,size in ((stat.S_IFIFO|0o600,1),(stat.S_IFDIR|0o700,1),(stat.S_IFREG|0o600,101)):
+            fs=_PinFilesystem();fs.add('/fixture/input',b'x',mode=mode,size=size)
+            with self.subTest(mode=mode),self.assertRaises(ValueError):self.capture(fs)
+            self.assertFalse([e for e in fs.events if e[0]=='read']);self.assertFalse(fs.fds)
+        fs=_PinFilesystem();fs.add('/fixture/input',b'x',mode=stat.S_IFLNK|0o777,target='/fixture/other')
+        with self.assertRaisesRegex(ValueError,'symlink'):self.capture(fs)
+        self.assertFalse([e for e in fs.events if e[0]=='read']);self.assertFalse(fs.fds)
+
+    def test_pin_capture_growth_truncation_mutation_and_original_revalidation(self):
+        for mutation in ('growth','truncated','version','replacement'):
+            fs=_PinFilesystem();fs.add('/fixture/input',b'abc')
+            fired=[]
+            def change(owner,entry,data):
+                if fired:return
+                fired.append(True)
+                if mutation=='growth':entry['node']['data'].extend(b'!');entry['node']['size']+=1
+                elif mutation=='truncated':entry['node']['size']=1
+                elif mutation=='version':entry['node']['mtime']+=1
+                else:owner.add('/fixture/input',b'abc')['ino']+=100
+            fs.after_read=change
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.capture(fs)
+            self.assertFalse(fs.fds)
+        fs=_PinFilesystem();fs.add('/fixture/input',b'A');record,ledger=self.capture(fs)
+        fs.nodes['/fixture/input']['mtime']+=1
+        with fs.effects(self.g),self.assertRaisesRegex(ValueError,'original input version'):
+            self.g['_revalidate'](record,ledger=ledger)
+        self.assertFalse(fs.fds)
+
+    def test_pin_capture_errors_late_open_and_close_preserve_exact_primary_once(self):
+        fs=_PinFilesystem();fs.add('/fixture/input',b'x')
+        primary=OSError('authored read failure');secondary=OSError('authored close failure')
+        fs.read_error=primary;fs.close_error=secondary
+        with self.assertRaises(OSError) as caught:self.capture(fs)
+        self.assertIs(primary,caught.exception);self.assertIs(secondary,primary.pinInputCloseFailure)
+        self.assertFalse(fs.fds)
+        closes=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closes),len(set(closes)))
+        fs=_PinFilesystem();fs.add('/fixture/input',b'x');fs.after_open=lambda owner,name:setattr(owner,'now',5.0)
+        with self.assertRaises(TimeoutError):self.capture(fs,ledger=self.g['_Ledger'](5.0),deadline=5.0)
+        self.assertFalse(fs.fds);self.assertFalse([e for e in fs.events if e[0]=='fstat'])
+        fs=_PinFilesystem();fs.add('/fixture/input',b'x');fs.close_error=secondary
+        with self.assertRaises(OSError) as caught:self.capture(fs)
+        self.assertIs(secondary,caught.exception);self.assertFalse(fs.fds)
+        for field in ('open_error','metadata_error'):
+            fs=_PinFilesystem();fs.add('/fixture/input',b'x');failure=OSError('authored metadata/open refusal')
+            setattr(fs,field,failure)
+            with self.subTest(field=field),self.assertRaises(OSError) as caught:self.capture(fs)
+            self.assertIs(failure,caught.exception);self.assertFalse(fs.fds)
+            self.assertFalse([event for event in fs.events if event[0]=='read'])
+
+    def test_pin_remaining_bytes_repeated_charge_and_large_hash_only_host_stream(self):
+        fs=_PinFilesystem();fs.add('/fixture/input',b'abc');ledger=self.g['_Ledger']();ledger.bytes=self.g['_INPUT_BYTES']-3
+        record,_=self.capture(fs,ledger=ledger);self.assertEqual(self.g['_INPUT_BYTES'],ledger.bytes)
+        reads=len([e for e in fs.events if e[0]=='read'])
+        with fs.effects(self.g),self.assertRaisesRegex(ValueError,'remaining direct byte'):
+            self.g['_revalidate'](record,ledger=ledger)
+        self.assertEqual(reads,len([e for e in fs.events if e[0]=='read']));self.assertFalse(fs.fds)
+        fs=_PinFilesystem();size=self.g['_SMALL']+1;fs.add('/fixture/input',size=size)
+        record,ledger=self.capture(fs,maximum=self.g['_INPUT_BYTES'])
+        self.assertEqual(size,record.size);self.assertIsNone(record.raw);self.assertEqual(b'',record.prefix)
+        self.assertEqual(size,ledger.bytes);self.assertTrue(all(e[2]<=65536 for e in fs.events if e[0]=='read'))
+        self.assertFalse(fs.fds)
+
+    def test_pin_depfile_stdout_path_alias_and_shared_work_boundaries(self):
+        import stat
+        ledger=self.g['_Ledger']()
+        escaped=b'output: /a'+bytes([92])+b' b /a'+bytes([92])+b'#c '+bytes([92,10])+b' /a'+bytes([92])+b':c'
+        self.assertEqual([Path('/a b'),Path('/a#c'),Path('/a:c')],self.g['_dep_paths'](escaped,ledger))
+        self.assertEqual([Path('/a')],self.g['_stdout_paths'](b'lib => /a (0x0)\n',ledger))
+        for raw in (b'output: relative',b'output: $variable',b'output: /a: /b',b'output: /a'+bytes([92])):
+            with self.assertRaises(ValueError):self.g['_dep_paths'](raw,self.g['_Ledger']())
+        ledger=self.g['_Ledger']();ledger.work=self.g['_WORK']-1
+        with self.assertRaisesRegex(ValueError,'work bound'):self.g['_dep_paths'](b'xx',ledger)
+        ledger=self.g['_Ledger']();ledger.tokens=self.g['_FILES']-1;ledger.token()
+        with self.assertRaisesRegex(ValueError,'token bound'):ledger.token()
+        for path in ('relative','/a/../b','//a','/'+('x'*4096),'/'+('/'.join(['a']*128))):
+            with self.assertRaises(ValueError):self.g['_path'](path,self.g['_Ledger']())
+        for count in (40,41):
+            fs=_PinFilesystem()
+            for i in range(count):fs.add('/a'+str(i),size=len('/a'+str(i+1)),mode=stat.S_IFLNK|0o777,target='/a'+str(i+1))
+            fs.add('/a'+str(count),b'A')
+            if count==40:record,_=self.capture(fs,'/a0',aliases=True);self.assertEqual('/a40',record.canonical)
+            else:
+                with self.assertRaisesRegex(ValueError,'symlink'):self.capture(fs,'/a0',aliases=True)
+            self.assertFalse(fs.fds)
+
+    def test_pin_config_scan_counts_nonmatches_eof_closes_and_revalidates(self):
+        import stat
+        for remaining in (3,2):
+            fs=_PinFilesystem();fs.add('/etc/clang',mode=stat.S_IFDIR|0o700)
+            fs.add('/etc/clang/a.cfg',b'A');fs.add('/etc/clang/other',b'B')
+            ledger=self.g['_Ledger']();ledger.advances=self.g['_FILES']-remaining
+            with fs.effects(self.g):
+                if remaining==3:
+                    self.assertEqual([Path('/etc/clang/a.cfg')],self.g['_config_inputs'](Path('/etc/clang'),ledger=ledger))
+                else:
+                    with self.assertRaisesRegex(ValueError,'scan advance'):self.g['_config_inputs'](Path('/etc/clang'),ledger=ledger)
+            self.assertEqual(remaining,fs.iterators[0].advances)
+            self.assertTrue(all(i.closed for i in fs.iterators));self.assertFalse(fs.fds)
+        fs=_PinFilesystem();fs.add('/etc/clang',mode=stat.S_IFDIR|0o700);ledger=self.g['_Ledger']()
+        with fs.effects(self.g):self.g['_config_inputs'](Path('/etc/clang'),ledger=ledger)
+        fs.add('/etc/clang/new.cfg',b'A')
+        with fs.effects(self.g),self.assertRaisesRegex(ValueError,'inventory changed'):
+            self.g['_config_inputs'](Path('/etc/clang'),ledger=ledger)
+        self.assertFalse(fs.fds)
+
+    def test_pin_writer_owns_exact_encoding_short_writes_and_never_reopens_replacement(self):
+        import hashlib,stat
+        fs=_PinFilesystem();fs.add('/fixture',mode=stat.S_IFDIR|0o700);fs.write_size=2
+        value={'unicode':'\u2603','line':'one\ntwo'};expected=(json.dumps(value,indent=2)+'\n').encode('utf8')
+        changed=[]
+        def replace(owner,entry):
+            if not changed:changed.append(True);owner.add('/fixture/out',mode=stat.S_IFIFO|0o600)
+        fs.after_write=replace;ledger=self.g['_Ledger']()
+        with fs.effects(self.g):result=self.g['_write_pin']('out',value,root=Path('/fixture'),ledger=ledger)
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),result)
+        self.assertEqual(1,len([e for e in fs.events if e[0]=='open' and e[1]=='/fixture/out']))
+        self.assertFalse([e for e in fs.events if e[0]=='read']);self.assertFalse(fs.fds)
+        self.assertTrue([e for e in fs.events if e[0]=='chmod' and e[2]==0o600])
+
+    def test_pin_writer_overflow_zero_write_late_and_close_failure_cannot_succeed(self):
+        import stat
+        fs=_PinFilesystem();fs.add('/fixture',mode=stat.S_IFDIR|0o700)
+        with patch.dict(self.g,_SMALL=8),fs.effects(self.g),self.assertRaisesRegex(ValueError,'output'):
+            self.g['_write_pin']('out',{'long':'value'},root=Path('/fixture'),ledger=self.g['_Ledger']())
+        self.assertFalse(fs.events)
+        fs.add('/fixture/out',b'authored original')
+        with fs.effects(self.g),self.assertRaises(FileExistsError):
+            self.g['_write_pin']('out',{},root=Path('/fixture'),ledger=self.g['_Ledger']())
+        self.assertEqual(b'authored original',bytes(fs.nodes['/fixture/out']['data']));self.assertFalse(fs.fds)
+        for fault in ('zero','late','late-close','close'):
+            fs=_PinFilesystem();fs.add('/fixture',mode=stat.S_IFDIR|0o700);ledger=self.g['_Ledger'](5.0)
+            if fault=='zero':fs.write_size=0
+            elif fault=='late':fs.after_write=lambda owner,entry:setattr(owner,'now',5.0)
+            elif fault=='late-close':fs.after_close=lambda owner,fd:setattr(owner,'now',5.0)
+            else:fs.close_error=OSError('authored writer close')
+            with self.subTest(fault=fault),fs.effects(self.g),self.assertRaises((ValueError,TimeoutError,OSError)):
+                self.g['_write_pin']('out',{},root=Path('/fixture'),ledger=ledger,deadline=5.0)
+            self.assertFalse(fs.fds)
+
+    def test_pin_actual_orchestration_keeps_five_bindings_four_recipes_two_profiles_and_proof(self):
+        import hashlib,stat
+        fs=_PinFilesystem();root=Path('/fixture');work=root/'toolchain-001'
+        fs.add('/etc',mode=stat.S_IFDIR|0o700)
+        source=root/'record_identity_probe.cpp';schema=root/'contracts/helper-schema.json';binary=work/'record_identity_probe'
+        for path,data in ((source,b'authored source'),(schema,b'{}'),(binary,b'authored ELF'),(work/'build_helper.py',b'authored builder'),
+                          (Path(self.g['__file__']),b'authored pinner'),(work/'helper-dependencies.d',('output: '+str(source)).encode())):
+            fs.add(path,data)
+        # The REAL authenticated proof parser remains available in a cold cache;
+        # these are exact public bytes, never a completion/predicate stub.
+        fs.add(ROOT/'worker_exec_proof.py',(ROOT/'worker_exec_proof.py').read_bytes())
+        build=gate.public_result(completed_result(phase='helper-build'))
+        build.update(schemaVersion=3,sourceSha256=hashlib.sha256(b'authored source').hexdigest(),
+                     helperSchemaSha256=hashlib.sha256(b'{}').hexdigest(),binarySha256=hashlib.sha256(b'authored ELF').hexdigest())
+        fs.add(work/'build.json',json.dumps(build).encode())
+        binding={'environmentPinSha256':'a'*64,'dependencies':[]}
+        for role,data in (('bash',b'\x7fELFbash'),('script',b'#!/bin/bash\n# inert'),('cache',b'cache')):
+            path=root/role;fs.add(path,data);binding[role+'Path']=str(path);binding[role+'Sha256']=hashlib.sha256(data).hexdigest()
+            binding['dependencies'].append({'path':str(path),'sha256':hashlib.sha256(data).hexdigest()})
+        for name in ('/usr/lib/llvm/23/bin/clang','/usr/lib/llvm/23/bin/clang++','/usr/bin/ld','/usr/bin/as'):fs.add(name,b'host tool')
+        fs.add('/z-a',b'first');fs.add('/z/file',b'second')
+        result=completed_result(phase='elf-inspection');result['stdout']=b'/z-a /z/file\n'
+        # Keep proof hash truthful after changing the untrusted stream only.
+        profile=gate.load_profile();runner=Mock(return_value=result);loader=Mock(return_value=binding);profiles=Mock(return_value=profile)
+        class Leaf:
+            path=root/'inspection'
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def run(self,operation,*args,**kwargs):return operation(*args,**kwargs)
+        recipe=self.g['inspection_recipe'];recipes=Mock(wraps=recipe);ledger=self.g['_Ledger']()
+        with fs.effects(self.g),patch.dict(self.g,ROOT=root,load_profile=profiles,load_inspection_binding=loader,
+                owned_worker_leaf=Mock(return_value=Leaf()),bounded_run=runner,contained_command=Mock(return_value=['NOT-EXECUTED']),inspection_recipe=recipes,_Ledger=Mock(return_value=ledger)):
+            value=self.g['pin']('pin.json','build.json')
+        self.assertEqual(5,loader.call_count);self.assertEqual(4,recipes.call_count);self.assertEqual(2,profiles.call_count)
+        self.assertEqual(2,runner.call_count)
+        self.assertTrue(all(c.kwargs['timeout']==10 and 'phase_deadline' not in c.kwargs for c in runner.call_args_list))
+        self.assertEqual(build['sourceSha256'],value['sourceSha256']);self.assertEqual(2,len(value['inspections']))
+        self.assertEqual(['/z/file','/z-a'],[name for name in value['dependencies'] if name in ('/z-a','/z/file')])
+        self.assertEqual(hashlib.sha256(json.dumps(build).encode()).hexdigest(),value['buildReceiptSha256'])
+        self.assertEqual(value,json.loads(bytes(fs.nodes[str(work/'pin.json')]['data'])))
+        by_role={record.role:record for record in ledger.records.values()}
+        self.assertEqual(65536,by_role['schema'].maximum);self.assertEqual(8388608,by_role['build-receipt'].maximum)
+        self.assertEqual(16777216,by_role['helper-binary'].maximum);self.assertEqual(1048576,by_role['depfile'].maximum)
+        self.assertEqual(536870912,by_role['host-tool'].maximum)
+        self.assertGreater(ledger.bytes,sum(record.size for record in ledger.records.values()))
+        self.assertFalse(fs.fds)
+
+
+    def test_pin_open_reserves_storage_before_acquisition_and_closes_prior_owners_once(self):
+        fs=_PinFilesystem();fs.add('/fixture/input',b'x');ledger=self.g['_Ledger']()
+        allocation=MemoryError('authored ownership storage failure');secondary=OSError('authored terminal close')
+        class NoStorage(list):
+            def append(self,value):raise allocation
+        with fs.effects(self.g):
+            prior=[]
+            for name in ('/','/fixture/input'):self.g['_open'](name,0,prior,ledger)
+            owned=NoStorage(prior);fs.close_error=secondary;primary=None
+            with self.assertRaises(MemoryError) as caught:
+                try:self.g['_open']('/fixture/input',0,owned,ledger)
+                except BaseException as error:primary=error;raise
+                finally:self.g['_close_all'](owned,primary,ledger)
+        self.assertIs(allocation,caught.exception);self.assertIs(secondary,allocation.pinInputCloseFailure)
+        self.assertEqual(2,len([e for e in fs.events if e[0]=='open']))
+        self.assertEqual(list(reversed(prior)),[e[1]for e in fs.events if e[0]=='close'])
+        self.assertEqual([None,None],owned);self.assertFalse(fs.fds)
+
+    def test_pin_open_failed_acquisition_has_no_phantom_close_and_late_acquisition_closes_once(self):
+        for fault in ('open','late'):
+            fs=_PinFilesystem();fs.add('/fixture/input',b'x');owned=[];ledger=self.g['_Ledger'](5.0);primary=None
+            failure=OSError('authored acquisition failure')
+            if fault=='open':fs.open_error=failure
+            else:fs.after_open=lambda owner,name:setattr(owner,'now',5.0)
+            with self.subTest(fault=fault),fs.effects(self.g),self.assertRaises((OSError,TimeoutError)) as caught:
+                try:self.g['_open']('/fixture/input',0,owned,ledger)
+                except BaseException as error:primary=error;raise
+                finally:self.g['_close_all'](owned,primary,ledger)
+            if fault=='open':self.assertIs(failure,caught.exception)
+            else:self.assertIsInstance(caught.exception,TimeoutError)
+            self.assertEqual(0 if fault=='open' else 1,len([e for e in fs.events if e[0]=='close']))
+            self.assertEqual([None],owned);self.assertFalse(fs.fds)
+
+    def test_pin_capture_terminal_publication_refuses_late_new_original_and_preserves_valid_original(self):
+        fs=_PinFilesystem();fs.add('/fixture/input',b'A');ledger=self.g['_Ledger'](5.0)
+        class LateRecords(dict):
+            def setdefault(self,key,value):
+                result=super().setdefault(key,value);fs.now=5.0;return result
+        ledger.records=LateRecords()
+        with self.assertRaises(TimeoutError):self.capture(fs,ledger=ledger,deadline=5.0)
+        self.assertEqual({},ledger.records);self.assertFalse(fs.fds)
+        closed=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closed),len(set(closed)))
+        publication=MemoryError('authored publication allocation failure')
+        class FailedPublication(dict):
+            def setdefault(self,key,value):
+                super().setdefault(key,value);raise publication
+        fs.now=0.0;ledger.records=FailedPublication()
+        with self.assertRaises(MemoryError) as caught:self.capture(fs,ledger=ledger,deadline=5.0)
+        self.assertIs(publication,caught.exception);self.assertEqual({},ledger.records);self.assertFalse(fs.fds)
+        fs.now=0.0;ledger.records={}
+        original,_=self.capture(fs,ledger=ledger,deadline=5.0)
+        key=('/fixture/input','authored');self.assertIs(original,ledger.records[key])
+        ledger.records=LateRecords(ledger.records)
+        with fs.effects(self.g),self.assertRaises(TimeoutError):
+            self.g['_revalidate'](original,ledger=ledger,deadline=5.0)
+        self.assertIs(original,ledger.records[key]);self.assertFalse(fs.fds)
+        fs.now=0.0;fs.nodes['/fixture/input']['mtime']+=1
+        with fs.effects(self.g),self.assertRaisesRegex(ValueError,'original input version'):
+            self.g['_revalidate'](original,ledger=ledger,deadline=5.0)
+        self.assertIs(original,ledger.records[key]);self.assertFalse(fs.fds)
+        closed=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closed),len(set(closed)))
+
+    def test_pin_recipe_terminal_construction_uses_original_end_and_none_compatibility(self):
+        import hashlib
+        for deadline in (5.0,None):
+            fs=_PinFilesystem();binding={'dependencies':[]};target=[];constructed=[]
+            for role,data in (('bash',b'\x7fELFbash'),('script',b'#!/bin/bash\n# inert'),('cache',b'cache')):
+                name='/fixture/'+role;fs.add(name,data);binding[role+'Path']=name
+                binding[role+'Sha256']=hashlib.sha256(data).hexdigest()
+            fs.add('/fixture/tool',b'authored tool');ledger=self.g['_Ledger'](deadline)
+            capture=self.g['_capture']
+            def actual_capture(*args,**kwargs):
+                record=capture(*args,**kwargs)
+                if record.role=='host-tool':target.append(record)
+                return record
+            def observed_path(value):
+                result=Path(value)
+                if target and value is target[0].canonical:
+                    constructed.append(result);fs.now=5.0
+                return result
+            with self.subTest(deadline=deadline),fs.effects(self.g),patch.dict(self.g,_capture=actual_capture,Path=observed_path):
+                if deadline is None:
+                    result=self.g['inspection_recipe'](binding,Path('/fixture/tool'),ledger=ledger)
+                    self.assertEqual(['/usr/bin/ldd','/fixture/tool'],result[0])
+                    self.assertEqual(['/fixture/bash','/fixture/script','/fixture/tool'],result[1])
+                    self.assertEqual((Path('/fixture/tool'),Path('/fixture/script'),Path('/fixture/cache')),result[2])
+                else:
+                    with self.assertRaises(TimeoutError):
+                        self.g['inspection_recipe'](binding,Path('/fixture/tool'),ledger=ledger,deadline=deadline)
+            self.assertEqual([Path('/fixture/tool')],constructed);self.assertEqual(5.0,fs.now)
+            self.assertEqual(4,len(ledger.records));self.assertFalse(fs.fds)
+            closed=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closed),len(set(closed)))
+
+
 if __name__ == '__main__':
     unittest.main()
