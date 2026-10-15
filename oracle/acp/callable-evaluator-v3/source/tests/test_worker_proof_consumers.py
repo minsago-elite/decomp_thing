@@ -1429,5 +1429,323 @@ class InspectionLoaderAuthentication(unittest.TestCase):
                 with self.subTest(deadline=deadline,attack=attack):self.pinner_loader_vector(deadline,attack)
 
 
+class _PublicationFilesystem:
+    """Injected metadata/stream transport; never opens a host FD or path."""
+    def __init__(self):
+        import stat
+        self.nodes=[];self.entries={};self.fds={};self.events=[];self.streams=[]
+        self.hook=None;self.next_fd=100;self.short=None
+        self.slash=self.node(stat.S_IFDIR|0o755)
+        self.root=self.node(stat.S_IFDIR|0o755)
+        self.directory=self.node(stat.S_IFDIR|0o755)
+        self.entries[(self.slash['ino'],'fixture')]=self.root
+        self.entries[(self.root['ino'],'toolchain-001')]=self.directory
+
+    def node(self,mode,data=b''):
+        node={'dev':1,'ino':len(self.nodes)+1,'mode':mode,'uid':42,'gid':43,
+              'nlink':1,'size':len(data),'mtime':1,'ctime':1,'data':bytearray(data)}
+        self.nodes.append(node);return node
+
+    def event(self,kind,*facts):
+        self.events.append((kind,)+facts)
+        if self.hook is not None:self.hook(kind,*facts)
+
+    def metadata(self,node):
+        from types import SimpleNamespace
+        return SimpleNamespace(st_dev=node['dev'],st_ino=node['ino'],st_mode=node['mode'],
+            st_uid=node['uid'],st_gid=node['gid'],st_nlink=node['nlink'],st_size=node['size'],
+            st_mtime_ns=node['mtime'],st_ctime_ns=node['ctime'])
+
+    def lookup(self,name,dir_fd=None):
+        if dir_fd is None:
+            if name!='/':raise AssertionError('unexpected absolute pathname lookup')
+            return self.slash
+        return self.entries[(self.fds[dir_fd]['ino'],name)]
+
+    def open(self,name,flags,mode=0o777,*,dir_fd=None):
+        import os,stat
+        self.event('open',name,flags,mode,dir_fd)
+        if flags&os.O_CREAT:
+            if dir_fd is None:raise AssertionError('publication must be relative to held A')
+            key=(self.fds[dir_fd]['ino'],name)
+            if key in self.entries:raise FileExistsError(name)
+            node=self.node(stat.S_IFREG|mode);self.entries[key]=node
+        else:
+            node=self.lookup(name,dir_fd)
+            if flags&os.O_DIRECTORY and not stat.S_ISDIR(node['mode']):raise OSError('nofollow directory refusal')
+        self.next_fd+=1;fd=self.next_fd;self.fds[fd]=node
+        self.events.append(('acquired',fd,node['ino']));return fd
+
+    def fstat(self,fd):
+        self.event('fstat',fd,self.fds[fd]);return self.metadata(self.fds[fd])
+
+    def stat(self,name,*,dir_fd=None,follow_symlinks=True):
+        if follow_symlinks:raise AssertionError('nofollow metadata required')
+        self.event('stat',name,dir_fd);return self.metadata(self.lookup(name,dir_fd))
+
+    def chmod(self,fd,mode):
+        import stat
+        self.event('chmod',fd,mode);node=self.fds[fd]
+        node['mode']=stat.S_IFMT(node['mode'])|mode;node['ctime']+=1
+
+    def replace(self,source,destination,*,src_dir_fd=None,dst_dir_fd=None):
+        self.event('replace',source,destination,src_dir_fd,dst_dir_fd)
+        if src_dir_fd is None or dst_dir_fd!=src_dir_fd:raise AssertionError('same held directory required')
+        inode=self.fds[src_dir_fd]['ino'];node=self.entries.pop((inode,source))
+        self.events.append(('renamed-source',node['ino']))
+        self.entries[(inode,destination)]=node;node['ctime']+=1
+        self.event('replaced',source,destination,src_dir_fd,dst_dir_fd)
+
+    def close(self,fd):
+        node=self.fds.pop(fd);self.event('close',fd,node)
+
+    def fdopen(self,fd,mode,*,closefd):
+        if closefd:raise AssertionError('only enclosing FD owner may close')
+        self.event('fdopen',fd,mode);fs=self
+        class Stream:
+            def __init__(self):self.closed=False
+            def write(self,value):
+                fs.event('write',fd,value)
+                count=len(value) if fs.short is None else min(fs.short,len(value))
+                block=value[:count];raw=block.encode('utf-8') if type(block)is str else block
+                node=fs.fds[fd];node['data'].extend(raw);node['size']+=len(raw);node['mtime']+=1
+                return count
+            def flush(self):fs.event('flush',fd)
+            def fileno(self):return fd
+            def close(self):
+                if self.closed:raise AssertionError('stream closed twice')
+                self.closed=True;fs.event('stream-close',fd)
+        stream=Stream();self.streams.append(stream);return stream
+
+    def effects(self,module):
+        from contextlib import ExitStack
+        stack=ExitStack();ops=module['os']
+        for name,operation in (('open',self.open),('fstat',self.fstat),('stat',self.stat),
+                ('fchmod',self.chmod),('replace',self.replace),('close',self.close),('fdopen',self.fdopen)):
+            stack.enter_context(patch.object(ops,name,side_effect=operation))
+        stack.enter_context(patch.object(ops,'getuid',return_value=42))
+        stack.enter_context(patch.object(ops,'unlink',side_effect=AssertionError('no namespace deletion authority')))
+        stack.enter_context(patch.object(module['uuid'],'uuid4',return_value=Mock(hex='a'*32)))
+        return stack
+
+
+class HelperPublicationDirectory(unittest.TestCase):
+    def setUp(self):
+        self.module=runpy.run_path(str(ROOT/'toolchain-001/build_helper.py'),run_name='inert_import')
+        self.directory=self.module['_PublicationDirectory'];self.publish=self.module['publish']
+
+    def assert_closed_once(self,fs):
+        acquired=[e[1]for e in fs.events if e[0]=='acquired']
+        closed=[e[1]for e in fs.events if e[0]=='close']
+        self.assertEqual(sorted(acquired),sorted(closed));self.assertEqual(len(closed),len(set(closed)))
+        self.assertFalse(fs.fds);self.assertTrue(all(stream.closed for stream in fs.streams))
+
+    def test_publication_same_A_bytes_modes_receipt_and_progress_use_only_retained_descriptors(self):
+        import os
+        fs=_PublicationFilesystem();fs.short=2
+        with fs.effects(self.module):
+            with self.directory(Path('/fixture')) as directory:
+                chosen=directory.fd
+                self.publish(directory,'helper-dependencies.d',b'authored dependencies',0o600)
+                self.publish(directory,'record_identity_probe',b'authored binary',0o700)
+                result={'schemaVersion':3,'publication':{'published':True},'unicode':'☃'}
+                # Text receipt uses the original JSON stream, not the short binary-write vector.
+                fs.short=None;directory.receipt('result.json',result)
+        parent=fs.directory['ino'];dependency=fs.entries[(parent,'helper-dependencies.d')]
+        binary=fs.entries[(parent,'record_identity_probe')];receipt=fs.entries[(parent,'result.json')]
+        self.assertEqual(b'authored dependencies',bytes(dependency['data']))
+        self.assertEqual(b'authored binary',bytes(binary['data']))
+        self.assertEqual(0o600,dependency['mode']&0o7777);self.assertEqual(0o700,binary['mode']&0o7777)
+        self.assertEqual((json.dumps(result,indent=2)+'\n').encode(),bytes(receipt['data']))
+        publications=[event for event in fs.events if event[0]=='replace']
+        self.assertEqual(['helper-dependencies.d','record_identity_probe'],[event[2]for event in publications])
+        self.assertTrue(all(event[3:]==(chosen,chosen)for event in publications))
+        files=[e for e in fs.events if e[0]=='open'and e[2]&os.O_CREAT]
+        self.assertEqual(3,len(files));self.assertTrue(all(e[4]==chosen for e in files))
+        for event in files:
+            for flag in (os.O_EXCL,os.O_NOFOLLOW,os.O_NONBLOCK,os.O_CLOEXEC):self.assertTrue(event[2]&flag)
+        self.assertEqual(0o666,files[-1][3]);self.assert_closed_once(fs)
+        # Existing real raw-proof build vectors still exercise complete/nonzero routing.
+        case=ProducerLaunchInputJoins(methodName='runTest');case.setUp()
+        case.build_vector();case.build_vector(exit_code=3)
+
+    def test_publication_admission_refuses_symlink_uid_and_original_parent_replacement(self):
+        import stat
+        for attack in ('root-symlink','child-symlink','root-uid','child-uid','replaced-before-create'):
+            fs=_PublicationFilesystem()
+            if attack=='root-symlink':fs.root['mode']=stat.S_IFLNK|0o777
+            elif attack=='child-symlink':fs.directory['mode']=stat.S_IFLNK|0o777
+            elif attack=='root-uid':fs.root['uid']=99
+            elif attack=='child-uid':fs.directory['uid']=99
+            with self.subTest(attack=attack),fs.effects(self.module):
+                with self.assertRaises((ValueError,OSError)):
+                    with self.directory(Path('/fixture')) as directory:
+                        fs.entries[(fs.root['ino'],'toolchain-001')]=fs.node(stat.S_IFDIR|0o755)
+                        self.publish(directory,'record_identity_probe',b'not credited',0o700)
+            self.assertFalse(any(e[0]=='write'for e in fs.events));self.assert_closed_once(fs)
+        for root in (Path('relative'),Path('/fixture/../other'),Path('/'+'/'.join(['x']*128)),Path('/'+'x'*4096)):
+            fs=_PublicationFilesystem()
+            with self.subTest(root=root),fs.effects(self.module),self.assertRaises(ValueError):
+                with self.directory(root):self.fail('invalid path admitted')
+            self.assertEqual([],fs.events)
+
+    def test_publication_parent_swap_at_write_rename_between_outputs_and_receipt_never_rebases(self):
+        import stat
+        for stage in ('write','rename','between-outputs','before-receipt'):
+            fs=_PublicationFilesystem();replacement=fs.node(stat.S_IFDIR|0o755)
+            def swapped():fs.entries[(fs.root['ino'],'toolchain-001')]=replacement
+            fired=[]
+            def hook(kind,*facts):
+                if not fired and ((stage=='write'and kind=='write')or(stage=='rename'and kind=='replace')):
+                    fired.append(True);swapped()
+            fs.hook=hook
+            with self.subTest(stage=stage),fs.effects(self.module):
+                with self.assertRaisesRegex(ValueError,'named publication parent changed'):
+                    with self.directory(Path('/fixture')) as directory:
+                        self.publish(directory,'helper-dependencies.d',b'dependencies',0o600)
+                        if stage=='between-outputs':swapped()
+                        self.publish(directory,'record_identity_probe',b'binary',0o700)
+                        if stage=='before-receipt':swapped()
+                        directory.receipt('result.json',{'publication':{'published':True}})
+            self.assertFalse(any(parent==replacement['ino']for parent,name in fs.entries))
+            self.assertFalse(any(e[0]=='open'and e[1]=='result.json'for e in fs.events))
+            self.assert_closed_once(fs)
+
+    def test_publication_temp_entry_check_is_not_same_uid_atomic_rename_authority(self):
+        import stat
+        for restored in (False,True):
+            fs=_PublicationFilesystem();different=fs.node(stat.S_IFREG|0o700,b'B')
+            original=[]
+            def hook(kind,*facts):
+                if kind=='stat'and facts[0].startswith('.helper-publish-')and not restored:
+                    fs.entries[(fs.directory['ino'],facts[0])]=different
+                if kind=='replace'and restored:
+                    key=(fs.directory['ino'],facts[0]);original.append(fs.entries[key]);fs.entries[key]=different
+                if kind=='replaced'and restored:
+                    fs.entries[(fs.directory['ino'],facts[1])]=original[0]
+            fs.hook=hook
+            with self.subTest(restored=restored),fs.effects(self.module):
+                with self.directory(Path('/fixture')) as directory:
+                    if restored:
+                        # Counterexample: B really was selected by rename; later A observation is not exclusion.
+                        self.publish(directory,'record_identity_probe',b'A',0o700)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'temporary entry changed'):
+                            self.publish(directory,'record_identity_probe',b'A',0o700)
+            renamed=[e[1]for e in fs.events if e[0]=='renamed-source']
+            self.assertEqual([different['ino']]if restored else [],renamed)
+            self.assert_closed_once(fs)
+
+    def test_publication_actual_faults_preserve_primary_and_once_close_without_name_cleanup(self):
+        for stage in ('open-file','fstat-file','fdopen','write','flush','chmod','replace','stream-close','close-file'):
+            fs=_PublicationFilesystem();primary=MemoryError('authored '+stage);fired=[]
+            def hook(kind,*facts):
+                is_file=(kind=='open'and facts[0].startswith('.helper-publish-'))
+                match=(stage=='open-file'and is_file or stage=='fstat-file'and kind=='fstat'and 'data'in facts[1]and
+                    facts[1]['mode']&0o170000==0o100000 or stage==kind or
+                    stage=='close-file'and kind=='close'and facts[1]['mode']&0o170000==0o100000)
+                if match and not fired:fired.append(True);raise primary
+            fs.hook=hook
+            with self.subTest(stage=stage),fs.effects(self.module):
+                with self.assertRaises(MemoryError)as caught:
+                    with self.directory(Path('/fixture')) as directory:
+                        self.publish(directory,'record_identity_probe',b'authored',0o700)
+            self.assertIs(primary,caught.exception);self.assertEqual([True],fired);self.assert_closed_once(fs)
+            self.assertLessEqual(sum(e[0]=='replace'for e in fs.events),1)
+        for progress in (0,False,None,999999):
+            fs=_PublicationFilesystem()
+            with self.subTest(progress=progress),fs.effects(self.module):
+                with self.assertRaisesRegex(ValueError,'invalid progress'):
+                    with self.directory(Path('/fixture')) as directory:
+                        original=fs.fdopen
+                        def stream(*args,**kwargs):
+                            value=original(*args,**kwargs);value.write=Mock(return_value=progress);return value
+                        with patch.object(self.module['os'],'fdopen',side_effect=stream):
+                            self.publish(directory,'record_identity_probe',b'authored',0o700)
+            self.assertFalse(any(e[0]=='replace'for e in fs.events));self.assert_closed_once(fs)
+        fs=_PublicationFilesystem()
+        with fs.effects(self.module):
+            with self.directory(Path('/fixture')) as directory:
+                temporary='.helper-publish-'+'a'*32
+                fs.entries[(fs.directory['ino'],temporary)]=fs.node(0o100600,b'other')
+                with self.assertRaises(FileExistsError):self.publish(directory,'record_identity_probe',b'authored',0o700)
+        self.assertEqual(1,sum(e[0]=='open'and e[1]==temporary for e in fs.events));self.assert_closed_once(fs)
+
+    def test_publication_partial_depfile_then_binary_or_receipt_failure_never_rolls_back(self):
+        for target in ('binary','receipt'):
+            fs=_PublicationFilesystem();primary=OSError('authored partial failure')
+            def hook(kind,*facts):
+                if target=='binary'and kind=='replace'and facts[1]=='record_identity_probe':raise primary
+                if target=='receipt'and kind=='open'and facts[0]=='result.json':raise primary
+            fs.hook=hook;returned=[]
+            with self.subTest(target=target),fs.effects(self.module):
+                with self.assertRaises(OSError)as caught:
+                    with self.directory(Path('/fixture')) as directory:
+                        self.publish(directory,'helper-dependencies.d',b'dependencies',0o600)
+                        self.publish(directory,'record_identity_probe',b'binary',0o700)
+                        directory.receipt('result.json',{'publication':{'published':True}})
+                        returned.append(True)
+            self.assertIs(primary,caught.exception);self.assertEqual([],returned)
+            self.assertEqual(b'dependencies',bytes(fs.entries[(fs.directory['ino'],'helper-dependencies.d')]['data']))
+            self.assertNotIn((fs.directory['ino'],'result.json'),fs.entries);self.assert_closed_once(fs)
+
+    def test_publication_close_failures_do_not_replace_body_or_claim_error_atomic_receipts(self):
+        class DeniedNotes(ValueError):
+            def add_note(self,*args):raise AssertionError('diagnostic annotation denied')
+            def __setattr__(self,*args):raise AssertionError('diagnostic attribute denied')
+        for body_fails in (False,True):
+            fs=_PublicationFilesystem();body=DeniedNotes('original body');cleanup=OSError('close uncertain');fired=[]
+            def hook(kind,*facts):
+                if kind=='close'and not fired:fired.append(True);raise cleanup
+            with self.subTest(body_fails=body_fails),fs.effects(self.module):
+                with self.assertRaises((DeniedNotes,OSError))as caught:
+                    with self.directory(Path('/fixture')) as directory:
+                        directory.receipt('result.json',{'publication':{'published':True}})
+                        fs.hook=hook
+                        if body_fails:raise body
+            self.assertIs(body if body_fails else cleanup,caught.exception)
+            # A complete-looking receipt is retained after a later refusal, not authenticated success.
+            raw=bytes(fs.entries[(fs.directory['ino'],'result.json')]['data'])
+            self.assertTrue(json.loads(raw)['publication']['published']);self.assert_closed_once(fs)
+            acquired=[e[1]for e in fs.events if e[0]=='acquired'][:3]
+            closed=[e[1]for e in fs.events if e[0]=='close'][-3:]
+            self.assertEqual(list(reversed(acquired)),closed)
+
+    def test_publication_receipt_lexical_utf8_and_exclusive_rules_refuse_before_work(self):
+        validate=self.module['_receipt_component']
+        for name in (None,1,'','.', '..','a/b','a/../b','/absolute','bad\0name',
+                     'helper-dependencies.d','record_identity_probe','x'*256,'é'*128,'\ud800'):
+            with self.subTest(name=name),self.assertRaises((ValueError,UnicodeError)):validate(name)
+        for name in ('result.json','é'*127+'a','x'*255):self.assertEqual(name,validate(name))
+        for mode in (0o100600,0o120777):
+            fs=_PublicationFilesystem();existing=fs.node(mode,b'unchanged')
+            fs.entries[(fs.directory['ino'],'result.json')]=existing
+            with self.subTest(mode=mode),fs.effects(self.module):
+                with self.directory(Path('/fixture')) as directory:
+                    with self.assertRaises(FileExistsError):directory.receipt('result.json',{})
+            self.assertEqual(b'unchanged',bytes(existing['data']));self.assert_closed_once(fs)
+        build=self.module['build'];profile=Mock(side_effect=AssertionError('invalid name before profile or filesystem'))
+        with patch.dict(build.__globals__,load_profile_with_digest=profile):
+            with self.assertRaises(ValueError):build('../escape')
+        profile.assert_not_called()
+
+    def test_publication_stable_directory_identity_allows_own_work_nlink_but_refuses_identity_changes(self):
+        for change in (None,'dev','ino','mode','uid','gid'):
+            fs=_PublicationFilesystem()
+            with self.subTest(change=change),fs.effects(self.module):
+                with self.directory(Path('/fixture')) as directory:
+                    # First owned worker-work mkdir and ordinary publication metadata must be allowed.
+                    for node in (fs.root,fs.directory):
+                        node['nlink']+=1;node['size']+=4096;node['mtime']+=1;node['ctime']+=1
+                    directory.check()
+                    if change is None:
+                        self.publish(directory,'record_identity_probe',b'authored',0o700)
+                    else:
+                        old=fs.directory[change];fs.directory[change]+=1
+                        with self.assertRaisesRegex(ValueError,'held publication parent changed'):directory.check()
+                        fs.directory[change]=old
+            self.assert_closed_once(fs)
+
+
 if __name__ == '__main__':
     unittest.main()

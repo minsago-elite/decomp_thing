@@ -4,7 +4,8 @@ import json
 import os
 import stat
 import struct
-import tempfile
+from contextlib import contextmanager
+import uuid
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,17 +46,198 @@ def read_output(path, limit, elf=False):
         os.close(fd)
 
 
-def publish(path, data, mode):
-    """Controller publication; worker never mounts this destination directory."""
-    descriptor, temporary = tempfile.mkstemp(prefix='.helper-publish-',dir=path.parent)
+def _receipt_component(name):
+    if (type(name) is not str or not 1 <= len(name) <= 255 or
+            name in ('.', '..', 'helper-dependencies.d', 'record_identity_probe') or
+            '/' in name or '\0' in name):
+        raise ValueError('helper receipt must be one bounded unreserved component')
+    if not 1 <= len(name.encode('utf-8', errors='strict')) <= 255:
+        raise ValueError('helper receipt UTF-8 component byte bound')
+    return name
+
+
+def _directory_version(metadata):
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError('helper publication parent must be directory')
+    # Our own worker-work/output creation may change nlink, size and timestamps.
+    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode),
+            stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid)
+
+
+def _file_version(metadata):
+    return tuple(getattr(metadata, key) for key in
+        ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+         'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+
+class _PublicationDirectory:
+    """Confinement to selected A, not original authorization or writer exclusion."""
+    def __init__(self, root):
+        self.root = Path(root)
+        self.fds = [None] * 129  # At most 128 ROOT components, plus fixed child.
+        self.count = 0
+        self.chain = []
+        self.fd = None
+        self.uid = None
+
+    def _open(self, name, parent=None):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        self.fds[self.count] = os.open(name, flags, **({} if parent is None else {'dir_fd': parent}))
+        self.count += 1  # Acquired FD is already owned before observations/allocations.
+        return self.fds[self.count - 1]
+
+    def _close(self, primary):
+        failure = None
+        while self.count:
+            self.count -= 1
+            descriptor = self.fds[self.count]
+            self.fds[self.count] = None  # A failed close is never retried.
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if primary is None and failure is not None:
+            raise failure
+
+    def __enter__(self):
+        try:
+            if (not self.root.is_absolute() or '..' in self.root.parts or
+                    len(self.root.parts) > 128 or len(str(self.root)) > 4096):
+                raise ValueError('helper publication ROOT path bound')
+            self.uid = os.getuid()
+            descriptor = self._open('/')
+            self.chain.append((descriptor, None, '/', _directory_version(os.fstat(descriptor))))
+            for component in self.root.parts[1:]:
+                parent = descriptor
+                descriptor = self._open(component, parent)
+                self.chain.append((descriptor, parent, component, _directory_version(os.fstat(descriptor))))
+            if os.fstat(descriptor).st_uid != self.uid:
+                raise ValueError('helper publication ROOT UID differs')
+            parent = descriptor
+            descriptor = self._open('toolchain-001', parent)
+            metadata = os.fstat(descriptor)
+            self.chain.append((descriptor, parent, 'toolchain-001', _directory_version(metadata)))
+            if metadata.st_uid != self.uid:
+                raise ValueError('helper publication directory UID differs')
+            self.fd = descriptor
+            self.check()
+            return self
+        except BaseException as primary:
+            self._close(primary)
+            raise
+
+    def check(self):
+        for descriptor, parent, component, expected in self.chain:
+            if _directory_version(os.fstat(descriptor)) != expected:
+                raise ValueError('helper held publication parent changed')
+            named = os.stat(component, follow_symlinks=False, **({} if parent is None else {'dir_fd': parent}))
+            if _directory_version(named) != expected:
+                raise ValueError('helper named publication parent changed')
+
+    def __exit__(self, kind, error, traceback):
+        primary = error
+        if primary is None:
+            try:
+                self.check()
+            except BaseException as failure:
+                primary = failure
+        self._close(primary)
+        if error is None and primary is not None:
+            raise primary
+        return False
+
+    @contextmanager
+    def file(self, component, mode):
+        descriptors = [None]
+        primary = None
+        try:
+            self.check()
+            descriptors[0] = os.open(component, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=self.fd)
+            descriptor = descriptors[0]
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != self.uid or
+                    metadata.st_nlink != 1 or metadata.st_size != 0):
+                raise ValueError('helper publication initial regular file differs')
+            self.check()
+            yield descriptor
+        except BaseException as failure:
+            primary = failure
+            raise
+        finally:
+            descriptor = descriptors[0]
+            descriptors[0] = None
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    if primary is None:
+                        raise
+            # No unlink: a name may now identify another same-UID writer's file.
+
+    def receipt(self, component, result):
+        with self.file(component, 0o666) as descriptor:
+            with _publication_stream(descriptor, 'w') as stream:
+                json.dump(result, stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+            self.check()
+
+
+@contextmanager
+def _publication_stream(descriptor, mode):
+    stream = None
+    primary = None
     try:
-        with os.fdopen(descriptor,'wb') as stream:
-            stream.write(data)
+        # The enclosing file owner alone closes the FD, even if stream setup fails.
+        stream = os.fdopen(descriptor, mode, closefd=False)
+        yield stream
+    except BaseException as failure:
+        primary = failure
+        raise
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException:
+                if primary is None:
+                    raise
+
+
+def publish(directory, component, data, mode):
+    """Same-A lookups; temp-name authenticity against same-UID writers is unproved."""
+    if ((component, mode) not in (('helper-dependencies.d', 0o600), ('record_identity_probe', 0o700))
+            or type(data) is not bytes):
+        raise ValueError('fixed helper publication component and immutable bytes required')
+    suffix = uuid.uuid4().hex
+    if type(suffix) is not str or len(suffix) != 32 or any(c not in '0123456789abcdef' for c in suffix):
+        raise ValueError('fixed helper publication temporary component required')
+    temporary = '.helper-publish-' + suffix
+    with directory.file(temporary, 0o600) as descriptor:
+        before = os.fstat(descriptor)
+        with _publication_stream(descriptor, 'wb') as stream:
+            offset = 0
+            while offset < len(data):
+                written = stream.write(data[offset:offset + 65536])
+                if type(written) is not int or not 0 < written <= min(65536, len(data) - offset):
+                    raise ValueError('helper publication write made invalid progress')
+                offset += written
             stream.flush()
             os.fchmod(stream.fileno(),mode)
-        os.replace(temporary,path)
-    finally:
-        if os.path.lexists(temporary):os.unlink(temporary)
+        after = os.fstat(descriptor)
+        if (not stat.S_ISREG(after.st_mode) or stat.S_IMODE(after.st_mode) != mode or
+                after.st_uid != directory.uid or after.st_nlink != 1 or after.st_size != len(data) or
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+            raise ValueError('helper publication output metadata differs')
+        directory.check()
+        if _file_version(os.stat(temporary, dir_fd=directory.fd, follow_symlinks=False)) != _file_version(after):
+            raise ValueError('helper publication temporary entry changed')
+        # This is confinement, not atomic compare-inode rename or writer exclusion.
+        os.replace(temporary, component, src_dir_fd=directory.fd, dst_dir_fd=directory.fd)
+        directory.check()
+        if _file_version(os.stat(component, dir_fd=directory.fd, follow_symlinks=False)) != _file_version(os.fstat(descriptor)):
+            raise ValueError('helper publication final entry differs')
 
 
 def _require_input_join(execution, name, original, phase, profile_sha):
@@ -79,11 +261,14 @@ def _require_input_join(execution, name, original, phase, profile_sha):
 
 
 def build(receipt_name):
-    destination = ROOT / 'toolchain-001'
-    output = destination / receipt_name
-    if output.parent.resolve() != destination.resolve():
-        raise ValueError('helper receipt outside owned toolchain root')
+    receipt_name = _receipt_component(receipt_name)
     profile, profile_sha = load_profile_with_digest()
+    with _PublicationDirectory(ROOT) as publication:
+        return _build_admitted(receipt_name, profile, profile_sha, publication)
+
+
+def _build_admitted(receipt_name, profile, profile_sha, publication):
+    destination = ROOT / 'toolchain-001'
     bounds = profile['bounds']
     source = ROOT / 'record_identity_probe.cpp'
     source_guard = digest(source,maximum=bounds['fileSizeBytes'],deadline=None)
@@ -122,16 +307,14 @@ def build(receipt_name):
             dependency_data = read_output(depfile,bounds['fileSizeBytes'])
             import hashlib
             binary_hash = hashlib.sha256(binary_data).hexdigest()
-            publish(destination/'helper-dependencies.d',dependency_data,0o600)
-            publish(destination/'record_identity_probe',binary_data,0o700)
+            publish(publication,'helper-dependencies.d',dependency_data,0o600)
+            publish(publication,'record_identity_probe',binary_data,0o700)
         result.update(schemaVersion=3,sourceSha256=source_hash,helperSchemaSha256=schema_hash,
                       binarySha256=binary_hash,workerArgv=argv,workerCwd=str(work),
                       publication={'binary':str(destination/'record_identity_probe'),
                                    'dependencies':str(destination/'helper-dependencies.d'),
                                    'published':execution['exitCode']==0})
-        with output.open('x') as stream:
-            json.dump(result,stream,indent=2)
-            stream.write('\n')
+        publication.receipt(receipt_name,result)
         return result
 
 
