@@ -29,6 +29,10 @@ FIXED = ('build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle
          'contracts/web/v1/contract.schema.json')
 SOURCE = (8192, 16*1024**2, 128*1024**2, 32)
 OUTPUT = (8192, 16*1024**2, 64*1024**2, 16)
+NPM_LINK = '../lib/node_modules/npm/bin/npm-cli.js'
+GROUP_ENTRIES = 256  # All entries/advances, including the EOF observation.
+GROUP_STAT_BYTES = 4096
+GROUP_SCAN_BYTES = 1024**2
 
 class Refusal(RuntimeError):
     pass
@@ -135,6 +139,20 @@ class Files:
                 raise Refusal('file changed during observation')
             self.ledger.check(); return b''.join(chunks)
         finally: os.close(fd)
+
+    def npm_launcher(self, path):
+        # Sole fixed leaf exception: never relax generic path/read admission.
+        p=Path(path); p=self.path(p.parent)/p.name; self.ledger.check()
+        first=p.lstat(); self.ledger.check()
+        expected=NPM_LINK.encode('ascii')
+        if p.name!='npm' or not stat.S_ISLNK(first.st_mode) or first.st_size!=len(expected):
+            raise Refusal('fixed npm launcher link required')
+        self.ledger.check(); target=os.readlink(p); self.ledger.check()
+        last=p.lstat(); self.ledger.check()
+        fields=('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns')
+        if target!=NPM_LINK or any(getattr(first,k)!=getattr(last,k) for k in fields):
+            raise Refusal('npm launcher link changed or unsupported')
+        return expected
 
     def write(self, path, data, evidence=False):
         self.ledger.check(cleanup=evidence)
@@ -249,20 +267,137 @@ class Files:
 
 
 
+def npm_inputs(manifest, files):
+    """Fixed launcher-text/entry-byte pins, not a transitive npm closure."""
+    home=Path(manifest['nodeHome'])
+    names=(str(home/'bin/npm'),str(home/'lib/node_modules/npm/bin/npm-cli.js'))
+    tools=manifest.get('tools',{})
+    if any(name not in tools for name in names): raise Refusal('required npm input lacks reviewed pin')
+    observed={}
+    for i,name in enumerate(names):
+        data=files.npm_launcher(name) if i==0 else files.read(name,128*1024**2)
+        row=tools[name]
+        if type(row) is not dict or type(row.get('bytes')) is not int or row!={'sha256':sha(data),'bytes':len(data)}:
+            raise Refusal('npm reviewed input disagreement')
+        observed[name]={**row,'kind':'fixed-symlink-text' if i==0 else 'regular-entry-bytes'}
+    return observed
+
+
 class Runner:
     def __init__(self, ledger, files, evidence):
         self.ledger=ledger; self.files=files; self.evidence=evidence
         self.uncertain=False; self.sequence=0
 
+    def group_members(self, pid, cleanup=False):
+        """Bounded racy observation, never child ownership or containment proof."""
+        count=total=0; members=[]; leader=False
+        self.ledger.check(cleanup=cleanup)
+        with os.scandir('/proc') as entries:
+            while True:
+                self.ledger.check(cleanup=cleanup)
+                if count>=GROUP_ENTRIES: raise Refusal('group observation entry bound')
+                count+=1
+                try: entry=next(entries)
+                except StopIteration: break
+                name=entry.name
+                if not name.isascii() or not name.isdecimal(): continue
+                if len(name)>10 or int(name)<=0: raise Refusal('invalid proc identity')
+                path='/proc/'+name+'/stat'; self.ledger.check(cleanup=cleanup)
+                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+                try:
+                    self.ledger.check(cleanup=cleanup); first=os.fstat(fd); self.ledger.check(cleanup=cleanup)
+                    if not stat.S_ISREG(first.st_mode) or not 0<=first.st_size<=GROUP_STAT_BYTES:
+                        raise Refusal('proc stat regular size admission')
+                    data=bytearray()
+                    while True:
+                        self.ledger.check(cleanup=cleanup)
+                        left=min(GROUP_STAT_BYTES-len(data),GROUP_SCAN_BYTES-total)
+                        if left<=0: raise Refusal('group observation byte bound')
+                        part=os.read(fd,left); self.ledger.check(cleanup=cleanup)
+                        if not part: break
+                        if len(part)>left: raise Refusal('proc read exceeded request')
+                        total+=len(part); data.extend(part)
+                    self.ledger.check(cleanup=cleanup); last=os.fstat(fd)
+                    self.ledger.check(cleanup=cleanup); named=os.stat(path,follow_symlinks=False)
+                    self.ledger.check(cleanup=cleanup)
+                    fields=('st_dev','st_ino','st_mode','st_size')
+                    if any(getattr(first,k)!=getattr(last,k) or getattr(first,k)!=getattr(named,k) for k in fields):
+                        raise Refusal('proc stat identity changed')
+                finally: os.close(fd)
+                raw=bytes(data); close=raw.rfind(b')'); prefix=(name+' (').encode('ascii')
+                if not raw.startswith(prefix) or close<len(prefix): raise Refusal('malformed proc stat')
+                fields=raw[close+1:].split()
+                if len(fields)<20 or fields[0] not in (b'R',b'S',b'D',b'Z',b'T',b't',b'X',b'x',b'K',b'W',b'P',b'I'):
+                    raise Refusal('malformed proc stat fields')
+                if any(not fields[i].isdigit() for i in (1,2,3,19)):
+                    raise Refusal('malformed proc stat coordinates')
+                group,session=int(fields[2]),int(fields[3])
+                if group==pid:
+                    if session!=pid: raise Refusal('owned group session mismatch')
+                    if int(name)==pid: leader=True
+                    else: members.append(int(name))
+                self.ledger.check(cleanup=cleanup)
+        if not leader: raise Refusal('held leader absent from group observation')
+        self.ledger.check(cleanup=cleanup)
+        return tuple(members)
+
     def __call__(self, argv, cwd, env):
         self.ledger.check(); self.sequence+=1
-        child=None; captured=bytearray(); intervened=False; primary=None
+        child=None; held=False; captured=bytearray(); intervened=False; primary=None
         facts={'launcherCreated':False,'rootReaped':False,'exitCode':None,'operationalGroupAbsent':None,
-               'terminationRequested':False,'killRequested':False,'waitUncertain':False}
+               'terminationRequested':False,'killRequested':False,'waitUncertain':False,'groupObservation':'NOT_RUN'}
+        def observe(cleanup=False):
+            nonlocal held
+            if not held: raise Refusal('child wait ownership unavailable')
+            self.ledger.check(cleanup=cleanup)
+            try: state=os.waitid(os.P_PID,child.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+            except BaseException:
+                held=False; facts['waitUncertain']=True; raise
+            self.ledger.check(cleanup=cleanup)
+            if state is not None and (state.si_pid!=child.pid or state.si_code not in (os.CLD_EXITED,os.CLD_KILLED,os.CLD_DUMPED)):
+                held=False; facts['waitUncertain']=True
+                raise Refusal('unrecognized child wait observation')
+            return state
+        def await_exit(cleanup=False):
+            while observe(cleanup) is None:
+                time.sleep(min(.01,self.ledger.check(cleanup=cleanup)))
+        def reap(cleanup=False):
+            nonlocal held
+            timeout=self.ledger.check(cleanup=cleanup)
+            if not held: raise Refusal('child already released')
+            held=False  # Revoke BEFORE any final wait, including ambiguous failures.
+            try: code=child.wait(timeout=timeout)
+            except BaseException:
+                facts['waitUncertain']=True; raise
+            facts.update(rootReaped=True,exitCode=code)
+            self.ledger.check(cleanup=cleanup)
+            return code
+        def membership(cleanup=False):
+            observe(cleanup)
+            try: members=self.group_members(child.pid,cleanup)
+            except BaseException:
+                facts['groupObservation']='UNKNOWN'; raise
+            observe(cleanup)
+            facts['groupObservation']='SURVIVORS' if members else 'LEADER_ONLY_SNAPSHOT'
+            return members
+        def send(number):
+            # Only an unreaped actual child authorizes its original session group.
+            observe(True); self.ledger.check(cleanup=True)
+            os.killpg(child.pid,number)
+            facts['terminationRequested' if number==signal.SIGTERM else 'killRequested']=True
+            self.ledger.check(cleanup=True)
+        def final_absence(cleanup=False):
+            self.ledger.check(cleanup=cleanup)
+            try: os.killpg(child.pid,0)
+            except ProcessLookupError: facts['operationalGroupAbsent']=True
+            else:
+                facts['operationalGroupAbsent']=False
+                raise Refusal('operational group leftovers; absence unverified')
+            self.ledger.check(cleanup=cleanup)
         try:
             if signal.getsignal(signal.SIGCHLD)!=signal.SIG_DFL: raise Refusal('SIGCHLD ownership prerequisite')
             child=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
-            facts['launcherCreated']=True
+            held=True; facts['launcherCreated']=True
             with selectors.DefaultSelector() as selector:
                 os.set_blocking(child.stdout.fileno(),False); selector.register(child.stdout,selectors.EVENT_READ)
                 while selector.get_map():
@@ -270,44 +405,32 @@ class Runner:
                         self.ledger.check(); chunk=os.read(key.fileobj.fileno(),65536)
                         if not chunk: selector.unregister(key.fileobj); continue
                         self.ledger.output(len(chunk),len(captured)+len(chunk)); captured.extend(chunk)
-                code=child.wait(timeout=self.ledger.check()); facts.update(rootReaped=True,exitCode=code)
-                self.ledger.check()
-            try: os.killpg(child.pid,0)
-            except ProcessLookupError: facts['operationalGroupAbsent']=True
-            else:
-                facts['operationalGroupAbsent']=False
-                raise Refusal('operational group leftovers; absence unverified')
+            await_exit()
+            if membership(): raise Refusal('observed operational group survivors')
+            code=reap(); final_absence()
             return {'code':code,'output':bytes(captured),'intervened':False,'reaped':True}
         except BaseException as error:
             primary=error; intervened=True; self.uncertain=True
-            # No poll(): retain the unreaped leader until signaling is over.
-            if child is not None:
+            if child is not None and held:
                 try:
-                    # WNOWAIT observes ownership without releasing/reusing PID.
-                    self.ledger.check(cleanup=True)
-                    state=os.waitid(os.P_PID,child.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
-                    self.ledger.check(cleanup=True)
-                    if state is None:
+                    send(signal.SIGTERM)
+                    grace=min(self.ledger.end,self.ledger.clock()+2)
+                    while True:
+                        state=observe(True)
+                        try: members=membership(True)
+                        except (OSError,Refusal): members=None
+                        if state is not None and members==(): break
                         self.ledger.check(cleanup=True)
-                        os.killpg(child.pid,signal.SIGTERM); facts['terminationRequested']=True
-                        try:
-                            code=child.wait(timeout=min(2,self.ledger.check(cleanup=True))); facts.update(rootReaped=True,exitCode=code)
-                        except subprocess.TimeoutExpired:
-                            self.ledger.check(cleanup=True)
-                            state=os.waitid(os.P_PID,child.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
-                            self.ledger.check(cleanup=True)
-                            if state is None:
-                                self.ledger.check(cleanup=True)
-                                os.killpg(child.pid,signal.SIGKILL); facts['killRequested']=True
-                            code=child.wait(timeout=self.ledger.check(cleanup=True)); facts.update(rootReaped=True,exitCode=code)
-                    else:
-                        code=child.wait(timeout=self.ledger.check(cleanup=True)); facts.update(rootReaped=True,exitCode=code)
+                        left=grace-self.ledger.clock()
+                        if left<=0 or members is None: break
+                        time.sleep(min(.01,left,self.ledger.check(cleanup=True)))
+                    if state is None or members!=(): send(signal.SIGKILL)
+                    await_exit(True); reap(True); final_absence(True)
                 except BaseException: facts['waitUncertain']=not facts['rootReaped']
             raise
         finally:
             try:
                 if child is not None and child.stdout is not None: child.stdout.close()
-                # Retained bytes are bounded; uncertain cleanup never grants continuation.
                 self.files.write(self.evidence/('command-%02d.log'%self.sequence),bytes(captured),evidence=True)
                 self.files.write(self.evidence/('command-%02d.json'%self.sequence),canonical({**facts,'argv':argv,'cwd':str(cwd),'environmentKeys':sorted(env),'npmOffline':env.get('NPM_CONFIG_OFFLINE'),
                            'intervened':intervened,'cleanupUncertain':self.uncertain,'descendantAbsenceProven':False}),evidence=True)
@@ -337,7 +460,7 @@ def require_outcomes(result, mode):
     negative=mode=='drift'; names=TASKS[:3] if negative else TASKS
     rows=outcomes(result['output'],names,negative)
     wanted={':'+name:'EXECUTED' for name in names}
-    if mode in ('unchanged','fresh','drift'): wanted[':frontendInstall']='UP-TO-DATE'
+    if mode in ('unchanged','fresh','stale','drift'): wanted[':frontendInstall']='UP-TO-DATE'
     if mode=='unchanged':
         for name in TASKS[2:]:
             if name!='verifyFrontendAssets': wanted[':'+name]='UP-TO-DATE'
@@ -345,7 +468,11 @@ def require_outcomes(result, mode):
         wanted[':frontendBuild']='FAILED'
         if result['code']!=1 or b'Generated contract drift:' not in result['output']: raise Refusal('wrong negative failure')
     elif result['code']!=0: raise Refusal('build failed')
-    if rows!=wanted: raise Refusal('actual task outcomes differ: '+json.dumps(rows,sort_keys=True))
+    if mode=='stale':
+        allowed={name:{value} for name,value in wanted.items()}
+        allowed[':generateFrontendAssetManifest']={'EXECUTED','UP-TO-DATE'}
+        if any(rows[name] not in allowed[name] for name in rows): raise Refusal('actual stale task outcomes differ: '+json.dumps(rows,sort_keys=True))
+    elif rows!=wanted: raise Refusal('actual task outcomes differ: '+json.dumps(rows,sort_keys=True))
     return rows
 
 
@@ -380,7 +507,7 @@ class Freshness:
         self.fixture=self.work/'fixture'; self.evidence=self.work/'evidence'
         self.manifest=manifest; self.ledger=ledger; self.fs=files; self.runner=runner
         self.active=None
-        self.phases={name:{'status':'NOT_RUN'} for name in ('cold','unchanged','warm','drift','fresh')}
+        self.phases={name:{'status':'NOT_RUN'} for name in ('cold','unchanged','warm','fresh','stale','drift')}
 
     def enter(self, mode):
         if self.active!=mode:
@@ -444,9 +571,11 @@ class Freshness:
 
     def build(self, mode):
         self.enter(mode)
+        pins=npm_inputs(self.manifest,self.fs)
         argv,env=self.command(mode); result=self.runner(argv,self.fixture,env)
+        if npm_inputs(self.manifest,self.fs)!=pins: raise Refusal('npm inputs changed across command')
         self.ledger.check(); actual=require_outcomes(result,mode)
-        self.phases[mode]={'status':'BUILD_COMPLETED','taskOutcomes':actual,'elapsedSeconds':self.ledger.clock()-self.ledger.start}
+        self.phases[mode]={'status':'BUILD_COMPLETED','taskOutcomes':actual,'npmInputPins':pins,'elapsedSeconds':self.ledger.clock()-self.ledger.start}
         self.fs.write(self.evidence/(mode+'-outcomes.json'),canonical(self.phases[mode]),evidence=True)
 
     def drift(self):
@@ -479,7 +608,6 @@ class Freshness:
         self.build('warm'); warm=self.snapshot()
         if warm!=cold: raise Refusal('offline warm bytes differ')
         self.phases['warm']['status']='PASSED'
-        self.drift()
         self.enter('fresh')
         old=self.fixture/'frontend/src/app/mark.svg'; data=self.fs.read(old)
         self.fs.write(old.with_name('freshness-mark.svg'),data.replace(b'<svg',b'<svg data-freshness="changed"',1))
@@ -488,21 +616,28 @@ class Freshness:
         app=self.fixture/'frontend/src/app/App.tsx'; original=self.fs.read(app)
         if original.count(b"'./mark.svg'")!=1: raise Refusal('asset import anchor differs')
         self.fs.write(app,original.replace(b"'./mark.svg'",b"'./freshness-mark.svg'"))
-        for part in ('build/frontend/dist','build/generated/frontend-resources/decompengine/web/ui'):
-            self.fs.write(self.fixture/part/'assets/freshness-obsolete.svg',b'<svg/>')
         self.build('fresh'); fresh=self.snapshot()
         old_assets={n for n in warm['dist'] if n.endswith('.svg') and n.startswith('assets/mark-')}
         new_assets={n for n in fresh['dist'] if n.endswith('.svg') and n.startswith('assets/freshness-mark-')}
         if not old_assets or len(new_assets)!=1 or fresh['buildId']==warm['buildId'] or old_assets.intersection(fresh['dist']): raise Refusal('fresh asset not invalidated')
         new_asset=next(iter(new_assets))
         if not any(new_asset in row.get('assets',[]) for row in fresh['vite'].values()): raise Refusal('new asset not referenced by Vite chunk')
-        if 'assets/freshness-obsolete.svg' in fresh['dist'] or 'assets/freshness-obsolete.svg' in fresh['staged']: raise Refusal('obsolete asset retained')
         if {warm['dist'][n]['sha256'] for n in old_assets}.intersection(fresh['dist'][n]['sha256'] for n in new_assets): raise Refusal('fresh asset bytes unchanged')
+        self.phases['fresh']['status']='PASSED'
+        self.fs.write(self.evidence/'fresh.json',canonical(fresh),evidence=True)
+        self.enter('stale')
+        for part in ('build/frontend/dist','build/generated/frontend-resources/decompengine/web/ui'):
+            self.fs.write(self.fixture/part/'assets/freshness-obsolete.svg',b'<svg/>')
+        self.build('stale'); stale=self.snapshot()
+        if 'assets/freshness-obsolete.svg' in stale['dist'] or 'assets/freshness-obsolete.svg' in stale['staged'] or stale!=fresh:
+            raise Refusal('obsolete asset retained or accepted fresh closure changed')
+        self.phases['stale']['status']='PASSED'
+        self.fs.write(self.evidence/'stale.json',canonical(stale),evidence=True)
+        self.drift()
         for n in ('frontend/src/api/generated.ts','frontend/src/api/generated-schema.ts'):
             if self.fs.read(self.fixture/n)!=self.fs.read(self.source/n): raise Refusal('generated API changed')
         if self.baseline()!=baseline: raise Refusal('packaged baseline changed')
-        self.phases['fresh']['status']='PASSED'
-        self.fs.write(self.evidence/'fresh.json',canonical(fresh),evidence=True)
+        npm_inputs(self.manifest,self.fs)
         self.ledger.check()
         return {'status':'PASSED_STAGE_ONLY','phases':self.phases,'packagedBaseline':baseline,
                 'fullIssue651Accepted':False,'descendantAbsenceProven':False,'coldGradleQualified':False}
@@ -546,9 +681,14 @@ def prepare(source, work, manifest, files):
         if type(row) is not dict or set(row)!={'sha256','bytes','mode'} or type(row['bytes']) is not int or type(row['mode']) is not int or not 0<=row['mode']<=0o777: raise Refusal('exact source pin types required')
         if total>128*1024**2 or set(row)!={'sha256','bytes','mode'} or row['sha256']!=sha(data) or row['bytes']!=len(data) or row['mode']!=stat.S_IMODE((source/name).stat().st_mode): raise Refusal('source pin disagreement')
     if len(manifest['tools'])>256: raise Refusal('tool input count')
+    npm_pins=npm_inputs(manifest,files)
     tool_bytes=0
     for name,row in manifest['tools'].items():
-        p=files.path(name); data=files.read(p,min(128*1024**2,512*1024**2-tool_bytes)); tool_bytes+=len(data)
+        if name==str(Path(manifest['nodeHome'])/'bin/npm'):
+            data=files.npm_launcher(name)
+        else:
+            p=files.path(name); data=files.read(p,min(128*1024**2,512*1024**2-tool_bytes))
+        tool_bytes+=len(data)
         if tool_bytes>512*1024**2: raise Refusal('tool input aggregate')
         if type(row) is not dict or type(row.get('bytes')) is not int or row!={'sha256':sha(data),'bytes':len(data)}: raise Refusal('provisioned tool pin disagreement')
     for value in ('gradleHome','nodeHome','javaHome'):
@@ -566,7 +706,7 @@ def prepare(source, work, manifest, files):
         files.write(work/'fixture'/name,data); (work/'fixture'/name).chmod(manifest['sources'][name]['mode'])
     fingerprint={n:manifest['sources'][n]['sha256'] for n in KEYS}
     fingerprint.update(os=manifest['os'],arch=manifest['arch'])
-    files.write(work/'evidence/inputs.json',canonical({'manifest':manifest,'npmCacheInputSha256':sha(canonical(fingerprint))}),evidence=True)
+    files.write(work/'evidence/inputs.json',canonical({'manifest':manifest,'npmInputPins':npm_pins,'npmCacheInputSha256':sha(canonical(fingerprint))}),evidence=True)
 
 
 def main(argv=None):

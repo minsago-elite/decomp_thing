@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Authored injected vectors only: no Gradle/npm/child/network/real fixture work."""
 import importlib.util
+from contextlib import ExitStack
 import io
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,10 @@ class MemoryFiles:
     def read(self,path,maximum=16*1024**2):
         self.ledger.check(); data=self.data[str(path)]
         if len(data)>maximum: raise f.Refusal('read bound')
+        return data
+    def npm_launcher(self,path):
+        data=self.read(path,512)
+        if data!=f.NPM_LINK.encode('ascii'):raise f.Refusal('fixed npm launcher link required')
         return data
     def write(self,path,data,evidence=False):
         self.ledger.check(cleanup=evidence)
@@ -37,7 +42,8 @@ class MemoryFiles:
 def build_output(mode):
     names=f.TASKS[:3] if mode=='drift' else f.TASKS
     labels={name:'' for name in names}
-    if mode in ('unchanged','fresh','drift'):labels['frontendInstall']=' UP-TO-DATE'
+    if mode in ('unchanged','fresh','stale','drift'):labels['frontendInstall']=' UP-TO-DATE'
+    if mode=='stale':labels['generateFrontendAssetManifest']=' UP-TO-DATE'
     if mode=='unchanged':
         for name in ('frontendBuild','generateFrontendAssetManifest','stageFrontend'):labels[name]=' UP-TO-DATE'
     if mode=='drift':labels['frontendBuild']=' FAILED'
@@ -49,20 +55,23 @@ def build_output(mode):
 class ProducedFixture:
     """An authored producer derives closure bytes from current in-memory inputs."""
     def __init__(self,files,fixture,defect=None):
-        self.fs=files; self.fixture=fixture; self.defect=defect; self.calls=[]
+        self.fs=files; self.fixture=fixture; self.defect=defect; self.calls=[]; self.observations=[]
     def __call__(self,argv,cwd,env):
         self.calls.append((argv,env)); self.fs.ledger.check()
         if argv[-1]=='--check':
-            checks=sum(a[-1]=='--check' for a,_ in self.calls)
             if self.defect=='drift-prep':return {'code':1,'output':b'wrong diagnostic','intervened':False,'reaped':True}
-            if self.defect=='fresh-prep' and checks==3:self.fs.write(self.fixture/'frontend/src/app/mark.svg',b'no SVG anchor')
             return {'code':1,'output':b'Generated contract drift: authored module','intervened':False,'reaped':True}
-        mode=('cold','unchanged','warm','drift','fresh')[sum(a[-1]!='--check' for a,_ in self.calls)-1]
+        mode=('cold','unchanged','warm','fresh','stale','drift')[sum(a[-1]!='--check' for a,_ in self.calls)-1]
         guard=self.fs.read(Path('/repo/work/graph.gradle'))
         if guard!=f.init_guard(f.TASKS[:3] if mode=='drift' else f.TASKS):raise AssertionError('wrong graph guard')
-        if mode not in ('unchanged','drift'):self.produce(mode)
+        sentinel=any(str(self.fixture/part/'assets/freshness-obsolete.svg') in self.fs.data for part in ('build/frontend/dist','build/generated/frontend-resources/decompengine/web/ui'))
+        self.observations.append((mode,sentinel))
+        if mode not in ('unchanged','drift') and not (self.defect=='missing-source-input' and mode=='fresh'):self.produce(mode)
+        if self.defect=='fresh-prep' and mode=='warm':self.fs.write(self.fixture/'frontend/src/app/mark.svg',b'no SVG anchor')
         if self.defect=='late' and mode=='cold':self.fs.ledger.clock.now=406
         result=build_output(mode)
+        if self.defect=='missing-source-input' and mode=='fresh':result['output']=result['output'].replace(b':frontendBuild\n',b':frontendBuild UP-TO-DATE\n')
+        if self.defect=='stale-manifest' and mode=='stale':self.fs.write(self.fixture/'build/frontend/asset-manifest.json',b'invalid authored manifest')
         if self.defect=='cache':result['output']=result['output'].replace(b':frontendBuild\n',b':frontendBuild FROM-CACHE\n')
         return result
     def produce(self,mode):
@@ -74,7 +83,7 @@ class ProducedFixture:
         dist={'index.html':b'<script src="./assets/app.js"></script>',
               '.vite/manifest.json':f.canonical(vite),'assets/app.js':asset.encode(),asset:data}
         droot=root/'build/frontend/dist'; sroot=root/'build/generated/frontend-resources/decompengine/web/ui'
-        if self.defect!='stale' or mode!='fresh':self.fs.remove(droot);self.fs.remove(sroot)
+        if self.defect!='stale' or mode!='stale':self.fs.remove(droot);self.fs.remove(sroot)
         for name,value in dist.items():self.fs.write(droot/name,value)
         rows=[{'path':name,'sizeBytes':len(value),'sha256':f.sha(value)} for name,value in sorted(dist.items())]
         payload={'schemaVersion':1,'applicationVersion':'0.1.0','entryScript':'assets/app.js','entryStyles':[],'files':rows}
@@ -108,7 +117,10 @@ class FreshnessControls(unittest.TestCase):
         files.write(source/'build/frontend/asset-manifest.json',b'authored original private manifest')
         files.write(source/'build/generated/frontend-resources/decompengine/web/ui/index.html',b'original staged UI')
         files.write(source/'build/generated/frontend-resources/decompengine/web/ui/asset-manifest.json',b'authored original private manifest')
-        manifest={'gradle':'/repo/cache/bin/gradle','gradleHome':'/repo/cache','nodeHome':'/repo/node','javaHome':'/repo/java','packagedBaseline':baseline}
+        tools={}
+        for name,data in (('/repo/node/bin/npm',f.NPM_LINK.encode('ascii')),('/repo/node/lib/node_modules/npm/bin/npm-cli.js',b'// authored inert npm entry')):
+            files.write(name,data);tools[name]={'bytes':len(data),'sha256':f.sha(data)}
+        manifest={'tools':tools,'gradle':'/repo/cache/bin/gradle','gradleHome':'/repo/cache','nodeHome':'/repo/node','javaHome':'/repo/java','packagedBaseline':baseline}
         runner=ProducedFixture(files,fixture,defect)
         return f.Freshness(source,work,manifest,ledger,files,runner),runner,files,clock
 
@@ -117,7 +129,7 @@ class FreshnessControls(unittest.TestCase):
         self.assertEqual('PASSED_STAGE_ONLY',result['status'])
         self.assertEqual({'PASSED'},{row['status'] for row in result['phases'].values()})
         self.assertFalse(result['fullIssue651Accepted']);self.assertFalse(result['descendantAbsenceProven'])
-        self.assertEqual(8,len(runner.calls)) # five Gradle calls plus three drift checks
+        self.assertEqual(9,len(runner.calls)) # six Gradle calls plus three drift checks
         for argv,env in runner.calls:
             self.assertNotIn('--rerun-tasks',argv)
             self.assertEqual('/repo/work/npm-download-cache',env['NPM_CONFIG_CACHE'])
@@ -243,8 +255,8 @@ class FreshnessControls(unittest.TestCase):
 
     def test_prebuild_failure_attributes_only_its_current_phase(self):
         for defect,current,passed,later in (
-                ('drift-prep','drift',('cold','unchanged','warm'),('fresh',)),
-                ('fresh-prep','fresh',('cold','unchanged','warm','drift'),())):
+                ('drift-prep','drift',('cold','unchanged','warm','fresh','stale'),()),
+                ('fresh-prep','fresh',('cold','unchanged','warm'),('stale','drift'))):
             with self.subTest(defect=defect):
                 diagnostic,_,_,_=self.harness(defect)
                 with self.assertRaises(f.Refusal) as caught:diagnostic.run()
@@ -320,20 +332,20 @@ class FreshnessControls(unittest.TestCase):
                     def unregister(self,*args):state['registered']=False
                 def observe(*args):
                     if state['reaped']:raise ChildProcessError('already reaped')
-                    return None
+                    return SimpleNamespace(si_pid=123,si_code=f.os.CLD_EXITED)
                 def signal_group(pid,number):
                     if number and state['reaped']:raise AssertionError('destructive post-reap signal')
                     signals.append(number)
                     if number==0 and defect!='leftover':raise ProcessLookupError('absent')
                 runner=f.Runner(ledger,files,Path('/repo/evidence'))
-                with patch.object(f.signal,'getsignal',return_value=f.signal.SIG_DFL),patch.object(f.subprocess,'Popen',return_value=Child()) as launch,patch.object(f.selectors,'DefaultSelector',return_value=Selector()),patch.object(f.os,'set_blocking'),patch.object(f.os,'read',return_value=b''),patch.object(f.os,'waitid',side_effect=observe),patch.object(f.os,'killpg',side_effect=signal_group):
+                with patch.object(f.signal,'getsignal',return_value=f.signal.SIG_DFL),patch.object(f.subprocess,'Popen',return_value=Child()) as launch,patch.object(f.selectors,'DefaultSelector',return_value=Selector()),patch.object(f.os,'set_blocking'),patch.object(runner,'group_members',return_value=()),patch.object(f.os,'read',return_value=b''),patch.object(f.os,'waitid',side_effect=observe),patch.object(f.os,'killpg',side_effect=signal_group):
                     if defect=='success':
                         result=runner(['NOT_EXECUTED'],Path('/repo/work'),{})
                         self.assertEqual({'code':0,'output':b'','intervened':False,'reaped':True},result)
                     else:
                         with self.assertRaises(f.Refusal):runner(['NOT_EXECUTED'],Path('/repo/work'),{})
                 self.assertEqual(1,launch.call_count);self.assertTrue(state['closed']);self.assertEqual(defect!='success',runner.uncertain)
-                self.assertEqual([f.signal.SIGTERM] if defect=='timeout' else ([0] if defect in ('leftover','success') else []),signals)
+                self.assertEqual([f.signal.SIGTERM,0] if defect=='timeout' else ([0] if defect in ('leftover','success') else []),signals)
                 self.assertIn('/repo/evidence/command-01.log',files.data)
 
     def test_jar_descriptor_admission_refuses_special_or_oversize_before_stream(self):
@@ -366,7 +378,7 @@ class FreshnessControls(unittest.TestCase):
         self.assertTrue(stream.closed);close.assert_not_called()
 
     def test_cleanup_observation_expiry_never_signals_or_masks_primary(self):
-        for late_observation in (1,2):
+        for late_observation in (1,3):
             with self.subTest(observation=late_observation):
                 clock=Clock();ledger=f.Ledger(clock);files=MemoryFiles(ledger);calls=[]
                 primary=f.Refusal('authored original failure');observations=[];closed=[]
@@ -388,7 +400,7 @@ class FreshnessControls(unittest.TestCase):
                     return None
                 def signal_group(pid,number):calls.append(number)
                 runner=f.Runner(ledger,files,Path('/repo/evidence'))
-                with patch.object(f.signal,'getsignal',return_value=f.signal.SIG_DFL),patch.object(f.subprocess,'Popen',return_value=Child()),patch.object(f.selectors,'DefaultSelector',return_value=Selector()),patch.object(f.os,'set_blocking'),patch.object(f.os,'waitid',side_effect=observe),patch.object(f.os,'killpg',side_effect=signal_group):
+                with patch.object(f.signal,'getsignal',return_value=f.signal.SIG_DFL),patch.object(f.subprocess,'Popen',return_value=Child()),patch.object(f.selectors,'DefaultSelector',return_value=Selector()),patch.object(f.os,'set_blocking'),patch.object(runner,'group_members',return_value=()),patch.object(f.os,'waitid',side_effect=observe),patch.object(f.os,'killpg',side_effect=signal_group):
                     with self.assertRaises(f.Refusal) as caught:runner(['NOT_EXECUTED'],Path('/repo/work'),{})
                 self.assertIs(primary,caught.exception);self.assertEqual([True],closed)
                 self.assertEqual([] if late_observation==1 else [f.signal.SIGTERM],calls)
@@ -422,6 +434,230 @@ class FreshnessControls(unittest.TestCase):
         with patch.object(files,'path',return_value=Path('/repo/input')),patch.object(f.os,'open',return_value=42),patch.object(f.os,'fstat',return_value=SimpleNamespace(st_mode=f.stat.S_IFIFO,st_size=0)),patch.object(f.os,'read') as read,patch.object(f.os,'close') as close:
             with self.assertRaises(f.Refusal):files.read('/repo/input')
         read.assert_not_called();close.assert_called_once_with(42)
+
+
+    def test_source_only_invalidation_precedes_sentinel_and_failed_task(self):
+        diagnostic,producer,files,_=self.harness()
+        result=diagnostic.run()
+        self.assertEqual([('cold',False),('unchanged',False),('warm',False),('fresh',False),('stale',True),('drift',False)],producer.observations)
+        self.assertEqual('PASSED_STAGE_ONLY',result['status'])
+        self.assertEqual(files.read('/repo/work/evidence/fresh.json'),files.read('/repo/work/evidence/stale.json'))
+        self.assertEqual('UP-TO-DATE',result['phases']['stale']['taskOutcomes'][':generateFrontendAssetManifest'])
+        diagnostic,producer,files,_=self.harness('missing-source-input')
+        with self.assertRaisesRegex(f.Refusal,'task outcomes'):diagnostic.run()
+        self.assertEqual([('cold',False),('unchanged',False),('warm',False),('fresh',False)],producer.observations)
+        self.assertFalse(any('freshness-obsolete.svg' in name for name in files.data))
+        self.assertEqual('NOT_RUN',diagnostic.phases['stale']['status'])
+        self.assertEqual('NOT_RUN',diagnostic.phases['drift']['status'])
+
+    def test_stale_control_is_independent_closed_outcome_and_byte_check(self):
+        for defect in ('stale','stale-manifest'):
+            with self.subTest(defect=defect):
+                diagnostic,producer,_,_=self.harness(defect)
+                with self.assertRaises((f.Refusal,ValueError)) as caught:diagnostic.run()
+                if defect=='stale':
+                    self.assertIsInstance(caught.exception,f.Refusal);self.assertIn('private manifest/dist mismatch',str(caught.exception))
+                else:self.assertIsInstance(caught.exception,f.json.JSONDecodeError)
+                result=diagnostic.failure(caught.exception)
+                self.assertEqual('PASSED',result['phases']['fresh']['status'])
+                self.assertEqual('FAILED_OR_UNKNOWN',result['phases']['stale']['status'])
+                self.assertEqual('NOT_RUN',result['phases']['drift']['status'])
+                self.assertEqual(('stale',True),producer.observations[-1])
+        good=build_output('stale')
+        self.assertEqual('UP-TO-DATE',f.require_outcomes(good,'stale')[':generateFrontendAssetManifest'])
+        executed={**good,'output':good['output'].replace(b':generateFrontendAssetManifest UP-TO-DATE',b':generateFrontendAssetManifest')}
+        self.assertEqual('EXECUTED',f.require_outcomes(executed,'stale')[':generateFrontendAssetManifest'])
+        for task in ('frontendBuild','stageFrontend','verifyFrontendAssets'):
+            with self.subTest(task=task),self.assertRaises(f.Refusal):
+                f.require_outcomes({**good,'output':good['output'].replace((':'+task+'\n').encode(),(':'+task+' UP-TO-DATE\n').encode())},'stale')
+
+    def test_npm_requires_independently_pinned_fixed_launcher_and_entry(self):
+        for missing in ('/repo/node/bin/npm','/repo/node/lib/node_modules/npm/bin/npm-cli.js'):
+            diagnostic,producer,files,_=self.harness();del diagnostic.manifest['tools'][missing]
+            with patch.object(files,'npm_launcher',wraps=files.npm_launcher) as link,patch.object(files,'read',wraps=files.read) as read:
+                with self.assertRaisesRegex(f.Refusal,'lacks reviewed pin'):f.npm_inputs(diagnostic.manifest,files)
+                link.assert_not_called();read.assert_not_called()
+            with self.assertRaises(f.Refusal):diagnostic.run()
+            self.assertEqual([],producer.calls)
+        diagnostic,_,files,_=self.harness();rows=f.npm_inputs(diagnostic.manifest,files)
+        self.assertEqual({'fixed-symlink-text','regular-entry-bytes'},{row['kind'] for row in rows.values()})
+        for name in diagnostic.manifest['tools']:
+            original=files.data[name];files.data[name]=original+b'changed'
+            with self.subTest(name=name),self.assertRaises(f.Refusal):f.npm_inputs(diagnostic.manifest,files)
+            files.data[name]=original
+
+    def test_actual_npm_leaf_exception_is_fixed_and_generic_paths_still_reject_links(self):
+        files=f.Files.__new__(f.Files);files.repository=Path('/repo');files.ledger=f.Ledger(Clock())
+        expected=f.NPM_LINK.encode('ascii')
+        def metadata(mode=f.stat.S_IFLNK|0o777,size=len(expected),inode=2):
+            return SimpleNamespace(st_dev=1,st_ino=inode,st_mode=mode,st_size=size,st_mtime_ns=3,st_ctime_ns=4)
+        for defect in ('positive','regular','large','wrong','escape','chain','raced','late'):
+            with self.subTest(defect=defect):
+                clock=Clock();files.ledger=f.Ledger(clock)
+                first=metadata(mode=f.stat.S_IFREG if defect=='regular' else f.stat.S_IFLNK|0o777,size=513 if defect=='large' else len(expected))
+                def readlink(path):
+                    if defect=='late':clock.now=406
+                    return {'wrong':'/outside/npm-cli.js','escape':'../../outside/npm-cli.js','chain':'../lib/node_modules/npm/bin/other-link.js'}.get(defect,f.NPM_LINK)
+                with patch.object(files,'path',return_value=Path('/repo/node/bin')) as parent,patch.object(Path,'lstat',side_effect=[first,metadata(inode=3 if defect=='raced' else 2)]),patch.object(f.os,'readlink',side_effect=readlink) as link:
+                    if defect=='positive':self.assertEqual(expected,files.npm_launcher('/repo/node/bin/npm'))
+                    else:
+                        with self.assertRaises(f.Refusal):files.npm_launcher('/repo/node/bin/npm')
+                    if defect in ('regular','large'):link.assert_not_called()
+                    parent.assert_called_once_with(Path('/repo/node/bin'))
+        with patch.object(Path,'is_symlink',return_value=True),patch.object(f.os,'open') as opened:
+            with self.assertRaisesRegex(f.Refusal,'symbolic path'):files.read('/repo/node/bin/npm')
+            opened.assert_not_called()
+
+    def test_npm_mutation_before_after_command_and_before_final_credit_refuses(self):
+        for when in ('before','after','final'):
+            with self.subTest(when=when):
+                diagnostic,producer,files,_=self.harness();entry='/repo/node/lib/node_modules/npm/bin/npm-cli.js'
+                f.npm_inputs(diagnostic.manifest,files)  # independently admitted before injected mutation
+                if when=='before':files.data[entry]+=b'changed'
+                def invoke(argv,cwd,env):
+                    result=producer(argv,cwd,env)
+                    if when=='after' or (when=='final' and sum(a[-1]=='--check' for a,_ in producer.calls)==3):files.data[entry]+=b'changed'
+                    return result
+                diagnostic.runner=invoke
+                with self.assertRaisesRegex(f.Refusal,'npm reviewed input'):diagnostic.run()
+                self.assertEqual(0 if when=='before' else (1 if when=='after' else 9),len(producer.calls))
+                if when=='final':self.assertEqual('PASSED',diagnostic.phases['drift']['status'])
+
+    def runner_vector(self, defect):
+        clock=Clock();ledger=f.Ledger(clock);files=MemoryFiles(ledger);events=[]
+        state={'waited':False,'registered':True,'closed':False,'term':False,'kill':False}
+        class Stream:
+            def fileno(self):return 42
+            def close(self):state['closed']=True
+        class Child:
+            pid=123;stdout=Stream()
+            def wait(self,timeout):
+                state['waited']=True;events.append(('wait',timeout))
+                if defect=='ambiguous-wait':raise OSError('authored ambiguous wait')
+                return 0
+        class Selector:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def register(self,*args):pass
+            def get_map(self):return {1:True} if state['registered'] else {}
+            def select(self,timeout):return [(SimpleNamespace(fileobj=Child.stdout),None)]
+            def unregister(self,*args):state['registered']=False
+        def observe(kind,pid,flags):
+            self.assertEqual((f.os.P_PID,123,f.os.WEXITED|f.os.WNOHANG|f.os.WNOWAIT),(kind,pid,flags))
+            self.assertFalse(state['waited']);events.append(('observe',clock.now))
+            if defect=='unknown-wait':raise ChildProcessError('authored ownership ambiguity')
+            return SimpleNamespace(si_pid=124 if defect=='wrong-child' else 123,si_code=f.os.CLD_EXITED)
+        def members(pid,cleanup=False):
+            self.assertEqual(123,pid);self.assertFalse(state['waited']);events.append(('members',cleanup))
+            if defect=='late-observation':clock.now=421
+            if defect=='unknown-scan':raise PermissionError('authored metadata refusal')
+            if defect=='survivor-kill' and not state['kill']:return (124,)
+            if defect=='survivor-term' and not state['term']:return (124,)
+            return ()
+        def send(pid,number):
+            self.assertEqual(123,pid);events.append(('signal',number))
+            if number:
+                self.assertFalse(state['waited'])
+                if number==f.signal.SIGTERM:state['term']=True
+                elif number==f.signal.SIGKILL:state['kill']=True
+                else:raise AssertionError('unexpected signal')
+            elif defect!='post-reap-leftover':raise ProcessLookupError('authored group absent')
+        runner=f.Runner(ledger,files,Path('/repo/evidence'));result=error=None
+        with ExitStack() as stack:
+            for obj,name,kwargs in ((f.signal,'getsignal',{'return_value':f.signal.SIG_DFL}),(f.subprocess,'Popen',{'return_value':Child()}),(f.selectors,'DefaultSelector',{'return_value':Selector()}),(f.os,'set_blocking',{}),(f.os,'read',{'return_value':b''}),(f.os,'waitid',{'side_effect':observe}),(f.os,'killpg',{'side_effect':send}),(runner,'group_members',{'side_effect':members}),(f.time,'sleep',{'side_effect':lambda amount:setattr(clock,'now',clock.now+amount)})):
+                stack.enter_context(patch.object(obj,name,**kwargs))
+            try:result=runner(['NOT_EXECUTED'],Path('/repo/work'),{})
+            except (f.Refusal,OSError) as caught:error=caught
+        return result,error,state,events,files,runner
+
+    def test_held_exited_leader_survivors_are_signaled_before_reap_and_never_success(self):
+        for defect in ('survivor-term','survivor-kill','unknown-scan'):
+            with self.subTest(defect=defect):
+                result,error,state,events,files,runner=self.runner_vector(defect)
+                self.assertIsNone(result);self.assertIsInstance(error,(f.Refusal,OSError));self.assertTrue(runner.uncertain)
+                self.assertTrue(state['waited']);self.assertTrue(state['closed'])
+                nonzero=[event[1] for event in events if event[0]=='signal' and event[1]]
+                self.assertEqual([f.signal.SIGTERM]+([] if defect=='survivor-term' else [f.signal.SIGKILL]),nonzero)
+                waiting=next(i for i,e in enumerate(events) if e[0]=='wait')
+                self.assertTrue(all(i<waiting for i,e in enumerate(events) if e[0]=='signal' and e[1]))
+                facts=f.closed_json(files.data['/repo/evidence/command-01.json'])
+                self.assertTrue(facts['rootReaped']);self.assertTrue(facts['operationalGroupAbsent'])
+                self.assertTrue(facts['intervened']);self.assertFalse(facts['descendantAbsenceProven'])
+
+    def test_wait_ambiguity_late_observation_and_post_reap_group_never_grant_signal_authority(self):
+        for defect in ('ambiguous-wait','unknown-wait','wrong-child','late-observation','post-reap-leftover'):
+            with self.subTest(defect=defect):
+                result,error,state,events,_,runner=self.runner_vector(defect)
+                self.assertIsNone(result);self.assertIsNotNone(error);self.assertTrue(runner.uncertain);self.assertTrue(state['closed'])
+                self.assertFalse(any(kind=='signal' and value for kind,value in events))
+                if defect in ('ambiguous-wait','post-reap-leftover'):self.assertTrue(state['waited'])
+        result,error,state,events,_,runner=self.runner_vector('positive')
+        self.assertIsNone(error);self.assertEqual({'code':0,'output':b'','intervened':False,'reaped':True},result)
+        self.assertFalse(runner.uncertain);self.assertTrue(state['closed'])
+        self.assertEqual([0],[value for kind,value in events if kind=='signal'])
+
+    def group_vector(self, names, defect=None):
+        clock=Clock();ledger=f.Ledger(clock);files=MemoryFiles(ledger)
+        runner=f.Runner(ledger,files,Path('/repo/evidence'));opened=[];closed=[];reads=[];buffers={}
+        class Entries:
+            advances=0;closed=False
+            def __init__(self):self.items=iter(names)
+            def __enter__(self):return self
+            def __exit__(self,*args):self.closed=True
+            def __next__(self):self.advances+=1;return SimpleNamespace(name=next(self.items))
+        entries=Entries()
+        def metadata(fd):
+            return SimpleNamespace(st_dev=1,st_ino=fd,st_mode=f.stat.S_IFIFO if defect=='special' else f.stat.S_IFREG,st_size=4097 if defect=='metadata-large' else 0)
+        def opened_stat(path,flags):
+            self.assertTrue(flags&f.os.O_NOFOLLOW);self.assertTrue(flags&f.os.O_NONBLOCK)
+            if defect=='permission':raise PermissionError('authored denial')
+            pid=int(path.split('/')[2]);fd=1000+pid;opened.append(fd)
+            raw=(str(pid)+' (authored ) comm) Z 1 '+str(123 if pid in (123,124) else pid)+' '+str(123 if pid in (123,124) else pid)+' ').encode()+b'0 '*15+b'99\n'
+            if defect=='session':raw=raw.replace(b' Z 1 123 123 ',b' Z 1 123 999 ')
+            buffers[fd]=b'malformed' if defect=='malformed' else (b'x'*4096 if defect=='read-large' else raw)
+            return fd
+        def read(fd,size):
+            reads.append((fd,size))
+            if defect=='late':clock.now=406
+            data=buffers[fd][:size];buffers[fd]=buffers[fd][size:];return data
+        def named(path,**kwargs):
+            if defect=='disappeared':raise FileNotFoundError('authored disappearing row')
+            fd=1000+int(path.split('/')[2]);row=metadata(fd)
+            if defect=='identity':row.st_ino+=1
+            return row
+        result=error=None
+        with patch.object(f.os,'scandir',return_value=entries) as scan,patch.object(f.os,'open',side_effect=opened_stat),patch.object(f.os,'fstat',side_effect=metadata),patch.object(f.os,'stat',side_effect=named),patch.object(f.os,'read',side_effect=read),patch.object(f.os,'close',side_effect=closed.append):
+            try:result=runner.group_members(123)
+            except (f.Refusal,OSError) as caught:error=caught
+            scan.assert_called_once_with('/proc')
+        return result,error,entries,opened,closed,reads
+
+    def test_bounded_group_observer_parses_parenthesized_comm_and_closes_resources(self):
+        result,error,entries,opened,closed,reads=self.group_vector(['self','123','124','800'])
+        self.assertIsNone(error);self.assertEqual((124,),result)
+        self.assertTrue(entries.closed);self.assertEqual(opened,closed);self.assertEqual(3,len(opened))
+        self.assertTrue(all(0<size<=4096 for _,size in reads))
+        result,error,_,opened,closed,_=self.group_vector(['123'])
+        self.assertEqual((),result);self.assertIsNone(error);self.assertEqual(opened,closed)
+
+    def test_group_observer_all_entry_and_stat_caps_and_unknowns_refuse_not_absence(self):
+        result,error,entries,opened,closed,reads=self.group_vector(['nonnumeric-'+str(i) for i in range(257)])
+        self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+        self.assertEqual(256,entries.advances);self.assertTrue(entries.closed)
+        self.assertEqual([],opened);self.assertEqual([],reads)
+        result,error,entries,opened,closed,_=self.group_vector(['123']+['nonpid-'+str(i) for i in range(254)])
+        self.assertEqual((),result);self.assertIsNone(error);self.assertEqual(256,entries.advances);self.assertTrue(entries.closed);self.assertEqual(opened,closed)
+        result,error,entries,opened,closed,_=self.group_vector(['self','800'])
+        self.assertIsNone(result);self.assertIsInstance(error,f.Refusal);self.assertTrue(entries.closed);self.assertEqual(opened,closed)
+        for defect in ('permission','special','metadata-large','read-large','late','malformed','session','disappeared','identity'):
+            with self.subTest(defect=defect):
+                result,error,entries,opened,closed,reads=self.group_vector(['123'],defect)
+                self.assertIsNone(result);self.assertIsNotNone(error);self.assertTrue(entries.closed);self.assertEqual(opened,closed)
+                if defect in ('special','metadata-large'):self.assertEqual([],reads)
+                if defect=='read-large':self.assertEqual(4096,sum(size for _,size in reads))
+        with patch.object(f,'GROUP_SCAN_BYTES',1):
+            result,error,entries,opened,closed,_=self.group_vector(['123'])
+            self.assertIsNone(result);self.assertIsInstance(error,f.Refusal);self.assertTrue(entries.closed);self.assertEqual(opened,closed)
 
 
 if __name__=='__main__':

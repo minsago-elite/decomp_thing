@@ -59,6 +59,9 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Check frontend freshness diagnostic controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-frontend-freshness.py
       - name: Type-check frontend source and tests
         run: npm --prefix frontend run typecheck
       - name: Lint frontend source and tests
