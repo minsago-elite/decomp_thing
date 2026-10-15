@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import os
 import stat
+from types import CodeType, FunctionType
+from inspect import CO_VARARGS, CO_VARKEYWORDS, CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR
 from bounded_runtime import BASE
 from evaluate_candidate_v3 import validate_exchange
 from build_contract import _pairs
@@ -126,9 +128,17 @@ def _consume(fd, expected, *, sink=None, retain=False):
     return hasher.hexdigest(), b''.join(chunks) if retain else None
 
 
-def _record(path, relative, metadata, fd, parents=()):
-    identity=_identity(metadata);sha,_=_consume(fd,identity)
-    return {'path':_absolute(path),'relative':relative,'identity':identity,'sha256':sha,'size':metadata.st_size,'parents':parents}
+def _record(path, relative, metadata, fd, parents=(), *, predicate_capture=None):
+    coordinate=str(path) if predicate_capture is not None else None  # Shared admission already made path absolute.
+    specification=predicate_capture[0].get(coordinate) if predicate_capture is not None else None
+    if specification is not None and metadata.st_size!=specification[0]:
+        raise ValueError('predicate source exact byte bound')
+    identity=_identity(metadata);sha,raw=_consume(fd,identity,retain=specification is not None)
+    record={'path':_absolute(path),'relative':relative,'identity':identity,'sha256':sha,'size':metadata.st_size,'parents':parents}
+    if specification is not None:
+        if sha!=specification[1]:raise ValueError('unsupported predicate source generation')
+        predicate_capture[1][coordinate]=(record,raw)
+    return record
 
 
 def admit_tree(root, budget=None):
@@ -175,6 +185,15 @@ def admit_files(paths, budget=None, root=None):
     Root-to-scope FD resolution separately has a fixed 128-component bound.
     A multi-directory population must supply its common reviewed scope root.
     """
+    return _admit_files(paths,budget,root)
+
+
+def _admit_files(paths, budget=None, root=None, *, predicate_capture=None):
+    """Charge files and every parent directory within the explicit input scope.
+
+    Root-to-scope FD resolution separately has a fixed 128-component bound.
+    A multi-directory population must supply its common reviewed scope root.
+    """
     budget=budget or TreeBudget();records={};directories={};anchor=_absolute(root) if root is not None else None
     for path in paths:
         path=_absolute(path)
@@ -194,9 +213,73 @@ def admit_files(paths, budget=None, root=None):
         fd=_open_regular(path,parents)
         try:
             metadata=os.fstat(fd);budget.kind(metadata.st_mode,metadata.st_size)
-            records[str(path)]=_record(path,str(path),metadata,fd,parents)
+            records[str(path)]=_record(path,str(path),metadata,fd,parents,predicate_capture=predicate_capture)
         finally:os.close(fd)
     return {'files':records,'directories':directories,'usage':dict(budget.used)}
+
+
+# One reviewed coordinator generation. These hashes do not authenticate its issuer,
+# interpreter/bootstrap, machine inputs or any native qualification.
+_PREDICATE_MODULES = (
+    ('prepare_v3.py',7056,'d7f0f5fc14295a1ce38871b4fd393c83f756662041913f3b1d76c9406e99f6a2'),
+    ('generate_controls_v3.py',8873,'e2cdd7593a0e23b5bbd2cbf0d8a0ea5aec2ff1113be710be114e4852f22b4b30'),
+    ('evaluate_candidate_v3.py',49679,'1ba0dac58a2b2840f1ad958bad5622b37159da350409b39ff27b131545a63639'),
+)
+
+
+def _admit_execution_predicates(paths):
+    # The checkpoint already passed complete charged population equality. Retain
+    # only these three fixed coordinates from their ORIGINAL admission interval.
+    specification={str(_absolute(BASE/name)):(size,sha) for name,size,sha in _PREDICATE_MODULES}
+    if type(paths) is not dict or not specification.keys()<=paths.keys():
+        raise ValueError('missing predicate defining source')
+    captured={}
+    files=_admit_files(paths,root=BASE,predicate_capture=(specification,captured))['files']
+    if captured.keys()!=specification.keys():raise ValueError('incomplete predicate source capture')
+    return files,captured
+
+
+def _predicate_code(module, name, arguments, locals):
+    selected=None
+    for value in module.co_consts:  # Direct module constants only; never recurse.
+        if isinstance(value,CodeType) and value.co_name==name:
+            if selected is not None:raise ValueError('duplicate predicate definition')
+            selected=value
+    forbidden=CO_VARARGS|CO_VARKEYWORDS|CO_GENERATOR|CO_COROUTINE|CO_ASYNC_GENERATOR
+    if (selected is None or selected.co_qualname!=name or selected.co_argcount!=len(arguments) or
+            selected.co_posonlyargcount or selected.co_kwonlyargcount or selected.co_flags&forbidden or
+            selected.co_freevars or selected.co_cellvars or selected.co_names or
+            selected.co_varnames!=arguments+locals):
+        raise ValueError('unsupported pure predicate definition')
+    return selected
+
+
+def _bind_admitted_predicates(sources, captured, checkpoint):
+    expected={str(_absolute(BASE/name)) for name,_,_ in _PREDICATE_MODULES}
+    if captured.keys()!=expected:raise ValueError('incomplete predicate source capture')
+    admitted={}
+    for name,maximum,sha in _PREDICATE_MODULES:
+        coordinate=str(_absolute(BASE/name));record,raw=captured[coordinate]
+        if (sources.get(coordinate) is not record or record['path']!=_absolute(BASE/name) or
+                record['size']!=maximum or type(raw) is not bytes or len(raw)!=maximum or
+                record['sha256']!=sha or checkpoint.get(coordinate)!=sha or
+                hashlib.sha256(raw).hexdigest()!=sha):
+            raise ValueError('predicate original capture/checkpoint binding differs')
+        admitted[name]=raw
+    compiled={name:compile(admitted[name],str(_absolute(BASE/name)),'exec',dont_inherit=True,optimize=0)
+              for name,_,_ in _PREDICATE_MODULES}
+    # The fixed prepare SHA binds its reviewed reexport to this exact evaluator.
+    # Never execute module bodies/imports, use module caches, or reopen source.
+    prepare=compiled['prepare_v3.py']
+    if any(isinstance(value,CodeType) and value.co_name in ('control_policy','control_passed')
+           for value in prepare.co_consts):
+        raise ValueError('unsupported predicate reexport generation')
+    policy=_predicate_code(compiled['generate_controls_v3.py'],'control_policy',(),())
+    passed=_predicate_code(compiled['evaluate_candidate_v3.py'],'control_passed',('control','report'),('kind',))
+    # Empty co_names is specific to the reviewed literal/input-only bodies, not
+    # a general globals analysis (attribute/method names also occur there).
+    return (FunctionType(policy,{'__builtins__':{}},'control_policy'),
+            FunctionType(passed,{'__builtins__':{}},'control_passed'))
 
 
 def read_admitted(record, maximum=MAX_BYTES):
@@ -469,13 +552,12 @@ def freeze(preflight, review, output, toolchain_pin, acceptance, source_checkpoi
     if set(checkpoint) != {'schemaVersion','files'} or checkpoint['schemaVersion'] != 3 or checkpoint['files'] != bindings['initialSha256']:
         raise ValueError('preflight must use exact prior source checkpoint')
     if set(checkpoint['files']) != execution_source_paths():raise ValueError('incomplete execution source checkpoint')
-    sources=admit_files(checkpoint['files'],root=BASE)['files']
+    sources,predicate_capture=_admit_execution_predicates(checkpoint['files'])
     for path,sha in checkpoint['files'].items():
         if sources[str(_absolute(path))]['sha256'] != sha:raise ValueError('source changed after checkpoint:'+path)
     if sources[str(_absolute(BASE/'contracts/helper-schema.json'))]['sha256']!=bindings['helperSchemaSha256']:raise ValueError('helper schema drift')
     if record(preflight/'record_identity_probe')['sha256']!=bindings['helperCopySha256']:raise ValueError('helper binary drift')
-    from generate_controls_v3 import control_policy
-    from prepare_v3 import control_passed
+    control_policy,control_passed=_bind_admitted_predicates(sources,predicate_capture,checkpoint['files'])
     manifest=receipt(preflight/'controls/manifest.json',maximum=1048576)
     if set(manifest)!={'schemaVersion','controls'} or manifest['schemaVersion']!=3:raise ValueError('closed v3 control manifest required')
     policy=control_policy();controls={}

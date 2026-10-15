@@ -766,4 +766,270 @@ class RegularOpenOwnership(unittest.TestCase):
         self.assertEqual([41,42],value['attempted']);self.assertEqual(1,value['fstat_calls'])
 
 
+# Exact reviewed coordinator SOURCE TEXT only. Never execute these module bodies.
+# No private originals/cases/candidates or host build path is a runtime fixture input.
+_PREDICATE_PREPARE_SOURCE = b'"""Trusted-only preflight template. Execution requires later native authorization."""\nimport argparse\nimport json\nfrom pathlib import Path\nfrom bounded_runtime import write_json, contained_command\nfrom build_contract import write_visible, profile\nfrom evaluate_candidate_v3 import (BASE,evaluate,run,phase_command,runtime_command,process_observation,validate_exchange,SCENARIO_FAMILIES,control_passed,new_worker_leaf,copy_input,compile_sequence,environment)\nfrom generate_controls_v3 import generate\nfrom freeze_v3 import execution_source_paths, admit_files, read_json, CopyPlan\n\nTEMPLATE_BASE=Path(__file__).resolve().parent\n\n\ndef preflight(output, helper, source_checkpoint):\n    if \'build/acp-decomp-effectiveness/callable-library-v3\' not in str(BASE):raise ValueError(\'trusted source copy required\')\n    if TEMPLATE_BASE != BASE:raise ValueError(\'compose current templates and held support in one new trusted generation before preflight\')\n    checkpoint=read_json(source_checkpoint)\n    if set(checkpoint)!={\'schemaVersion\',\'files\'} or checkpoint[\'schemaVersion\']!=3:raise ValueError(\'prior immutable v3 source checkpoint required\')\n    initial=checkpoint[\'files\']\n    # Complete exact execution-source set; no runtime results or historical observations are inputs.\n    required=execution_source_paths()\n    if set(initial)!=required:raise ValueError(\'source checkpoint must cover complete exact execution inputs\')\n    sources=admit_files(initial,root=BASE)[\'files\']\n    if any(sources[path][\'sha256\']!=sha for path,sha in initial.items()):raise ValueError(\'source changed before preflight\')\n    helper_record=next(iter(admit_files([helper],root=BASE)[\'files\'].values()))\n    plan=CopyPlan()\n    for path,item in sources.items():plan.add(Path(\'execution-snapshot\')/Path(path).relative_to(BASE),record=item)\n    plan.add(\'record_identity_probe\',record=helper_record)\n    plan.execute(output)  # entire source/helper copy population reserved first\n    write_visible(output)\n    helper_copy=output/\'record_identity_probe\'\n    bindings={\'schemaVersion\':3,\'sourceCheckpointSha256\':next(iter(admit_files([source_checkpoint],root=BASE)[\'files\'].values()))[\'sha256\'],\'initialSha256\':initial,\'helperCopySha256\':helper_record[\'sha256\'],\'helperSchemaSha256\':sources[str(BASE/\'contracts/helper-schema.json\')][\'sha256\'],\'helperSchemaVersion\':3}\n    validate_exchange(\'execution-bindings\',bindings);write_json(output/\'execution-bindings.json\',bindings)\n    def snapshot_sha(path):return next(iter(admit_files([path],root=BASE)[\'files\'].values()))[\'sha256\']\n    controls=generate(output/\'controls\');caller=output/\'caller\'\n    caller_work=new_worker_leaf(\'caller-build\')\n    caller_source=copy_input(BASE/\'private/caller.c\',caller_work/\'caller.c\')\n    caller_binary=caller_work/\'caller\'\n    caller_argv=[\'/usr/bin/gcc\',\'-std=c11\',\'-O2\',\'-Wall\',\'-Wextra\',\'-Werror\',str(caller_source),\'-ldl\',\'-o\',str(caller_binary)]\n    build,_=run(contained_command(caller_argv,caller_work,(caller_source,),environment=environment(caller_work)),caller_work,timeout=profile()[\'bounds\'][\'callerBuildSeconds\'],phase=\'caller-build\')\n    write_json(output/\'caller-build.json\',build)\n    if build[\'status\']!=\'passed\':raise RuntimeError(\'caller build incomplete\')\n    copy_input(caller_binary,caller,executable=True)\n    def retain_reference(phase,status):write_json(output/(\'reference-\'+phase+\'.json\'),status)\n    reference_status,reference_artifacts=compile_sequence(BASE/\'private/original.c\',headers=(BASE/\'private/original.h\',),retain=retain_reference)\n    if any(reference_status.get(phase,{}).get(\'status\')!=\'passed\' for phase in (\'preprocess\',\'compile\',\'link\')):\n        raise RuntimeError(\'reference build incomplete\')\n    reference=output/\'reference\';reference.mkdir(mode=0o700)\n    copy_input(reference_artifacts[\'link\'],reference/\'libcandidate.so\')\n    case_definitions=read_json(BASE/\'private/cases.json\',maximum=1048576)\n    cases=case_definitions[\'scenarios\']\n    if [c[\'id\'] for c in cases]!=list(range(24)) or [c[\'family\'] for c in cases]!=SCENARIO_FAMILIES:raise ValueError(\'scenario source identity drift\')\n    reference_library=(reference/\'libcandidate.so\').resolve(strict=True)\n    reference_input={\'path\':str(reference_library),\'sha256\':snapshot_sha(reference_library)}\n    observations=[]\n    for case in cases:\n        runtime_work=new_worker_leaf(\'runtime\')\n        status,result=run(runtime_command(caller,reference_library,case[\'id\']),runtime_work,timeout=profile()[\'bounds\'][\'runtimeSeconds\'],phase=\'runtime\',runtime_library=reference_input)\n        process=process_observation(result)\n        # Nonzero completed reference termination is valid; incomplete capture never becomes an oracle.\n        if not process[\'completed\']:raise RuntimeError(\'reference process incomplete\')\n        receipt=output/(\'reference-process-\'+str(case[\'id\'])+\'.json\');write_json(receipt,status)\n        observations.append({\'id\':case[\'id\'],\'family\':case[\'family\'],\'process\':process,\'evidenceSha256\':snapshot_sha(receipt)})\n    if snapshot_sha(reference_library)!=reference_input[\'sha256\']:raise ValueError(\'admitted reference library changed during scenarios\')\n    observations_path=output/\'reference-observations.json\'\n    value={\'schemaVersion\':3,\'sourceSha256\':sources[str(BASE/\'private/original.c\')][\'sha256\'],\'callerSha256\':snapshot_sha(caller),\'callerPath\':str(caller.resolve(strict=True)),\'libraryPath\':reference_input[\'path\'],\'librarySha256\':reference_input[\'sha256\'],\'profileSha256\':snapshot_sha(BASE/\'contracts/candidate-build-profile.json\'),\'observations\':observations}\n    validate_exchange(\'reference-observations\',value);write_json(observations_path,value)\n    rows=[]\n    for c in controls:\n        receipt=output/(\'control-\'+c[\'name\'])/\'receipt.json\'\n        report=evaluate(Path(c[\'path\']),receipt.parent,helper_copy,caller,output,observations_path)\n        rows.append({\'name\':c[\'name\'],\'expected\':c[\'expected\'],\'expectedStage\':c[\'stage\'],\'passed\':control_passed(c,report),\'receipt\':str(receipt),\'receiptSha256\':snapshot_sha(receipt),\'runtimeRequestCount\':report[\'runtimeRequestCount\'],\'completedScenarioProcessCount\':report[\'completedScenarioProcessCount\'],\'unknownScenarioProcessCount\':report[\'unknownScenarioProcessCount\']})\n    summary={\'schemaVersion\':3,\'status\':\'preflight-only-independent-review-required\',\'freezeCreated\':False,\'allControlsPassed\':all(r[\'passed\'] for r in rows),\'executionDependenciesUnchanged\':all(item[\'sha256\']==initial[path] for path,item in admit_files(initial,root=BASE)[\'files\'].items()) and next(iter(admit_files([helper],root=BASE)[\'files\'].values()))[\'sha256\']==helper_record[\'sha256\'],\'rows\':rows}\n    validate_exchange(\'matrix\',summary);write_json(output/\'matrix.json\',summary);return summary\n\n\nif __name__==\'__main__\':\n    parser=argparse.ArgumentParser(description=__doc__)\n    for name in (\'output\',\'helper\',\'source-checkpoint\'):parser.add_argument(\'--\'+name,type=Path,required=True)\n    args=parser.parse_args();print(json.dumps(preflight(args.output.resolve(),args.helper.resolve(),args.source_checkpoint.resolve()),indent=2))\n'
+_PREDICATE_GENERATOR_SOURCE = b'"""Fresh private source controls; never reads a historical candidate."""\nfrom pathlib import Path\nimport hashlib\nimport json\nfrom build_contract import load_profile\nfrom freeze_v3 import read_regular, CopyPlan\nBASE=Path(__file__).resolve().parent\n\ndef generate(destination):\n    maximum=load_profile()[\'bounds\'][\'sourceBytes\']\n    header=read_regular(BASE/\'private/original.h\',maximum).decode(\'utf8\')\n    source=read_regular(BASE/\'private/original.c\',maximum).decode(\'utf8\').replace(\'#include "original.h"\', header).replace(\'#define ACP_PUBLIC __attribute__((visibility("default")))\',\'#define ACP_PUBLIC\')\n    controls=[];plan=CopyPlan()\n    def add(name,text,kind=\'refused\',stage=\'declarations\'):\n        raw=text.encode(\'utf8\')\n        if len(raw)>maximum:raise ValueError(\'control source bound\')\n        path=destination/(name+\'.c\');plan.add(name+\'.c\',raw=raw)\n        controls.append({\'name\':name,\'path\':str(path),\'sha256\':hashlib.sha256(raw).hexdigest(),\'expected\':kind,\'stage\':stage})\n    add(\'baseline\',source,\'matched\',\'behavior\')\n    add(\'renamed\',source.replace(\'struct acp_pair\',\'struct alternate_pair\').replace(\'struct acp_record\',\'struct alternate_record\'),\'matched\',\'behavior\')\n    anonymous=source.replace(\'struct acp_pair {\',\'struct {\').replace(\'struct acp_record {\',\'struct {\')\n    add(\'anonymous\',anonymous,\'matched\',\'behavior\')\n    aliases=source.replace(\'} acp_pair;\',\'} pair_origin;\\ntypedef pair_origin pair_mid;\\ntypedef pair_mid acp_pair;\').replace(\'} acp_record;\',\'} record_origin;\\ntypedef record_origin record_mid;\\ntypedef record_mid acp_record;\')\n    add(\'two-hop-alias\',aliases,\'matched\',\'behavior\')\n    mixed=aliases.replace(\'typedef int32_t (*acp_callback)\', \'typedef int32_t callback_scalar;\\ntypedef double weight_scalar;\\ntypedef int32_t (*acp_callback)\').replace(\'(*acp_callback)(int32_t value\',\'(*acp_callback)(callback_scalar value\').replace(\'double weight;\',\'double weight;\')\n    # Alias defined before records, then used in fields, parameters and callback.\n    mixed=mixed.replace(\'typedef enum acp_mode\',\'typedef double field_scalar;\\ntypedef enum acp_mode\').replace(\'    double weight;\',\'    field_scalar weight;\').replace(\'acp_pair pair, double scale\',\'acp_pair pair, weight_scalar scale\')\n    add(\'alias-parameter-callback-fields\',mixed,\'matched\',\'behavior\')\n    add(\'missing-fold\',source.replace(\'acp_fold\',\'removed_fold\'),\'refused\',\'exports\')\n    add(\'reordered-fields\',source.replace(\'    double weight;\\n    uint64_t bits;\',\'    uint64_t bits;\\n    double weight;\'))\n    add(\'equal-size-field\',source.replace(\'    uint64_t bits;\',\'    double bits;\').replace(\'pair.bits & UINT64_C(7)\',\'(uint64_t)pair.bits & UINT64_C(7)\'))\n    add(\'scale-parameter\',source.replace(\'acp_pair pair, double scale\',\'acp_pair pair, uint64_t scale\'))\n    add(\'signedness\',source.replace(\'acp_mix(int32_t delta\',\'acp_mix(uint32_t delta\'))\n    add(\'width\',source.replace(\'acp_mix(int32_t delta\',\'acp_mix(int64_t delta\'))\n    add(\'callback\',source.replace(\'(*acp_callback)(int32_t value\',\'(*acp_callback)(int64_t value\'))\n    start=source.index(\'ACP_PUBLIC double acp_fold(unsigned count, ...)\\n{\')\n    fixed=source[:start]+\'ACP_PUBLIC double acp_fold(unsigned count) { return (double)count * 0.5; }\\n\'\n    fixed=fixed.replace(\'double acp_fold(unsigned count, ...);\',\'double acp_fold(unsigned count);\')\n    add(\'varargs\',fixed)\n    add(\'state-layout\',source.replace(\'    uint32_t calls;\',\'    uint64_t calls;\'))\n    add(\'hidden-symbol\',source.replace(\'ACP_PUBLIC uint64_t acp_mix(\', \'__attribute__((visibility("hidden"))) uint64_t acp_mix(\'),\'refused\',\'exports\')\n    static=source.replace(\'uint64_t acp_mix(\', \'static uint64_t acp_mix(\').replace(\'ACP_PUBLIC static uint64_t\',\'__attribute__((used)) static uint64_t\')\n    add(\'static-symbol\',static,\'refused\',\'exports\')\n    add(\'ms-abi\',source.replace(\'uint64_t acp_mix(\', \'uint64_t __attribute__((ms_abi)) acp_mix(\'))\n    add(\'packed\',source.replace(\'struct acp_pair {\',\'struct __attribute__((packed)) acp_pair {\'))\n    add(\'anonymous-attribute\',anonymous.replace(\'typedef struct {\',\'typedef struct __attribute__((packed)) {\',1))\n    add(\'alias-attribute\',source.replace(\'} acp_pair;\',\'} acp_pair __attribute__((aligned(32)));\'))\n    add(\'asm-label\',source.replace(\'uint8_t rotate);\',\'uint8_t rotate) __asm__("other_mix");\',1),\'refused\',\'exports\')\n    add(\'behavior-mutant\',source.replace(\'0x9e3779b97f4a7c15\',\'0x9e3779b97f4a7c16\'),\'mismatched\',\'behavior\')\n    add(\'overinvoke\',source.replace(\'    result = callback(value, context);\',\'    callback(value, context);\\n    callback(value, context);\\n    callback(value, context);\\n    result = callback(value, context);\'),\'mismatched\',\'behavior\')\n    add(\'abnormal-runtime\',source.replace(\'    uint64_t combined = value ^ signed_token(delta);\',\'    __builtin_trap();\\n    uint64_t combined = value ^ signed_token(delta);\'),\'mismatched\',\'behavior\')\n    add(\'timeout\',source.replace(\'    uint64_t combined = value ^ signed_token(delta);\',\'    for (;;) { __asm__ volatile(""); }\\n    uint64_t combined = value ^ signed_token(delta);\'),\'unknown\',\'behavior\')\n    overflow=source.replace(\'    uint64_t combined = value ^ signed_token(delta);\',\'    extern long write(int, const void *, unsigned long);\\n    static const char output[8192] = {0};\\n    for (;;) { (void)write(1, output, sizeof(output)); }\\n    uint64_t combined = value ^ signed_token(delta);\')\n    add(\'output-overflow\',overflow,\'unknown\',\'behavior\')\n    add(\'constructor-load-failure\',source+\'\\n__attribute__((constructor)) static void load_failure(void) { __builtin_trap(); }\\n\',\'mismatched\',\'behavior\')\n    add(\'constructor-marker-exit\',source+\'\\n#include <unistd.h>\\n__attribute__((constructor)) static void early(void) { const char m[]="ACP_V2_LOAD_OK\\\\nACP_V2_CALL\\\\n"; write(2,m,sizeof(m)-1); _exit(7); }\\n\',\'mismatched\',\'behavior\')\n    add(\'constructor-crash\',source+\'\\n__attribute__((constructor)) static void crash(void) { __builtin_trap(); }\\n\',\'mismatched\',\'behavior\')\n    sentinel=destination/\'host-only-sentinel.h\'\n    plan.add(\'host-only-sentinel.h\',raw=b\'#define ACP_HOST_ONLY_SENTINEL_1507 1\\n\')\n    add(\'macro-host-include\',\'#define ACP_HASH #\\nACP_HASH include "\'+str(sentinel.absolute())+\'"\\n\'+source,\'refused\',\'declarations\')\n    add(\'private-source-include\',\'#include "/work/expected.c"\\n\',\'build-failed\',\'preprocess\')\n    add(\'private-header-include\',\'#include "/work/original.h"\\n\',\'build-failed\',\'preprocess\')\n    manifest={\'schemaVersion\':3,\'controls\':controls}\n    plan.add_json(\'manifest.json\',manifest)\n    # Every control, sentinel, directory and manifest is reserved before output.\n    plan.execute(destination)\n    return controls\n\n\ndef control_policy():\n    """Reviewed finite control coverage, independent of a produced manifest."""\n    return {\'baseline\': {\'expected\': \'matched\', \'stage\': \'behavior\'}, \'renamed\': {\'expected\': \'matched\', \'stage\': \'behavior\'}, \'anonymous\': {\'expected\': \'matched\', \'stage\': \'behavior\'}, \'two-hop-alias\': {\'expected\': \'matched\', \'stage\': \'behavior\'}, \'alias-parameter-callback-fields\': {\'expected\': \'matched\', \'stage\': \'behavior\'}, \'missing-fold\': {\'expected\': \'refused\', \'stage\': \'exports\'}, \'reordered-fields\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'equal-size-field\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'scale-parameter\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'signedness\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'width\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'callback\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'varargs\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'state-layout\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'hidden-symbol\': {\'expected\': \'refused\', \'stage\': \'exports\'}, \'static-symbol\': {\'expected\': \'refused\', \'stage\': \'exports\'}, \'ms-abi\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'packed\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'anonymous-attribute\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'alias-attribute\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'asm-label\': {\'expected\': \'refused\', \'stage\': \'exports\'}, \'behavior-mutant\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'overinvoke\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'abnormal-runtime\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'timeout\': {\'expected\': \'unknown\', \'stage\': \'behavior\'}, \'output-overflow\': {\'expected\': \'unknown\', \'stage\': \'behavior\'}, \'constructor-load-failure\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'constructor-marker-exit\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'constructor-crash\': {\'expected\': \'mismatched\', \'stage\': \'behavior\'}, \'macro-host-include\': {\'expected\': \'refused\', \'stage\': \'declarations\'}, \'private-source-include\': {\'expected\': \'build-failed\', \'stage\': \'preprocess\'}, \'private-header-include\': {\'expected\': \'build-failed\', \'stage\': \'preprocess\'}}\n'
+
+
+class AdmittedPredicateSources(unittest.TestCase):
+    def sources(self, root):
+        import hashlib
+        payloads={'prepare_v3.py':_PREDICATE_PREPARE_SOURCE,
+                  'generate_controls_v3.py':_PREDICATE_GENERATOR_SOURCE,
+                  'evaluate_candidate_v3.py':Path(e.__file__).read_bytes()}
+        for name,maximum,sha in f._PREDICATE_MODULES:
+            self.assertEqual(maximum,len(payloads[name]))
+            self.assertEqual(sha,hashlib.sha256(payloads[name]).hexdigest())
+        for name,raw in payloads.items():(root/name).write_bytes(raw)
+        return {str(root/name):hashlib.sha256(raw).hexdigest() for name,raw in payloads.items()},payloads
+
+    def captured(self, root, paths):
+        with patch.object(f,'BASE',root):
+            sources,captured=f._admit_execution_predicates(paths)
+            policy,passed=f._bind_admitted_predicates(sources,captured,paths)
+        return sources,captured,policy,passed
+
+    def report(self, expected, stage='declarations'):
+        value=report_fixture()
+        admitted=expected in ('matched','mismatched','unknown')
+        if expected=='mismatched':
+            rows=[e.scenario_entry(o,receipt(stdout=b'authored different bytes'),True,'a'*64) for o in observations()]
+        elif expected=='unknown':
+            incomplete=receipt();incomplete['timedOut']=True
+            rows=[e.scenario_entry(o,incomplete,True,'a'*64) for o in observations()]
+        elif not admitted:
+            rows=[e.scenario_entry(o) for o in observations()]
+        else:rows=value['scenarios']
+        value['admitted']=admitted;value['scenarios']=rows
+        if not admitted:
+            value['runtimeInputs']=None
+            for name in e.PHASES:
+                value['phases'][name]={'status':'not-attempted','reason':'authored static refusal','evidenceSha256':None}
+            value['phases'][stage]['status']='failed' if expected=='build-failed' else 'refused'
+        summary=e.summarize(rows,admitted);behavior=summary.pop('behaviorStatus')
+        value.update(summary);value['phases']['behavior']['status']=behavior
+        value['phases']['load']={'status':'unverified' if admitted else 'not-attempted','value':None}
+        e.validate_exchange('report',value)
+        return value
+
+    def freeze_fixture(self, root, *, failing_baseline=False):
+        import hashlib
+        from test_link_inputs import LinkInputTests, pin
+        paths,payloads=self.sources(root)
+        for name in ('helper-schema.json','candidate-build-profile.json'):
+            path=root/'contracts'/name;path.parent.mkdir(exist_ok=True)
+            path.write_bytes((e.BASE/'contracts'/name).read_bytes())
+            paths[str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
+        _,_,policy,_=self.captured(root,paths)
+        preflight=root/'preflight';preflight.mkdir();(preflight/'controls').mkdir()
+        helper=preflight/'record_identity_probe';helper.write_bytes(b'authored inert helper')
+        controls=[];rows=[]
+        for name,entry in policy().items():
+            source=preflight/'controls'/(name+'.c');source.write_bytes(('authored '+name).encode())
+            source_sha=hashlib.sha256(source.read_bytes()).hexdigest()
+            controls.append({'name':name,'path':str(source),'sha256':source_sha,**entry})
+            directory=preflight/'receipts'/name;directory.mkdir(parents=True)
+            evidence=directory/'synthetic.json';evidence.write_bytes(('authored evidence '+name).encode())
+            evidence_sha=hashlib.sha256(evidence.read_bytes()).hexdigest()
+            expected='mismatched' if failing_baseline and name=='baseline' else entry['expected']
+            report=self.report(expected,entry['stage']);report['candidateSha256']=source_sha
+            report['evidenceFiles']={'synthetic.json':evidence_sha}
+            for row in report['scenarios']:
+                if row['evidenceSha256'] is not None:row['evidenceSha256']=evidence_sha
+            e.validate_exchange('report',report)
+            target=directory/'receipt.json';target.write_text(json.dumps(report))
+            rows.append({'name':name,'expected':entry['expected'],'expectedStage':entry['stage'],'passed':True,
+                         'receipt':str(target),'receiptSha256':hashlib.sha256(target.read_bytes()).hexdigest(),
+                         'runtimeRequestCount':report['runtimeRequestCount'],
+                         'completedScenarioProcessCount':report['completedScenarioProcessCount'],
+                         'unknownScenarioProcessCount':report['unknownScenarioProcessCount']})
+        (preflight/'controls/manifest.json').write_text(json.dumps({'schemaVersion':3,'controls':controls}))
+        matrix={'schemaVersion':3,'status':'preflight-only-independent-review-required','freezeCreated':False,
+                'allControlsPassed':True,'executionDependenciesUnchanged':True,'rows':rows}
+        e.validate_exchange('matrix',matrix);(preflight/'matrix.json').write_text(json.dumps(matrix))
+        checkpoint=root/'source.json';checkpoint.write_text(json.dumps({'schemaVersion':3,'files':paths}))
+        bindings={'schemaVersion':3,'sourceCheckpointSha256':hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                  'initialSha256':paths,'helperCopySha256':hashlib.sha256(helper.read_bytes()).hexdigest(),
+                  'helperSchemaSha256':paths[str(root/'contracts/helper-schema.json')],'helperSchemaVersion':3}
+        e.validate_exchange('execution-bindings',bindings)
+        (preflight/'execution-bindings.json').write_text(json.dumps(bindings))
+        # Reuse the existing inert producer fixture, not a schema/qualification stub.
+        fixture=LinkInputTests();self.addCleanup(fixture.doCleanups);fixture.setUp()
+        toolchain=pin.collect_pin(fixture.manifest,fixture.root)
+        e.validate_exchange('toolchain-pin',toolchain)
+        (root/'toolchain.json').write_text(json.dumps(toolchain))
+        for name in ('review.md','acceptance.md','qualification.md'):(root/name).write_text('UNQUALIFIED fixture')
+        return (preflight,root/'review.md',root/'not-created',root/'toolchain.json',root/'acceptance.md',
+                checkpoint,root/'qualification.md'),paths,payloads
+
+    def test_actual_predicate_generation_keeps_record_shape_and_all_five_pure_outcomes(self):
+        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            root=Path(temporary);paths,_=self.sources(root);other=root/'other.py';other.write_bytes(b'never retained')
+            paths[str(other)]=f.hashlib.sha256(b'never retained').hexdigest()
+            sources,captured,policy,passed=self.captured(root,paths)
+            self.assertEqual({str(root/name) for name,_,_ in f._PREDICATE_MODULES},set(captured))
+            self.assertEqual({'path','relative','identity','sha256','size','parents'},set(sources[str(other)]))
+            for name,(record,raw) in captured.items():
+                self.assertIs(record,sources[name]);self.assertEqual(record['size'],len(raw))
+            table=policy();self.assertEqual(32,len(table))
+            for kind,stage in (('matched','behavior'),('mismatched','behavior'),('unknown','behavior'),
+                               ('refused','declarations'),('build-failed','preprocess')):
+                report=self.report(kind,stage)
+                self.assertTrue(passed({'expected':kind,'stage':stage},report))
+                self.assertFalse(passed({'expected':'matched','stage':stage},self.report('refused',stage)))
+            self.assertEqual({},policy.__globals__['__builtins__']);self.assertEqual({},passed.__globals__['__builtins__'])
+            self.assertEqual('control_policy',policy.__code__.co_qualname)
+            self.assertEqual('control_passed',passed.__code__.co_qualname)
+
+    def test_real_freeze_uses_captured_A_with_pathname_B_and_poisoned_imports_then_refuses_qualification(self):
+        from types import SimpleNamespace
+        for bad_report in (False,True):
+            with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+                root=Path(temporary)/'build/acp-decomp-effectiveness/callable-library-v3';root.mkdir(parents=True)
+                args,paths,payloads=self.freeze_fixture(root,failing_baseline=bad_report)
+                real_admit=f._admit_execution_predicates;real_bind=f._bind_admitted_predicates;seen=[]
+                def admit(checkpoint):
+                    result=real_admit(checkpoint)
+                    for name,raw in payloads.items():(root/name).write_bytes(raw.replace(b'control_passed',b'control_forged')+b'\n# pathname B\n')
+                    return result
+                def bind(*values):
+                    handles=real_bind(*values);seen.append(handles)
+                    self.assertFalse(handles[1]({'expected':'matched'},self.report('refused')))
+                    for name,raw in payloads.items():(root/name).write_bytes(raw)
+                    return handles
+                _,_,actual_policy,_=self.captured(root,paths)
+                expected_policy=actual_policy()
+                poison=SimpleNamespace(control_policy=lambda:expected_policy,control_passed=lambda *unused:True)
+                with patch.object(f,'BASE',root),patch.object(f,'execution_source_paths',return_value=set(paths)), \
+                        patch.object(f,'_admit_execution_predicates',side_effect=admit), \
+                        patch.object(f,'_bind_admitted_predicates',side_effect=bind), \
+                        patch.dict(sys.modules,{name:poison for name in ('prepare_v3','generate_controls_v3','evaluate_candidate_v3')}), \
+                        patch.object(f,'require_qualified_pin',wraps=f.require_qualified_pin) as qualification:
+                    message='control expectation/result drift' if bad_report else 'static-only toolchain pin'
+                    with self.assertRaisesRegex(ValueError,message):f.freeze(*args)
+                self.assertEqual(1,len(seen));self.assertFalse(args[2].exists())
+                if bad_report:qualification.assert_not_called()
+                else:qualification.assert_called_once()
+                self.assertTrue(all((root/name).read_bytes()==raw for name,raw in payloads.items()))
+                # Restored matching bytes do not attest an undetectable OS metadata ABA.
+                restored=f.admit_files(paths,root=root)['files']
+                self.assertEqual(paths,{name:row['sha256'] for name,row in restored.items()})
+
+    def test_predicate_missing_generation_and_original_record_checkpoint_joins_precede_compile(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            root=Path(temporary);paths,payloads=self.sources(root)
+            for missing in tuple(paths):
+                with self.subTest(missing=missing),patch.object(f,'BASE',root), \
+                        patch.object(f,'compile',create=True,side_effect=AssertionError('no compile')) as compiler:
+                    with self.assertRaisesRegex(ValueError,'missing predicate'):f._admit_execution_predicates({k:v for k,v in paths.items() if k!=missing})
+                    compiler.assert_not_called()
+            with patch.object(f,'BASE',root):sources,captured=f._admit_execution_predicates(paths)
+            for fault in ('checkpoint','record','raw','missing-capture'):
+                current=dict(paths);owned=dict(sources);retained=dict(captured)
+                selected=str(root/'evaluate_candidate_v3.py');record,raw=retained[selected]
+                if fault=='checkpoint':current[selected]='0'*64
+                elif fault=='record':owned[selected]=dict(record)
+                elif fault=='raw':retained[selected]=(record,b'X'+raw[1:])
+                else:del retained[selected]
+                with self.subTest(fault=fault),patch.object(f,'BASE',root), \
+                        patch.object(f,'compile',create=True,side_effect=AssertionError('all joins precede compile')) as compiler:
+                    with self.assertRaisesRegex(ValueError,'predicate'):f._bind_admitted_predicates(owned,retained,current)
+                    compiler.assert_not_called()
+            for name,raw in payloads.items():
+                changed=raw.replace(b'control_passed',b'control_forged') if b'control_passed' in raw else b'X'+raw[1:]
+                self.assertEqual(len(raw),len(changed));(root/name).write_bytes(changed)
+                forged=dict(paths);forged[str(root/name)]=hashlib.sha256(changed).hexdigest()
+                with self.subTest(generation=name),patch.object(f,'BASE',root), \
+                        patch.object(f,'compile',create=True,side_effect=AssertionError('unsupported generation before compile')) as compiler:
+                    with self.assertRaisesRegex(ValueError,'unsupported predicate source generation'):f._admit_execution_predicates(forged)
+                    compiler.assert_not_called()
+                (root/name).write_bytes(raw)
+
+    def test_predicate_prebody_caps_nonregular_and_total_budget_refuse_without_retention(self):
+        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            root=Path(temporary);paths,payloads=self.sources(root);target=root/'prepare_v3.py'
+            for size in (0,7055,7057):
+                target.write_bytes(b'x'*size)
+                with self.subTest(size=size),patch.object(f,'BASE',root), \
+                        patch.object(f,'_consume',side_effect=AssertionError('no body retention')) as consume:
+                    with self.assertRaisesRegex(ValueError,'predicate source exact byte bound'):f._admit_execution_predicates(paths)
+                    consume.assert_not_called()
+            target.unlink();target.mkdir()
+            with patch.object(f,'BASE',root),patch.object(f,'_consume',side_effect=AssertionError('no special payload')) as consume:
+                with self.assertRaisesRegex(ValueError,'regular file required'):f._admit_execution_predicates(paths)
+                consume.assert_not_called()
+            target.rmdir();target.write_bytes(payloads['prepare_v3.py'])
+            budget=f.TreeBudget
+            with patch.object(f,'BASE',root),patch.object(f,'TreeBudget',side_effect=lambda:budget(bytes=7055)), \
+                    patch.object(f,'_consume',side_effect=AssertionError('reservation before retained bytes')) as consume:
+                with self.assertRaisesRegex(ValueError,'payload budget'):f._admit_execution_predicates(paths)
+                consume.assert_not_called()
+
+    def test_predicate_compile_and_direct_shape_refuse_without_executing_modules_or_partial_pair(self):
+        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            root=Path(temporary);paths,_=self.sources(root)
+            with patch.object(f,'BASE',root):sources,captured=f._admit_execution_predicates(paths)
+            failure=SyntaxError('authored compiler refusal')
+            with patch.object(f,'BASE',root),patch.object(f,'compile',create=True,side_effect=failure), \
+                    patch.object(f,'FunctionType',side_effect=AssertionError('no partial pair')) as functions:
+                with self.assertRaises(SyntaxError) as caught:f._bind_admitted_predicates(sources,captured,paths)
+                self.assertIs(failure,caught.exception);functions.assert_not_called()
+            real_compile=compile
+            def no_module_body(raw,filename,*args,**kwargs):
+                return real_compile(raw+b'\nraise AssertionError("module body was executed")\n',filename,*args,**kwargs)
+            with patch.object(f,'BASE',root),patch.object(f,'compile',create=True,side_effect=no_module_body):
+                policy,passed=f._bind_admitted_predicates(sources,captured,paths)
+                self.assertEqual(32,len(policy()))
+                self.assertFalse(passed({'expected':'matched'},self.report('refused')))
+            allocation=MemoryError('authored second function allocation');real_function=f.FunctionType;created=[]
+            def functions(*args,**kwargs):
+                if created:raise allocation
+                result=real_function(*args,**kwargs);created.append(result);return result
+            with patch.object(f,'BASE',root),patch.object(f,'FunctionType',side_effect=functions) as constructing:
+                with self.assertRaises(MemoryError) as caught:f._bind_admitted_predicates(sources,captured,paths)
+                self.assertIs(allocation,caught.exception);self.assertEqual(2,constructing.call_count)
+            self.assertEqual(1,len(created),'test spy is the only holder of the unpublished first function')
+            shapes=(
+                ('evaluate_candidate_v3.py', 'def control_passed(control): return True\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report): return global_claim\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report): return report.get("accepted")\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report,*args): return True\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report): yield True\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report):\n def retain(): return control\n return retain\n'),
+                ('evaluate_candidate_v3.py', 'async def control_passed(control,report): return True\n'),
+                ('evaluate_candidate_v3.py', 'def holder():\n def control_passed(control,report): return True\n return control_passed\n'),
+                ('evaluate_candidate_v3.py', 'def control_passed(control,report): return True\ndef control_passed(control,report): return False\n'),
+                ('prepare_v3.py', 'def control_passed(control,report): return True\n'),
+            )
+            for module,source in shapes:
+                def compiler(raw,filename,*args,**kwargs):
+                    return real_compile(source if Path(filename).name==module else raw,filename,*args,**kwargs)
+                with self.subTest(module=module,shape=source),patch.object(f,'BASE',root), \
+                        patch.object(f,'compile',create=True,side_effect=compiler), \
+                        patch.object(f,'FunctionType',side_effect=AssertionError('shape fails before functions')) as functions:
+                    with self.assertRaisesRegex(ValueError,'predicate'):f._bind_admitted_predicates(sources,captured,paths)
+                    functions.assert_not_called()
+
+    def test_predicate_acquisition_close_failure_keeps_exact_error_and_no_usable_capture(self):
+        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            root=Path(temporary);paths,_=self.sources(root);real_record=f._record;real_close=f.os.close
+            target=[];closed=[];failure=OSError('authored source descriptor close')
+            def record(path,relative,metadata,descriptor,*args,**kwargs):
+                result=real_record(path,relative,metadata,descriptor,*args,**kwargs)
+                if path==root/'prepare_v3.py':target.append(descriptor)
+                return result
+            def close(descriptor):
+                real_close(descriptor)
+                if target and descriptor==target[0]:
+                    closed.append(descriptor);raise failure
+            with patch.object(f,'BASE',root),patch.object(f,'_record',side_effect=record), \
+                    patch.object(f.os,'close',side_effect=close), \
+                    patch.object(f,'compile',create=True,side_effect=AssertionError('no usable pair after close')) as compiler:
+                with self.assertRaises(OSError) as caught:f._admit_execution_predicates(paths)
+                self.assertIs(failure,caught.exception);compiler.assert_not_called()
+            self.assertEqual(target,closed)
+
+
 if __name__=='__main__':unittest.main()
