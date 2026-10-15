@@ -4,15 +4,25 @@
 
 ## Project CI
 
-Run the same checks as the repository workflow:
+Run the shared JVM/Kotlin entry point:
 
 ```bash
 scripts/ci.sh
 ```
 
-That command runs:
+By default, this runs `verifyReconstructionNeutrality` and `test` through
+`./gradlew --no-daemon`, plus `v3BoundaryFinalStagingIsolated`,
+`v3BoundaryPublicationIsolated` and `v3BoundaryCensusIsolated` with
+`-PisolateV3BoundaryTests=true`. Those three RSS-sensitive methods run in fresh
+workers instead of the shared worker. The test task also requires the entire
+`GccCompilerEnginePlanningTest` class in a fresh, single-fork 512 MiB-heap worker;
+this does not raise its production/fixture RSS cap.
 
-- `./gradlew --no-daemon test`
+`DECOMP_CI_TEST_SHARD=core` selects tests excluding the `ci-live` tag and retains
+these isolated checks. `live` selects only that tag; the full default selects
+both. Hosted workflows additionally prepare fixtures and run credential-free
+preflights, frontend/browser jobs and separate contract/oracle workflows through
+the entry points below.
 
 Gradle also builds the embedded frontend. CI provisions the exact Node 24.20.0 /
 npm 11.19.0 distribution using `scripts/install-frontend-node.sh`; the installer
@@ -20,8 +30,8 @@ checks the reviewed official archive digest and repository version pins. Local
 builds need the same toolchain on PATH. Node is a build dependency and is absent
 from the application Docker runtime stage.
 
-The independent **Frontend contracts and bundle** job runs on every push and pull
-request. It uses a clean locked npm install, strict type checking, lint, component
+The independent **Frontend contracts and bundle** job runs on pull requests and
+pushes to master or tags. It uses a clean locked npm install, strict type checking, lint, component
 and state tests, the versioned web schema's positive/negative fixtures, a production
 bundle with size/dependency checks, and the manifest completeness/digest tests.
 It also rejects changes to checked frontend or contract inputs produced by those
@@ -53,8 +63,8 @@ results, tool/lock/schema identities and bundle/manifest metadata as
 `frontend-verification` for 14 days, including after failures. It does not upload
 environment dumps, credentials, private source maps or generated job content.
 
-The **Packaged web contracts and browser** job also runs on every push and pull
-request. It builds the archives from the current checkout, runs the web/job JVM
+The **Packaged web contracts and browser** job also runs on pull requests and
+pushes to master or tags. It builds the archives from the current checkout, runs the web/job JVM
 contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
 permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
 Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
@@ -90,6 +100,38 @@ that GitHub requires its result for merge.
 The existing Kotlin, ACP, Clang, archival and oracle jobs retain their checks;
 the manual LLVM source rebuild remains the optional expensive lane described below.
 
+### Lane ownership and explicit qualification
+
+The workflow/script paths below own scheduling and gate behavior. Normal runs
+mean pull requests and master/tag pushes; the oracle-model normal jobs explicitly
+exclude manual dispatch. Expensive scheduled checks remain part of normal CI.
+Optional means an explicit selection condition; selected jobs must still pass
+their checks. GitHub branch-protection requirements remain separate as noted above.
+
+| Lane | Scheduling and responsibility | Source |
+| --- | --- | --- |
+| Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
+| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
+| Kotlin core / live / aggregate | Normal; core and tagged live tests run separately with required hosted fixtures. Live also runs the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires both partitions to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
+| Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
+| ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
+| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| Retained GCC driver DWARF interfaces | Explicit dispatch, or a triggered PR run already carrying `qualify:driver-dwarf-interfaces`. Applying the label alone is not a configured workflow trigger. | `driver-dwarf-interfaces` in [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml) |
+| LLVM native runtime measurement | Explicit dispatch with `qualification=native-runtime-measurement`; measurement does not approve a production runtime. | `native-runtime-measurement` in [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| LLVM oracle clean rebuild | Manual dispatch only; run when the locked source/toolchain/flags/artifact pair needs fresh rebuild evidence. | [llvm-oracle-rebuild.yml](../.github/workflows/llvm-oracle-rebuild.yml) |
+
+Core performs installed analysis-I/O verification and quota snapshot preparation
+in one invocation of `bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io`.
+The fixed mode includes `verifyAnalysisIoHelperInstalled` with the existing
+preparation targets, retains `build/analysis-native-installed-verification.txt`,
+and fails before fixture work if that Gradle pipeline fails. The combined
+invocation preserves this check. Live does not request this core-only mode.
+
+Capability acceptance remains with its existing owners. #215 owns
+Git synchronization/provider qualification; #223–#226 retain their component,
+JVM, packaged, accessibility/scale/adverse-condition requirements. #227 and this
+documentation slice #653 do not close those dependencies or supply a release claim.
+
 The test task first builds and verifies the same static ACP gate helper shipped by `installDist`; security-boundary
 tests do not compile private helper copies. Distribution jobs should additionally run
 `./gradlew --no-daemon verifyAcpGateHelperDistribution`.
@@ -111,6 +153,13 @@ scripted contract boundary; independent authenticated agents and full release
 acceptance have their separate issue #67/#72 requirements. Ordinary local tests may
 skip unavailable host integrations when the required-host flag is unset.
 
+The independent **Built-in core contract** invokes
+`python3 scripts/validate-builtin-contract.py`. It forces test execution with the
+required live host and checks its fixed required suite/case inventory with zero
+failures, errors or skips. It retains
+`build/builtin-contract-qualification/summary.json`; its real-provider and workflow
+release qualification fields remain false.
+
 Run the independent generated-C compatibility lane with LLVM/Clang:
 
 ```bash
@@ -129,6 +178,16 @@ scripts/validate-archival-docker.sh
 ```
 
 That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated rich and stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project. The explicit evidence-only policy retains every raw model entity and its planned ownership while compiling diagnostic inventory sources. It preserves unsupported display text as evidence, keeps implementation acceptance false, and does not claim that the diagnostic executable reproduces the input program's ABI or behavior. The ordinary generated-C declaration and implementation gates remain strict.
+
+### Reporting skipped or unrun verification
+
+Record the source commit/ref, exact command and selected lane, required-host flags
+and prerequisites, actual test/failure/error/skip counts, reasons and retained
+artifacts. Distinguish reused task output from fresh execution. An optional lane
+not selected, or a phase blocked by setup/preflight failure before tests, is unrun;
+missing reports do not establish passing tests or verified cleanup. Ordinary local
+integration skips do not satisfy a required no-skip contract. Retain the original
+failure and any later repeat separately, and state which checks were not repeated.
 
 Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 
