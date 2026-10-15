@@ -1926,11 +1926,12 @@ private fun hostPhysicalLocation(
 /** Exact-existing-root reauthentication only; generic admission and missing-tail resolution stay strict. */
 private fun manifestRootPhysicalLocation(
     descriptor: LinuxDescriptor,
+    rootIdentity: LinuxFilesystemSyscalls.StatxIdentityScratch,
     mounts: List<HostPhysicalMount>,
     cancellationCheck: () -> Unit,
 ): HostPhysicalLocation = descriptor.whileOpen { fd ->
     cancellationCheck()
-    val identity = LinuxFilesystemSyscalls.identity(fd)
+    val identity = rootIdentity.identity(fd)
     val mount = mounts.singleOrNull { it.mountId == identity.mountId }
         ?: throw IOException("private-control descriptor mount is absent or ambiguous")
     val named = Files.readSymbolicLink(LinuxFilesystemSyscalls.descriptorPath(descriptor))
@@ -1983,7 +1984,7 @@ private fun manifestRootPhysicalLocation(
             current.close()
         }
     }
-    val after = LinuxFilesystemSyscalls.identity(fd)
+    val after = rootIdentity.identity(fd)
     if (identity.key != after.key || identity.mountId != after.mountId || identity.mode != after.mode) {
         throw IOException("private-control descriptor changed during inspection")
     }
@@ -2094,6 +2095,7 @@ private fun physicalLocationsOverlap(a: HostPhysicalLocation, b: HostPhysicalLoc
 private class RuntimePrivateControlScope private constructor(
     private val mountEvents: LinuxDescriptor,
     private val mountPoll: LinuxFilesystemSyscalls.MountMetadataPollScratch,
+    private val rootIdentity: LinuxFilesystemSyscalls.StatxIdentityScratch,
     private val mounts: List<HostPhysicalMount>,
     private var controls: Map<PinnedControlDirectory, ManifestControlIdentity>,
     private var generation: Any,
@@ -2124,10 +2126,10 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun currentRoot(check: () -> Unit): HostPhysicalLocation {
-        val current = manifestRootPhysicalLocation(rootDescriptor, mounts, check)
+        val current = manifestRootPhysicalLocation(rootDescriptor, rootIdentity, mounts, check)
         if (current.key != root.key || rootDescriptor.identity.mountId !=
-            LinuxFilesystemSyscalls.identity(rootDescriptor.fd).mountId ||
-            rootDescriptor.identity.mode != LinuxFilesystemSyscalls.identity(rootDescriptor.fd).mode ||
+            rootIdentity.identity(rootDescriptor.fd).mountId ||
+            rootDescriptor.identity.mode != rootIdentity.identity(rootDescriptor.fd).mode ||
             current.namespacePath != root.namespacePath) {
             throw IOException("runtime manifest source root changed")
         }
@@ -2254,7 +2256,12 @@ private class RuntimePrivateControlScope private constructor(
                 val primary = failure
                 if (primary == null) failure = cleanup else if (primary !== cleanup) primary.addSuppressed(cleanup)
             } finally {
-                try { rootDescriptor.close() } finally { mountEvents.close() }
+                try { rootIdentity.close() } catch (cleanup: Throwable) {
+                    val primary = failure
+                    if (primary == null) failure = cleanup else if (primary !== cleanup) primary.addSuppressed(cleanup)
+                } finally {
+                    try { rootDescriptor.close() } finally { mountEvents.close() }
+                }
             }
         }
         failure?.let { throw it }
@@ -2268,6 +2275,21 @@ private class RuntimePrivateControlScope private constructor(
         ): T {
             // The caller's initializer callback exists before native storage is allocated here.
             val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+            return try {
+                initialize(scratch)
+            } catch (failure: Throwable) {
+                try { scratch.close() } catch (cleanup: Throwable) {
+                    if (cleanup !== failure) failure.addSuppressed(cleanup)
+                }
+                throw failure
+            }
+        }
+
+        /** No storage escapes until constructor and every admission checkpoint have succeeded. */
+        private fun <T> withOwnedStatxScratch(
+            initialize: (LinuxFilesystemSyscalls.StatxIdentityScratch) -> T,
+        ): T {
+            val scratch = LinuxFilesystemSyscalls.StatxIdentityScratch()
             return try {
                 initialize(scratch)
             } catch (failure: Throwable) {
@@ -2312,14 +2334,16 @@ private class RuntimePrivateControlScope private constructor(
                             }
                             ACTIVE_PRIVATE_CONTROLS.forEach { retained[it] = it.retainManifestIdentity(mounts, check) }
                             val ownerRecord = ACTIVE_PRIVATE_CONTROLS.singleOrNull { it.key == owner }
-                            val created = RuntimePrivateControlScope(eventHandle, pollScratch, mounts, retained, privateControlGeneration,
-                                pinned, location, ownerRecord, check)
-                            scope = created
-                            created.requireRootUnexposed(retained)
-                            created.checkpointLocked()
-                            if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
-                            ACTIVE_MANIFEST_SCOPES += created
-                            created
+                            withOwnedStatxScratch { statxScratch ->
+                                val created = RuntimePrivateControlScope(eventHandle, pollScratch, statxScratch, mounts, retained, privateControlGeneration,
+                                    pinned, location, ownerRecord, check)
+                                scope = created
+                                created.requireRootUnexposed(retained)
+                                created.checkpointLocked()
+                                if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
+                                ACTIVE_MANIFEST_SCOPES += created
+                                created
+                            }
                         }
                     }
                 } catch (failure: Throwable) {

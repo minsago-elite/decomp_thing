@@ -41,6 +41,58 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `manifest statx scratch owns failed construction and transfers only admitted storage`() {
+        for (primary in listOf<Throwable>(IOException("scripted initial checkpoint failure"), AssertionError("scripted constructor failure"))) {
+            var owned: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+            val cleanup = IOException("scripted statx cleanup failure")
+            val memory = ManifestStatxMemory(cleanup)
+            val observed = try {
+                initializeManifestStatxScratch { scratch ->
+                    owned = scratch
+                    replaceManifestStatxMemory(scratch, memory)
+                    throw primary
+                }
+                error("failed admission unexpectedly returned")
+            } catch (failure: Throwable) { failure }
+            assertTrue(observed === primary)
+            assertEquals(listOf(cleanup), observed.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(owned).identity(-401) }
+            checkNotNull(owned).close()
+            assertEquals(1, memory.closes)
+        }
+        var transferred: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+        val memory = ManifestStatxMemory()
+        assertEquals("admitted", initializeManifestStatxScratch { scratch ->
+            transferred = scratch
+            replaceManifestStatxMemory(scratch, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        })
+        assertEquals(0, memory.closes)
+        checkNotNull(transferred).close(); checkNotNull(transferred).close()
+        assertEquals(1, memory.closes)
+    }
+
+    private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestStatxMemory(scratch: LinuxFilesystemSyscalls.StatxIdentityScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestStatxScratch(initialize: (LinuxFilesystemSyscalls.StatxIdentityScratch) -> Any?): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedStatxScratch", Function1::class.java)
+        return invokePrivate(companion, method, initialize)
+    }
+
+    @Test
     fun `manifest poll scratch initialization guard frees failed admissions and preserves primary failure`() {
         for (primary in listOf<Throwable>(IOException("authored admission failure"), AssertionError("authored constructor failure"))) {
             val handle = scriptedManifestPollHandle(-201)

@@ -820,6 +820,46 @@ internal object LinuxFilesystemSyscalls {
 
     fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
 
+    /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
+    class StatxIdentityScratch : AutoCloseable {
+        private var closed = false
+        private val statistics = Memory(STATX_BYTES)
+
+        @Synchronized
+        fun identity(fd: Int): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, null, null)
+        }
+
+        // Script only through reflection in controls; production always uses libc and the proc fallback.
+        @Synchronized
+        private fun identityWith(fd: Int, query: (Memory) -> Long, fallback: () -> LinuxFileIdentity): LinuxFileIdentity {
+            check(!closed) { "descriptor identity scratch is closed" }
+            return queryIdentity(fd, query, fallback)
+        }
+
+        private fun queryIdentity(fd: Int, query: ((Memory) -> Long)?, fallback: (() -> LinuxFileIdentity)?): LinuxFileIdentity {
+            statistics.clear() // Reset all 256 bytes before each observation, never reuse an identity.
+            val observed = descriptorStatxQueryOrNull {
+                retryOnInterrupted("inspect pinned descriptor identity") {
+                    if (query == null) {
+                        libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                            STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                    } else query(statistics)
+                }
+            }
+            return (if (observed == null) null else decodeDescriptorStatxIdentity(statistics))
+                ?: if (fallback == null) descriptorProcIdentity(fd) else fallback()
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            statistics.close()
+        }
+    }
+
     /** One descriptor-relative query preserves live checks without repeated stat/fdinfo reads. */
     private fun descriptorStatxIdentity(fd: Int): LinuxFileIdentity? = Memory(STATX_BYTES).use { statistics ->
         statistics.clear()

@@ -16,6 +16,177 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `owned statx scratch resets all bytes and retains fresh immutable identities across scopes`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
+            LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->
+                var firstBuffer: com.sun.jna.Memory? = null
+                var calls = 0
+                var fallbacks = 0
+                val fallback = LinuxFileIdentity(LinuxFileKey(3, 99), 0x4000, 4, 5, 6, 7, false, true, false)
+                val identities = listOf(11L, 12L).map { inode ->
+                    scriptedStatx(first, query = { buffer ->
+                        calls++
+                        assertEquals(256L, buffer.size())
+                        assertContentEquals(ByteArray(256), buffer.getByteArray(0, 256))
+                        if (firstBuffer == null) firstBuffer = buffer else assertTrue(firstBuffer === buffer)
+                        writeStatxIdentity(buffer, inode)
+                        buffer.setByte(255, 0x7f)
+                        0L
+                    }, fallback = { fallbacks++; fallback })
+                }
+                assertEquals(listOf(11L, 12L), identities.map { it.key.inode })
+                assertEquals(LinuxFileIdentity(LinuxFileKey(2049, 11), 0x81a0, 1001, 1002, 2, 42,
+                    true, false, false), identities[0])
+                assertTrue(identities[0] !== identities[1])
+                assertEquals(11L, identities[0].key.inode) // A later syscall cannot retarget a returned value.
+                assertEquals(0, fallbacks)
+                val incomplete = scriptedStatx(first, query = { buffer ->
+                    calls++
+                    assertContentEquals(ByteArray(256), buffer.getByteArray(0, 256))
+                    buffer.setInt(0, 0x11f) // Prior valid mount id must not survive the missing mask.
+                    0L
+                }, fallback = { fallbacks++; fallback })
+                assertEquals(fallback, incomplete)
+                assertEquals(1, fallbacks)
+                assertEquals(3, calls)
+                scriptedStatx(second, query = { buffer ->
+                    assertTrue(firstBuffer !== buffer)
+                    assertContentEquals(ByteArray(256), buffer.getByteArray(0, 256))
+                    writeStatxIdentity(buffer, 13)
+                    0L
+                })
+                assertEquals(11L, identities[0].key.inode)
+            }
+        }
+    }
+
+    @Test
+    fun `owned statx scratch preserves retries missing backend fallback and genuine errno refusals`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+            var calls = 0
+            val identity = scriptedStatx(scratch, query = { buffer ->
+                calls++
+                if (calls == 1) { com.sun.jna.Native.setLastError(4); -1L }
+                else { writeStatxIdentity(buffer, 21); 0L }
+            })
+            assertEquals(2, calls)
+            assertEquals(21L, identity.key.inode)
+            val fallback = identity.copy(key = LinuxFileKey(7, 22))
+            for (errno in listOf(1, 38, 95)) {
+                var fallbacks = 0
+                val actual = scriptedStatx(scratch, query = {
+                    com.sun.jna.Native.setLastError(errno); -1L
+                }, fallback = { fallbacks++; fallback })
+                assertEquals(fallback, actual)
+                assertEquals(1, fallbacks)
+            }
+            var missingBackendFallbacks = 0
+            assertEquals(fallback, scriptedStatx(scratch, query = { throw UnsatisfiedLinkError("scripted absent statx") },
+                fallback = { missingBackendFallbacks++; fallback }))
+            assertEquals(1, missingBackendFallbacks)
+            for (errno in listOf(5, 9, 13)) {
+                var fallbacks = 0
+                val failure = assertFailsWith<LinuxSyscallException> {
+                    scriptedStatx(scratch, query = { com.sun.jna.Native.setLastError(errno); -1L },
+                        fallback = { fallbacks++; fallback })
+                }
+                assertEquals(errno, failure.errno)
+                assertEquals("inspect pinned descriptor identity failed with errno $errno", failure.message)
+                assertEquals(0, fallbacks)
+            }
+            for (mountId in listOf(0L, -1L)) {
+                val failure = assertFailsWith<IOException> {
+                    scriptedStatx(scratch, query = { writeStatxIdentity(it, 23); it.setLong(0x90, mountId); 0L })
+                }
+                assertEquals("descriptor statx returned an invalid mount identity", failure.message)
+            }
+            val primary = IOException("scripted proc fallback failure")
+            val observed = assertFailsWith<IOException> {
+                scriptedStatx(scratch, query = { 0L }, fallback = { throw primary })
+            }
+            assertTrue(observed === primary)
+        }
+    }
+
+    @Test
+    fun `owned statx scratch serializes close with query and never closes borrowed descriptor`() {
+        val handle = scriptedMountHandle(-301)
+        val scratch = LinuxFilesystemSyscalls.StatxIdentityScratch()
+        val memory = CountingStatxMemory()
+        replaceStatxMemory(scratch, memory)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val closing = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val query = executor.submit<LinuxFileIdentity> {
+                scriptedStatx(scratch, fd = handle.fd, query = { buffer ->
+                    assertTrue(Thread.holdsLock(scratch))
+                    entered.countDown()
+                    assertTrue(release.await(2, TimeUnit.SECONDS))
+                    assertEquals(0, memory.closes)
+                    writeStatxIdentity(buffer, 31)
+                    0L
+                })
+            }
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            val close = executor.submit { closing.countDown(); scratch.close() }
+            assertTrue(closing.await(2, TimeUnit.SECONDS))
+            assertEquals(0, memory.closes) // Query owns the monitor; no timing-based success criterion.
+            release.countDown()
+            assertEquals(31L, query.get(2, TimeUnit.SECONDS).key.inode)
+            close.get(2, TimeUnit.SECONDS)
+            assertEquals(1, memory.closes)
+            scratch.close()
+            assertEquals(1, memory.closes)
+            var queries = 0
+            assertFailsWith<IllegalStateException> { scriptedStatx(scratch, query = { queries++; 0L }) }
+            assertFailsWith<IllegalStateException> { scratch.identity(handle.fd) }
+            assertEquals(0, queries)
+            assertEquals(-301, handle.whileOpen { it })
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+            scratch.close()
+        }
+    }
+
+    private fun writeStatxIdentity(buffer: com.sun.jna.Memory, inode: Long) {
+        buffer.setInt(0, 0x111f)
+        buffer.setInt(0x10, 2)
+        buffer.setInt(0x14, 1001)
+        buffer.setInt(0x18, 1002)
+        buffer.setShort(0x1c, 0x81a0.toShort())
+        buffer.setLong(0x20, inode)
+        buffer.setInt(0x88, 8)
+        buffer.setInt(0x8c, 1)
+        buffer.setLong(0x90, 42)
+    }
+
+    private fun scriptedStatx(
+        scratch: LinuxFilesystemSyscalls.StatxIdentityScratch,
+        fd: Int = -300,
+        query: (com.sun.jna.Memory) -> Long,
+        fallback: () -> LinuxFileIdentity = { error("unexpected scripted proc fallback") },
+    ): LinuxFileIdentity = try {
+        val method = scratch.javaClass.getDeclaredMethod("identityWith", Int::class.javaPrimitiveType,
+            Function1::class.java, Function0::class.java).apply { isAccessible = true }
+        method.invoke(scratch, fd, query, fallback) as LinuxFileIdentity
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+    private class CountingStatxMemory : com.sun.jna.Memory(256) {
+        @Volatile var closes = 0
+        override fun close() { closes++; super.close() }
+    }
+
+    private fun replaceStatxMemory(scratch: LinuxFilesystemSyscalls.StatxIdentityScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    @Test
     fun `owned mount poll scratch resets stale bytes isolates scopes and never caches observations`() {
         val firstHandle = scriptedMountHandle(-101)
         val secondHandle = scriptedMountHandle(-102)
