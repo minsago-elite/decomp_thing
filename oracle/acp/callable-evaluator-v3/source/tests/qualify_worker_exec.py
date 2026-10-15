@@ -755,6 +755,100 @@ def postexec_control_passed(name,result):
         return stdout==b'FAULT:timeout\n' and (partial or termination=={'kind':'signal','value':9,'rawWaitStatus':9})
     return name=='descendant'  # Verified native0+descendant denial/reach bytes above, capture deadline+cleanup.
 
+
+def _fixed_probe(worker, work, environment, original_helper, deadline):
+    """One fixed public zero probe; no caller-selected worker tail or FD role."""
+    from bounded_runtime import bounded_run, _controller_metadata_timely
+    from interface_gate_v3 import probe_command, _shared_helper_pin
+    _controller_metadata_timely(deadline)
+    name, pin = _shared_helper_pin(original_helper)
+    if name != str(worker): raise ValueError('fixed probe helper differs from original admission')
+    command = probe_command(worker, work, ['zero'])
+    _controller_metadata_timely(deadline)
+    result = bounded_run(command, work, environment, managed_scope=True, phase='probe',
+                         phase_deadline=deadline, helper_admission={name:dict(pin)})
+    try:
+        _controller_metadata_timely(deadline)
+    except Exception as error:
+        error.bounded_result = result
+        raise
+    return result
+
+
+def _fixed_probe_pair_passed(first, second, original_helper, profile_sha):
+    """Historical primitive pair only; actual raw replay and original A/H joins."""
+    from bounded_runtime import _helper_execution_pin
+    from interface_gate_v3 import _shared_helper_pin, _require_shared_helper
+    if (type(profile_sha) is not str or len(profile_sha) != 64 or
+            any(c not in '0123456789abcdef' for c in profile_sha)):
+        return False
+    try:
+        _, original = _shared_helper_pin(original_helper)
+    except (ValueError, TypeError):
+        return False
+    identities = []
+    for result in (first, second):
+        if type(result) is not dict: return False
+        raw = result.get('workerProofRaw')
+        if type(raw) is not bytes or not 0 < len(raw) <= 1024: return False
+        bounds = result.get('bounds')
+        if (type(bounds) is not dict or bounds.get('phase') != 'probe' or
+                bounds.get('profileSha256') != profile_sha or type(result.get('exitCode')) is not int or
+                result['exitCode'] != 0 or result.get('stdout') != b'' or result.get('stderr') != b''):
+            return False
+        try:
+            # This existing consumer requires complete controller facts AND real raw replay.
+            _require_shared_helper(result, original_helper)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
+        held = _helper_execution_pin(result, original['sha256'])
+        if held is None: return False
+        identities.append((held[1]['device'], held[1]['inode']))
+    return identities[0] != identities[1]
+
+
+def _fixed_probe_controls(worker, work, environment, output):
+    """One independent A admission in first original end; two fixed case receipts."""
+    from bounded_runtime import _pin_files, _controller_metadata_timely, worker_execution_complete, public_result
+    from build_contract import load_profile_with_digest
+    from interface_gate_v3 import _shared_helper_pin
+    began = time.monotonic()
+    profile, profile_sha = load_profile_with_digest()
+    first_end = began + profile['bounds']['probeSeconds']
+    _controller_metadata_timely(first_end)
+    admitted = _pin_files([worker], first_end)
+    _controller_metadata_timely(first_end)
+    name, pin = _shared_helper_pin(admitted)
+    original = {name:dict(pin)}
+    results = []; raw_results = []
+    for index, case in enumerate(('handoff-probe', 'handoff-probe-second')):
+        end = first_end if index == 0 else time.monotonic() + profile['bounds']['probeSeconds']
+        failure = None
+        try:
+            _controller_metadata_timely(end)
+            raw = _fixed_probe(worker, work, environment, {name:dict(pin)}, end)
+        except (ValueError, OSError) as error:
+            failure = type(error).__name__[:128]
+            raw = getattr(error, 'bounded_result', None)
+            if raw is None:
+                raw = {'infrastructureFailure':True, 'reason':failure}
+        passed = (failure is None and worker_execution_complete(raw) and
+                  raw['exitCode'] == 0 and raw['stdout'] == b'' and raw['stderr'] == b'')
+        public = public_result(raw) if type(raw.get('stdout')) is bytes and type(raw.get('stderr')) is bytes else {
+            (k+'Hex' if type(v) is bytes else k):(v.hex() if type(v) is bytes else v) for k,v in raw.items()}
+        result = {'name':case, 'passed':passed, 'expectedInfrastructureUnknown':False,
+                  'adapterError':failure, 'execution':public}
+        _write(output / (case+'.json'), result)
+        results.append(result); raw_results.append(raw)
+    pair = {'name':'handoff-probe-pair', 'passed':all(r['passed'] for r in results) and
+            _fixed_probe_pair_passed(raw_results[0],raw_results[1],original,profile_sha),
+            'expectedInfrastructureUnknown':False, 'qualificationOnly':True,
+            'candidateAcceptanceAuthority':False, 'originalHelper':original,
+            'profileSha256':profile_sha, 'caseNames':['handoff-probe','handoff-probe-second']}
+    _write(output / 'handoff-probe-pair.json', pair)
+    return [*results,pair]
+
+
 def qualify(monitor, output):
     from bounded_runtime import (bounded_run, contained_command, public_result,
                                  worker_execution_complete, load_worker_monitor_binding)
@@ -819,7 +913,8 @@ def qualify(monitor, output):
     mutant_detected = (worker_execution_complete(baseline) and worker_execution_complete(mutation) and
                        (baseline['exitCode'],baseline['stdout'],baseline['stderr']) !=
                        (mutation['exitCode'],mutation['stdout'],mutation['stderr']))
-    for phase in ('probe','elf-inspection','caller-build','helper-build','toolchain-inspection'):
+    results.extend(_fixed_probe_controls(worker,work,environment,output))
+    for phase in ('elf-inspection','caller-build','helper-build','toolchain-inspection'):
         run('handoff-'+phase,[str(worker),'zero'],phase,0)
     for name, text in CONSTRUCTORS.items():
         c = work / (name+'.c'); library = work / (name+'.so'); c.write_text(text)

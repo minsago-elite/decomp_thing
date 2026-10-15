@@ -675,6 +675,197 @@ class ReviewCorrectionTests(unittest.TestCase):
         self.assertIn("postexec=True",source)
 
 
+class FixedProbeQualifierTests(unittest.TestCase):
+    """Prospective actual qualifier bodies; mocked execution, genuine replay only."""
+    @classmethod
+    def setUpClass(cls):
+        path=ROOT/'tests/qualify_worker_exec.py'
+        spec=importlib.util.spec_from_file_location('fixed_probe_qualifier_controls',path)
+        cls.qualifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.qualifier)
+
+    def pair(self, *, identities=((90,93),(94,95))):
+        import build_contract
+        from test_process_results import receipt
+        _, profile_sha=build_contract.load_profile_with_digest()
+        admitted={'/authored/helper':{'device':7,'inode':8,'mode':0o700,'sha256':'c'*64}}
+        values=[receipt(phase='probe',stdout=b'',caller='/authored/helper',caller_sha='c'*64,
+                        input_pins=admitted,helper_identity=identity) for identity in identities]
+        return admitted,profile_sha,values
+
+    def test_fixed_adapter_uses_real_probe_recipe_detached_A_and_same_original_end(self):
+        import bounded_runtime as runtime
+        import interface_gate_v3 as interface
+        import build_contract
+        from static_test_support import static_temp
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
+            work=Path(directory);worker=work/'public-worker';worker.write_bytes(b'authored inert public helper')
+            admitted=runtime._pin_files([worker]);before=copy.deepcopy(admitted)
+            environment={'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C','TMPDIR':str(work)}
+            result={'authored':'no process'};calls=[]
+            def run(command,actual_work,environment,**kwargs):
+                calls.append((command,actual_work,environment,kwargs))
+                kwargs['helper_admission'][str(worker)]['sha256']='0'*64
+                return result
+            with patch.object(self.qualifier.time,'monotonic',return_value=1), \
+                    patch.object(interface,'profile',side_effect=build_contract.load_profile), \
+                    patch.object(runtime,'bounded_run',side_effect=run), \
+                    patch.object(runtime,'contained_command',side_effect=AssertionError('no generic probe fallback')):
+                value=self.qualifier._fixed_probe(worker,work,environment,admitted,17.25)
+            self.assertIs(result,value);self.assertEqual(before,admitted);self.assertEqual(1,len(calls))
+            command,actual_work,actual_environment,kwargs=calls[0]
+            self.assertEqual(work,actual_work);self.assertEqual(environment,actual_environment)
+            self.assertEqual(['/probe','zero'],command[-2:]);self.assertNotIn('--ro-bind-fd',command)
+            self.assertIn(['--ro-bind',str(worker),'/probe'],[command[i:i+3] for i in range(len(command)-2)])
+            self.assertEqual('probe',kwargs['phase']);self.assertIs(True,kwargs['managed_scope'])
+            self.assertEqual(17.25,kwargs['phase_deadline']);self.assertIsNot(admitted,kwargs['helper_admission'])
+            self.assertIsNot(admitted[str(worker)],kwargs['helper_admission'][str(worker)])
+
+    def test_fixed_adapter_entry_command_and_return_expiry_refuse_without_retry_and_keep_primary(self):
+        import bounded_runtime as runtime
+        import interface_gate_v3 as interface
+        admitted,_,_=self.pair();worker=Path('/authored/helper');work=Path('/authored/work');clock=[10.0]
+        with patch.object(self.qualifier.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(interface,'probe_command',return_value=['NOT_EXECUTED']) as recipe, \
+                patch.object(runtime,'bounded_run') as run:
+            with self.assertRaises(TimeoutError):self.qualifier._fixed_probe(worker,work,{},admitted,10.0)
+            recipe.assert_not_called();run.assert_not_called()
+            clock[0]=0
+            def late_recipe(*args,**kwargs):clock[0]=10.0;return ['NOT_EXECUTED']
+            recipe.side_effect=late_recipe
+            with self.assertRaises(TimeoutError):self.qualifier._fixed_probe(worker,work,{},admitted,10.0)
+            run.assert_not_called()
+            clock[0]=0;recipe.side_effect=None;partial={'stdout':b'preserved','workerProofRaw':b'partial'}
+            def late_run(*args,**kwargs):clock[0]=10.0;return partial
+            run.side_effect=late_run
+            with self.assertRaises(TimeoutError) as refusal:self.qualifier._fixed_probe(worker,work,{},admitted,10.0)
+            self.assertIs(partial,refusal.exception.bounded_result);self.assertEqual(1,run.call_count)
+            run.reset_mock();clock[0]=0;primary=OSError('authored execution refusal');primary.bounded_result=partial
+            run.side_effect=primary
+            with self.assertRaises(OSError) as observed:self.qualifier._fixed_probe(worker,work,{},admitted,10.0)
+            self.assertIs(primary,observed.exception);self.assertIs(partial,primary.bounded_result);self.assertEqual(1,run.call_count)
+
+    def controls(self, *, late_admission=False, late_first=False, second_failure=False):
+        import bounded_runtime as runtime
+        import interface_gate_v3 as interface
+        import build_contract
+        from static_test_support import static_temp
+        from test_process_results import receipt
+        owner=tempfile.TemporaryDirectory(dir=static_temp('static-process'));self.addCleanup(owner.cleanup)
+        work=Path(owner.name);output=work/'receipts';output.mkdir()
+        worker=work/'public-worker';worker.write_bytes(b'authored inert A');worker.chmod(0o700)
+        clock=[0.0];calls=[];maps=[];original_pin=runtime._pin_files;admissions=[]
+        environment={'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C','TMPDIR':str(work)}
+        def pin(paths,end):
+            value=original_pin(paths,end);admissions.append(copy.deepcopy(value))
+            if late_admission:clock[0]=end
+            return value
+        def run(command,actual_work,environment,**kwargs):
+            index=len(calls);calls.append((command,kwargs['phase_deadline']));maps.append(kwargs['helper_admission'])
+            admitted=copy.deepcopy(kwargs['helper_admission']);name,row=next(iter(admitted.items()))
+            value=receipt(phase='probe',stdout=b'',caller=name,caller_sha=row['sha256'],input_pins=admitted,
+                          helper_identity=((90,93),(94,95))[index])
+            kwargs['helper_admission'][name]['sha256']='f'*64  # never mutate independent A or the next copy
+            if index==0:clock[0]=kwargs['phase_deadline'] if late_first else 2.0
+            if index==1 and second_failure:
+                error=OSError('authored second probe failure');error.bounded_result=value;raise error
+            return value
+        with patch.object(self.qualifier.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(runtime,'_pin_files',side_effect=pin) as pinner, \
+                patch.object(interface,'profile',side_effect=build_contract.load_profile), \
+                patch.object(runtime,'bounded_run',side_effect=run), \
+                patch.object(runtime,'contained_command',side_effect=AssertionError('generic probe forbidden')):
+            if late_admission:
+                with self.assertRaises(TimeoutError):self.qualifier._fixed_probe_controls(worker,work,environment,output)
+                results=None
+            else:results=self.qualifier._fixed_probe_controls(worker,work,environment,output)
+        self.assertEqual(1,pinner.call_count);self.assertEqual(([worker],30.0),pinner.call_args.args)
+        return SimpleNamespace(results=results,calls=calls,maps=maps,admitted=admissions[0],output=output)
+
+    def test_actual_controls_admit_A_once_keep_detached_equal_inputs_and_distinct_original_case_ends(self):
+        import bounded_runtime as runtime
+        value=self.controls()
+        self.assertEqual(['handoff-probe','handoff-probe-second','handoff-probe-pair'],[r['name'] for r in value.results])
+        self.assertTrue(all(r['passed'] for r in value.results))
+        self.assertEqual([30.0,32.0],[end for _,end in value.calls])
+        self.assertIsNot(value.maps[0],value.maps[1])
+        name=next(iter(value.admitted));self.assertIsNot(value.maps[0][name],value.maps[1][name])
+        pair=value.results[2];self.assertEqual(value.admitted,pair['originalHelper'])
+        self.assertFalse(pair['candidateAcceptanceAuthority']);self.assertTrue(pair['qualificationOnly'])
+        for entry in value.results[:2]:
+            self.assertTrue(runtime.worker_execution_complete(entry['execution']))
+            self.assertEqual(value.admitted[name],entry['execution']['launchInputPins'][name])
+            self.assertEqual(['/probe','zero'],value.calls[value.results.index(entry)][0][-2:])
+        for name in ('handoff-probe','handoff-probe-second','handoff-probe-pair'):
+            stored=json.loads((value.output/(name+'.json')).read_bytes());self.assertTrue(stored['passed'])
+
+    def test_actual_controls_expired_admission_and_adapter_refusal_cannot_become_pair_success(self):
+        value=self.controls(late_admission=True);self.assertEqual([],value.calls)
+        for flags,first_pass in (({'late_first':True},False),({'second_failure':True},True)):
+            with self.subTest(flags=flags):
+                value=self.controls(**flags)
+                self.assertEqual(2,len(value.calls));self.assertEqual(first_pass,value.results[0]['passed'])
+                self.assertFalse(value.results[2]['passed'])
+                refused=value.results[0 if flags.get('late_first') else 1]
+                self.assertIsNotNone(refused['adapterError'])
+                self.assertIn('workerProofRawHex',refused['execution'])  # genuine partial/full bytes retained as facts
+                self.assertFalse(refused['passed'])
+
+    def test_actual_pair_predicate_replays_raw_and_refuses_A_shaped_reused_or_resealed_bindings(self):
+        import bounded_runtime as runtime
+        admitted,profile,values=self.pair();first,second=values
+        self.assertTrue(self.qualifier._fixed_probe_pair_passed(first,second,admitted,profile))
+        self.assertIsNone(self.qualifier._initial_exec(first))  # old runtime-only predicate must stay runtime-only
+        for identities in (((90,93),(90,93)),((7,8),(94,95))):
+            _,_,reused=self.pair(identities=identities)
+            self.assertTrue(all(runtime.worker_execution_complete(r) for r in reused))
+            self.assertFalse(self.qualifier._fixed_probe_pair_passed(*reused,admitted,profile))
+        for mutation in ('original-A','missing-H','H-mode','H-sha','raw','profile','cleanup','reaped','absence','capture','wait','timed-out','stdout'):
+            bad=copy.deepcopy(second)
+            if mutation=='original-A':bad['launchInputPins']['/authored/helper']['mode']^=0o100
+            elif mutation=='missing-H':bad['launchInputPins'].pop('/proc/123/fd/40')
+            elif mutation=='H-mode':bad['launchInputPins']['/proc/123/fd/40']['mode']=0o700
+            elif mutation=='H-sha':bad['launchInputPins']['/proc/123/fd/40']['sha256']='d'*64
+            elif mutation=='raw':
+                records=[json.loads(line) for line in bad['workerProofRaw'].splitlines()];records[0]['w']=127
+                bad['workerProofRaw']=wire(*records);bad['workerProof']['proofSha256']=hashlib.sha256(bad['workerProofRaw']).hexdigest()
+            elif mutation=='profile':
+                bad['bounds']['profileSha256']='f'*64
+                bad['launchInputPins'][str(runtime.BASE/'contracts/candidate-build-profile.json')]['sha256']='f'*64
+            elif mutation=='stdout':bad['stdout']=b'unexpected bytes'
+            elif mutation=='timed-out':bad['timedOut']=True
+            else:bad[{'cleanup':'cleanupVerified','reaped':'rootReaped','absence':'finalAbsenceVerified',
+                      'capture':'captureComplete','wait':'waitComplete'}[mutation]]=False
+            bad['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(bad['launchInputPins'])
+            with self.subTest(mutation=mutation):
+                if mutation in ('original-A','profile'):self.assertTrue(runtime.worker_execution_complete(bad))
+                self.assertFalse(self.qualifier._fixed_probe_pair_passed(first,bad,admitted,profile))
+        # A-shaped proof is parseable, but its mutable source identity cannot replace H.
+        bad=copy.deepcopy(second);pin=bad['launchInputPins'].pop('/proc/123/fd/40')
+        expected=bad['workerProofBindings']['expected'];expected.update(targetDevice=7,targetInode=8)
+        records=[json.loads(line) for line in bad['workerProofRaw'].splitlines()]
+        records[0].update(ed=7,ei=8,od=7,oi=8);bad['workerProofRaw']=wire(*records)
+        bad['workerProof']['proofSha256']=hashlib.sha256(bad['workerProofRaw']).hexdigest()
+        bad['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(bad['launchInputPins'])
+        self.assertEqual('verified',proof_parser.parse_proof(bad['workerProofRaw'],expected)['status'])
+        self.assertFalse(self.qualifier._fixed_probe_pair_passed(first,bad,admitted,profile))
+
+    def test_pair_proof_bound_precedes_complete_join_and_wrong_phase_or_current_profile_refuses(self):
+        import interface_gate_v3 as interface
+        from test_process_results import receipt
+        admitted,profile,(first,second)=self.pair()
+        for raw in (None,b'',b'x'*1025):
+            bad=copy.deepcopy(first);bad['workerProofRaw']=raw
+            with self.subTest(raw=raw is None or len(raw)), \
+                    patch.object(interface,'_require_shared_helper',side_effect=AssertionError('proof bound before join')):
+                self.assertFalse(self.qualifier._fixed_probe_pair_passed(bad,second,admitted,profile))
+        runtime_result=receipt(phase='runtime',stdout=b'')
+        self.assertFalse(self.qualifier._fixed_probe_pair_passed(runtime_result,second,admitted,profile))
+        for expected in ('0'*64,'invalid',None):
+            self.assertFalse(self.qualifier._fixed_probe_pair_passed(first,second,admitted,expected))
+        for original in ({},{'/authored/helper':{**admitted['/authored/helper'],'sha256':'d'*64}}):
+            self.assertFalse(self.qualifier._fixed_probe_pair_passed(first,second,original,profile))
+
+
 class CleanupDeadlineCorrectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
