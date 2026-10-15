@@ -310,7 +310,7 @@ class ProfileCarry(unittest.TestCase):
         snapshot=contract._ProfileSnapshot(authored_profile_bytes())
         with contract.profile_scope(snapshot),patch.object(Path,'resolve',return_value=Path('/authored/gcc-A')) as resolved,patch.object(contract,'digest',return_value='a'*64) as hashed,patch.object(contract,'_bounded_json_snapshot',side_effect=AssertionError('no profile reopen')):
             self.assertEqual('A',contract.profile()['gccIdentity']['version'])
-            hashed.assert_called_once_with(Path('/authored/gcc-A'));resolved.assert_called_once_with()
+            hashed.assert_called_once_with(Path('/authored/gcc-A'), maximum=16777216, deadline=None);resolved.assert_called_once_with()
             hashed.return_value='f'*64
             with self.assertRaisesRegex(ValueError,'GCC executable differs'):contract.profile()
             self.assertEqual('A',contract.load_profile()['gccIdentity']['version'])

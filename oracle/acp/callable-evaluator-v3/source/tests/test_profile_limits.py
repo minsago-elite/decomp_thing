@@ -4,6 +4,7 @@ import copy
 import io
 import hashlib
 import os
+import stat
 import json
 import sys
 import tempfile
@@ -67,6 +68,150 @@ class ProfileLimits(unittest.TestCase):
         self.guards.enter_context(patch.object(runtime.resource, 'setrlimit', side_effect=AssertionError('static test forbids host policy')))
         self.guards.enter_context(patch.object(runtime.os, 'pidfd_open', side_effect=AssertionError('static test forbids pidfd')))
         self.guards.enter_context(patch.object(runtime, 'kill_exact', side_effect=AssertionError('static test forbids signals')))
+
+    def retained_digest_vector(self, mutation=None, *, primary=None, close_error=None, deadline=10.0):
+        # Actual shared reader/hash, with only metadata/FD/clock operations modeled.
+        events=[];now=[0.0];payload=b'authored';offset=[0];fstats={};stats={};tracebacks=[]
+        def metadata(kind,inode,size=0,stamp=1):
+            return types.SimpleNamespace(st_dev=7,st_ino=inode,st_mode=kind|0o500,
+                st_uid=9,st_gid=9,st_nlink=1,st_size=size,st_mtime_ns=stamp,st_ctime_ns=stamp)
+        if mutation=='empty':payload=b''
+        root=metadata(stat.S_IFDIR,1);parent=metadata(stat.S_IFDIR,2)
+        leaf=metadata(stat.S_IFREG,3,len(payload))
+        if mutation in ('fifo','device','directory','link'):
+            leaf.st_mode={'fifo':stat.S_IFIFO,'device':stat.S_IFCHR,'directory':stat.S_IFDIR,'link':stat.S_IFLNK}[mutation]|0o500
+        if mutation=='oversize':leaf.st_size+=1
+        def opened(name,flags,**kwargs):
+            events.append(('open',name,flags,kwargs))
+            if mutation=='open-'+name:raise OSError('authored nofollow open refusal')
+            fd={'/':101,'authored':102,'input':103}[name]
+            if mutation=='late-open' and name=='/':now[0]=10.0
+            return fd
+        def fstat(fd):
+            events.append(('fstat',fd));fstats[fd]=fstats.get(fd,0)+1
+            if mutation=='fstat-error' and fd==103:raise primary
+            if mutation=='descriptor-drift' and fd==103 and fstats[fd]>1:return metadata(stat.S_IFREG,4,len(payload))
+            if mutation=='overwrite' and fd==103 and fstats[fd]>1:return metadata(stat.S_IFREG,3,len(payload),2)
+            if mutation=='held-parent' and fd==102 and fstats[fd]>1:return metadata(stat.S_IFDIR,4)
+            return {101:root,102:parent,103:leaf}[fd]
+        def named(name,**kwargs):
+            events.append(('stat',name,kwargs));stats[name]=stats.get(name,0)+1
+            if mutation=='stat-error' and name=='input':raise primary
+            if mutation=='path-drift' and name=='input' and stats[name]>1:return metadata(stat.S_IFREG,4,len(payload))
+            if mutation=='named-parent' and name=='authored' and stats[name]>1:return metadata(stat.S_IFDIR,4)
+            return {'/':root,'authored':parent,'input':leaf}[name]
+        def read(fd,count):
+            events.append(('read',fd,count));self.assertEqual(103,fd)
+            if primary is not None and mutation not in ('fstat-error','stat-error'):raise primary
+            if mutation=='late-read':now[0]=10.0
+            data=payload[:-1] if mutation=='short' else payload+b'X' if mutation=='growth' else payload
+            take=min(count,3) if mutation=='partial' else count
+            result=data[offset[0]:offset[0]+take];offset[0]+=len(result);return result
+        def closed(fd):
+            events.append(('close',fd))
+            if fd==103 and primary is not None:tracebacks.append(primary.__traceback__)
+            if mutation=='late-close':now[0]=10.0
+            if fd==103 and close_error is not None:raise close_error
+        original_hash=hashlib.sha256
+        def hashed(raw):
+            events.append(('hash',raw))
+            if mutation=='late-hash':now[0]=10.0
+            return original_hash(raw)
+        answer=caught=None
+        with patch.object(contract.os,'open',side_effect=opened),patch.object(contract.os,'fstat',side_effect=fstat), \
+                patch.object(contract.os,'stat',side_effect=named),patch.object(contract.os,'read',side_effect=read), \
+                patch.object(contract.os,'close',side_effect=closed),patch.object(contract.time,'monotonic',side_effect=lambda:now[0]), \
+                patch.object(contract.hashlib,'sha256',side_effect=hashed):
+            try:answer=runtime.digest(Path('/authored/input'),maximum=len(payload),deadline=deadline)
+            except BaseException as failure:caught=failure
+        return types.SimpleNamespace(answer=answer,error=caught,events=events,payload=payload,tracebacks=tracebacks)
+
+    def test_retained_digest_exact_empty_partial_payload_and_nofollow_owned_closure(self):
+        for mutation,reads in ((None,[8,1]),('empty',[1]),('partial',[8,5,2,1])):
+            with self.subTest(mutation=mutation):
+                vector=self.retained_digest_vector(mutation)
+                self.assertIsNone(vector.error)
+                self.assertEqual(hashlib.sha256(vector.payload).hexdigest(),vector.answer)
+                self.assertEqual(reads,[row[2] for row in vector.events if row[0]=='read'])
+                self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+                opens=[row for row in vector.events if row[0]=='open']
+                for row in opens:self.assertTrue(row[2]&os.O_NOFOLLOW);self.assertTrue(row[2]&os.O_CLOEXEC)
+                self.assertTrue(opens[-1][2]&os.O_NONBLOCK);self.assertEqual({'dir_fd':102},opens[-1][3])
+                self.assertTrue(all(not row[2]['follow_symlinks'] for row in vector.events if row[0]=='stat'))
+                self.assertLess(max(i for i,row in enumerate(vector.events) if row[0]=='close'),
+                                next(i for i,row in enumerate(vector.events) if row[0]=='hash'))
+
+    def test_retained_digest_refuses_special_size_path_and_identity_changes(self):
+        for mutation in ('fifo','device','directory','link','oversize','open-authored','open-input',
+                         'short','growth','descriptor-drift','overwrite','path-drift','held-parent','named-parent'):
+            with self.subTest(mutation=mutation):
+                vector=self.retained_digest_vector(mutation)
+                self.assertIsInstance(vector.error,(ValueError,OSError));self.assertIsNone(vector.answer)
+                self.assertFalse(any(row[0]=='hash' for row in vector.events))
+                acquired=[{'/':101,'authored':102,'input':103}[row[1]] for row in vector.events
+                          if row[0]=='open' and mutation!='open-'+row[1]]
+                self.assertEqual(list(reversed(acquired)),[row[1] for row in vector.events if row[0]=='close'])
+                if mutation in ('fifo','device','directory','link','oversize','open-authored','open-input'):
+                    self.assertFalse(any(row[0]=='read' for row in vector.events))
+        with patch.object(contract.os,'open',side_effect=AssertionError('invalid admission must not open')):
+            for maximum in (-1,True,16777217,1.0):
+                with self.subTest(maximum=maximum),self.assertRaises(ValueError):runtime.digest(Path('/authored/input'),maximum=maximum)
+            for path in (Path('/authored/../input'),Path('/'+'/'.join(['x']*128)),Path('/'+'x'*4096)):
+                with self.subTest(path=path),self.assertRaises(ValueError):runtime.digest(path)
+
+    def test_retained_digest_exact_primary_survives_cleanup_and_diagnostic_faults(self):
+        class NoDiagnostics(ValueError):
+            def __setattr__(self,name,value):raise RuntimeError('authored diagnostic refusal')
+        for mutation in (None,'fstat-error','stat-error'):
+            malformed=ValueError('authored malformed notes');malformed.__notes__=()
+            for primary in (ValueError('authored primary'),NoDiagnostics('authored primary'),malformed):
+                cleanup=OSError('authored cleanup')
+                vector=self.retained_digest_vector(mutation,primary=primary,close_error=cleanup)
+                self.assertIs(vector.error,primary);self.assertIsNone(vector.answer)
+                self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+                tail=primary.__traceback__
+                while tail is not None and tail is not vector.tracebacks[0]:tail=tail.tb_next
+                self.assertIs(tail,vector.tracebacks[0])
+                if type(primary) is ValueError and primary is not malformed:
+                    self.assertEqual(['contract descriptor cleanup failures: 1'],primary.__notes__)
+                if primary is malformed:self.assertEqual((),primary.__notes__)
+        cleanup=OSError('cleanup only')
+        vector=self.retained_digest_vector(close_error=cleanup)
+        self.assertIs(vector.error,cleanup);self.assertIsNone(vector.answer)
+        self.assertEqual([103,102,101],[row[1] for row in vector.events if row[0]=='close'])
+
+    def test_retained_digest_original_deadline_closes_late_acquisition_and_final_operations(self):
+        for mutation in ('late-open','late-read','late-close','late-hash'):
+            with self.subTest(mutation=mutation):
+                vector=self.retained_digest_vector(mutation)
+                self.assertIsInstance(vector.error,TimeoutError);self.assertIsNone(vector.answer)
+                expected=[101] if mutation=='late-open' else [103,102,101]
+                self.assertEqual(expected,[row[1] for row in vector.events if row[0]=='close'])
+        with patch.object(contract.time,'monotonic',return_value=10), \
+                patch.object(contract.os,'open',side_effect=AssertionError('expired end before open')):
+            with self.assertRaises(TimeoutError):runtime.digest(Path('/authored/input'),deadline=10)
+        vector=self.retained_digest_vector('late-read',deadline=None)
+        self.assertIsNone(vector.error);self.assertEqual(hashlib.sha256(vector.payload).hexdigest(),vector.answer)
+
+    def test_retained_digest_hashes_capture_not_later_path_and_gcc_keeps_exact_realpath(self):
+        with tempfile.TemporaryDirectory(dir=TEMP) as temporary:
+            path=Path(temporary)/'gcc';path.write_bytes(b'authored A')
+            original=contract._bounded_json_snapshot
+            def captured(name,maximum,*,deadline=None):
+                raw=original(name,maximum,deadline=deadline)
+                path.write_bytes(b'authored B')
+                return raw
+            with patch.object(contract,'_bounded_json_snapshot',side_effect=captured):
+                self.assertEqual(hashlib.sha256(b'authored A').hexdigest(),contract.digest(path,maximum=10))
+            value=contract.load_profile();value['gccIdentity'].update(executable=str(path),realpath=str(path),sha256=hashlib.sha256(b'authored B').hexdigest())
+            with patch.object(contract,'digest',wraps=contract.digest) as hashed:
+                self.assertIs(value,contract._revalidate_gcc(value))
+                hashed.assert_called_once_with(path,maximum=16777216,deadline=None)
+            path.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'GCC executable differs'):contract._revalidate_gcc(value)
+            value['gccIdentity']['realpath']=str(path.with_name('other'))
+            with patch.object(contract,'digest',side_effect=AssertionError('realpath disagreement before hash')):
+                with self.assertRaisesRegex(ValueError,'GCC executable differs'):contract._revalidate_gcc(value)
 
     def test_complete_rlimits_are_disclosed_and_applied_exactly_without_host_policy(self):
         p = contract.load_profile(); bounds = runtime.execution_bounds(phase='runtime')

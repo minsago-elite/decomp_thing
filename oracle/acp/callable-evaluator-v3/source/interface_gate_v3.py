@@ -393,7 +393,7 @@ def probe(source, helper, work, environment, *, deadline=None, expected_inputs=N
         helper_pin = _pin_files([helper], deadline)[str(helper)]
         bindings={'sourceSha256':expected_inputs[str(source)]['sha256'],'helperSha256':helper_pin['sha256']}
     else:
-        bindings={'sourceSha256':digest(source),'helperSha256':digest(helper)}
+        bindings={'sourceSha256':digest(source,maximum=bounds['fileSizeBytes'],deadline=deadline),'helperSha256':digest(helper,maximum=bounds['workerLaunchPinFileBytes'],deadline=deadline)}
     argument='/work/'+str(source.relative_to(work))
     if expected_inputs is not None:
         revalidate_handoff(expected_inputs, deadline)
@@ -411,7 +411,7 @@ def probe(source, helper, work, environment, *, deadline=None, expected_inputs=N
             require_handoff_execution(result, {**expected_inputs,str(helper):helper_pin}, deadline, phase='probe')
             bindings['inputsUnchanged']=True
         else:
-            bindings['inputsUnchanged']=bindings['sourceSha256']==digest(source) and bindings['helperSha256']==digest(helper)
+            bindings['inputsUnchanged']=bindings['sourceSha256']==digest(source,maximum=bounds['fileSizeBytes'],deadline=deadline) and bindings['helperSha256']==digest(helper,maximum=bounds['workerLaunchPinFileBytes'],deadline=deadline)
         receipt['inputBindings']=bindings
         if not bindings['inputsUnchanged']:
             raise ValueError('probe inputs changed during execution')

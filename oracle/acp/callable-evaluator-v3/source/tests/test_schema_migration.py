@@ -117,16 +117,61 @@ class SchemaMigration(unittest.TestCase):
                     # A later pathname version cannot redefine the returned parsed bytes/hash.
                     if path.name=='reference-process-0.json':path.write_bytes(b'{"execution":{}}')
                 return result
-            def no_receipt_digest(path):
+            def no_receipt_digest(path,**kwargs):
                 if path.name.startswith('reference-process-'):
                     raise AssertionError('receipt must not have a separate pathname digest')
-                return original_digest(path)
+                return original_digest(path,**kwargs)
             with patch.object(e,'BASE',root),patch.object(e,'_read_json',side_effect=read_once),patch.object(e,'digest',side_effect=no_receipt_digest):
                 self.assertEqual(24,len(e.validated_observations(observations,caller,prep)))
             self.assertEqual(['reference-process-'+str(i)+'.json' for i in range(24)],seen)
             with patch.object(e,'BASE',root):
                 with self.assertRaisesRegex(ValueError,'receipt drift'):
                     e.validated_observations(observations,caller,prep)
+
+    def test_reference_original_source_uses_its_bounded_role_without_invented_phase_end(self):
+        import bounded_runtime as runtime
+        import build_contract as contract
+        import stat
+        import types
+        trusted=static_temp('static-process')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            root=Path(temporary);(root/'private').mkdir();original=root/'private/original.c'
+            original.write_bytes(b'authored original source')
+            prep=root/'preparation';prep.mkdir();(prep/'reference').mkdir()
+            caller=prep/'caller';caller.write_bytes(b'authored caller')
+            library=prep/'reference/libcandidate.so';library.write_bytes(b'authored library')
+            observations=prep/'reference-observations.json';observations.write_bytes(b'{}')
+            header={'sourceSha256':e.digest(original),'callerSha256':e.digest(caller),'callerPath':str(caller),
+                    'libraryPath':str(library),'librarySha256':e.digest(library),
+                    'profileSha256':e.load_profile_with_digest()[1],'observations':[]}
+            real_digest=e.digest;real_fstat=contract.os.fstat;original_inode=original.stat().st_ino
+            calls=[]
+            def hashing(path,**kwargs):
+                calls.append((path,kwargs));return real_digest(path,**kwargs)
+            with patch.object(e,'BASE',root),patch.object(e,'read_exchange',return_value=header), \
+                    patch.object(e,'digest',side_effect=hashing):
+                # Passing the real source admission reaches the unchanged24-row check.
+                with self.assertRaisesRegex(ValueError,'scenario identity drift'):
+                    e.validated_observations(observations,caller,prep)
+            self.assertEqual([(original,{'maximum':16777216,'deadline':None})],calls)
+            for mutation in ('fifo','oversize'):
+                def fstat(fd):
+                    value=real_fstat(fd)
+                    if value.st_ino==original_inode:
+                        fields={key:getattr(value,key) for key in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')}
+                        if mutation=='fifo':fields['st_mode']=stat.S_IFIFO|0o600
+                        else:fields['st_size']=16777217
+                        return types.SimpleNamespace(**fields)
+                    return value
+                with self.subTest(mutation=mutation),patch.object(e,'BASE',root), \
+                        patch.object(e,'read_exchange',return_value=header),patch.object(contract.os,'fstat',side_effect=fstat), \
+                        patch.object(e,'_read_json',side_effect=AssertionError('source must refuse before receipts')):
+                    with self.assertRaisesRegex(ValueError,'regular file byte bound'):
+                        e.validated_observations(observations,caller,prep)
+            original.unlink();original.symlink_to(caller)
+            with patch.object(e,'BASE',root),patch.object(e,'read_exchange',return_value=header), \
+                    patch.object(e,'_read_json',side_effect=AssertionError('source must refuse before receipts')):
+                with self.assertRaises(OSError):e.validated_observations(observations,caller,prep)
 
     def test_nonzero_reference_binds_actual_selected_preparation_and_raw_receipts(self):
         import bounded_runtime as runtime

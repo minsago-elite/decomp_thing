@@ -1627,6 +1627,46 @@ class RuntimeWorkerProof(unittest.TestCase):
         with patch.object(runtime,'BASE',base):
             with self.assertRaises(ValueError):runtime.load_worker_monitor_binding()
 
+    def test_monitor_binding_rehashes_actual_retained_files_with_original_cap_and_end(self):
+        profile=build_contract.load_profile();base=self.directory/'monitor-binding';base.mkdir();(base/'contracts').mkdir()
+        fixed={'sourceSha256':base/'worker_exec_monitor.c','protocolSha256':base/'contracts/worker-exec-proof-schema.json',
+               'parserSha256':base/'worker_exec_proof.py'}
+        for key,path in fixed.items():path.write_bytes(('authored '+key).encode())
+        dependency=base/'dependency';dependency.write_bytes(b'authored dependency')
+        binding={key:runtime.digest(path) for key,path in fixed.items()}
+        binding.update(binaryPath=str(base/'monitor'),binarySha256='a'*64,manifestSha256='b'*64,
+            environmentPinSha256=profile['toolchainEnvironmentPinSha256'],
+            dependencies=[{'path':str(dependency),'sha256':runtime.digest(dependency)}])
+        module=types.SimpleNamespace(load_monitor_binding=lambda supplied:binding)
+        real_digest=runtime.digest;calls=[]
+        def hashing(path,**kwargs):calls.append((path,kwargs));return real_digest(path,**kwargs)
+        with patch.object(runtime,'BASE',base),patch.object(runtime,'_authenticated_monitor_loader',return_value=module), \
+                patch.object(runtime,'_nonprivileged_executable',return_value={'sha256':'a'*64}), \
+                patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'digest',side_effect=hashing):
+            self.assertIs(binding,runtime.load_worker_monitor_binding(deadline=10.0))
+        self.assertEqual([*fixed.values(),dependency],[path for path,_ in calls])
+        self.assertTrue(all(kwargs=={'maximum':16777216,'deadline':10.0} for _,kwargs in calls))
+        for path in (fixed['sourceSha256'],dependency):
+            saved=path.read_bytes()
+            for mutation in ('changed','missing','symlink','oversize'):
+                if mutation=='changed':path.write_bytes(b'changed')
+                elif mutation=='missing':path.unlink()
+                elif mutation=='symlink':path.unlink();path.symlink_to(fixed['parserSha256'])
+                real_fstat=build_contract.os.fstat;inode=path.stat().st_ino if path.exists() else None
+                def fstat(fd):
+                    value=real_fstat(fd)
+                    if mutation=='oversize' and value.st_ino==inode:
+                        return types.SimpleNamespace(**{key:(16777217 if key=='st_size' else getattr(value,key)) for key in
+                            ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')})
+                    return value
+                with self.subTest(path=path,mutation=mutation),patch.object(runtime,'BASE',base), \
+                        patch.object(runtime,'_authenticated_monitor_loader',return_value=module), \
+                        patch.object(runtime,'_nonprivileged_executable',return_value={'sha256':'a'*64}), \
+                        patch.object(runtime.time,'monotonic',return_value=0),patch.object(build_contract.os,'fstat',side_effect=fstat):
+                    with self.assertRaises((ValueError,OSError)):runtime.load_worker_monitor_binding(deadline=10.0)
+                if path.is_symlink() or path.exists():path.unlink()
+                path.write_bytes(saved)
+
     def test_monitor_binding_late_gate_keeps_same_deadline_and_refuses(self):
         real_loader=runtime._authenticated_monitor_loader;now=[0.0];deadlines=[]
         def loaded(deadline):

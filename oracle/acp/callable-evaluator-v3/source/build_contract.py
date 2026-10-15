@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 from pathlib import Path
 import re
 from contextlib import contextmanager
@@ -30,9 +31,19 @@ _IMMUTABLE['limitSemantics']['workerExecProof'] = 'barrier and monitor overhead 
 _IMMUTABLE['limitAudit'].append({'phase': 'worker-exec-proof', 'source': 'bounded_runtime.py/scope_gate.py/worker_exec_monitor.c', 'keys': ['workerProofRecords', 'workerProofRecordBytes', 'workerProofBytes', 'workerBarrierSeconds', 'workerBarrierPollSeconds', 'workerBarrierAttempts', 'workerProcEntries', 'workerFdEntries', 'workerNumericFds', 'workerMetadataBytes', 'workerMonitorProcesses', 'workerLaunchPinEntries', 'workerLaunchPinFileBytes'], 'scope': 'closed 2-record proof, bounded pre-worker proc/FD barrier, one monitor inside existing aggregate task budget'})
 
 
-def digest(path: Path) -> str:
-    with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+def digest(path: Path, *, maximum=None, deadline=None) -> str:
+    # Compatibility default is the existing launch-file domain, not arbitrary host files.
+    ceiling = _IMMUTABLE['bounds']['workerLaunchPinFileBytes']
+    if maximum is None:
+        maximum = ceiling
+    if type(maximum) is not int or not 0 <= maximum <= ceiling:
+        raise ValueError('invalid digest byte bound')
+    _snapshot_timely(deadline)
+    raw = _bounded_json_snapshot(path, maximum, deadline=deadline)
+    _snapshot_timely(deadline)
+    result = hashlib.sha256(raw).hexdigest()
+    _snapshot_timely(deadline)
+    return result
 
 
 def _pairs(pairs):
@@ -56,8 +67,14 @@ def _directory_version(metadata):
                  ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid'))
 
 
-def _bounded_json_snapshot(path: Path, maximum: int) -> bytes:
-    """Finite stable snapshot; no enclosing wall deadline or root authority is implied."""
+def _snapshot_timely(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('phase expired during contract snapshot')
+
+
+def _bounded_json_snapshot(path: Path, maximum: int, *, deadline=None) -> bytes:
+    """Stable bounded bytes; an optional caller end refuses lateness, not blocking syscalls."""
+    _snapshot_timely(deadline)
     if type(maximum) is not int or maximum < 0:
         raise ValueError('invalid contract byte bound')
     path = Path(path)
@@ -67,66 +84,83 @@ def _bounded_json_snapshot(path: Path, maximum: int) -> bytes:
         path = Path.cwd() / path
     if len(path.parts) > 128 or len(str(path)) > 4096 or path.name == '':
         raise ValueError('contract path bound')
-    descriptors = []
+    # Root +at most126 parent components +leaf; own every fd before fallible checks.
+    descriptors = [None] * 128
+    count = 0
     directories = []
     primary = None
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    def checked(operation, *args, **kwargs):
+        _snapshot_timely(deadline)
+        value = operation(*args, **kwargs)
+        _snapshot_timely(deadline)
+        return value
+    def opened(name, flags, **kwargs):
+        nonlocal count
+        _snapshot_timely(deadline)
+        descriptor = os.open(name, flags, **kwargs)
+        descriptors[count] = descriptor
+        count += 1
+        _snapshot_timely(deadline)
+        return descriptor
     try:
-        descriptor = os.open('/', directory_flags)
-        descriptors.append(descriptor)
-        metadata = os.fstat(descriptor)
+        descriptor = opened('/', directory_flags)
+        metadata = checked(os.fstat, descriptor)
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError('contract parent must be directory')
         directories.append((descriptor, None, None, _directory_version(metadata)))
         for component in path.parts[1:-1]:
             parent = descriptor
-            descriptor = os.open(component, directory_flags, dir_fd=parent)
-            descriptors.append(descriptor)
-            metadata = os.fstat(descriptor)
+            descriptor = opened(component, directory_flags, dir_fd=parent)
+            metadata = checked(os.fstat, descriptor)
             if not stat.S_ISDIR(metadata.st_mode):
                 raise ValueError('contract parent must be directory')
             version = _directory_version(metadata)
-            if _directory_version(os.stat(component, dir_fd=parent, follow_symlinks=False)) != version:
+            if _directory_version(checked(os.stat, component, dir_fd=parent, follow_symlinks=False)) != version:
                 raise ValueError('contract parent changed during admission')
             directories.append((descriptor, parent, component, version))
         parent = descriptor
-        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                             dir_fd=parent)
-        descriptors.append(descriptor)
-        before = os.fstat(descriptor)
+        descriptor = opened(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                            dir_fd=parent)
+        before = checked(os.fstat, descriptor)
         if not stat.S_ISREG(before.st_mode) or not 0 <= before.st_size <= maximum:
             raise ValueError('contract regular file byte bound')
         version = _snapshot_version(before)
-        if _snapshot_version(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != version:
+        if _snapshot_version(checked(os.stat, path.name, dir_fd=parent, follow_symlinks=False)) != version:
             raise ValueError('contract file changed before read')
         remaining = before.st_size
         chunks = []
         while remaining:
-            block = os.read(descriptor, min(65536, remaining))
+            block = checked(os.read, descriptor, min(65536, remaining))
             if not block:
                 raise ValueError('contract file truncated')
             remaining -= len(block)
             chunks.append(block)
-        if os.read(descriptor, 1):
+        if checked(os.read, descriptor, 1):
             raise ValueError('contract file grew')
-        if (_snapshot_version(os.fstat(descriptor)) != version or
-                _snapshot_version(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != version):
+        if (_snapshot_version(checked(os.fstat, descriptor)) != version or
+                _snapshot_version(checked(os.stat, path.name, dir_fd=parent, follow_symlinks=False)) != version):
             raise ValueError('contract file changed during read')
         for held, ancestor, name, expected in directories:
-            if _directory_version(os.fstat(held)) != expected:
+            if _directory_version(checked(os.fstat, held)) != expected:
                 raise ValueError('contract held parent changed')
-            named = (os.stat('/', follow_symlinks=False) if ancestor is None else
-                     os.stat(name, dir_fd=ancestor, follow_symlinks=False))
+            named = (checked(os.stat, '/', follow_symlinks=False) if ancestor is None else
+                     checked(os.stat, name, dir_fd=ancestor, follow_symlinks=False))
             if _directory_version(named) != expected:
                 raise ValueError('contract named parent changed')
-        return b''.join(chunks)
+        raw = b''.join(chunks)
+        _snapshot_timely(deadline)
+        return raw
     except BaseException as failure:
         primary = failure
         raise
     finally:
         cleanup_failure = None
         cleanup_count = 0
-        for held in reversed(descriptors):
+        while count:
+            count -= 1
+            held = descriptors[count]
+            descriptors[count] = None
             try:
                 os.close(held)
             except BaseException as failure:
@@ -134,10 +168,14 @@ def _bounded_json_snapshot(path: Path, maximum: int) -> bytes:
                 if cleanup_failure is None:
                     cleanup_failure = failure
         if cleanup_failure is not None:
-            if primary is not None:
-                BaseException.add_note(primary, 'contract descriptor cleanup failures: ' + str(cleanup_count))
-            else:
+            if primary is None:
                 raise cleanup_failure
+            try:
+                BaseException.add_note(primary, 'contract descriptor cleanup failures: ' + str(cleanup_count))
+            except BaseException:
+                pass
+        if primary is None:
+            _snapshot_timely(deadline)
 
 
 def _decode_json(raw):
@@ -241,7 +279,7 @@ def profile():
 
 def _revalidate_gcc(value):
     identity = value['gccIdentity']
-    if str(Path(identity['executable']).resolve()) != identity['realpath'] or digest(Path(identity['realpath'])) != identity['sha256']:
+    if str(Path(identity['executable']).resolve()) != identity['realpath'] or digest(Path(identity['realpath']), maximum=value['bounds']['workerLaunchPinFileBytes'], deadline=None) != identity['sha256']:
         raise ValueError('GCC executable differs from visible profile identity')
     return value
 

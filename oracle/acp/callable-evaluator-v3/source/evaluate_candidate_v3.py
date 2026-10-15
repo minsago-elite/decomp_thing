@@ -614,7 +614,7 @@ def validated_observations(path, caller, preparation):
     if not path.resolve(strict=True).is_relative_to(BASE):
         raise ValueError('observations outside trusted v3 namespace')
     value=read_exchange(path,'reference-observations')
-    if (value['sourceSha256']!=digest(BASE/'private/original.c') or value['callerSha256']!=inputs[str(caller)]['sha256']
+    if (value['sourceSha256']!=digest(BASE/'private/original.c',maximum=load_profile()['bounds']['fileSizeBytes'],deadline=None) or value['callerSha256']!=inputs[str(caller)]['sha256']
             or value['callerPath']!=str(caller)
             or value['libraryPath']!=str(library)
             or value['librarySha256']!=inputs[str(library)]['sha256']

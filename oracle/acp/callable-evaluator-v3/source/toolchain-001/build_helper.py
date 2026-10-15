@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from bounded_runtime import bounded_run, public_result, digest, contained_command
 from build_contract import load_profile
-from interface_gate_v3 import _complete_execution, owned_worker_leaf
+from interface_gate_v3 import _complete_execution, owned_worker_leaf, MAXIMUM_HELPER_SCHEMA_BYTES
 
 
 def read_output(path, limit, elf=False):
@@ -65,8 +65,8 @@ def build(receipt_name):
         raise ValueError('helper receipt outside owned toolchain root')
     bounds = load_profile()['bounds']
     source = ROOT / 'record_identity_probe.cpp'
-    source_hash = digest(source)
-    schema_hash = digest(ROOT/'contracts/helper-schema.json')
+    source_hash = digest(source,maximum=bounds['fileSizeBytes'],deadline=None)
+    schema_hash = digest(ROOT/'contracts/helper-schema.json',maximum=MAXIMUM_HELPER_SCHEMA_BYTES,deadline=None)
     with owned_worker_leaf(ROOT,'helper-build-') as leaf:
         work = leaf.path
         binary = work/'record_identity_probe'
@@ -84,7 +84,7 @@ def build(receipt_name):
             error = ValueError('incomplete helper build execution')
             error.bounded_result = execution
             raise error
-        if source_hash != digest(source) or schema_hash != digest(ROOT/'contracts/helper-schema.json'):
+        if source_hash != digest(source,maximum=bounds['fileSizeBytes'],deadline=None) or schema_hash != digest(ROOT/'contracts/helper-schema.json',maximum=MAXIMUM_HELPER_SCHEMA_BYTES,deadline=None):
             raise ValueError('helper build source/schema drift')
         result = public_result(execution)
         binary_hash = None

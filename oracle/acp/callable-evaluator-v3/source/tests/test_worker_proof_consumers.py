@@ -1,5 +1,6 @@
 """Pure consumer controls: every native operation is mocked, never launched."""
 import copy
+import json
 from pathlib import Path
 import runpy
 import sys
@@ -26,6 +27,89 @@ def inspection_fixture(root):
 
 
 class WorkerProofConsumers(unittest.TestCase):
+    def test_probe_fallback_retains_before_after_digest_caps_and_same_absolute_end(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            work=Path(directory);source=work/'source.c';helper=work/'helper'
+            for mutation in (None,'source','helper'):
+                source.write_bytes(b'authored source');helper.write_bytes(b'authored helper')
+                helper_sha=gate.digest(helper);calls=[];real_digest=gate.digest
+                def hashing(path,**kwargs):calls.append((path,kwargs));return real_digest(path,**kwargs)
+                refusal={'schemaVersion':3,'status':'refused','diagnostics':['unsupported-integer-builtin-kind']}
+                result=completed_result(json.dumps(refusal).encode(),exit_code=2,target_sha=helper_sha)
+                def run(*args,**kwargs):
+                    if mutation is not None:(source if mutation=='source' else helper).write_bytes(b'changed input')
+                    return result
+                with self.subTest(mutation=mutation),patch.object(gate.time,'monotonic',return_value=0), \
+                        patch.object(gate,'digest',side_effect=hashing),patch.object(gate,'bounded_run',side_effect=run) as runner, \
+                        patch.object(gate,'probe_command',return_value=['NOT-EXECUTED']):
+                    if mutation is None:
+                        value=gate.probe(source,helper,work,{},deadline=10.0)
+                        self.assertEqual('refused',value['status']);self.assertTrue(value['inputBindings']['inputsUnchanged'])
+                    else:
+                        with self.assertRaisesRegex(ValueError,'inputs changed') as caught:gate.probe(source,helper,work,{},deadline=10.0)
+                        self.assertIs(caught.exception.bounded_result,result)
+                expected=[source,helper,source]+([] if mutation=='source' else [helper])
+                self.assertEqual(expected,[path for path,_ in calls])
+                self.assertTrue(all(kwargs=={'maximum':16777216,'deadline':10.0} for _,kwargs in calls))
+                self.assertEqual(10.0,runner.call_args.kwargs['phase_deadline'])
+                self.assertEqual(10.0,runner.call_args.kwargs['timeout'])
+
+    def test_probe_captured_handoff_does_not_add_fallback_pathname_hashes(self):
+        import bounded_runtime as runtime
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            work=Path(directory);source=work/'source.c';source.write_bytes(b'authored source')
+            helper=work/'helper';helper.write_bytes(b'authored helper')
+            expected=runtime._pin_files((source,));reached=ValueError('authored handoff command reached')
+            with patch.object(gate.time,'monotonic',return_value=0), \
+                    patch.object(gate,'digest',side_effect=AssertionError('handoff must retain its physical pins')), \
+                    patch.object(runtime,'_pin_files',wraps=runtime._pin_files) as pinned, \
+                    patch.object(gate,'bounded_run',side_effect=AssertionError('no worker')), \
+                    patch.object(gate,'probe_command',side_effect=reached) as command:
+                with self.assertRaises(ValueError) as caught:gate.probe(source,helper,work,{},deadline=10.0,expected_inputs=expected)
+            self.assertIs(caught.exception,reached)
+            self.assertEqual([(expected,10.0),([helper],10.0),(expected,10.0)],[call.args for call in pinned.call_args_list])
+            self.assertEqual(expected,command.call_args.kwargs['read_only_files'])
+
+    def test_helper_build_rehashes_actual_source_schema_with_distinct_role_caps_and_no_new_end(self):
+        build=runpy.run_path(str(ROOT/'toolchain-001/build_helper.py'),run_name='inert_import')['build']
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root=Path(directory);(root/'toolchain-001').mkdir();(root/'contracts').mkdir()
+            source=root/'record_identity_probe.cpp';schema=root/'contracts/helper-schema.json'
+            for mutation in (None,'source','schema'):
+                source.write_bytes(b'authored source');schema.write_bytes(b'{}')
+                calls=[];real_digest=gate.digest
+                def hashing(path,**kwargs):calls.append((path,kwargs));return real_digest(path,**kwargs)
+                result=completed_result(exit_code=1)
+                def run(*args,**kwargs):
+                    if mutation is not None:(source if mutation=='source' else schema).write_bytes(b'changed')
+                    return result
+                with self.subTest(mutation=mutation),patch.dict(build.__globals__,ROOT=root,digest=hashing,
+                        contained_command=Mock(return_value=['NOT-EXECUTED']),bounded_run=run):
+                    if mutation is None:
+                        value=build('not-published.json');self.assertFalse(value['publication']['published'])
+                        self.assertFalse((root/'toolchain-001/record_identity_probe').exists())
+                    else:
+                        with self.assertRaisesRegex(ValueError,'source/schema drift'):build('refused-'+mutation+'.json')
+                        self.assertFalse((root/'toolchain-001'/('refused-'+mutation+'.json')).exists())
+                expected=[(source,{'maximum':16777216,'deadline':None}),(schema,{'maximum':65536,'deadline':None}),
+                          (source,{'maximum':16777216,'deadline':None})]
+                if mutation!='source':expected.append((schema,{'maximum':65536,'deadline':None}))
+                self.assertEqual(expected,calls)
+
+    def test_helper_schema_oversize_and_source_symlink_refuse_before_worker(self):
+        build=runpy.run_path(str(ROOT/'toolchain-001/build_helper.py'),run_name='inert_import')['build']
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root=Path(directory);(root/'toolchain-001').mkdir();(root/'contracts').mkdir()
+            source=root/'record_identity_probe.cpp';schema=root/'contracts/helper-schema.json'
+            source.write_bytes(b'authored source');schema.write_bytes(b' '*65537)
+            runner=Mock(side_effect=AssertionError('input refusal before worker'))
+            with patch.dict(build.__globals__,ROOT=root,bounded_run=runner):
+                with self.assertRaisesRegex(ValueError,'regular file byte bound'):build('oversize.json')
+                schema.write_bytes(b'{}');source.unlink();source.symlink_to(schema)
+                with self.assertRaises(OSError):build('symlink.json')
+            runner.assert_not_called()
+            self.assertFalse((root/'worker-work').exists())
+
     def test_owned_leaf_retains_unknown_and_preserves_primary_cleanup_errors(self):
         for prefix in ('helper-build-','helper-inspection-'):
             with tempfile.TemporaryDirectory(dir=ROOT) as directory:

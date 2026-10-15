@@ -27,7 +27,7 @@ BASE = Path(__file__).resolve().parent
 CONTROLLER_PROC_SCAN_ENTRIES = 256
 CONTROLLER_PROC_STAT_BYTES = 4096
 
-from build_contract import load_profile_with_digest, enforced_process_limits
+from build_contract import load_profile_with_digest, enforced_process_limits, digest as _retained_digest
 
 
 def _canonical_pin_digest(pins: dict) -> str:
@@ -492,7 +492,7 @@ def load_worker_monitor_binding(deadline=None) -> dict:
              ('protocolSha256', BASE / 'contracts/worker-exec-proof-schema.json'),
              ('parserSha256', BASE / 'worker_exec_proof.py')]
     for key, path in fixed:
-        if digest(path) != binding[key]:
+        if digest(path, maximum=profile['bounds']['workerLaunchPinFileBytes'], deadline=deadline) != binding[key]:
             raise ValueError('monitor source/protocol/parser pin differs')
     binary = _nonprivileged_executable(Path(binding['binaryPath']))
     if binary['sha256'] != binding['binarySha256']:
@@ -501,7 +501,7 @@ def load_worker_monitor_binding(deadline=None) -> dict:
     for item in binding['dependencies']:
         if (not isinstance(item, dict) or set(item) != {'path', 'sha256'} or
                 not Path(item['path']).is_absolute() or item['path'] in paths or
-                digest(Path(item['path'])) != item['sha256']):
+                digest(Path(item['path']), maximum=profile['bounds']['workerLaunchPinFileBytes'], deadline=deadline) != item['sha256']):
             raise ValueError('monitor dependency inventory changed')
         paths.add(item['path'])
     _monitor_loader_timely(deadline)
@@ -822,9 +822,8 @@ def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
     return facts
 
 
-def digest(path: Path) -> str:
-    with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+def digest(path: Path, *, maximum=None, deadline=None) -> str:
+    return _retained_digest(path, maximum=maximum, deadline=deadline)
 
 
 def private_directory(path: Path) -> Path:
