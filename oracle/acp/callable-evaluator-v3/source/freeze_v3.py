@@ -78,12 +78,33 @@ def _open_directory(path, expected=()):
 
 def _open_regular(path, parents=()):
     path=_absolute(path);parent=_open_directory(path.parent,parents)
+    fd=None;primary=None
     try:
         fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
-    finally:os.close(parent)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd);raise ValueError('regular file required')
-    return fd
+        closing,parent=parent,None  # Relinquish before close: an error never authorizes retry.
+        os.close(closing)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('regular file required')
+        result,fd=fd,None
+        return result
+    except BaseException as failure:
+        primary=failure
+        raise
+    finally:
+        cleanup_failure=None;cleanup_count=0
+        for held in (fd,parent):
+            if held is not None:
+                try:os.close(held)
+                except BaseException as failure:
+                    cleanup_count+=1
+                    if cleanup_failure is None:cleanup_failure=failure
+        if cleanup_failure is not None:
+            if primary is not None:
+                try:
+                    BaseException.add_note(primary,'regular file descriptor cleanup failures: '+str(cleanup_count))
+                except BaseException:
+                    pass  # Diagnostics must never replace the already retained primary.
+            else:raise cleanup_failure
 
 
 def _consume(fd, expected, *, sink=None, retain=False):

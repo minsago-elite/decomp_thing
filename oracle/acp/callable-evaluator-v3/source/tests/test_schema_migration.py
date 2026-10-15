@@ -449,4 +449,107 @@ class BoundedTrees(unittest.TestCase):
         self.assertEqual(counts['yielded'],50);self.assertGreater(counts['yielded'],4)
 
 
+class RegularOpenOwnership(unittest.TestCase):
+    """Actual helper over symbolic FDs; no filesystem, payload or process operations."""
+    def vector(self, failure=None, close_failures=(), *, regular=True, malformed_notes=False):
+        path=Path('/authored/record.json');parents=(('/authored',(1,2,3)),)
+        handles=set();acquired=[];closed=[];attempted=[];events=[]
+        open_error=OSError('authored leaf-open refusal')
+        stat_error=OSError('authored admission-fstat refusal')
+        if malformed_notes:stat_error.__notes__=None
+        parent_error=OSError('authored parent-close refusal')
+        leaf_error=OSError('authored leaf-close refusal')
+        nonregular_error=ValueError('regular file required')
+        def parent_open(directory,expected):
+            self.assertEqual((path.parent,parents),(directory,expected))
+            handles.add(41);acquired.append(41);events.append(('parent',41))
+            return 41
+        def leaf_open(name,flags,*,dir_fd):
+            self.assertEqual(('record.json',41),(name,dir_fd))
+            self.assertEqual(f.os.O_RDONLY|f.os.O_NOFOLLOW|f.os.O_NONBLOCK|f.os.O_CLOEXEC,flags)
+            self.assertIn(41,handles);events.append(('open',42))
+            if failure=='open':raise open_error
+            handles.add(42);acquired.append(42)
+            return 42
+        def admission(number):
+            self.assertEqual(42,number);self.assertIn(number,handles)
+            events.append(('fstat',42))
+            if failure=='fstat':raise stat_error
+            return type('AuthoredMetadata',(),{'st_mode':f.stat.S_IFREG if regular else f.stat.S_IFIFO})()
+        def closing(number):
+            attempted.append(number)  # Count even a retry whose assertion is caught by cleanup.
+            self.assertIn(number,handles,'each acquired descriptor gets one close attempt')
+            # Remove symbolic ownership even on failure: no assumption permits a retry.
+            handles.remove(number);closed.append(number);events.append(('close',number))
+            if number in close_failures:raise parent_error if number==41 else leaf_error
+        answer=error=None
+        with patch.object(f,'_open_directory',side_effect=parent_open), \
+                patch.object(f.os,'open',side_effect=leaf_open), \
+                patch.object(f.os,'fstat',side_effect=admission) as observed, \
+                patch.object(f.os,'close',side_effect=closing), \
+                patch.object(f.os,'read',side_effect=AssertionError('regular-open must not read payload')) as reading, \
+                patch.object(f.os,'pread',side_effect=AssertionError('regular-open must not pread payload')) as preading, \
+                patch.object(f,'ValueError',return_value=nonregular_error,create=True) as nonregular:
+            try:answer=f._open_regular(path,parents)
+            except BaseException as caught:error=caught
+        self.assertEqual([],reading.call_args_list);self.assertEqual([],preading.call_args_list)
+        self.assertEqual(closed,attempted);self.assertEqual(len(attempted),len(set(attempted)))
+        return {'answer':answer,'error':error,'handles':handles,'acquired':acquired,'closed':closed,'attempted':attempted,'events':events,
+                'open_error':open_error,'stat_error':stat_error,'parent_error':parent_error,'leaf_error':leaf_error,
+                'nonregular_error':nonregular_error,'fstat_calls':observed.call_count,'nonregular_calls':nonregular.call_args_list}
+
+    def assert_failed_closed(self,value,primary,closed):
+        self.assertIsNone(value['answer']);self.assertIs(value['error'],value[primary])
+        self.assertEqual(set(),value['handles']);self.assertEqual(closed,value['closed'])
+        self.assertEqual(sorted(value['acquired']),sorted(value['closed']))
+
+    def test_regular_open_success_preserves_order_and_transfers_only_leaf(self):
+        value=self.vector()
+        self.assertIsNone(value['error']);self.assertEqual(42,value['answer'])
+        self.assertEqual({42},value['handles']);self.assertEqual([41],value['closed'])
+        self.assertEqual([('parent',41),('open',42),('close',41),('fstat',42)],value['events'])
+        self.assertEqual(1,value['fstat_calls']);self.assertEqual([],value['nonregular_calls'])
+
+    def test_regular_open_leaf_open_and_late_fstat_failures_close_once(self):
+        for failure,primary,closed in (('open','open_error',[41]),('fstat','stat_error',[41,42])):
+            with self.subTest(failure=failure):
+                value=self.vector(failure)
+                self.assert_failed_closed(value,primary,closed)
+                self.assertEqual(0 if failure=='open' else 1,value['fstat_calls'])
+                if failure=='fstat':
+                    self.assertEqual([('parent',41),('open',42),('close',41),('fstat',42),('close',42)],value['events'])
+
+    def test_regular_open_parent_close_failure_still_closes_leaf_without_admission(self):
+        for faults in ((41,),(41,42)):
+            with self.subTest(close_failures=faults):
+                value=self.vector(close_failures=faults)
+                self.assert_failed_closed(value,'parent_error',[41,42])
+                self.assertEqual(0,value['fstat_calls']);self.assertEqual([],value['nonregular_calls'])
+                self.assertEqual([('parent',41),('open',42),('close',41),('close',42)],value['events'])
+                if 42 in faults:
+                    self.assertEqual(['regular file descriptor cleanup failures: 1'],value['error'].__notes__)
+
+    def test_regular_open_metadata_nonregular_and_open_primaries_survive_cleanup_faults(self):
+        for failure,faults,regular,primary,closed in (
+                ('open',(41,),True,'open_error',[41]),
+                ('fstat',(42,),True,'stat_error',[41,42]),
+                (None,(),False,'nonregular_error',[41,42]),
+                (None,(42,),False,'nonregular_error',[41,42])):
+            with self.subTest(failure=failure,close_failures=faults,regular=regular):
+                value=self.vector(failure,faults,regular=regular)
+                self.assert_failed_closed(value,primary,closed)
+                if faults:
+                    self.assertEqual(['regular file descriptor cleanup failures: 1'],value['error'].__notes__)
+                if not regular:
+                    self.assertEqual(1,len(value['nonregular_calls']))
+                    self.assertEqual(('regular file required',),value['nonregular_calls'][0].args)
+                else:self.assertEqual([],value['nonregular_calls'])
+        # Malformed existing notes make add_note raise; that secondary diagnostic
+        # must not mask this exact admission error after the leaf-close fault.
+        value=self.vector('fstat',(42,),malformed_notes=True)
+        self.assert_failed_closed(value,'stat_error',[41,42])
+        self.assertIsNone(value['error'].__notes__)
+        self.assertEqual([41,42],value['attempted']);self.assertEqual(1,value['fstat_calls'])
+
+
 if __name__=='__main__':unittest.main()
