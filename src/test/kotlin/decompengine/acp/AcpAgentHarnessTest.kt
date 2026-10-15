@@ -450,6 +450,78 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `fatal cleanup publication keeps winner facts immutable across losing executions`() {
+        // Exercise both deterministic CAS orderings through the real publication seam.
+        // No RunningAcpProcess is constructed: even its inert stream fixture starts a reader.
+        for (winnerIndex in 0..1) {
+            val harness = AcpAgentHarness(AcpProcessConfiguration(
+                executable = Path.of("/home/june/decomp_thing/build/authored-not-executed"),
+            ))
+            val facts = listOf("authored first process shutdown facts", "authored second process shutdown facts")
+            assertFalse(facts[0] == facts[1], "contenders must carry distinct process facts")
+            val causes = listOf(java.io.IOException("first local cause"), java.io.IOException("second local cause"))
+            val failures = causes.mapIndexed { index, cause ->
+                AgentExecutionException(AgentFailure(AgentFailureKind.INTERNAL, "local cleanup $index"), cause).also {
+                    it.addSuppressed(IllegalStateException("earlier cleanup $index"))
+                    it.addSuppressed(IllegalArgumentException("primary failure $index"))
+                }
+            }
+            val publish = AcpAgentHarness::class.java.declaredMethods.single { it.name == "publishFatalCleanup" }
+                .apply { isAccessible = true }
+            val selected = AcpAgentHarness::class.java.getDeclaredField("unresolvedCleanupFailure")
+                .apply { isAccessible = true }.get(harness) as java.util.concurrent.atomic.AtomicReference<*>
+            val attachments = mutableListOf<Int>()
+            fun attach(index: Int): (Throwable) -> Unit = { owned ->
+                assertTrue(owned === failures[index], "attachment must target its local failure")
+                assertFalse(selected.get() === owned, "facts must be complete before publication")
+                owned.addSuppressed(IllegalStateException(facts[index]))
+                attachments += index
+            }
+            val loserIndex = 1 - winnerIndex
+            val winner = failures[winnerIndex]
+            assertTrue(publish.invoke(harness, winner, attach(winnerIndex)) === winner)
+            val publishedSuppressed = winner.suppressed
+            assertEquals(3, publishedSuppressed.size)
+            assertEquals("earlier cleanup $winnerIndex", publishedSuppressed[0].message)
+            assertEquals("primary failure $winnerIndex", publishedSuppressed[1].message)
+            assertEquals(facts[winnerIndex], publishedSuppressed[2].message)
+
+            assertTrue(publish.invoke(harness, failures[loserIndex], attach(loserIndex)) === winner)
+            assertTrue(winner.cause === causes[winnerIndex])
+            assertContentEquals(publishedSuppressed, winner.suppressed, "loser cannot mutate an already returned failure")
+            assertEquals(facts[loserIndex], failures[loserIndex].suppressed.last().message)
+            assertFalse(winner.suppressed.any { it.message == facts[loserIndex] })
+            assertEquals(listOf(winnerIndex, loserIndex), attachments)
+            assertTrue(selected.get() === winner, "sticky refusal retains the original selected exception")
+        }
+        for (throwAttachment in listOf(false, true)) {
+            val harness = AcpAgentHarness(AcpProcessConfiguration(
+                executable = Path.of("/home/june/decomp_thing/build/authored-not-executed"),
+            ))
+            val cause = java.io.IOException("preserved local cause")
+            val failure = AgentExecutionException(AgentFailure(AgentFailureKind.INTERNAL, "local cleanup"), cause)
+            val primary = IllegalStateException("preserved primary")
+            failure.addSuppressed(primary)
+            var attachmentTarget: Throwable? = null
+            val attach: ((Throwable) -> Unit)? = if (throwAttachment) {
+                { owned ->
+                    attachmentTarget = owned
+                    throw AssertionError("authored diagnostic attachment failure")
+                }
+            } else null // Same no-diagnostic fallback used if method-reference allocation fails.
+            val publish = AcpAgentHarness::class.java.declaredMethods.single { it.name == "publishFatalCleanup" }
+                .apply { isAccessible = true }
+            assertTrue(publish.invoke(harness, failure, attach) === failure)
+            if (throwAttachment) assertTrue(attachmentTarget === failure) else assertNull(attachmentTarget)
+            assertTrue(failure.cause === cause)
+            assertContentEquals(arrayOf<Throwable>(primary), failure.suppressed)
+            val selected = AcpAgentHarness::class.java.getDeclaredField("unresolvedCleanupFailure")
+                .apply { isAccessible = true }.get(harness) as java.util.concurrent.atomic.AtomicReference<*>
+            assertTrue(selected.get() === failure, "failed or absent diagnostics cannot prevent sticky publication")
+        }
+    }
+
+    @Test
     fun `stop refusal assertion keeps closed mode cause phase without arbitrary failure text`() {
         val record = authoredStdoutFacts()
         val evidence = AcpInvocationEvidenceSnapshot(
@@ -805,7 +877,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(93, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(94, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {

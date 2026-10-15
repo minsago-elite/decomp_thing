@@ -716,10 +716,12 @@ class AcpAgentHarness(
         }
         if (fatalCleanup != null) {
             primaryFailure?.let(fatalCleanup::addSuppressed)
-            unresolvedCleanupFailure.compareAndSet(null, fatalCleanup)
-            val original = requireNotNull(unresolvedCleanupFailure.get())
-            running.attachStdoutShutdownFacts(original)
-            throw original
+            val attachOwnedFacts: ((Throwable) -> Unit)? = try {
+                running::attachStdoutShutdownFacts
+            } catch (_: Throwable) {
+                null // Diagnostic preparation cannot replace or prevent sticky publication.
+            }
+            throw publishFatalCleanup(fatalCleanup, attachOwnedFacts)
         }
         val completedPrimaryFailure = primaryFailure
         if (completedPrimaryFailure != null) {
@@ -1606,6 +1608,21 @@ class AcpAgentHarness(
                 ),
             )
         }
+    }
+
+    private fun publishFatalCleanup(
+        fatalCleanup: AgentExecutionException,
+        attachOwnedFacts: ((Throwable) -> Unit)?,
+    ): AgentExecutionException {
+        // This execution owns fatalCleanup. Finish its facts before another execution can
+        // observe publication; a losing publisher must never modify the selected failure.
+        try {
+            attachOwnedFacts?.invoke(fatalCleanup)
+        } catch (_: Throwable) {
+            // Diagnostics are best effort; the original failure still must be published.
+        }
+        unresolvedCleanupFailure.compareAndSet(null, fatalCleanup)
+        return requireNotNull(unresolvedCleanupFailure.get())
     }
 
     private fun mapFailure(
