@@ -81,6 +81,13 @@ private fun readRecordedRepairHistorySnapshotWithHistory(
 }
 
 private const val HISTORY_E = 2_147_483_646L
+// Diagnostic-reader eligibility only: no format/writer/ledger or whole-heap claim.
+private const val HISTORY_CANONICAL_CAPTURE_MAXIMUM = 64L * 1024 * 1024
+
+private fun requireHistoryCanonicalCaptureSize(size: Long, requestedMaximum: Long) {
+    require(size in 1..minOf(requestedMaximum, HISTORY_CANONICAL_CAPTURE_MAXIMUM))
+}
+
 private const val HISTORY_Q = 16_384L // Existing LinuxFilesystemSyscalls.read growth chunk, not a new quota.
 private val HISTORY_DECLARED_NAME = Regex("legacy-graph-([0-9a-f]{64})\\.json")
 
@@ -133,7 +140,7 @@ private class HistoryCaptureSession(
 
     private fun readCaptured(reports: LinuxDescriptor?): RepairHistoryReadResult {
         check()
-        val graph = capture("graph.json", HISTORY_E) ?: run {
+        val graph = capture("graph.json", HISTORY_CANONICAL_CAPTURE_MAXIMUM) ?: run {
             requireMissing("recovery-binding.json")
             check()
             requireMissing("graph.json")
@@ -242,7 +249,8 @@ private class HistoryCaptureSession(
             val path = LinuxFilesystemSyscalls.descriptorPath(held)
             val before = Files.readAttributes(path, BasicFileAttributes::class.java)
             val size = before.size()
-            require(before.isRegularFile && size in 1..maximumBytes)
+            require(before.isRegularFile)
+            requireHistoryCanonicalCaptureSize(size, maximumBytes)
             ledger.reserve(size) // Debit BEFORE any body read, including final captures.
             val captured = readStableRegularFile(LinuxFilesystemSyscalls.descriptorPath(revisions), name, size,
                 cancellationCheck = cancel)

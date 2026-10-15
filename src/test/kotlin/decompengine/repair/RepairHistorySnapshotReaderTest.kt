@@ -795,6 +795,241 @@ class RepairHistorySnapshotReaderTest {
         return root
     }
 
+    @Test
+    fun canonicalCaptureSizeConjoinsFixedPolicyAndOriginalRequestedBoundWithoutAllocation() {
+        top("requireHistoryCanonicalCaptureSize", canonicalCaptureMaximum, canonicalCaptureMaximum)
+        top("requireHistoryCanonicalCaptureSize", canonicalCaptureMaximum, 2_147_483_646L)
+        top("requireHistoryCanonicalCaptureSize", 3L, 3L)
+        for ((size, maximum) in listOf(-1L to canonicalCaptureMaximum, 0L to canonicalCaptureMaximum,
+            canonicalCaptureMaximum + 1 to 2_147_483_646L, 4L to 3L)) {
+            assertFailsWith<IllegalArgumentException> { top("requireHistoryCanonicalCaptureSize", size, maximum) }
+        }
+        var closes = 0
+        var primary: Throwable? = null
+        val cleanup = IllegalStateException("authored cap close failure")
+        val owned = AutoCloseable { closes++; throw cleanup }
+        val thrown = assertFails {
+            top("withHistoryOwned", owned, { _: AutoCloseable ->
+                try { top("requireHistoryCanonicalCaptureSize", canonicalCaptureMaximum + 1, 2_147_483_646L) }
+                catch (failure: Throwable) { primary = failure; throw failure }
+            })
+        }
+        assertIs<IllegalArgumentException>(thrown)
+        assertSame(primary, thrown)
+        assertEquals(1, closes)
+        assertTrue(thrown.suppressed.isEmpty())
+    }
+
+    @Test
+    fun sparseCanonicalGraphOverFixedCapRefusesBeforeBodyDebitAndWholeSnapshot() {
+        val root = root()
+        val path = Files.createDirectories(root.resolve("reports/repair-revisions"))
+        sparseCanonicalLeaf(path.resolve("graph.json"), canonicalCaptureMaximum + 1)
+        // All directory-creating setup precedes the owned directory identity snapshot.
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            assertCanonicalCapRefusalBeforeBody(revisions, "graph.json", 2_147_483_646L)
+            unavailable(readRecordedRepairHistorySnapshot(revisions, {}, {}))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        unavailable(readProjectRecordedRepairHistory(root))
+    }
+
+    /** Root-selected future Actions capacity control; raw bytes, not valid-graph/heap qualification. */
+    @Test
+    fun actualRawExactCanonicalCapCaptureUsesSmallWriterChunksAndStreamingExpectedDigest() {
+        val path = Files.createDirectory(root().resolve("raw-capacity-revisions"))
+        val leaf = path.resolve("graph.json")
+        val chunk = ByteArray(16_384) { (it % 127).toByte() }
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        assertEquals(0L, canonicalCaptureMaximum % chunk.size)
+        Files.newOutputStream(leaf, java.nio.file.StandardOpenOption.CREATE_NEW,
+            java.nio.file.StandardOpenOption.WRITE).use { output ->
+            repeat((canonicalCaptureMaximum / chunk.size).toInt()) {
+                output.write(chunk)
+                digest.update(chunk)
+            }
+        }
+        val expectedSha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        assertEquals(canonicalCaptureMaximum, Files.size(leaf))
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            val capture = session(revisions)
+            val raw = call(capture, "capture", "graph.json", canonicalCaptureMaximum) as StableRegularFile
+            assertEquals(canonicalCaptureMaximum, raw.bytes.size.toLong())
+            assertEquals(expectedSha, raw.sha256)
+            assertContentEquals(chunk, raw.bytes.copyOfRange(0, chunk.size))
+            assertContentEquals(chunk, raw.bytes.copyOfRange(raw.bytes.size - chunk.size, raw.bytes.size))
+            assertTrue(raw.identity.isRegularFile)
+            assertEquals(canonicalCaptureMaximum, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.identity, LinuxFilesystemSyscalls.identity(revisions.fd))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+    }
+
+    @Test
+    fun highRecordedBudgetKeepsSmallActualCanonicalInputsEligibleAndCapsBindingBeforeDebit() {
+        val selected = budget.copy(maximumGraphBytes = canonicalCaptureMaximum + 1,
+            maximumIndexEvidenceBytes = canonicalCaptureMaximum + 1)
+        val root = producer(selected)
+        val path = root.resolve("reports/repair-revisions")
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        assertTrue(graph.size.toLong() < canonicalCaptureMaximum && binding.size.toLong() < canonicalCaptureMaximum)
+        assertEquals(selected, recordedRepairHistoryReadBudget(graph))
+        val pure = recordedRepairHistorySnapshot(graph, binding, selected)
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            val capture = session(revisions)
+            val result = call(capture, "read") as RepairHistoryReadResult
+            assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+            assertEquals(pure.graphSha256, result.snapshot?.graphSha256)
+            assertEquals(2L * graph.size + 2L * binding.size, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(root).status)
+        sparseCanonicalLeaf(path.resolve("recovery-binding.json"), canonicalCaptureMaximum + 1)
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            assertCanonicalCapRefusalBeforeBody(revisions, "recovery-binding.json", selected.maximumGraphBytes)
+            val capture = session(revisions)
+            assertFailsWith<IllegalArgumentException> { call(capture, "read") }
+            assertEquals(graph.size.toLong(), field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        unavailable(readProjectRecordedRepairHistory(root))
+        assertContentEquals(graph, path.resolve("graph.json").readBytes())
+        assertEquals("base", root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun requiredLegacyDeclarationUsesSameCapBeforeDebitAndNeverPublishesPartialSnapshot() {
+        val selected = budget.copy(maximumGraphBytes = canonicalCaptureMaximum + 1,
+            maximumIndexEvidenceBytes = canonicalCaptureMaximum + 1)
+        val root = legacyPendingWithCaptureBudget(selected)
+        val path = root.resolve("reports/repair-revisions")
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        val declared = Files.newDirectoryStream(path, "legacy-graph-*.json").use { it.single() }
+        val original = declared.readBytes()
+        assertTrue(graph.size.toLong() < selected.maximumGraphBytes)
+        assertTrue(original.size.toLong() < canonicalCaptureMaximum)
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            val capture = session(revisions)
+            val result = call(capture, "read") as RepairHistoryReadResult
+            assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+            assertEquals(true, result.snapshot?.pending?.rollback?.legacyPendingStateUnknown)
+            assertEquals(2L * graph.size + 2L * binding.size + 2L * original.size,
+                field(field(capture, "ledger")!!, "used"))
+        }
+        sparseCanonicalLeaf(declared, canonicalCaptureMaximum + 1)
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            assertCanonicalCapRefusalBeforeBody(revisions, declared.fileName.toString(), selected.maximumGraphBytes)
+            val capture = session(revisions)
+            assertFailsWith<RepairHistorySnapshotRefusal> { call(capture, "read") }
+            assertEquals(graph.size.toLong() + binding.size, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        unavailable(readProjectRecordedRepairHistory(root))
+        assertContentEquals(graph, path.resolve("graph.json").readBytes())
+        assertContentEquals(binding, path.resolve("recovery-binding.json").readBytes())
+        assertEquals("candidate", root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun actualProducerSummaryOverOneMiBStillReadsWithinCanonicalCaptureCap() {
+        val selected = budget.copy(maximumGraphBytes = 4L * 1024 * 1024)
+        val root = root()
+        val summary = "x".repeat(1024 * 1024 + 1)
+        assertTrue(summary.toByteArray().size.toLong() <= selected.maximumRequestBytes)
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("large-summary", emptyList(), byteArrayOf())))
+            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
+                summary, corpus.inputs.map { it.id }, null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            graph.reject(attempt)
+        }
+        val path = root.resolve("reports/repair-revisions")
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        assertTrue(graph.size > 1024 * 1024 && graph.size.toLong() < canonicalCaptureMaximum)
+        val expected = recordedRepairHistorySnapshot(graph, binding, selected)
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            val capture = session(revisions)
+            val result = call(capture, "read") as RepairHistoryReadResult
+            assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
+            assertEquals(expected.graphSha256, result.snapshot?.graphSha256)
+            assertEquals(expected.attempts.size, result.snapshot?.attempts?.size)
+            assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, result.snapshot?.qualification)
+            assertEquals(2L * graph.size + 2L * binding.size, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        assertEquals(RepairHistoryReadStatus.RECORDED, readProjectRecordedRepairHistory(root).status)
+        assertEquals("base", root.resolve("code.c").readText())
+    }
+
+    @Test
+    fun laterCanonicalGrowthPastCapRefusesBeforeSecondBodyAndKeepsFirstPassCharge() {
+        val root = producer()
+        val path = root.resolve("reports/repair-revisions")
+        val graph = path.resolve("graph.json").readBytes()
+        val binding = path.resolve("recovery-binding.json").readBytes()
+        val firstPass = graph.size.toLong() + binding.size
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            var changed = false
+            lateinit var capture: Any
+            capture = session(revisions, revalidate = {
+                if (!changed && (field(field(capture, "ledger")!!, "used") as Long) >= firstPass) {
+                    changed = true
+                    sparseCanonicalLeaf(path.resolve("graph.json"), canonicalCaptureMaximum + 1)
+                }
+            })
+            assertFailsWith<IllegalArgumentException> { call(capture, "read") }
+            assertTrue(changed)
+            assertEquals(firstPass, field(field(capture, "ledger")!!, "used"))
+            assertEquals(revisions.fd, revisions.whileOpen { it })
+        }
+        unavailable(readProjectRecordedRepairHistory(root))
+        assertContentEquals(binding, path.resolve("recovery-binding.json").readBytes())
+        assertEquals("base", root.resolve("code.c").readText())
+    }
+
+    private val canonicalCaptureMaximum = 64L * 1024 * 1024
+
+    private fun assertCanonicalCapRefusalBeforeBody(revisions: LinuxDescriptor, name: String, maximum: Long) {
+        var checks = 0
+        val capture = session(revisions, cancel = {
+            if (++checks > 2) error("unexpected stable-reader body entry")
+        })
+        assertFailsWith<IllegalArgumentException> { call(capture, "capture", name, maximum) }
+        assertEquals(2, checks) // Existing initial check only; stable reader's first callback is not reached.
+        assertEquals(0L, field(field(capture, "ledger")!!, "used"))
+        assertEquals(revisions.fd, revisions.whileOpen { it })
+    }
+
+    private fun sparseCanonicalLeaf(path: Path, size: Long) {
+        require(size > 0)
+        Files.newByteChannel(path, java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE).use { channel ->
+            channel.position(size - 1)
+            assertEquals(1, channel.write(java.nio.ByteBuffer.wrap(byteArrayOf(0))))
+        }
+        assertEquals(size, Files.size(path))
+    }
+
+    private fun legacyPendingWithCaptureBudget(selected: RepairResourceBudget): Path {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
+            val attempt = graph.beginAttempt(listOf("code.c")) // Genuine schema2, before any upgrade.
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+        }
+        assertFailsWith<MigrationCrash> {
+            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+                if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                    point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
+            }).close()
+        }
+        return root
+    }
+
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)
