@@ -220,8 +220,7 @@ def verify_visible(directory):
     expected = {'schemaVersion': 3, 'profile': value, 'profileSha256': sha256}
     if json.dumps(manifest, sort_keys=True, allow_nan=False) != json.dumps(expected, sort_keys=True):
         raise ValueError('visible manifest/profile disagreement')
-    with (directory / 'prompt.txt').open('rb') as stream:
-        prompt = stream.read(MAXIMUM_VISIBLE_BYTES + 1)
+    prompt = _bounded_json_snapshot(directory / 'prompt.txt', MAXIMUM_VISIBLE_BYTES)
     if prompt != _render(value).encode('utf-8'):
         raise ValueError('visible prompt/profile disagreement')
 
