@@ -83,19 +83,29 @@ class RepairHistorySnapshotReaderTest {
 
     @Test
     fun specialSymlinkOversizeLinkAndWriteAdmissionRefuseBeforePayloadRead() {
-        withRevisions { revisions, path ->
-            val target = path.resolve("target").also { it.writeText("abc") }
-            Files.createSymbolicLink(path.resolve("symbolic"), target.fileName)
-            Files.createDirectory(path.resolve("directory"))
-            Files.createLink(path.resolve("linked"), target)
-            val writable = path.resolve("writable").also { it.writeText("abc") }
-            Files.setPosixFilePermissions(writable, java.nio.file.attribute.PosixFilePermissions.fromString("rw-rw----"))
+        val path = Files.createDirectory(root().resolve("fixture-revisions"))
+        val target = path.resolve("target").also { it.writeText("abc") }
+        Files.createSymbolicLink(path.resolve("symbolic"), target.fileName)
+        Files.createDirectory(path.resolve("directory"))
+        Files.createLink(path.resolve("linked"), target)
+        val writable = path.resolve("writable").also { it.writeText("abc") }
+        Files.setPosixFilePermissions(writable, java.nio.file.attribute.PosixFilePermissions.fromString("rw-rw----"))
+        path.resolve("oversized").writeText("abcd")
+        path.resolve("ordinary").writeText("abc")
+        // Capture the directory identity only after fixture creation changes its link count.
+        LinuxFilesystemSyscalls.openRoot(path).use { revisions ->
+            assertEquals(revisions.identity, LinuxFilesystemSyscalls.identity(revisions.fd))
+            val ordinary = session(revisions)
+            val captured = call(ordinary, "capture", "ordinary", 3L) as StableRegularFile
+            assertContentEquals("abc".toByteArray(), captured.bytes)
+            assertEquals(sha256("abc".toByteArray()), captured.sha256)
+            assertEquals(3L, field(field(ordinary, "ledger")!!, "used"))
+            assertEquals(revisions.identity, LinuxFilesystemSyscalls.identity(revisions.fd))
             for ((name, maximum) in listOf("symbolic" to 3L, "directory" to 3L, "linked" to 3L, "writable" to 3L)) {
                 var checks = 0
                 assertFails { call(session(revisions, cancel = { checks++ }), "capture", name, maximum) }
                 assertEquals(2, checks, "no stable-reader body entry for $name")
             }
-            path.resolve("oversized").writeText("abcd")
             var checks = 0
             assertFails { call(session(revisions, cancel = { checks++ }), "capture", "oversized", 3L) }
             assertEquals(2, checks)
