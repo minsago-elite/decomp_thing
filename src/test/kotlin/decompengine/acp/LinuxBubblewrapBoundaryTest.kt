@@ -41,6 +41,77 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `manifest poll scratch initialization guard frees failed admissions and preserves primary failure`() {
+        for (primary in listOf<Throwable>(IOException("authored admission failure"), AssertionError("authored constructor failure"))) {
+            val handle = scriptedManifestPollHandle(-201)
+            var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+            val cleanup = IOException("authored scratch cleanup failure")
+            val memory = ManifestPollMemory(cleanup)
+            var initializations = 0
+            val failure = try {
+                initializeManifestPollScratch(handle) { owned ->
+                    initializations++
+                    scratch = owned
+                    replaceManifestPollMemory(owned, memory)
+                    throw primary
+                }
+                error("authored admission unexpectedly returned")
+            } catch (observed: Throwable) { observed }
+            assertTrue(failure === primary)
+            assertEquals(1, initializations)
+            assertEquals(listOf(cleanup), failure.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(scratch).poll() } // Closed before any native query.
+            checkNotNull(scratch).close()
+            assertEquals(1, memory.closes)
+            assertEquals(-201, handle.whileOpen { it })
+        }
+    }
+
+    @Test
+    fun `manifest poll scratch initialization transfers only on successful admission`() {
+        val handle = scriptedManifestPollHandle(-202)
+        var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+        val memory = ManifestPollMemory()
+        val result = initializeManifestPollScratch(handle) { owned ->
+            scratch = owned
+            replaceManifestPollMemory(owned, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        }
+        assertEquals("admitted", result)
+        assertEquals(0, memory.closes)
+        checkNotNull(scratch).close(); checkNotNull(scratch).close()
+        assertEquals(1, memory.closes)
+        assertEquals(-202, handle.whileOpen { it })
+    }
+
+    private fun scriptedManifestPollHandle(fd: Int) = LinuxDescriptor(fd,
+        LinuxFileIdentity(LinuxFileKey(0, 0), 0, 0, 0, 1, 1, false, false, false))
+
+    private class ManifestPollMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(8) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestPollMemory(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("polled").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestPollScratch(
+        handle: LinuxDescriptor,
+        initialize: (LinuxFilesystemSyscalls.MountMetadataPollScratch) -> Any?,
+    ): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedPollScratch",
+            LinuxDescriptor::class.java, Function1::class.java)
+        return invokePrivate(companion, method, handle, initialize)
+    }
+
+    @Test
     fun `manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection`() {
         withRepositoryTemporaryDirectory("acp-control-concurrency-") { base ->
             val parent = Files.createDirectory(base.resolve("controls"))

@@ -2093,6 +2093,7 @@ private fun physicalLocationsOverlap(a: HostPhysicalLocation, b: HostPhysicalLoc
 /** All mutable membership and lifetime state is guarded by ACTIVE_PRIVATE_CONTROLS. */
 private class RuntimePrivateControlScope private constructor(
     private val mountEvents: LinuxDescriptor,
+    private val mountPoll: LinuxFilesystemSyscalls.MountMetadataPollScratch,
     private val mounts: List<HostPhysicalMount>,
     private var controls: Map<PinnedControlDirectory, ManifestControlIdentity>,
     private var generation: Any,
@@ -2116,7 +2117,7 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     private fun requireMountsUnchanged() {
-        if (mountChanged || LinuxFilesystemSyscalls.mountMetadataChanged(mountEvents)) {
+        if (mountChanged || LinuxFilesystemSyscalls.mountMetadataPollChanged(mountPoll.poll())) {
             mountChanged = true
             throw IOException("host mounts changed during runtime manifest")
         }
@@ -2241,14 +2242,42 @@ private class RuntimePrivateControlScope private constructor(
             ACTIVE_MANIFEST_SCOPES.remove(this)
             controls.values.toList().also { controls = emptyMap() }
         }
+        var failure: Throwable? = null
         try {
             detached.asReversed().forEach { it.close() }
+        } catch (primary: Throwable) {
+            failure = primary
         } finally {
-            try { rootDescriptor.close() } finally { mountEvents.close() }
+            // Detachment forbids new scope polls; the scratch lock also waits for an in-flight
+            // query before freeing memory. The scratch never closes its borrowed descriptor.
+            try { mountPoll.close() } catch (cleanup: Throwable) {
+                val primary = failure
+                if (primary == null) failure = cleanup else if (primary !== cleanup) primary.addSuppressed(cleanup)
+            } finally {
+                try { rootDescriptor.close() } finally { mountEvents.close() }
+            }
         }
+        failure?.let { throw it }
     }
 
     companion object {
+        /** Retain local scratch ownership until all construction/admission steps return. */
+        private fun <T> withOwnedPollScratch(
+            handle: LinuxDescriptor,
+            initialize: (LinuxFilesystemSyscalls.MountMetadataPollScratch) -> T,
+        ): T {
+            // The caller's initializer callback exists before native storage is allocated here.
+            val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+            return try {
+                initialize(scratch)
+            } catch (failure: Throwable) {
+                try { scratch.close() } catch (cleanup: Throwable) {
+                    if (cleanup !== failure) failure.addSuppressed(cleanup)
+                }
+                throw failure
+            }
+        }
+
         fun open(source: Path, owner: LinuxFileKey?, check: () -> Unit): RuntimePrivateControlScope =
             synchronized(ACTIVE_PRIVATE_CONTROLS) {
                 requirePrivateControlRegistryHealthy()
@@ -2265,31 +2294,33 @@ private class RuntimePrivateControlScope private constructor(
                         ?: throw IOException("host mount metadata is unavailable")
                     val eventHandle = authorized.use { LinuxFilesystemSyscalls.openReadableFrom(it) }
                     events = eventHandle
-                    // Read this independently owned event handle once; never refresh or acknowledge drift.
-                    val text = LinuxFilesystemSyscalls.read(eventHandle, MAXIMUM_PROC_MOUNTINFO_BYTES, check).toString(Charsets.UTF_8)
-                    val lines = text.lineSequence().filter(String::isNotEmpty).take(MAXIMUM_PROC_MOUNTINFO_LINES + 1).toList()
-                    if (lines.size > MAXIMUM_PROC_MOUNTINFO_LINES) throw IOException("host mount metadata has too many records")
-                    val mounts = parseHostPhysicalMounts(lines, check)
-                    if (mounts.map { it.mountId }.toSet().size != mounts.size) throw IOException("host mount metadata contains duplicate mount ids")
-                    withHostPhysicalPath(source, check) { descriptor, missing ->
-                        if (missing.toString().isNotEmpty()) throw IOException("runtime manifest source disappeared")
-                        val location = hostPhysicalLocation(descriptor, mounts, check)
-                        val pinned = LinuxFilesystemSyscalls.openAbsolutePathOrNull(location.namespacePath)
-                            ?: throw IOException("runtime manifest source disappeared")
-                        rootDescriptor = pinned
-                        if (pinned.identity.key != descriptor.identity.key || pinned.identity.mountId != descriptor.identity.mountId) {
-                            throw IOException("runtime manifest source changed during admission")
+                    withOwnedPollScratch(eventHandle) { pollScratch ->
+                        // Read this independently owned event handle once; never refresh or acknowledge drift.
+                        val text = LinuxFilesystemSyscalls.read(eventHandle, MAXIMUM_PROC_MOUNTINFO_BYTES, check).toString(Charsets.UTF_8)
+                        val lines = text.lineSequence().filter(String::isNotEmpty).take(MAXIMUM_PROC_MOUNTINFO_LINES + 1).toList()
+                        if (lines.size > MAXIMUM_PROC_MOUNTINFO_LINES) throw IOException("host mount metadata has too many records")
+                        val mounts = parseHostPhysicalMounts(lines, check)
+                        if (mounts.map { it.mountId }.toSet().size != mounts.size) throw IOException("host mount metadata contains duplicate mount ids")
+                        withHostPhysicalPath(source, check) { descriptor, missing ->
+                            if (missing.toString().isNotEmpty()) throw IOException("runtime manifest source disappeared")
+                            val location = hostPhysicalLocation(descriptor, mounts, check)
+                            val pinned = LinuxFilesystemSyscalls.openAbsolutePathOrNull(location.namespacePath)
+                                ?: throw IOException("runtime manifest source disappeared")
+                            rootDescriptor = pinned
+                            if (pinned.identity.key != descriptor.identity.key || pinned.identity.mountId != descriptor.identity.mountId) {
+                                throw IOException("runtime manifest source changed during admission")
+                            }
+                            ACTIVE_PRIVATE_CONTROLS.forEach { retained[it] = it.retainManifestIdentity(mounts, check) }
+                            val ownerRecord = ACTIVE_PRIVATE_CONTROLS.singleOrNull { it.key == owner }
+                            val created = RuntimePrivateControlScope(eventHandle, pollScratch, mounts, retained, privateControlGeneration,
+                                pinned, location, ownerRecord, check)
+                            scope = created
+                            created.requireRootUnexposed(retained)
+                            created.checkpointLocked()
+                            if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
+                            ACTIVE_MANIFEST_SCOPES += created
+                            created
                         }
-                        ACTIVE_PRIVATE_CONTROLS.forEach { retained[it] = it.retainManifestIdentity(mounts, check) }
-                        val ownerRecord = ACTIVE_PRIVATE_CONTROLS.singleOrNull { it.key == owner }
-                        val created = RuntimePrivateControlScope(eventHandle, mounts, retained, privateControlGeneration,
-                            pinned, location, ownerRecord, check)
-                        scope = created
-                        created.requireRootUnexposed(retained)
-                        created.checkpointLocked()
-                        if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
-                        ACTIVE_MANIFEST_SCOPES += created
-                        created
                     }
                 } catch (failure: Throwable) {
                     scope?.let { ACTIVE_MANIFEST_SCOPES.remove(it) }

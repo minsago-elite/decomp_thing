@@ -466,7 +466,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(81, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(83, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
