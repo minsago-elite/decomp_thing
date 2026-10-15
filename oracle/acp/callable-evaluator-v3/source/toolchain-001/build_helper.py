@@ -9,8 +9,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from bounded_runtime import bounded_run, public_result, digest, contained_command
-from build_contract import load_profile
+from bounded_runtime import bounded_run, public_result, digest, contained_command, _pin_files
+from build_contract import load_profile_with_digest
 from interface_gate_v3 import _complete_execution, owned_worker_leaf, MAXIMUM_HELPER_SCHEMA_BYTES
 
 
@@ -58,15 +58,41 @@ def publish(path, data, mode):
         if os.path.lexists(temporary):os.unlink(temporary)
 
 
+def _require_input_join(execution, name, original, phase, profile_sha):
+    """Join an independent ordinary input, never the executable target identity."""
+    def valid_row(row):
+        return (type(row) is dict and set(row) == {'device','inode','mode','sha256'} and
+                all(type(row[key]) is int and 0 <= row[key] <= (1 << 64)-1 for key in ('device','inode')) and
+                type(row['mode']) is int and 0 <= row['mode'] <= 0o7777 and
+                type(row['sha256']) is str and len(row['sha256']) == 64 and
+                all(c in '0123456789abcdef' for c in row['sha256']))
+    actual = execution['launchInputPins'].get(name) if type(name) is str else None
+    if (type(name) is not str or not name or len(name) > 4096 or '\0' in name or
+            not Path(name).is_absolute() or str(Path(name)) != name or '..' in Path(name).parts or
+            not valid_row(original) or not valid_row(actual) or actual != original or
+            type(profile_sha) is not str or len(profile_sha) != 64 or
+            any(c not in '0123456789abcdef' for c in profile_sha) or
+            execution['bounds'].get('phase') != phase or execution['bounds'].get('profileSha256') != profile_sha):
+        error = ValueError('producer launch input differs from independent admission')
+        error.bounded_result = execution
+        raise error
+
+
 def build(receipt_name):
     destination = ROOT / 'toolchain-001'
     output = destination / receipt_name
     if output.parent.resolve() != destination.resolve():
         raise ValueError('helper receipt outside owned toolchain root')
-    bounds = load_profile()['bounds']
+    profile, profile_sha = load_profile_with_digest()
+    bounds = profile['bounds']
     source = ROOT / 'record_identity_probe.cpp'
-    source_hash = digest(source,maximum=bounds['fileSizeBytes'],deadline=None)
+    source_guard = digest(source,maximum=bounds['fileSizeBytes'],deadline=None)
     schema_hash = digest(ROOT/'contracts/helper-schema.json',maximum=MAXIMUM_HELPER_SCHEMA_BYTES,deadline=None)
+    source_pins = _pin_files([source], None)
+    original_source = source_pins.get(str(source))
+    if original_source is None or original_source['sha256'] != source_guard:
+        raise ValueError('helper build source admission differs')
+    source_hash = original_source['sha256']
     with owned_worker_leaf(ROOT,'helper-build-') as leaf:
         work = leaf.path
         binary = work/'record_identity_probe'
@@ -84,7 +110,10 @@ def build(receipt_name):
             error = ValueError('incomplete helper build execution')
             error.bounded_result = execution
             raise error
+        _require_input_join(execution, str(source), original_source, 'helper-build', profile_sha)
         if source_hash != digest(source,maximum=bounds['fileSizeBytes'],deadline=None) or schema_hash != digest(ROOT/'contracts/helper-schema.json',maximum=MAXIMUM_HELPER_SCHEMA_BYTES,deadline=None):
+            raise ValueError('helper build source/schema drift')
+        if _pin_files([source], None) != source_pins:
             raise ValueError('helper build source/schema drift')
         result = public_result(execution)
         binary_hash = None

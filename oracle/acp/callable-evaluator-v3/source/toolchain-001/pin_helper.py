@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from interface_gate_v3 import _complete_execution, owned_worker_leaf, MAXIMUM_HELPER_SCHEMA_BYTES
 from bounded_runtime import bounded_run, contained_command, public_result
-from build_contract import load_profile, _decode_json
+from build_contract import load_profile, load_profile_with_digest, _decode_json
 
 # Explicit caller policy selected from existing link/profile ceilings. This is
 # direct pin work, NOT a shared budget for the five nested Resolver invocations.
@@ -496,6 +496,26 @@ def _write_pin(output_name,value,*,root,ledger,deadline=None):
     return result
 
 
+def _require_input_join(execution, name, original, phase, profile_sha):
+    """Join an independent ordinary input, never the executable target identity."""
+    def valid_row(row):
+        return (type(row) is dict and set(row) == {'device','inode','mode','sha256'} and
+                all(type(row[key]) is int and 0 <= row[key] <= (1 << 64)-1 for key in ('device','inode')) and
+                type(row['mode']) is int and 0 <= row['mode'] <= 0o7777 and
+                type(row['sha256']) is str and len(row['sha256']) == 64 and
+                all(c in '0123456789abcdef' for c in row['sha256']))
+    actual = execution['launchInputPins'].get(name) if type(name) is str else None
+    if (type(name) is not str or not name or len(name) > 4096 or '\0' in name or
+            not Path(name).is_absolute() or str(Path(name)) != name or '..' in Path(name).parts or
+            not valid_row(original) or not valid_row(actual) or actual != original or
+            type(profile_sha) is not str or len(profile_sha) != 64 or
+            any(c not in '0123456789abcdef' for c in profile_sha) or
+            execution['bounds'].get('phase') != phase or execution['bounds'].get('profileSha256') != profile_sha):
+        error = ValueError('producer launch input differs from independent admission')
+        error.bounded_result = execution
+        raise error
+
+
 def pin(output_name,build_receipt_name,*,deadline=None):
     ledger=_Ledger(deadline); work=ROOT/'toolchain-001'
     output_name=_name(output_name); build_receipt=work/_name(build_receipt_name)
@@ -520,12 +540,17 @@ def pin(output_name,build_receipt_name,*,deadline=None):
     for path in _dep_paths(dep.raw,ledger):add(path)
     bounds=ledger.call(load_profile)['bounds']
     inspections=[]
-    profile=ledger.call(load_profile)
+    profile,profile_sha=ledger.call(load_profile_with_digest)
     binding=ledger.call(load_inspection_binding,profile)
     with owned_worker_leaf(ROOT,'helper-inspection-') as leaf:
         inspection_work=leaf.path
         environment={'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C','TMPDIR':str(inspection_work)}
-        for tool in (binary,Path('/usr/lib/llvm/23/bin/clang')):
+        for tool,original in ((binary,obj),(Path('/usr/lib/llvm/23/bin/clang'),None)):
+            if original is None:
+                original=_capture(tool,role='host-tool',maximum=_INPUT_BYTES,ledger=ledger,aliases=True,deadline=deadline)
+            ledger.step()
+            original_row={'device':original.version[0],'inode':original.version[1],
+                          'mode':stat.S_IMODE(original.version[2]),'sha256':original.sha256}
             if ledger.call(load_inspection_binding,profile)!=binding:raise ValueError('inspection admitted closure changed before execution')
             logical,argv,inputs=inspection_recipe(binding,tool,ledger=ledger,deadline=deadline)
             timeout=bounds['elfInspectionSeconds']
@@ -539,6 +564,7 @@ def pin(output_name,build_receipt_name,*,deadline=None):
                 ledger.timely()
                 if not _complete_execution(execution) or execution['exitCode']!=0:
                     error=ValueError('incomplete helper dependency inspection');error.bounded_result=execution;raise error
+                ledger.call(_require_input_join,execution,original.canonical,original_row,'elf-inspection',profile_sha)
                 if ledger.call(load_inspection_binding,profile)!=binding:raise ValueError('inspection admitted closure changed during execution')
                 inspection_recipe(binding,tool,ledger=ledger,deadline=deadline)
                 inspections.append({'logicalArgv':logical,'actualArgv':argv,'environmentPinSha256':binding['environmentPinSha256'],'execution':public_result(execution)})

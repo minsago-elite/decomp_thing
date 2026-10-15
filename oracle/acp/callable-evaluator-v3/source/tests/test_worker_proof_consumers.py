@@ -26,6 +26,27 @@ def inspection_fixture(root):
     return binding
 
 
+def _producer_execution(inputs, *, phase, target=None, profile_sha=None, stdout=b'', exit_code=0):
+    """Authored raw proof with separate executable and independently supplied inputs."""
+    import hashlib
+    import bounded_runtime as runtime
+    if profile_sha is None:profile_sha=gate.load_profile_with_digest()[1]
+    target=target or ('/usr/lib/llvm/23/bin/clang++',{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64})
+    name,row=target
+    value=completed_result(stdout=stdout,exit_code=exit_code,target_sha=row['sha256'],phase=phase)
+    pins=value['launchInputPins'];pins.pop('/authored/worker',None);pins.update(copy.deepcopy(inputs));pins[name]=copy.deepcopy(row)
+    pins[str(runtime.BASE/'contracts/candidate-build-profile.json')]['sha256']=profile_sha
+    value['bounds']['profileSha256']=profile_sha
+    binding=value['workerProofBindings'];binding['expected'].update(targetDevice=row['device'],targetInode=row['inode'])
+    binding['targetSha256']=row['sha256']
+    binding['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+    records=[json.loads(line)for line in value['workerProofRaw'].splitlines()]
+    records[0].update(ed=row['device'],ei=row['inode'],od=row['device'],oi=row['inode'])
+    value['workerProofRaw']=b''.join((json.dumps(record,separators=(',',':'))+'\n').encode()for record in records)
+    value['workerProof']['proofSha256']=hashlib.sha256(value['workerProofRaw']).hexdigest()
+    return value
+
+
 class WorkerProofConsumers(unittest.TestCase):
     def test_probe_fallback_retains_before_after_digest_caps_and_same_absolute_end(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
@@ -79,7 +100,8 @@ class WorkerProofConsumers(unittest.TestCase):
                 source.write_bytes(b'authored source');schema.write_bytes(b'{}')
                 calls=[];real_digest=gate.digest
                 def hashing(path,**kwargs):calls.append((path,kwargs));return real_digest(path,**kwargs)
-                result=completed_result(exit_code=1)
+                from bounded_runtime import _pin_files
+                result=_producer_execution(_pin_files([source]),phase='helper-build',exit_code=1)
                 def run(*args,**kwargs):
                     if mutation is not None:(source if mutation=='source' else schema).write_bytes(b'changed')
                     return result
@@ -262,7 +284,8 @@ class WorkerProofConsumers(unittest.TestCase):
                 Path(argv[argv.index('-o')+1]).write_bytes(elf)
                 Path(argv[argv.index('-MF')+1]).write_bytes(b'output: '+str(source).encode())
                 self.assertFalse((root/'toolchain-001/record_identity_probe').exists())
-                return completed_result()
+                from bounded_runtime import _pin_files
+                return _producer_execution(_pin_files([source]),phase='helper-build')
             with patch.dict(build.__globals__,ROOT=root,contained_command=command,bounded_run=run):
                 result=build('receipt.json')
             self.assertTrue(result['publication']['published'])
@@ -687,14 +710,22 @@ class HelperPinBoundedInputs(unittest.TestCase):
         fs.add('/z-a',b'first');fs.add('/z/file',b'second')
         result=completed_result(phase='elf-inspection');result['stdout']=b'/z-a /z/file\n'
         # Keep proof hash truthful after changing the untrusted stream only.
-        profile=gate.load_profile();runner=Mock(return_value=result);loader=Mock(return_value=binding);profiles=Mock(return_value=profile)
+        profile,profile_sha=gate.load_profile_with_digest()
+        def row(path):
+            node=fs.metadata(fs.nodes[str(path)])
+            return {'device':node.st_dev,'inode':node.st_ino,'mode':stat.S_IMODE(node.st_mode),
+                    'sha256':hashlib.sha256(bytes(fs.nodes[str(path)]['data'])).hexdigest()}
+        target=(binding['bashPath'],row(binding['bashPath']))
+        results=[_producer_execution({str(path):row(path)},phase='elf-inspection',target=target,
+                    profile_sha=profile_sha,stdout=result['stdout'])for path in (binary,Path('/usr/lib/llvm/23/bin/clang'))]
+        runner=Mock(side_effect=results);loader=Mock(return_value=binding);profiles=Mock(side_effect=[profile,(profile,profile_sha)])
         class Leaf:
             path=root/'inspection'
             def __enter__(self):return self
             def __exit__(self,*args):return False
             def run(self,operation,*args,**kwargs):return operation(*args,**kwargs)
         recipe=self.g['inspection_recipe'];recipes=Mock(wraps=recipe);ledger=self.g['_Ledger']()
-        with fs.effects(self.g),patch.dict(self.g,ROOT=root,load_profile=profiles,load_inspection_binding=loader,
+        with fs.effects(self.g),patch.dict(self.g,ROOT=root,load_profile=profiles,load_profile_with_digest=profiles,load_inspection_binding=loader,
                 owned_worker_leaf=Mock(return_value=Leaf()),bounded_run=runner,contained_command=Mock(return_value=['NOT-EXECUTED']),inspection_recipe=recipes,_Ledger=Mock(return_value=ledger)):
             value=self.g['pin']('pin.json','build.json')
         self.assertEqual(5,loader.call_count);self.assertEqual(4,recipes.call_count);self.assertEqual(2,profiles.call_count)
@@ -804,6 +835,200 @@ class HelperPinBoundedInputs(unittest.TestCase):
             self.assertEqual([Path('/fixture/tool')],constructed);self.assertEqual(5.0,fs.now)
             self.assertEqual(4,len(ledger.records));self.assertFalse(fs.fds)
             closed=[e[1]for e in fs.events if e[0]=='close'];self.assertEqual(len(closed),len(set(closed)))
+
+
+class ProducerLaunchInputJoins(unittest.TestCase):
+    def setUp(self):
+        self.builder=runpy.run_path(str(ROOT/'toolchain-001/build_helper.py'),run_name='inert_import')['build']
+        self.pinner=runpy.run_path(str(ROOT/'toolchain-001/pin_helper.py'),run_name='inert_import')['pin']
+
+    def mutate_input(self,inputs,name,mutation):
+        if mutation=='sha':inputs[name]['sha256']='1'*64
+        elif mutation=='inode':inputs[name]['inode']+=1
+        elif mutation=='mode':inputs[name]['mode']^=0o100
+        elif mutation=='missing':inputs.pop(name)
+        elif mutation=='rekeyed':inputs['/authored/unrelated-input']=inputs.pop(name)
+        elif mutation=='unrelated':
+            inputs['/authored/unrelated-input']=copy.deepcopy(inputs[name]);inputs[name]['sha256']='1'*64
+        elif mutation=='bool':inputs[name]['device']=True
+        elif mutation=='extra':inputs[name]['unreviewed']=True
+        elif mutation=='row-type':inputs[name]=[]
+
+    def build_vector(self,mutation=None,*,exit_code=0):
+        import bounded_runtime as runtime
+        import struct
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root=Path(directory);(root/'toolchain-001').mkdir();(root/'contracts').mkdir()
+            source=root/'record_identity_probe.cpp';source.write_bytes(b'authored source A')
+            (root/'contracts/helper-schema.json').write_bytes(b'{}')
+            original=runtime._pin_files([source]);profile_sha=gate.load_profile_with_digest()[1]
+            elf=bytearray(120);elf[:7]=b'ELF';struct.pack_into('<HHI',elf,16,3,62,1)
+            struct.pack_into('<Q',elf,32,64);struct.pack_into('<HHH',elf,52,64,56,1)
+            returned=[]
+            def run(argv,cwd,environment,**kwargs):
+                inputs=copy.deepcopy(original)
+                if mutation=='restored':
+                    source.write_bytes(b'authored source B');inputs=runtime._pin_files([source]);source.write_bytes(b'authored source A')
+                else:self.mutate_input(inputs,str(source),mutation)
+                if mutation=='post-mode':source.chmod(source.stat().st_mode^0o100)
+                value=_producer_execution(inputs,phase='compiler' if mutation=='phase' else 'helper-build',
+                    profile_sha='f'*64 if mutation=='profile' else profile_sha,exit_code=exit_code)
+                if mutation=='incomplete':value['workerExecVerified']=False
+                if mutation=='cleanup':value['cleanupVerified']=False
+                if mutation=='raw-proof':value['workerProofRaw']=b'not a worker proof'
+                expected_complete=mutation not in ('bool','extra','row-type','incomplete','cleanup','raw-proof')
+                self.assertEqual(expected_complete,gate._complete_execution(value))
+                self.assertEqual('/usr/lib/llvm/23/bin/clang++',argv[0])
+                self.assertNotEqual((original[str(source)]['device'],original[str(source)]['inode']),
+                    (value['workerProofBindings']['expected']['targetDevice'],value['workerProofBindings']['expected']['targetInode']))
+                Path(argv[argv.index('-o')+1]).write_bytes(elf)
+                Path(argv[argv.index('-MF')+1]).write_bytes(b'output: '+str(source).encode())
+                returned.append(value);return value
+            g=self.builder.__globals__;reader=g['read_output'];publisher=g['publish']
+            with patch.dict(g,ROOT=root,contained_command=lambda argv,*args,**kwargs:argv,bounded_run=run), \
+                    patch.dict(g,read_output=Mock(wraps=reader),publish=Mock(wraps=publisher)):
+                error=result=None
+                try:result=self.builder('result.json')
+                except ValueError as failure:error=failure
+                read_calls=g['read_output'].call_count;publish_calls=g['publish'].call_count
+            self.assertEqual(1,len(returned));execution=returned[0]
+            if mutation is None:
+                self.assertIsNone(error);self.assertEqual(original[str(source)]['sha256'],result['sourceSha256'])
+                self.assertEqual(exit_code,result['exitCode']);self.assertTrue((root/'toolchain-001/result.json').is_file())
+                self.assertEqual(exit_code==0,result['publication']['published'])
+                self.assertEqual(2 if exit_code==0 else 0,read_calls);self.assertEqual(2 if exit_code==0 else 0,publish_calls)
+                self.assertEqual(exit_code==0,(root/'toolchain-001/record_identity_probe').exists())
+                if exit_code!=0:self.assertIsNone(result['binarySha256'])
+            else:
+                self.assertIsNotNone(error);self.assertEqual(0,read_calls);self.assertEqual(0,publish_calls)
+                self.assertFalse((root/'toolchain-001/result.json').exists());self.assertFalse((root/'toolchain-001/record_identity_probe').exists())
+                if mutation=='post-mode':self.assertEqual('helper build source/schema drift',str(error))
+                else:
+                    self.assertIs(execution,error.bounded_result)
+                    self.assertEqual('producer launch input differs from independent admission' if
+                        mutation not in ('bool','extra','row-type','incomplete','cleanup','raw-proof') else
+                        'incomplete helper build execution',str(error))
+                if mutation=='cleanup':self.assertTrue(execution['leafCleanup']['retained'])
+            return original,execution
+
+    def test_actual_build_join_refuses_resealed_input_B_and_restored_A_before_outputs(self):
+        for mutation in ('restored','sha','inode','mode','missing','rekeyed','unrelated','phase','profile','post-mode'):
+            with self.subTest(mutation=mutation):self.build_vector(mutation)
+
+    def test_actual_build_join_preserves_real_proof_rejections_and_complete_nonzero_receipts(self):
+        for mutation in ('bool','extra','row-type','incomplete','cleanup','raw-proof'):
+            with self.subTest(mutation=mutation):self.build_vector(mutation)
+        for exit_code in (0,7,-9):
+            with self.subTest(exit_code=exit_code):self.build_vector(exit_code=exit_code)
+
+    def pin_vector(self,mutation=None,*,failed_tool=0):
+        import hashlib,stat
+        fs=_PinFilesystem();root=Path('/fixture');work=root/'toolchain-001';g=self.pinner.__globals__
+        fs.add('/etc',mode=stat.S_IFDIR|0o700)
+        source=root/'record_identity_probe.cpp';schema=root/'contracts/helper-schema.json';binary=work/'record_identity_probe'
+        clang=Path('/usr/lib/llvm/23/bin/clang')
+        for path,data in ((source,b'source A'),(schema,b'{}'),(binary,b'helper A'),(clang,b'clang A'),
+                (work/'build_helper.py',b'builder'),(Path(g['__file__']),b'pinner'),
+                (work/'helper-dependencies.d',('output: '+str(source)).encode()),
+                (ROOT/'worker_exec_proof.py',(ROOT/'worker_exec_proof.py').read_bytes())):fs.add(path,data)
+        def row(path):
+            node=fs.metadata(fs.nodes[str(path)])
+            return {'device':node.st_dev,'inode':node.st_ino,'mode':stat.S_IMODE(node.st_mode),
+                    'sha256':hashlib.sha256(bytes(fs.nodes[str(path)]['data'])).hexdigest()}
+        originals={str(tool):row(tool)for tool in (binary,clang)}
+        profile,profile_sha=gate.load_profile_with_digest()
+        build=_producer_execution({str(source):row(source)},phase='helper-build',profile_sha=profile_sha)
+        self.assertTrue(gate._complete_execution(build))
+        build=gate.public_result(build);build.update(schemaVersion=3,sourceSha256=row(source)['sha256'],
+            helperSchemaSha256=row(schema)['sha256'],binarySha256=row(binary)['sha256'])
+        fs.add(work/'build.json',json.dumps(build).encode())
+        binding={'environmentPinSha256':'a'*64,'dependencies':[]}
+        for role,data in (('bash',b'ELFbash'),('script',b'#!/bin/bash\n# inert'),('cache',b'cache')):
+            path=root/role;fs.add(path,data);binding[role+'Path']=str(path);binding[role+'Sha256']=row(path)['sha256']
+            binding['dependencies'].append({'path':str(path),'sha256':row(path)['sha256']})
+        for name in ('/usr/lib/llvm/23/bin/clang++','/usr/bin/ld','/usr/bin/as'):fs.add(name,b'host tool')
+        for name in ('/observed/helper','/observed/clang'):fs.add(name,b'selected inert dependency')
+        target=(binding['bashPath'],row(binding['bashPath']));executions=[];selected=[];commands=[]
+        class Leaf:
+            path=root/'inspection'
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def run(self,operation,*args,**kwargs):return operation(*args,**kwargs)
+        def command(argv,cwd,**kwargs):
+            commands.append((argv,kwargs));return argv
+        def run(argv,*args,**kwargs):
+            index=len(executions);tool=(binary,clang)[index];name=str(tool);inputs={name:copy.deepcopy(originals[name])}
+            current_mutation=mutation if index==failed_tool else None
+            if current_mutation=='restored':
+                node=fs.nodes[name];old=bytes(node['data']);node['data']=bytearray(b'input B');node['size']=7
+                inputs[name]=row(tool);node['data']=bytearray(old);node['size']=len(old)
+            else:self.mutate_input(inputs,name,current_mutation)
+            value=_producer_execution(inputs,phase='runtime' if current_mutation=='phase' else 'elf-inspection',
+                profile_sha='f'*64 if current_mutation=='profile' else profile_sha,target=target,
+                stdout=b'/forbidden/selection\n' if current_mutation is not None else
+                    b'/observed/helper\n' if index==0 else b'/observed/clang\n',
+                exit_code=7 if current_mutation=='nonzero' else 0)
+            if current_mutation=='incomplete':value['workerExecVerified']=False
+            if current_mutation=='cleanup':value['cleanupVerified']=False
+            if current_mutation=='raw-proof':value['workerProofRaw']=b'not a worker proof'
+            expected_complete=current_mutation not in ('bool','extra','row-type','incomplete','cleanup','raw-proof')
+            self.assertEqual(expected_complete,gate._complete_execution(value))
+            self.assertEqual(binding['bashPath'],argv[0]);self.assertEqual(str(tool),argv[2])
+            self.assertNotEqual((originals[name]['device'],originals[name]['inode']),
+                (value['workerProofBindings']['expected']['targetDevice'],value['workerProofBindings']['expected']['targetInode']))
+            executions.append(value);return value
+        parse=g['_stdout_paths']
+        def actual_paths(raw,ledger):selected.append(raw);return parse(raw,ledger)
+        loader=Mock(return_value=binding);profiles=Mock(side_effect=[profile,(profile,profile_sha)])
+        recipes=Mock(wraps=g['inspection_recipe'])
+        with fs.effects(g),patch.dict(g,ROOT=root,load_profile=profiles,load_profile_with_digest=profiles,
+                load_inspection_binding=loader,owned_worker_leaf=Mock(return_value=Leaf()),bounded_run=run,
+                contained_command=command,inspection_recipe=recipes,_stdout_paths=actual_paths):
+            error=result=None
+            try:result=self.pinner('pin.json','build.json')
+            except ValueError as failure:error=failure
+        if mutation is None:
+            self.assertIsNone(error);self.assertEqual(2,len(executions));self.assertEqual(2,len(selected))
+            self.assertEqual(5,loader.call_count);self.assertEqual(4,recipes.call_count);self.assertEqual(2,profiles.call_count)
+            self.assertEqual(row(binary)['sha256'],result['binarySha256']);self.assertIn('/observed/helper',result['dependencies'])
+            self.assertIn('/observed/clang',result['dependencies']);self.assertIn(str(work/'pin.json'),fs.nodes)
+        else:
+            self.assertIsNotNone(error);self.assertIs(executions[-1],error.bounded_result)
+            self.assertEqual(failed_tool+1,len(executions));self.assertEqual(failed_tool,len(selected))
+            self.assertNotIn(str(work/'pin.json'),fs.nodes)
+            self.assertFalse(any(event[0]=='read' and event[1]=='/forbidden/selection'for event in fs.events))
+            self.assertEqual('producer launch input differs from independent admission' if
+                mutation not in ('bool','extra','row-type','incomplete','cleanup','raw-proof','nonzero') else
+                'incomplete helper dependency inspection',str(error))
+        self.assertFalse(fs.fds)
+        return originals,executions
+
+    def test_actual_inspections_join_helper_and_clang_separately_from_bash_before_stdout(self):
+        self.pin_vector()
+        for failed_tool in (0,1):
+            for mutation in ('restored','sha','inode','mode','missing','rekeyed','unrelated','phase','profile'):
+                with self.subTest(tool=failed_tool,mutation=mutation):self.pin_vector(mutation,failed_tool=failed_tool)
+
+    def test_actual_inspections_keep_real_proof_cleanup_and_zero_exit_requirements(self):
+        for failed_tool in (0,1):
+            for mutation in ('bool','extra','row-type','incomplete','cleanup','raw-proof','nonzero'):
+                with self.subTest(tool=failed_tool,mutation=mutation):self.pin_vector(mutation,failed_tool=failed_tool)
+
+    def test_producer_local_joins_require_closed_independent_rows_and_exact_canonical_key(self):
+        row={'device':19,'inode':20,'mode':0o600,'sha256':'2'*64};name='/authored/source'
+        execution=_producer_execution({name:row},phase='helper-build')
+        self.assertTrue(gate._complete_execution(execution));profile_sha=execution['bounds']['profileSha256']
+        for producer in (self.builder,self.pinner):
+            join=producer.__globals__['_require_input_join']
+            join(execution,name,copy.deepcopy(row),'helper-build',profile_sha)
+            for field,value in (('device',True),('inode',-1),('mode',0o10000),('sha256','G'*64)):
+                original=copy.deepcopy(row);original[field]=value
+                with self.subTest(producer=producer.__name__,field=field),self.assertRaisesRegex(ValueError,'independent admission') as caught:
+                    join(execution,name,original,'helper-build',profile_sha)
+                self.assertIs(execution,caught.exception.bounded_result)
+            for other_name in ('relative','/authored/../source','//authored/source','/authored/./source','/authored/missing'):
+                with self.assertRaisesRegex(ValueError,'independent admission'):
+                    join(execution,other_name,row,'helper-build',profile_sha)
 
 
 if __name__ == '__main__':
