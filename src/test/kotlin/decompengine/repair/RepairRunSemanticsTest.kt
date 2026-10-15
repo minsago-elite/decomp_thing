@@ -847,14 +847,21 @@ class RepairRunSemanticsTest {
             graph.beginRun(2, 60_000)
             val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
             graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+            val pending = Json.parseToJsonElement(reference.resolve("reports/repair-revisions/graph.json").readText())
+                .jsonObject.getValue("pending").jsonObject
+            assertEquals(attempt.id, pending.getValue("id").jsonPrimitive.content)
+            assertEquals("true", pending.getValue("detached").jsonPrimitive.content)
+            // Detached staging has not published any source-install record; recovery creates false later.
+            assertEquals(kotlinx.serialization.json.JsonNull, pending.getValue("rollbackRecord"))
+            assertEquals("broken", reference.resolve("code.c").readText())
         }
         lateinit var iterations: List<RepairIteration>
         lateinit var runs: List<RepairRunState>
         ModuleRevisionGraph.open(reference, profile).use { graph ->
             assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
             val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
-            assertEquals(true, rollback.candidateSourceInstallStarted)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
+            assertEquals(false, rollback.candidateSourceInstallStarted)
             assertEquals("broken", reference.resolve("code.c").readText())
             assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
             iterations = graph.derivedRepairIterations()

@@ -2729,11 +2729,22 @@ class ModuleRevisionGraphTest {
     @Test
     fun `later native run evidence cannot enlarge a declared migration allowance`() {
         val fixture = declaredBudgetFixture(2, reserve = 8192)
+        assertEquals(16L * 1024, fixture.budget.maximumGraphBytes)
+        assertTrue(fixture.reservedBytes in 1L..8192L, "actual producer must leave positive ordinary-run slack")
+        assertEquals(fixture.budget.maximumGraphBytes - fixture.reservedBytes, fixture.legacy.size.toLong())
         val path = fixture.project.resolve("reports/repair-revisions/graph.json")
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile, fixture.budget).use { graph ->
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertTrue(graph.snapshot.runs.isEmpty())
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
             graph.beginRun(1, 60_000)
-            graph.finishRun(RepairRunStatus.NO_CHANGES, RepairEvidence("unchanged", "bounded later native run"))
+            assertEquals(RepairRunStatus.RUNNING, graph.snapshot.runs.single().status)
+            val completed = graph.finishRun(RepairRunStatus.NO_CHANGES, RepairEvidence("unchanged", "bounded later native run"))
+            assertEquals(RepairRunStatus.NO_CHANGES, completed.status)
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
             graph.beginRun(1, 60_000)
+            assertEquals(listOf(RepairRunStatus.NO_CHANGES, RepairRunStatus.RUNNING), graph.snapshot.runs.map { it.status })
+            requireDeclaredGraphBudget(fixture.project, path.readBytes(), fixture.budget)
             val before = path.readBytes()
             val snapshot = graph.snapshot
             val source = fixture.project.resolve("src/modules/alpha.c")
@@ -5596,7 +5607,7 @@ class ModuleRevisionGraphTest {
     }
 
     private data class DeclaredBudgetFixture(val project: Path, val budget: RepairResourceBudget,
-        val legacy: ByteArray, val nativeGraph: ByteArray, val originalSource: ByteArray)
+        val legacy: ByteArray, val nativeGraph: ByteArray, val originalSource: ByteArray, val reservedBytes: Long)
 
     private fun declaredBudgetFixture(schema: Int, withRun: Boolean = true, reserve: Int = 0): DeclaredBudgetFixture {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
@@ -5624,13 +5635,20 @@ class ModuleRevisionGraphTest {
                 .replace(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null", "")
                 .replace(Regex(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":\\{[^{}\n]*\\}"), "")
         }
-        val padding = (budget.maximumGraphBytes - reserve - legacy(native).toByteArray().size).toInt()
+        val unpaddedBytes = legacy(native).toByteArray().size.toLong()
+        val headroom = budget.maximumGraphBytes - unpaddedBytes
+        assertTrue(headroom > 0, "declared schema=$schema unpadded=$unpaddedBytes cap=${budget.maximumGraphBytes}")
+        require(reserve >= 0)
+        // Reserve only slack actually available from this producer; keep at least one padding byte.
+        // Defaults still saturate the unchanged cap exactly. No compatibility credit is enlarged.
+        val admittedReserve = minOf(reserve.toLong(), headroom - 1)
+        val padding = (headroom - admittedReserve).toInt()
         assertTrue(padding > 0)
         native = native.replace("DECLARED_GRAPH_PADDING", "p".repeat("DECLARED_GRAPH_PADDING".length + padding))
         val old = legacy(native).toByteArray()
-        assertEquals(budget.maximumGraphBytes - reserve, old.size.toLong(), "declared schema=$schema")
+        assertEquals(budget.maximumGraphBytes - admittedReserve, old.size.toLong(), "declared schema=$schema")
         path.writeBytes(old)
-        return DeclaredBudgetFixture(project, budget, old, native.toByteArray(), original)
+        return DeclaredBudgetFixture(project, budget, old, native.toByteArray(), original, admittedReserve)
     }
 
     private fun requireDeclaredGraphBudget(project: Path, payload: ByteArray, budget: RepairResourceBudget) {
@@ -5717,7 +5735,8 @@ class ModuleRevisionGraphTest {
                 graph.beginRun(1, 60_000)
                 val attempt = graph.beginAttempt(listOf(relative), RevisionRepairMetadata(
                     1, "compile", "bounded failure", null, corpus.inputs.map(ProcessInput::id), null, corpus.sha256))
-                graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after))
+                graph.persistAndBindAgentInvocation(attempt, completeAcpReceiptDocument(project, attempt, relative, before, after,
+                    includeModification = legacyPrefixHasChanges))
                 if (legacyPrefixHasChanges) graph.installCandidate(attempt, mapOf(relative to after))
                 // Detached candidate installation does not exchange the canonical source tree.
             }
@@ -6130,6 +6149,7 @@ class ModuleRevisionGraphTest {
         relativePath: String,
         before: ByteArray,
         after: ByteArray,
+        includeModification: Boolean = true,
     ): AcpExecutionReceiptDocument {
         val workspacePath = AgentWorkspacePath("project", relativePath)
         val request = AgentExecutionRequest(
@@ -6139,13 +6159,13 @@ class ModuleRevisionGraphTest {
                 listOf(AgentPathRule(workspacePath, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))),
             ),
         )
-        val change = AgentFileChange(
+        val changes = if (includeModification) listOf(AgentFileChange(
             workspacePath,
             AgentFileChangeKind.MODIFIED,
             sha256(before),
             sha256(after),
             after.size.toLong(),
-        )
+        )) else emptyList()
         val implementationId = "repair-test-acp"
         val factory = AcpHarnessProvenance(
             harness = "acp",
@@ -6218,11 +6238,11 @@ class ModuleRevisionGraphTest {
         val result = AgentExecutionResult(
             AgentStopReason.COMPLETED,
             "peer completion summary",
-            listOf(change),
+            changes,
             AgentSessionReference(implementationId, "repair-session"),
         )
         val recorder = BoundedAgentExecutionEventRecorder().also {
-            it.record(AgentFileChangeEvent(0, change))
+            changes.forEachIndexed { index, change -> it.record(AgentFileChangeEvent(index.toLong(), change)) }
         }
         val receipt = AgentExecutionReceipt(
             AgentExecutionRequestBinding.capture(request),
