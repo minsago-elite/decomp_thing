@@ -2697,6 +2697,46 @@ class AcpAgentHarnessTest {
         return failure
     }
 
+    /** Existing receipt metadata only: no process queries, exception text, stderr or request content. */
+    private fun cleanupFailureDiagnostic(
+        invocation: AcpInvocationEvidenceSnapshot,
+        failure: AgentExecutionException,
+    ): String {
+        val diagnostics = invocation.diagnostics
+        val output = invocation.sandboxEvidence?.outerProcessOutput
+        val allowedCauseTypes = setOf(
+            "decompengine.agent.AgentExecutionException", "decompengine.acp.AcpCleanupProofFailure",
+            "decompengine.acp.AcpOutputLimitFailure", "decompengine.acp.AcpPhaseTimeout",
+            "decompengine.acp.AcpEofFailure", "decompengine.acp.AcpProcessExitedFailure",
+            "java.io.IOException", "java.lang.IllegalStateException", "java.lang.InterruptedException",
+            "java.util.concurrent.TimeoutException", "java.util.concurrent.ExecutionException",
+        )
+        val seen = ArrayList<Throwable>(6)
+        val causeTypes = ArrayList<String>(6)
+        var cause: Throwable? = failure
+        while (cause != null && seen.size < 6 && seen.none { it === cause }) {
+            val current = requireNotNull(cause)
+            seen += current
+            causeTypes += current.javaClass.name.takeIf { it in allowedCauseTypes } ?: "other"
+            cause = current.cause
+        }
+        return ("cleanupDiagnostic phase=${invocation.phaseReached} cleanup=${invocation.cleanupDisposition} " +
+            "failureKind=${failure.failure.kind} failedOutcome=${failure.receipt?.outcome is AgentExecutionOutcome.Failed} " +
+            "audits=${invocation.completeness} negotiated=${invocation.negotiatedAgent != null} " +
+            "wirePromptPresent=${invocation.wirePromptSha256 != null} sandbox=${invocation.sandboxEvidence != null} " +
+            "completeEvidence=${invocation.completeExecutionEvidence != null} diagnostics=${diagnostics != null} " +
+            "exitCode=${diagnostics?.exitCode} forcedTermination=${diagnostics?.forcedTermination} " +
+            "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
+            "remainingPidCount=${diagnostics?.remainingProcessIds?.size} " +
+            "remainingPidsFirst8=${diagnostics?.remainingProcessIds?.take(8)} " +
+            "sandboxCleanupVerified=${diagnostics?.sandboxCleanupVerified} " +
+            "producedBytes=${diagnostics?.producedOutputBytes} producedLimit=${diagnostics?.producedOutputLimitBytes} " +
+            "outputLimitExceeded=${diagnostics?.outputLimitExceeded} stderrTruncated=${diagnostics?.stderrTruncated} " +
+            "outerObserved=${output?.observedBytes} outerLimit=${output?.maximumBytes} outerExceeded=${output?.limitExceeded} " +
+            "stdoutEof=unknown stderrEof=unknown shutdownBudget=unknown " +
+            "causeClasses=$causeTypes causeTailUnknown=${cause != null} suppressedCauses=unknown").take(4096)
+    }
+
     private fun assertCleanTermination(
         harness: AcpAgentHarness,
         context: String = "execution",
@@ -2708,7 +2748,14 @@ class AcpAgentHarnessTest {
         val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
         if (failure != null) {
             assertNotNull(invocation, "$context invocation evidence")
-            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, context)
+            val cleanupContext = if (invocation.cleanupDisposition != AcpExecutionCleanupDisposition.VERIFIED) {
+                try {
+                    "$context " + cleanupFailureDiagnostic(invocation, failure)
+                } catch (_: Throwable) {
+                    "diagnostic-unavailable"
+                }
+            } else context
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, cleanupContext)
             assertNull(invocation.completeExecutionEvidence, "$context failed outcome archive evidence")
         }
         val diagnostics = assertNotNull(invocation?.diagnostics ?: harness.latestDiagnostics(), context)

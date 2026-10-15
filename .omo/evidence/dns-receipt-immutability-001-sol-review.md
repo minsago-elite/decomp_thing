@@ -1,0 +1,16 @@
+# Independent DNS receipt immutability review
+
+**CLEAR_SCOPED — exact sWSXa source fix.** No blocking source finding. This closes the exposed mutable subject-map structure without changing candidate validation or granting runtime approval. Kotlin remains uncompiled; no executed regression or native qualification is claimed.
+
+- Freeze `build/dns-receipt-immutability-001/freeze.json`: SHA256 `58ca9d71461975175361148b5e6f950b2125b2451f42c8a7be24201b2954f059`; handoff `2756cb5756e54a011c40008207b87ca19de4db09b072f14499da66658620a02e`; diff `de2c496010d21672952df6b8e45d590e6b80626b101a786ec284aa9458d578ee`.
+- Exact ApprovalContracts source `6ec765b1a97204ef06ff92238589354459cbe3e86c6e2b74b81a1f2d242bcc90`; BuildInput test `33f27ec8272902a13383ceb4d57b212f61776ec4af6921ad8af909a06b0e893b`. Independently verified both current sizes/hashes, before hashes, source-copy equality, five evidence rows and unchanged approval-gate hash.
+
+## Assessment
+
+1. `Receipt` constructor13–16 copies `subjects.toMap()` before exposing a property and wraps the detached copy in `Collections.unmodifiableMap`. Caller aliases cannot change its map structure. Java's unmodifiable wrapper also rejects entry.setValue and map/view mutation. Enum keys and String values are immutable, so a defensive shallow copy suffices; no mutable nested value remains. Pattern matches existing Candidate references storage.
+2. Independently reconstructed the entire production file by applying only that exact constructor/storage replacement to before bytes: exact equality. Digest/domain separation, closed kind/subject parsing, original receipt values, envelope/root/hash/subject validation and all admission logic are byte-identical. No recomputation from attacker-mutated state or dummy digest was introduced.
+3. The two authored controls test consequences: actual parsed multi-subject receipt put/remove/clear/entry mutation must throw while digest and positive envelope binding stay fixed; a constructor-owned alias may be changed/cleared without altering the receipt. The separate negative uses a parsed receipt genuinely declaring wrong M/P with its real digest, changes the caller alias to correct M/P, and declares that retained digest in the envelope: immutable wrong subjects must still reject. This exercises the original retargeting vulnerability, not merely an implementation-type assertion.
+4. Independently removed the two inserted methods from current test source and obtained exact original test bytes. Static annotations33→35. This class is outside the existing reflected five-class83 guard; no guard change is required. Retained seven checks are source/hash checks only, not compiled/passing Kotlin tests.
+5. RuntimeProfile SHA256 `1778f5c656eb1842570f3ee0d3638bc25b046ce469cd952bb38296612595d566` matches; `requireApproved` still unconditionally throws. Candidate DAG/envelope consistency remains inert and does not authenticate signatures or supply source/runtime/resolver/network authority. Native qualification remains pending.
+
+Scope is the exact two owned files, not another owner's source or a composed freeze. A later provider-base merge requires its own integration checks. No tests/compiler/JVM/native/proc/network/auth/model/CI execution or Git/remote/source mutation occurred. Only source/evidence reads, hashes/comparisons and this additive review were performed.
