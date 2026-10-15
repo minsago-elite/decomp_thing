@@ -561,15 +561,15 @@ class LinuxBubblewrapBoundaryTest {
 
                                         // Both routes drive the existing hash/copy callback cadence, without a replacement query.
                                         val hash = boundaryType.getDeclaredMethod("sha256", LinuxDescriptor::class.java,
-                                            java.lang.Long.TYPE, Function0::class.java)
+                                            java.lang.Long.TYPE, Function0::class.java, RuntimeCopyStatistics::class.java)
                                         queries.clear()
-                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check)
+                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check, null)
                                         val hashOrder = queries.toList()
                                         queries.clear()
                                         val originalDigest = invokePrivate(null, hash, file, Files.size(boundPath), {
                                             invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
                                             Unit
-                                        })
+                                        }, null)
                                         assertEquals(originalDigest, boundDigest)
                                         assertEquals(hashOrder, queries, "all original hash checkpoints still execute")
                                         assertTrue(hashOrder.count { it == "file" } > 1, "the real multi-chunk hash repeats the bound check")
