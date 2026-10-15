@@ -3,6 +3,7 @@ from pathlib import Path
 from contextlib import contextmanager, ExitStack
 from types import SimpleNamespace
 import hashlib
+import json
 import stat
 import sys
 import unittest

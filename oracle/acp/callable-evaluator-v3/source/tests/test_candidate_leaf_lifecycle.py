@@ -399,9 +399,11 @@ class PhaseArtifactContinuity(unittest.TestCase):
         (self.root/'worker_exec_proof.py').write_bytes((e.BASE/'worker_exec_proof.py').read_bytes())
         def pin(path):return e.CopiedInput(path,e._file_version(path.stat()),hashlib.sha256(path.read_bytes()).hexdigest()).pin()
         caller_pin=pin(caller);observations=[]
-        for i,family in enumerate(e.SCENARIO_FAMILIES):
-            raw=receipt(caller=str(caller),caller_sha=caller_pin['sha256'],input_pins={str(caller):caller_pin})
-            observations.append({'id':i,'family':family,'process':e.process_observation(raw)})
+        # Reference receipts and their later replay share the same canonical profile path.
+        with patch.object(e,'BASE',self.root),patch('bounded_runtime.BASE',self.root):
+            for i,family in enumerate(e.SCENARIO_FAMILIES):
+                raw=receipt(caller=str(caller),caller_sha=caller_pin['sha256'],input_pins={str(caller):caller_pin})
+                observations.append({'id':i,'family':family,'process':e.process_observation(raw)})
         produced=[];leaf_count=[];runs=[];probes=[];inspections=[];copy=e.copy_input
         candidate_pre=b'authored preprocessed candidate';reference_pre=b'authored preprocessed reference'
         linked=b'authored linked library'

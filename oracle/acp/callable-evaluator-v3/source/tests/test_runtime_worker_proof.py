@@ -984,6 +984,11 @@ class RuntimeWorkerProof(unittest.TestCase):
                         return [(entry,1) for entry in list(self.entries.values())]
                     def close(self):pass
                 pins=authored['launchInputPins']
+                # The actual runner bounds must join this authored receipt's profile pin.
+                bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+                pins[str(base/'contracts/candidate-build-profile.json')]['sha256']=bounds['profileSha256']
+                authored['bounds']=bounds
+                authored['workerProofBindings']['launchPinsSha256']=runtime._canonical_pin_digest(pins)
                 launch={'argv':['authored never executed'],'unit':'authored.scope',
                         'expected':authored['workerProofBindings']['expected'],'pins':pins,
                         'proofBinding':authored['workerProofBindings'],
@@ -1020,7 +1025,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                     ):effects.enter_context(effect)
                     try:
                         result=runtime._run_scoped(['authored'],self.work,self.env,b'',
-                            runtime.execution_bounds(managed_scope=True,phase='runtime'),provisioning=False)
+                            bounds,provisioning=False)
                     except (ValueError,OSError) as error:
                         result=error.bounded_result
                         if mutation in ('capture','prelaunch','release'):
