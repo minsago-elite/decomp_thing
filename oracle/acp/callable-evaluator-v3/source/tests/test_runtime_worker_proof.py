@@ -151,16 +151,17 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertNotEqual(before,runtime._pin_files([self.input]))
 
     def test_pin_open_is_nonblocking_and_special_replacement_refuses_before_payload(self):
+        declared_profile=runtime.load_profile_with_digest()
         fifo=types.SimpleNamespace(st_mode=stat.S_IFIFO|0o600)
-        with patch.object(runtime.os,'open',return_value=123) as opened,patch.object(runtime.os,'fstat',return_value=fifo),patch.object(runtime.os,'close'),patch.object(runtime.os,'read',side_effect=AssertionError('special file payload must not be read')):
+        with patch.object(runtime,'load_profile_with_digest',return_value=declared_profile),patch.object(runtime.os,'open',return_value=123) as opened,patch.object(runtime.os,'fstat',return_value=fifo),patch.object(runtime.os,'close'),patch.object(runtime.os,'read',side_effect=AssertionError('special file payload must not be read')):
             with self.assertRaises(ValueError):runtime._pin_files([self.input])
             with self.assertRaises(ValueError):runtime._nonprivileged_executable(self.input)
         flags=opened.call_args.args[1]
         self.assertTrue(flags&os.O_NONBLOCK);self.assertTrue(flags&os.O_NOFOLLOW)
         empty=self.work/'empty';empty.write_bytes(b'')
-        with patch.object(runtime.os,'open',side_effect=AssertionError('whole batch must be admitted before any payload open')):
+        with patch.object(runtime,'load_profile_with_digest',return_value=declared_profile),patch.object(runtime.os,'open',side_effect=AssertionError('whole batch must be admitted before any payload open')):
             with self.assertRaises(ValueError):runtime._pin_files([self.input,empty])
-        with patch.object(runtime.os,'open',side_effect=AssertionError('expired deadline must refuse before open')):
+        with patch.object(runtime,'load_profile_with_digest',return_value=declared_profile),patch.object(runtime.os,'open',side_effect=AssertionError('expired deadline must refuse before open')):
             with self.assertRaises(TimeoutError):runtime._pin_files([self.input],deadline=0)
         # Existing closed recipe admits an executable in RW work. Its post-exec
         # pathname can change; safe pin opening remains necessary even with proof.
@@ -200,12 +201,13 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_gate_snapshot_handoff_checks_seals_content_and_preserves_only_owned_fd(self):
         spec=importlib.util.spec_from_file_location('snapshot_gate_control',SOURCE/'scope_gate.py')
         gate=importlib.util.module_from_spec(spec);spec.loader.exec_module(gate)
+        declared_profile=build_contract.load_profile()
         payload=b'authored immutable bytes'
         library={'device':91,'inode':92,'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest(),'sourcePath':'/authored/library.so'}
         record={'ownerPid':123,'ownerStart':77,'descriptor':9,'library':library}
         fields=['0']*20;fields[19]='77'
         metadata=types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_dev=91,st_ino=92,st_size=len(payload))
-        with patch.object(Path,'read_text',return_value='123 (controller) '+' '.join(fields)),patch.object(gate.os,'open',return_value=10) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.fcntl,'fcntl',return_value=runtime._SEALED_LIBRARY) as seals,patch.object(gate.os,'read',return_value=payload) as read,patch.object(gate.os,'lseek'),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate.os,'close') as close:
+        with patch.object(gate,'_contract',return_value=declared_profile),patch.object(Path,'read_text',return_value='123 (controller) '+' '.join(fields)),patch.object(gate.os,'open',return_value=10) as opened,patch.object(gate.os,'fstat',return_value=metadata),patch.object(gate.fcntl,'fcntl',return_value=runtime._SEALED_LIBRARY) as seals,patch.object(gate.os,'read',return_value=payload) as read,patch.object(gate.os,'lseek'),patch.object(gate.os,'dup2') as duplicate,patch.object(gate.os,'set_inheritable') as inherit,patch.object(gate.os,'close') as close:
             gate._acquire_library_snapshot(record,1024)
             opened.assert_called_once_with('/proc/123/fd/9',gate.os.O_RDONLY|gate.os.O_NONBLOCK|gate.os.O_CLOEXEC)
             duplicate.assert_called_once_with(10,5,inheritable=True);inherit.assert_called_once_with(5,True)

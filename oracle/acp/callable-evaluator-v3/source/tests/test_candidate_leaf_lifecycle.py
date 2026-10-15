@@ -176,14 +176,15 @@ class PhaseArtifactContinuity(unittest.TestCase):
 
     def test_capture_admits_type_and_size_before_read_and_closes_both_fds(self):
         source,_=self.artifact();original_fstat=os.fstat;original_close=os.close
-        for mode,size in ((stat.S_IFIFO,1),(stat.S_IFREG,e.load_profile()['bounds']['fileSizeBytes']+1)):
+        declared_profile=e.load_profile()
+        for mode,size in ((stat.S_IFIFO,1),(stat.S_IFREG,declared_profile['bounds']['fileSizeBytes']+1)):
             def metadata(fd):
                 row=original_fstat(fd)
                 if stat.S_ISREG(row.st_mode):
                     return SimpleNamespace(st_dev=row.st_dev,st_ino=row.st_ino,st_mode=mode,st_size=size,
                                            st_mtime_ns=row.st_mtime_ns,st_ctime_ns=row.st_ctime_ns)
                 return row
-            with self.subTest(mode=mode),patch.object(e,'_handoff_parent',return_value=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)),patch.object(e.os,'fstat',side_effect=metadata),patch.object(e.os,'read') as read,patch.object(e.os,'close',side_effect=original_close) as close:
+            with self.subTest(mode=mode),patch.object(e,'load_profile',return_value=declared_profile),patch.object(e,'_handoff_parent',return_value=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)),patch.object(e.os,'fstat',side_effect=metadata),patch.object(e.os,'read') as read,patch.object(e.os,'close',side_effect=original_close) as close:
                 with self.assertRaisesRegex(ValueError,'bounded regular-file'):
                     e.capture_artifact(source,deadline=self.end)
                 read.assert_not_called();self.assertEqual(2,close.call_count)
@@ -214,13 +215,14 @@ class PhaseArtifactContinuity(unittest.TestCase):
 
     def test_capture_and_copy_close_failure_never_return_usable_value(self):
         source,artifact=self.artifact();original_close=os.close
+        declared_profile=e.load_profile()
         def failed_close(fd):
             original_close(fd)
             raise OSError('authored close uncertainty')
         for action in (lambda:e.capture_artifact(source,deadline=self.end),
                        lambda:e.copy_input(artifact,self.root/'close-copy',deadline=self.end)):
             parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
-            with patch.object(e,'_handoff_parent',return_value=parent),patch.object(e.os,'close',side_effect=failed_close) as close:
+            with patch.object(e,'load_profile',return_value=declared_profile),patch.object(e,'_handoff_parent',return_value=parent),patch.object(e.os,'close',side_effect=failed_close) as close:
                 with self.assertRaises(OSError):action()
                 self.assertEqual(2,close.call_count)
 

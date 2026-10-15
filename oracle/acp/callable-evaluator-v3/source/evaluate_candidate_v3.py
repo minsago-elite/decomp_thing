@@ -619,9 +619,9 @@ def validated_observations(path, caller, preparation):
             if len(bytes.fromhex(obs['process'][field]))>load_profile()['bounds']['outputBytesPerStream']:
                 raise ValueError('observation output exceeds bound')
         receipt_path=path.parent/('reference-process-'+str(obs['id'])+'.json')
-        if digest(receipt_path)!=obs['evidenceSha256']:
+        receipt,receipt_sha=_read_json(receipt_path,1048576)
+        if receipt_sha!=obs['evidenceSha256']:
             raise ValueError('reference process receipt drift')
-        receipt,_=_read_json(receipt_path,1048576)
         execution=receipt.get('execution')
         if not isinstance(execution,dict):raise ValueError('reference execution evidence missing')
         if process_observation(execution)!=obs['process']:

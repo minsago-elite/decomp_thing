@@ -86,6 +86,48 @@ class SchemaMigration(unittest.TestCase):
             for key,item in (('schemaVersion',2),('unexpected',True)):
                 changed=deepcopy(value);changed[key]=item
                 with self.assertRaises(Exception,msg=name):e.validate_exchange(name,changed)
+    def test_reference_receipt_hash_and_parse_use_one_authenticated_snapshot(self):
+        import bounded_runtime as runtime
+        import hashlib
+        trusted=static_temp('static-process')
+        with tempfile.TemporaryDirectory(dir=trusted) as temporary:
+            root=Path(temporary);(root/'private').mkdir()
+            (root/'private/original.c').write_text('authored source only')
+            shutil.copytree(e.BASE/'contracts',root/'contracts')
+            prep=root/'preparation';prep.mkdir();(prep/'reference').mkdir()
+            caller=prep/'caller';caller.write_bytes(b'authored inert caller')
+            library=prep/'reference/libcandidate.so';library.write_bytes(b'authored inert library')
+            pins=runtime._pin_files((caller,library));rows=[]
+            for i,family in enumerate(e.SCENARIO_FAMILIES):
+                execution=receipt(7,caller=str(caller),caller_sha=e.digest(caller),input_pins=pins)
+                raw=json.dumps({'status':'failed','execution':e.public_result(execution)}).encode()
+                (prep/('reference-process-'+str(i)+'.json')).write_bytes(raw)
+                rows.append({'id':i,'family':family,'process':e.process_observation(execution),
+                             'evidenceSha256':hashlib.sha256(raw).hexdigest()})
+            observations=prep/'reference-observations.json'
+            observations.write_text(json.dumps({'schemaVersion':3,'sourceSha256':e.digest(root/'private/original.c'),
+                'callerSha256':e.digest(caller),'callerPath':str(caller),'libraryPath':str(library),
+                'librarySha256':e.digest(library),'profileSha256':e.digest(root/'contracts/candidate-build-profile.json'),
+                'observations':rows}))
+            original_read=e._read_json;original_digest=e.digest;seen=[]
+            def read_once(path,maximum):
+                result=original_read(path,maximum)
+                if path.name.startswith('reference-process-'):
+                    self.assertEqual(1048576,maximum);seen.append(path.name)
+                    # A later pathname version cannot redefine the returned parsed bytes/hash.
+                    if path.name=='reference-process-0.json':path.write_bytes(b'{"execution":{}}')
+                return result
+            def no_receipt_digest(path):
+                if path.name.startswith('reference-process-'):
+                    raise AssertionError('receipt must not have a separate pathname digest')
+                return original_digest(path)
+            with patch.object(e,'BASE',root),patch.object(e,'_read_json',side_effect=read_once),patch.object(e,'digest',side_effect=no_receipt_digest):
+                self.assertEqual(24,len(e.validated_observations(observations,caller,prep)))
+            self.assertEqual(['reference-process-'+str(i)+'.json' for i in range(24)],seen)
+            with patch.object(e,'BASE',root):
+                with self.assertRaisesRegex(ValueError,'receipt drift'):
+                    e.validated_observations(observations,caller,prep)
+
     def test_nonzero_reference_binds_actual_selected_preparation_and_raw_receipts(self):
         import bounded_runtime as runtime
         trusted=static_temp('static-process')

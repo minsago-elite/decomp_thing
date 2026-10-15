@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 import re
 
@@ -40,11 +42,104 @@ def _pairs(pairs):
     return result
 
 
+def _snapshot_version(metadata):
+    return tuple(getattr(metadata, key) for key in
+                 ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+                  'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+
+def _directory_version(metadata):
+    # Unrelated directory contents may change; the held directory/edge may not.
+    return tuple(getattr(metadata, key) for key in
+                 ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid'))
+
+
+def _bounded_json_snapshot(path: Path, maximum: int) -> bytes:
+    """Finite stable snapshot; no enclosing wall deadline or root authority is implied."""
+    if type(maximum) is not int or maximum < 0:
+        raise ValueError('invalid contract byte bound')
+    path = Path(path)
+    if '..' in path.parts:
+        raise ValueError('contract parent traversal unsupported')
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if len(path.parts) > 128 or len(str(path)) > 4096 or path.name == '':
+        raise ValueError('contract path bound')
+    descriptors = []
+    directories = []
+    primary = None
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open('/', directory_flags)
+        descriptors.append(descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('contract parent must be directory')
+        directories.append((descriptor, None, None, _directory_version(metadata)))
+        for component in path.parts[1:-1]:
+            parent = descriptor
+            descriptor = os.open(component, directory_flags, dir_fd=parent)
+            descriptors.append(descriptor)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError('contract parent must be directory')
+            version = _directory_version(metadata)
+            if _directory_version(os.stat(component, dir_fd=parent, follow_symlinks=False)) != version:
+                raise ValueError('contract parent changed during admission')
+            directories.append((descriptor, parent, component, version))
+        parent = descriptor
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=parent)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not 0 <= before.st_size <= maximum:
+            raise ValueError('contract regular file byte bound')
+        version = _snapshot_version(before)
+        if _snapshot_version(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != version:
+            raise ValueError('contract file changed before read')
+        remaining = before.st_size
+        chunks = []
+        while remaining:
+            block = os.read(descriptor, min(65536, remaining))
+            if not block:
+                raise ValueError('contract file truncated')
+            remaining -= len(block)
+            chunks.append(block)
+        if os.read(descriptor, 1):
+            raise ValueError('contract file grew')
+        if (_snapshot_version(os.fstat(descriptor)) != version or
+                _snapshot_version(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != version):
+            raise ValueError('contract file changed during read')
+        for held, ancestor, name, expected in directories:
+            if _directory_version(os.fstat(held)) != expected:
+                raise ValueError('contract held parent changed')
+            named = (os.stat('/', follow_symlinks=False) if ancestor is None else
+                     os.stat(name, dir_fd=ancestor, follow_symlinks=False))
+            if _directory_version(named) != expected:
+                raise ValueError('contract named parent changed')
+        return b''.join(chunks)
+    except BaseException as failure:
+        primary = failure
+        raise
+    finally:
+        cleanup_failure = None
+        cleanup_count = 0
+        for held in reversed(descriptors):
+            try:
+                os.close(held)
+            except BaseException as failure:
+                cleanup_count += 1
+                if cleanup_failure is None:
+                    cleanup_failure = failure
+        if cleanup_failure is not None:
+            if primary is not None:
+                BaseException.add_note(primary, 'contract descriptor cleanup failures: ' + str(cleanup_count))
+            else:
+                raise cleanup_failure
+
+
 def _read_json(path: Path, maximum: int):
-    with path.open('rb') as stream:
-        raw = stream.read(maximum + 1)
-    if len(raw) > maximum:
-        raise ValueError('contract byte bound')
+    raw = _bounded_json_snapshot(path, maximum)
     try:
         value = json.loads(raw, object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite contract value')))
