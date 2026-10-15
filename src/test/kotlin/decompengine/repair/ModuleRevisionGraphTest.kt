@@ -5934,6 +5934,215 @@ class ModuleRevisionGraphTest {
         return project
     }
 
+
+    @Test
+    fun `rollback failure records and parser admit only the four producer stage code pairs`() {
+        val allowed = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+        )
+        val forbidden = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+        )
+        for (state in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+            val digest = "a".repeat(64)
+            val base = RepairRollbackRecord(attemptId = "revision_pair", runId = null, targetRevisionId = "root_pair",
+                expectedSourceRevisionSha256 = digest, state = state,
+                failureStage = allowed.first().first, failureCode = allowed.first().second,
+                observedSourceRevisionSha256 = if (state == RepairRollbackState.RESTORED_AFTER_FAILURE) digest else null,
+                candidateSourceInstallStarted = true)
+            for ((stage, code) in allowed) {
+                val record = base.copy(failureStage = stage, failureCode = code)
+                val parsed = rollbackPairPrivate("parseRepairRollbackRecord", rollbackPairJson(record)) as RepairRollbackRecord
+                assertEquals(record, parsed)
+                assertEquals(stage, parsed.failureStage); assertEquals(code, parsed.failureCode)
+            }
+            for ((stage, code) in forbidden) {
+                assertEquals("rollback failure stage/code pair is invalid",
+                    assertFailsWith<IllegalArgumentException> { base.copy(failureStage = stage, failureCode = code) }.message)
+                val forged = JsonObject(rollbackPairJson(base) + mapOf(
+                    "failureStage" to JsonPrimitive(stage.name.lowercase()), "failureCode" to JsonPrimitive(code.name.lowercase())))
+                assertEquals("rollback failure stage/code pair is invalid",
+                    assertFailsWith<IllegalArgumentException> { rollbackPairPrivate("parseRepairRollbackRecord", forged) }.message)
+            }
+        }
+        val digest = "a".repeat(64)
+        val noFailure = RepairRollbackRecord(attemptId = "revision_none", runId = null, targetRevisionId = "root_none",
+            expectedSourceRevisionSha256 = digest, state = RepairRollbackState.NOT_REQUIRED_VERIFIED,
+            observedSourceRevisionSha256 = digest)
+        assertNull(noFailure.failureStage); assertNull(noFailure.failureCode)
+        assertEquals(noFailure, rollbackPairPrivate("parseRepairRollbackRecord", rollbackPairJson(noFailure)))
+    }
+
+    @Test
+    fun `recorded and reopened pending and resolved failures preserve every allowed pair`() {
+        val allowed = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+        )
+        for (pending in listOf(true, false)) for ((stage, code) in allowed) {
+            val fixture = rollbackPairFixture(pending)
+            val changed = rollbackPairReplace(fixture.canonical, pending, stage, code)
+            val view = recordedRepairHistorySnapshot(changed.toByteArray(), fixture.binding, RepairResourceBudget())
+            val record = requireNotNull(if (pending) view.pending?.rollback else view.attempts.last().rollback)
+            assertEquals(stage, record.failureStage); assertEquals(code, record.failureCode)
+            assertEquals(if (pending) RepairRollbackState.RESTORE_FAILED_UNRESOLVED else RepairRollbackState.RESTORED_AFTER_FAILURE, record.state)
+            fixture.root.resolve("reports/repair-revisions/graph.json").writeText(changed)
+            ModuleRevisionGraph.open(fixture.root, fixture.profile).use { reopened ->
+                val restored = requireNotNull(reopened.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, restored.state)
+                assertEquals(stage, restored.failureStage); assertEquals(code, restored.failureCode)
+                assertEquals(restored.expectedSourceRevisionSha256, restored.observedSourceRevisionSha256)
+                assertEquals("before", fixture.root.resolve("code.c").readText())
+                assertTrue(reopened.snapshot.runs.isEmpty()) // No fabricated run for a standalone failure.
+            }
+        }
+    }
+
+    @Test
+    fun `impossible pending and resolved pairs refuse before reopen mutation or recorded credit`() {
+        val forbidden = listOf(
+            RepairRollbackStage.SOURCE_RESTORE to RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            RepairRollbackStage.SOURCE_VERIFICATION to RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+        )
+        for (pending in listOf(true, false)) for ((stage, code) in forbidden) {
+            val fixture = rollbackPairFixture(pending)
+            val baseline = recordedRepairHistorySnapshot(fixture.canonical.toByteArray(), fixture.binding, RepairResourceBudget())
+            assertNotNull(if (pending) baseline.pending?.rollback else baseline.attempts.last().rollback)
+            val changed = rollbackPairReplace(fixture.canonical, pending, stage, code)
+            val graphPath = fixture.root.resolve("reports/repair-revisions/graph.json")
+            graphPath.writeText(changed)
+            val graphKey = Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey()
+            val source = fixture.root.resolve("code.c")
+            val sourceBytes = source.readBytes()
+            val sourceKey = Files.readAttributes(source, BasicFileAttributes::class.java).fileKey()
+            val refusal = assertFailsWith<RepairHistorySnapshotRefusal> {
+                recordedRepairHistorySnapshot(changed.toByteArray(), fixture.binding, RepairResourceBudget())
+            }
+            assertEquals("Recorded repair metadata is invalid or exceeds its bound.", refusal.message)
+            assertEquals("rollback failure stage/code pair is invalid",
+                assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(fixture.root, fixture.profile).close() }.message)
+            assertEquals(changed, graphPath.readText())
+            assertEquals(graphKey, Files.readAttributes(graphPath, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(sourceBytes, source.readBytes())
+            assertEquals(sourceKey, Files.readAttributes(source, BasicFileAttributes::class.java).fileKey())
+            assertContentEquals(fixture.binding, fixture.root.resolve("reports/repair-revisions/recovery-binding.json").readBytes())
+        }
+    }
+
+    @Test
+    fun `resealed archive preserves valid failure pairs and refuses only impossible cross pairs`() {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val fixture = releaseRepairFixture(recoveredRollbackPrefix = true, temporaryParent = parent)
+        val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("rollback-pairs-original.zip"))
+        val positive = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(bundle.archivePath,
+            fixture.project.parent.resolve("rollback-pairs-original-control"))
+        val accepted = positive.source.acceptedAcpContributions.single().taskId
+        val pairs = listOf(
+            Triple("source_restore", "unrecognized_source_state", true),
+            Triple("source_restore", "restore_operation_failed", true),
+            Triple("source_verification", "target_digest_mismatch", true),
+            Triple("source_verification", "restore_operation_failed", true),
+            Triple("source_restore", "target_digest_mismatch", false),
+            Triple("source_verification", "unrecognized_source_state", false),
+        )
+        for ((stage, code, valid) in pairs) {
+            val archive = fixture.project.parent.resolve("rollback-pair-$stage-$code.zip")
+            rewriteArchive(bundle.archivePath, archive) { entries ->
+                val path = "reports/repair-revisions/graph.json"
+                val graph = Json.parseToJsonElement(entries.getValue(path).decodeToString()).jsonObject
+                val nodes = graph.getValue("nodes").jsonArray
+                val failed = nodes[1].jsonObject
+                val record = failed.getValue("rollbackRecord").jsonObject
+                val run = graph.getValue("runs").jsonArray.first().jsonObject
+                assertEquals("restored_after_failure", record.getValue("state").jsonPrimitive.content)
+                assertEquals("rejected", failed.getValue("status").jsonPrimitive.content)
+                assertEquals("rollback_failed", run.getValue("status").jsonPrimitive.content)
+                assertEquals(record.getValue("attemptId"), run.getValue("rollbackFailureAttemptId"))
+                assertEquals(record.getValue("runId"), run.getValue("id"))
+                assertEquals(record.getValue("state"), run.getValue("rollbackResolution"))
+                assertEquals(record.getValue("expectedSourceRevisionSha256"), record.getValue("observedSourceRevisionSha256"))
+                assertEquals(accepted, nodes.last().jsonObject.getValue("id").jsonPrimitive.content)
+                assertEquals(nodes.last().jsonObject.getValue("id"), graph.getValue("fullyAcceptedHeadId"))
+                val changed = JsonObject(record + mapOf("failureStage" to JsonPrimitive(stage), "failureCode" to JsonPrimitive(code)))
+                entries[path] = JsonObject(graph + ("nodes" to JsonArray(nodes.mapIndexed { index, element ->
+                    if (index == 1) JsonObject(element.jsonObject + ("rollbackRecord" to changed)) else element
+                }))).toString().toByteArray()
+                // Only this record pair changes. Run/history/source/receipt/proof bytes stay coherent; manifest is resealed.
+            }
+            val output = fixture.project.parent.resolve("rollback-pair-$stage-$code-output")
+            if (valid) {
+                val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive, output)
+                assertEquals(accepted, lineage.source.acceptedAcpContributions.single().taskId)
+                assertContentEquals(fixture.after, output.resolve(fixture.relativePath).readBytes())
+            } else {
+                val failure = assertFailsWith<IllegalArgumentException> { ArchivalBundleVerifier.extractAndVerify(archive, output) }
+                assertEquals("repair release rollback failure stage/code pair is invalid", failure.message)
+                assertFalse(output.exists())
+            }
+        }
+    }
+
+    private data class RollbackFailurePairFixture(
+        val root: Path, val profile: RepairIndexProfile, val canonical: String, val binding: ByteArray,
+    )
+
+    private fun rollbackPairFixture(pending: Boolean): RollbackFailurePairFixture {
+        val parent = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val root = Files.createTempDirectory(parent, "rollback-pair-")
+        root.resolve("code.c").writeText("before")
+        val profile = DeclarativeRepairIndexProfile("rollback-pair", RepairIndexLayout(listOf("code.c"), listOf("code.c")))
+        class RestoreRefusal : IllegalStateException("authored rollback operation refusal")
+        var armed = false
+        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback") throw RestoreRefusal()
+        }).use { graph ->
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf("code.c"))
+            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            armed = true
+            assertFailsWith<RestoreRefusal> { graph.reject(attempt) }
+        }
+        if (!pending) ModuleRevisionGraph.open(root, profile).close()
+        val revisions = root.resolve("reports/repair-revisions")
+        val canonical = revisions.resolve("graph.json").readText()
+        val json = Json.parseToJsonElement(canonical).jsonObject
+        val record = if (pending) json.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            else json.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+        assertEquals(if (pending) "restore_failed_unresolved" else "restored_after_failure", record.getValue("state").jsonPrimitive.content)
+        assertEquals("source_restore", record.getValue("failureStage").jsonPrimitive.content)
+        assertEquals("restore_operation_failed", record.getValue("failureCode").jsonPrimitive.content)
+        return RollbackFailurePairFixture(root, profile, canonical, revisions.resolve("recovery-binding.json").readBytes())
+    }
+
+    private fun rollbackPairReplace(canonical: String, pending: Boolean, stage: RepairRollbackStage, code: RepairRollbackFailureCode): String {
+        val graph = Json.parseToJsonElement(canonical).jsonObject
+        val record = if (pending) graph.getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+            else graph.getValue("nodes").jsonArray.last().jsonObject.getValue("rollbackRecord").jsonObject
+        val before = record.toString()
+        assertTrue(before in canonical)
+        assertEquals(canonical.indexOf(before), canonical.lastIndexOf(before))
+        val changed = JsonObject(record + mapOf("failureStage" to JsonPrimitive(stage.name.lowercase()),
+            "failureCode" to JsonPrimitive(code.name.lowercase()))).toString()
+        return canonical.replace(before, changed) // Preserve every other canonical byte, including wire style.
+    }
+
+    private fun rollbackPairJson(record: RepairRollbackRecord): JsonObject = Json.parseToJsonElement(
+        rollbackPairPrivate("toJson", record).toString()).jsonObject
+
+    private fun rollbackPairPrivate(name: String, vararg arguments: Any): Any? = try {
+        Class.forName("decompengine.repair.ModuleRevisionGraphKt").declaredMethods
+            .single { method -> method.name == name && method.parameterCount == arguments.size &&
+                method.parameterTypes.indices.all { index -> method.parameterTypes[index].isAssignableFrom(arguments[index].javaClass) }
+            }.also { it.isAccessible = true }
+            .invoke(null, *arguments)
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
     private data class ReleaseRepairFixture(
         val project: Path,
         val relativePath: String,

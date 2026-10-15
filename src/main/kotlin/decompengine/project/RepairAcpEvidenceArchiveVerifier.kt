@@ -1201,6 +1201,13 @@ private data class ReleaseRepairNode(
         get() = evidenceKind?.let { ReleaseRepairEvidence(it, evidenceSummary.orEmpty(), evidenceArtifact) }
 }
 
+private val RELEASE_ROLLBACK_FAILURE_PAIRS = setOf(
+    "source_restore" to "unrecognized_source_state",
+    "source_restore" to "restore_operation_failed",
+    "source_verification" to "target_digest_mismatch",
+    "source_verification" to "restore_operation_failed",
+)
+
 private data class ReleaseRollbackRecord(
     val schemaVersion: Int,
     val attemptId: String,
@@ -1227,6 +1234,9 @@ private data class ReleaseRollbackRecord(
             "restore_operation_failed", "unrecognized_source_state", "target_digest_mismatch",
         ))
         require((failureStage == null) == (failureCode == null))
+        if (failureStage != null) require((failureStage to requireNotNull(failureCode)) in RELEASE_ROLLBACK_FAILURE_PAIRS) {
+            "repair release rollback failure stage/code pair is invalid"
+        }
         require(legacyPendingStateUnknown || candidateSourceInstallStarted != null) {
             "repair release native rollback requires a known source-install marker"
         }

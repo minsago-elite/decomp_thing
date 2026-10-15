@@ -1402,6 +1402,9 @@ data class RepairRollbackRecord(
         require(observedSourceRevisionSha256 == null ||
             observedSourceRevisionSha256.matches(Regex("[0-9a-f]{64}")))
         require((failureStage == null) == (failureCode == null))
+        if (failureStage != null) require((failureStage to requireNotNull(failureCode)) in RECOVERY_FAILURE_PAIRS) {
+            "rollback failure stage/code pair is invalid"
+        }
         require(legacyPendingStateUnknown || candidateSourceInstallStarted != null) {
             "native rollback requires a known source-install marker"
         }
