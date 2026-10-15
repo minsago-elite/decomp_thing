@@ -1164,8 +1164,9 @@ private class NativeDnsOwnedDomainOwner(private val bwrap: Path, private val jav
             val fields = line.split(':')
             fields.size == 3 && fields[0] == "ND1" &&
                 fields[1].toIntOrNull() in setOf(10, 11, 12, 20, 21, 22, 23, 25, 30, 31,
-                    33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 53, 54, 55, 56, 57,
-                    58, 60, 61, 62, 63, 64) && fields[1].toIntOrNull()?.toString() == fields[1] &&
+                    33, 34, 35, 36, 37, 40, 41, 42, 43, 44, 45, 46, 50, 51, 52, 53, 54, 55, 56, 57,
+                    58, 60, 61, 62, 63, 64, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+                    80, 81, 82, 83, 84, 85, 86, 87, 88, 89) && fields[1].toIntOrNull()?.toString() == fields[1] &&
                 fields[2].toIntOrNull()?.let { it in 0..4095 && it.toString() == fields[2] } == true &&
                 line.all { it.code in 32..126 }
         }.take(32).toList()
