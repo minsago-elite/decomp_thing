@@ -864,7 +864,7 @@ class AdmittedPredicateSources(unittest.TestCase):
                 checkpoint,root/'qualification.md'),paths,payloads
 
     def test_actual_predicate_generation_keeps_record_shape_and_all_five_pure_outcomes(self):
-        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
             root=Path(temporary);paths,_=self.sources(root);other=root/'other.py';other.write_bytes(b'never retained')
             paths[str(other)]=f.hashlib.sha256(b'never retained').hexdigest()
             sources,captured,policy,passed=self.captured(root,paths)
@@ -885,7 +885,7 @@ class AdmittedPredicateSources(unittest.TestCase):
     def test_real_freeze_uses_captured_A_with_pathname_B_and_poisoned_imports_then_refuses_qualification(self):
         from types import SimpleNamespace
         for bad_report in (False,True):
-            with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+            with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
                 root=Path(temporary)/'build/acp-decomp-effectiveness/callable-library-v3';root.mkdir(parents=True)
                 args,paths,payloads=self.freeze_fixture(root,failing_baseline=bad_report)
                 real_admit=f._admit_execution_predicates;real_bind=f._bind_admitted_predicates;seen=[]
@@ -918,7 +918,7 @@ class AdmittedPredicateSources(unittest.TestCase):
 
     def test_predicate_missing_generation_and_original_record_checkpoint_joins_precede_compile(self):
         import hashlib
-        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
             root=Path(temporary);paths,payloads=self.sources(root)
             for missing in tuple(paths):
                 with self.subTest(missing=missing),patch.object(f,'BASE',root), \
@@ -948,7 +948,7 @@ class AdmittedPredicateSources(unittest.TestCase):
                 (root/name).write_bytes(raw)
 
     def test_predicate_prebody_caps_nonregular_and_total_budget_refuse_without_retention(self):
-        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
             root=Path(temporary);paths,payloads=self.sources(root);target=root/'prepare_v3.py'
             for size in (0,7055,7057):
                 target.write_bytes(b'x'*size)
@@ -968,7 +968,7 @@ class AdmittedPredicateSources(unittest.TestCase):
                 consume.assert_not_called()
 
     def test_predicate_compile_and_direct_shape_refuse_without_executing_modules_or_partial_pair(self):
-        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
             root=Path(temporary);paths,_=self.sources(root)
             with patch.object(f,'BASE',root):sources,captured=f._admit_execution_predicates(paths)
             failure=SyntaxError('authored compiler refusal')
@@ -1013,7 +1013,7 @@ class AdmittedPredicateSources(unittest.TestCase):
                     functions.assert_not_called()
 
     def test_predicate_acquisition_close_failure_keeps_exact_error_and_no_usable_capture(self):
-        with tempfile.TemporaryDirectory(dir=static_temp('predicate-capture')) as temporary:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process-correction-001')) as temporary:
             root=Path(temporary);paths,_=self.sources(root);real_record=f._record;real_close=f.os.close
             target=[];closed=[];failure=OSError('authored source descriptor close')
             def record(path,relative,metadata,descriptor,*args,**kwargs):
