@@ -72,6 +72,48 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
+    fun `reused cleanup latch is inert across two receipts and never accumulates timing records`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        val cleanup = AcpCleanupProofFailure("authored retained cleanup failure")
+        val facts = decompengine.agent.AgentFailure(AgentFailureKind.INTERNAL, "authored unresolved cleanup")
+        val stored = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("mappedPrelaunchFailure", decompengine.agent.AgentFailure::class.java,
+                Throwable::class.java, RuntimeCopyStatistics.Prefix::class.java)
+            .apply { isAccessible = true }.invoke(null, facts, cleanup, prefix) as AgentExecutionException
+        val originalSuppressed = stored.suppressed.toList()
+        assertEquals(1, originalSuppressed.size)
+        val root = Path.of(".").toAbsolutePath().normalize()
+        val harness = AcpAgentHarness(AcpProcessConfiguration(
+            executable = root.resolve("build/inert-never-launched-acp"), sandboxBoundary = null,
+        )) // No live harness/fixture/Python/user-runtime/gate-helper discovery.
+        @Suppress("UNCHECKED_CAST")
+        val latch = AcpAgentHarness::class.java.getDeclaredField("unresolvedCleanupFailure")
+            .apply { isAccessible = true }.get(harness) as java.util.concurrent.atomic.AtomicReference<AgentExecutionException?>
+        latch.set(stored)
+        var callbacks = 0
+        val request = AgentExecutionRequest(
+            objective = "inert retained cleanup refusal", workspaceRoots = listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(emptyList()),
+            cancellation = AgentCancellation { callbacks++; error("scheduler/cancellation must not be reached") },
+        )
+        repeat(2) {
+            val receipt = harness.executeReceipt(request) { callbacks++; error("event/model callback must not be reached") }
+            assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+            assertTrue(receipt.failureCause === stored)
+            assertTrue((receipt.outcome as AgentExecutionOutcome.Failed).failure === facts)
+            val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.REQUEST_BOUND, evidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, evidence.cleanupDisposition)
+            assertNull(evidence.diagnostics)
+            assertNull(evidence.sandboxEvidence)
+            assertTrue(latch.get() === stored)
+            assertEquals(originalSuppressed, stored.suppressed.toList())
+        }
+        assertEquals(0, callbacks)
+        assertTrue(stored.cause === cleanup)
+    }
+
+    @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
         val input = object : java.io.InputStream() {
@@ -495,7 +537,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(87, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(88, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {

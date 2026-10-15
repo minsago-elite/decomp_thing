@@ -1495,14 +1495,14 @@ class LinuxBubblewrapBoundaryTest {
             byteCheckpoints = 0
             var controlDuringCopy = false
             val copiedSnapshot = requireNotNull(invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
-                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, copyControl, {
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java, RuntimeCopyStatistics::class.java), largeSource, largeLimits, copyControl, {
                         if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
                             val concurrent = newControl()
                             invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve"))
                             controls.remove(concurrent)
                             controlDuringCopy = true
                         }
-                    }))
+                    }, null))
             assertTrue(controlDuringCopy)
             val copiedSource = invokePrivate(copiedSnapshot, copiedSnapshot.javaClass.getDeclaredMethod("getSource")) as Path
             // Source lives inside its exact private owner; compare all copied bytes directly.
@@ -1519,11 +1519,11 @@ class LinuxBubblewrapBoundaryTest {
             byteCheckpoints = 0
             val cancelledCopy = assertFailsWith<IOException> {
                 invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
-                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, cancelledCopyControl, {
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java, RuntimeCopyStatistics::class.java), largeSource, largeLimits, cancelledCopyControl, {
                         if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
                             throw IOException("injected partial-copy cancellation")
                         }
-                    })
+                    }, null)
             }
             assertEquals("injected partial-copy cancellation", cancelledCopy.message)
             assertTrue(Files.list(controlPath(cancelledCopyControl)).use { it.findAny().isEmpty }, "failed partial copy cleanup must be proved")
