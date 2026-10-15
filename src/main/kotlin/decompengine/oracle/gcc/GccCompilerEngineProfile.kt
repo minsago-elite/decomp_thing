@@ -34,9 +34,11 @@ data class GccCompilerEngineBudgets(
     val plannerMaximumEntities: Int,
     val plannerMaximumDependencyEdges: Long,
     val plannerMaximumWorkUnits: Long,
+    val fullRecoveryCc1ExportWallClockMillis: Long = exportWallClockMillis,
 ) {
     init {
         require(exportWallClockMillis in 1..MAXIMUM_EXPORT_MILLIS)
+        require(fullRecoveryCc1ExportWallClockMillis in exportWallClockMillis..MAXIMUM_EXPORT_MILLIS)
         require(exportMaximumResidentBytes in 1..MAXIMUM_RESIDENT_BYTES)
         require(plannerMaximumEntities in 1..MAXIMUM_PLANNER_ENTITIES)
         require(plannerMaximumDependencyEdges in 1..MAXIMUM_PLANNER_EDGES)
@@ -57,6 +59,68 @@ data class GccCompilerEngineArtifactBinding(
     val bytes: Long,
     val sha256: String,
 )
+
+/** Closed, checked policy for bounded cc1 full-recovery throughput; no caller-selected counts. */
+data class GccCompilerEngineThroughputPolicy(
+    val schemaVersion: Int,
+    val runtimeInvocationVersion: Int,
+    val processorCount: Int,
+    val analysisThreadCount: Int,
+    val decompilerWorkerCount: Int,
+) {
+    init {
+        require(schemaVersion == 1 && runtimeInvocationVersion == 6 && processorCount == 4 &&
+            analysisThreadCount == 4 && decompilerWorkerCount == 4
+        ) { "compiler-engine throughput policy is unsupported" }
+    }
+
+    internal fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "schemaVersion" to JsonPrimitive(schemaVersion),
+        "runtimeInvocationVersion" to JsonPrimitive(runtimeInvocationVersion),
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ))
+}
+
+/** Diagnostic execution admission only; this policy cannot select ordinary full-export recovery. */
+data class GccCompilerEngineDiagnosticPolicy(
+    val provider: String,
+    val schemaVersion: Int,
+    val runtimeInvocationVersion: Int,
+    val workerOperation: String,
+    val diagnosticPolicy: String,
+    val processorCount: Int,
+    val analysisThreadCount: Int,
+    val decompilerWorkerCount: Int,
+    val maximumJavaHeapBytes: Long,
+    val maximumResidentBytes: Long,
+    val wallClockSeconds: Long,
+) {
+    init {
+        require(provider == "gcc-cc1-runtime-diagnostics-v1" && schemaVersion == 1 &&
+            runtimeInvocationVersion == 7 && workerOperation == "analyze-diagnostics-v1" &&
+            diagnosticPolicy == "jvm-mxbean-stdout-v1" && processorCount == 4 &&
+            analysisThreadCount == 4 && decompilerWorkerCount == 4 &&
+            maximumJavaHeapBytes == 2L * 1024 * 1024 * 1024 &&
+            maximumResidentBytes == 16L * 1024 * 1024 * 1024 && wallClockSeconds == 9_000L
+        ) { "compiler-engine diagnostic policy is unsupported" }
+    }
+
+    internal fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "provider" to JsonPrimitive(provider),
+        "schemaVersion" to JsonPrimitive(schemaVersion),
+        "runtimeInvocationVersion" to JsonPrimitive(runtimeInvocationVersion),
+        "workerOperation" to JsonPrimitive(workerOperation),
+        "diagnosticPolicy" to JsonPrimitive(diagnosticPolicy),
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+        "maximumJavaHeapBytes" to JsonPrimitive(maximumJavaHeapBytes),
+        "maximumResidentBytes" to JsonPrimitive(maximumResidentBytes),
+        "wallClockSeconds" to JsonPrimitive(wallClockSeconds),
+    ))
+}
 
 data class AuthenticatedGccCompilerEngineArtifact(
     val path: Path,
@@ -138,6 +202,8 @@ data class GccCompilerEngineSuite(
     val analysis: GccCompilerEngineAnalysisToolchain,
     val budgets: GccCompilerEngineBudgets,
     val engines: List<GccCompilerEngine>,
+    val fullRecoveryCc1Throughput: GccCompilerEngineThroughputPolicy? = null,
+    val cc1RuntimeDiagnostics: GccCompilerEngineDiagnosticPolicy? = null,
 ) {
     init {
         require(engines.map(GccCompilerEngine::id) == listOf("cc1", "lto1"))
@@ -204,6 +270,7 @@ internal class GccCompilerEngineProfileLoader(
         val target = benchmark.stringField("target")
         val budgets = GccCompilerEngineBudgets(
             exportWallClockMillis = Math.multiplyExact(budgetDocument.longField("exportWallClockSeconds"), 1_000L),
+            fullRecoveryCc1ExportWallClockMillis = Math.multiplyExact(budgetDocument.longField("fullRecoveryCc1ExportWallClockSeconds"), 1_000L),
             exportMaximumResidentBytes = budgetDocument.longField("exportMaximumResidentBytes"),
             plannerMaximumEntities = budgetDocument.intField("plannerMaximumEntities"),
             plannerMaximumDependencyEdges = budgetDocument.longField("plannerMaximumDependencyEdges"),
@@ -224,6 +291,32 @@ internal class GccCompilerEngineProfileLoader(
             plannerId = planner.stringField("id"),
             plannerVersion = planner.intField("version"),
         )
+        val throughput = analysisDocument["fullRecoveryCc1Throughput"]?.let {
+            val policy = analysisDocument.objectField("fullRecoveryCc1Throughput")
+            GccCompilerEngineThroughputPolicy(
+                schemaVersion = policy.intField("schemaVersion"),
+                runtimeInvocationVersion = policy.intField("runtimeInvocationVersion"),
+                processorCount = policy.intField("processorCount"),
+                analysisThreadCount = policy.intField("analysisThreadCount"),
+                decompilerWorkerCount = policy.intField("decompilerWorkerCount"),
+            )
+        }
+        val diagnostics = analysisDocument["cc1RuntimeDiagnostics"]?.let {
+            val policy = analysisDocument.objectField("cc1RuntimeDiagnostics")
+            GccCompilerEngineDiagnosticPolicy(
+                provider = policy.stringField("provider"),
+                schemaVersion = policy.intField("schemaVersion"),
+                runtimeInvocationVersion = policy.intField("runtimeInvocationVersion"),
+                workerOperation = policy.stringField("workerOperation"),
+                diagnosticPolicy = policy.stringField("diagnosticPolicy"),
+                processorCount = policy.intField("processorCount"),
+                analysisThreadCount = policy.intField("analysisThreadCount"),
+                decompilerWorkerCount = policy.intField("decompilerWorkerCount"),
+                maximumJavaHeapBytes = policy.longField("maximumJavaHeapBytes"),
+                maximumResidentBytes = policy.longField("maximumResidentBytes"),
+                wallClockSeconds = policy.longField("wallClockSeconds"),
+            )
+        }
         authenticateAnalysisToolchain(analysis)
 
         val sourceLock = readBoundDependency(
@@ -276,12 +369,46 @@ internal class GccCompilerEngineProfileLoader(
             analysis = analysis,
             budgets = budgets,
             engines = Collections.unmodifiableList(engines),
+            fullRecoveryCc1Throughput = throughput,
+            cc1RuntimeDiagnostics = diagnostics,
         )
+    }
+
+    /** Fixed driver export selection, separate from the cc1/lto1 planning suite and its schema. */
+    fun loadDriverTarget(suite: GccCompilerEngineSuite): GccBundledExportTarget {
+        if (suite.profileSha256 != DRIVER_COMPILER_PROFILE_SHA256 ||
+            suite.sourceLockSha256 != DRIVER_SOURCE_LOCK_SHA256 ||
+            suite.baseBuildRecordSha256 != DRIVER_BUILD_RECORD_SHA256 ||
+            suite.toolchainReproductionSha256 != DRIVER_TOOLCHAIN_SHA256
+        ) fail("GCC driver controls differ from the fixed export target")
+        val root = suite.profilePath.parent
+        val sourceLock = readBoundDependency(root, "source-lock.json", DRIVER_SOURCE_LOCK_SHA256,
+            MAXIMUM_CONTROL_BYTES, "driver source lock", "gcc/source-lock")
+        val baseBuild = readBoundDependency(root, "build-record.json", DRIVER_BUILD_RECORD_SHA256,
+            MAXIMUM_CONTROL_BYTES, "driver build record", "gcc/build-record")
+        val manifest = readBoundDependency(root, "oracle-manifest.json", DRIVER_MANIFEST_SHA256,
+            MAXIMUM_MANIFEST_BYTES, "driver oracle manifest", "gcc/oracle-manifest")
+        val profileId = "gcc-driver-${suite.version}"
+        if (baseBuild.document.objectField("oracle").stringField("id") != profileId ||
+            manifest.document.objectField("oracle").stringField("id") != profileId
+        ) fail("GCC driver manifest and base build identity differ")
+        val stageFull = baseBuild.document.objectField("commands").arrayField("stageFull").strings("driver stage command")
+        if (stageFull != listOf("/usr/bin/install", "-m", "0755", "/oracle/install/bin/gcc", "{full}")) {
+            fail("GCC driver build output differs from the fixed base build")
+        }
+        val outputs = baseBuild.document.objectField("outputs")
+        authenticateManifest("driver", suite.version, suite.sourceRevision, sourceLock, baseBuild, manifest.document,
+            outputs.stringField("full"), outputs.stringField("stripped"))
+        val artifacts = manifest.document.objectField("artifacts")
+        return GccBundledExportTarget("driver", profileId, stageFull[3], baseBuild.path, baseBuild.sha256,
+            manifest.path, manifest.sha256,
+            artifacts.objectField("full").artifactBinding("GCC driver full artifact"),
+            artifacts.objectField("stripped").artifactBinding("GCC driver stripped artifact"))
     }
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 11 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 16 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -590,6 +717,11 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab"
+        private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+        private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+        private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+        private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         const val MAXIMUM_PROFILE_BYTES = 1024 * 1024
         private const val MAXIMUM_CONTROL_BYTES = 32 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024

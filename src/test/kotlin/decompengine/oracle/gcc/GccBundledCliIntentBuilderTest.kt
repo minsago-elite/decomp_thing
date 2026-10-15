@@ -38,6 +38,14 @@ class GccBundledCliIntentBuilderTest {
             GccBundledCliIntentBuilder.build(SHA, "lto1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 binary, profile, archive, controls, operationJournal, scratch, POLICY, fullRecoveryExport = true)
         }
+        for ((kind, full) in listOf(
+            GccCompilerEngineContainmentRunKind.FRESH_CONTROL to false,
+            GccCompilerEngineContainmentRunKind.INTERRUPTED to true,
+            GccCompilerEngineContainmentRunKind.RESUMED to true,
+        )) assertFails {
+            GccBundledCliIntentBuilder.build(SHA, "driver", kind,
+                binary, profile, archive, controls, operationJournal, scratch, POLICY, fullRecoveryExport = full)
+        }
         assertEmpty(controls)
         assertEmpty(operationJournal)
     }

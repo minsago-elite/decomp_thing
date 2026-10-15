@@ -6,12 +6,26 @@ on:
     tags: ['**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Manual GCC evidence capture
+        type: choice
+        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics]
+        default: driver-dwarf-interfaces
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  cc1-runtime-diagnostics:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cc1-runtime-diagnostics'
+    uses: ./.github/workflows/gcc-cc1-full-export.yml
+    permissions:
+      contents: read
+    with:
+      capture-mode: cc1-runtime-diagnostics
+
   provenance-and-elf-verifier:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
@@ -248,7 +262,7 @@ jobs:
 
   driver-dwarf-interfaces:
     name: Retained GCC driver DWARF interfaces
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-dwarf-interfaces')
+    if: (github.event_name == 'workflow_dispatch' && inputs.operation == 'driver-dwarf-interfaces') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-dwarf-interfaces')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

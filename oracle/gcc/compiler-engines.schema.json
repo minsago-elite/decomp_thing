@@ -12,13 +12,43 @@
       "additionalProperties": false,
       "required": ["exporter", "ghidra", "planner"],
       "properties": {
+        "cc1RuntimeDiagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "schemaVersion", "runtimeInvocationVersion", "workerOperation", "diagnosticPolicy", "processorCount", "analysisThreadCount", "decompilerWorkerCount", "maximumJavaHeapBytes", "maximumResidentBytes", "wallClockSeconds"],
+          "properties": {
+            "provider": {"const": "gcc-cc1-runtime-diagnostics-v1"},
+            "schemaVersion": {"const": 1},
+            "runtimeInvocationVersion": {"const": 7},
+            "workerOperation": {"const": "analyze-diagnostics-v1"},
+            "diagnosticPolicy": {"const": "jvm-mxbean-stdout-v1"},
+            "processorCount": {"const": 4},
+            "analysisThreadCount": {"const": 4},
+            "decompilerWorkerCount": {"const": 4},
+            "maximumJavaHeapBytes": {"const": 2147483648},
+            "maximumResidentBytes": {"const": 17179869184},
+            "wallClockSeconds": {"const": 9000}
+          }
+        },
+        "fullRecoveryCc1Throughput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "runtimeInvocationVersion", "processorCount", "analysisThreadCount", "decompilerWorkerCount"],
+          "properties": {
+            "schemaVersion": {"const": 1},
+            "runtimeInvocationVersion": {"const": 6},
+            "processorCount": {"const": 4},
+            "analysisThreadCount": {"const": 4},
+            "decompilerWorkerCount": {"const": 4}
+          }
+        },
         "exporter": {
           "type": "object",
           "additionalProperties": false,
           "required": ["id", "version", "sha256", "recoveryMode"],
           "properties": {
             "id": {"const": "decompengine-ghidra-program-model"},
-            "version": {"const": 11},
+            "version": {"const": 16},
             "recoveryMode": {"const": "planning"},
             "sha256": {"$ref": "#/$defs/sha256"}
           }
@@ -72,9 +102,10 @@
     "budgets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["exportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
+      "required": ["exportWallClockSeconds", "fullRecoveryCc1ExportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
       "properties": {
         "exportWallClockSeconds": {"const": 1800},
+        "fullRecoveryCc1ExportWallClockSeconds": {"const": 9000},
         "exportMaximumResidentBytes": {"const": 17179869184},
         "plannerMaximumEntities": {"type": "integer", "minimum": 1},
         "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},

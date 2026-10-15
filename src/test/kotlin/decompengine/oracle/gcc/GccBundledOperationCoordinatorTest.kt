@@ -523,6 +523,7 @@ class GccBundledOperationCoordinatorTest {
             }
         }
         lateinit var bound: GccBundledOperationIntent
+        lateinit var diagnosticBound: GccBundledOperationIntent
         GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { profile ->
             val suite = profile.suite
             val engine = suite.engine("cc1")
@@ -556,6 +557,46 @@ class GccBundledOperationCoordinatorTest {
                 assertFails { build(selected.map { if (it.role == role) it.copy(sha256 = SHA_CHANGED) else it }) }
             }
             assertFails { build(limits = GccCompilerEngineContainmentBudgets(suite.budgets.exportWallClockMillis + 1000, budgets().maximumResidentBytes, 32)) }
+            val fullBudget = GccCompilerEngineContainmentBudgets(
+                suite.budgets.fullRecoveryCc1ExportWallClockMillis, budgets().maximumResidentBytes, 32)
+            assertFails { build(limits = fullBudget) }
+            // This default policy has no retained parallel throughput; keep the v2 full-export control serial.
+            assertEquals(null, suite.fullRecoveryCc1Throughput)
+            val parallelRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 6)
+            val parallel = assertFailsWith<IllegalArgumentException> {
+                GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                    selected, parallelRuntime, fullBudget, policy(), profile)
+            }
+            assertEquals("parallel full recovery requires the retained cc1 throughput policy", parallel.message)
+            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 5)
+            val fullIntent = GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, fullRuntime, fullBudget, policy(), profile)
+            assertEquals(fullBudget, fullIntent.budgets)
+            fullIntent.requireFullExportExecution()
+            checkNotNull(fullIntent.openPlannerProfile(emptyList())).use { it.requireCurrent() }
+            val diagnosticRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 7)
+            diagnosticBound = GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, diagnosticRuntime, fullBudget, policy(), profile)
+            val diagnosticDocument = OracleJson.parseCanonical(diagnosticBound.canonicalBytes).jsonObject
+            assertEquals(JsonPrimitive(4), diagnosticDocument["schemaVersion"])
+            assertEquals(JsonPrimitive("gcc-bundled-operation-intent-v4"), diagnosticDocument["provider"])
+            assertEquals(JsonPrimitive("gcc-retained-diagnostic-profile-v1"),
+                diagnosticDocument.getValue("plannerProfile").jsonObject["provider"])
+            assertNotEquals(fullIntent.requestSha256, diagnosticBound.requestSha256)
+            assertFailsWith<IllegalStateException> { diagnosticBound.requireFullExportExecution() }
+            assertContentEquals(profile.bindDiagnosticInvocation("cc1", selected, fullBudget, true, diagnosticRuntime),
+                OracleJson.canonicalBytes(diagnosticDocument.getValue("plannerProfile")))
+            checkNotNull(diagnosticBound.openPlannerProfile(emptyList())).use { it.requireCurrent() }
+            assertFails { GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.INTERRUPTED,
+                selected, diagnosticRuntime, fullBudget, policy(), profile) }
+            assertFails { GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, diagnosticRuntime, fullBudget, policy()) }
+            for (engineId in listOf("driver", "lto1")) assertFails {
+                GccBundledOperationIntent(OPERATION_ID, engineId, GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                    selected, diagnosticRuntime, fullBudget, policy(), profile)
+            }
+            assertFails { GccBundledOperationIntent(OPERATION_ID, "lto1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, fullRuntime, fullBudget, policy(), profile) }
             assertFails { build(limits = GccCompilerEngineContainmentBudgets(60_000, suite.budgets.exportMaximumResidentBytes + 1, 32)) }
             assertFails { bound.openPlannerProfile(listOf(root)) }
             assertFails { GccBundledOperationIntent(OPERATION_ID, "lto1", bound.runKind, selected, runtime(), budgets(), policy(), profile) }
@@ -576,6 +617,7 @@ class GccBundledOperationCoordinatorTest {
             assertNotEquals(bound.requestSha256, ltoIntent.requestSha256)
         }
         // The intent owns bytes, not the caller's closed descriptor handle.
+        checkNotNull(diagnosticBound.openPlannerProfile(emptyList())).use { it.requireCurrent() }
         checkNotNull(bound.openPlannerProfile(emptyList())).use { retained ->
             retained.requireCurrent()
             val journalRoot = Files.createDirectory(root.resolve("journal"))
@@ -590,6 +632,7 @@ class GccBundledOperationCoordinatorTest {
         val path = root.resolve("compiler-engines.json")
         Files.write(path, Files.readAllBytes(path) + byteArrayOf(32))
         assertFails { bound.openPlannerProfile(emptyList()) }
+        assertFails { diagnosticBound.openPlannerProfile(emptyList()) }
     }
 
     private fun intent(

@@ -18,6 +18,7 @@
     "src/main/kotlin/decompengine/oracle",
     "src/test/kotlin/decompengine/oracle",
     "tests/oracle",
+    ".github/workflows/gcc-cc1-full-export.yml",
     ".github/workflows/gcc-oracle-model.yml",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",

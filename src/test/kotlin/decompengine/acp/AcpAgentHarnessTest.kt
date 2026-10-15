@@ -64,11 +64,55 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.coroutines.flow.collect
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @Test
+    fun `reused cleanup latch is inert across two receipts and never accumulates timing records`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        val cleanup = AcpCleanupProofFailure("authored retained cleanup failure")
+        val facts = decompengine.agent.AgentFailure(AgentFailureKind.INTERNAL, "authored unresolved cleanup")
+        val stored = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("mappedPrelaunchFailure", decompengine.agent.AgentFailure::class.java,
+                Throwable::class.java, RuntimeCopyStatistics.Prefix::class.java)
+            .apply { isAccessible = true }.invoke(null, facts, cleanup, prefix) as AgentExecutionException
+        val originalSuppressed = stored.suppressed.toList()
+        assertEquals(1, originalSuppressed.size)
+        val root = Path.of(".").toAbsolutePath().normalize()
+        val harness = AcpAgentHarness(AcpProcessConfiguration(
+            executable = root.resolve("build/inert-never-launched-acp"), sandboxBoundary = null,
+        )) // No live harness/fixture/Python/user-runtime/gate-helper discovery.
+        @Suppress("UNCHECKED_CAST")
+        val latch = AcpAgentHarness::class.java.getDeclaredField("unresolvedCleanupFailure")
+            .apply { isAccessible = true }.get(harness) as java.util.concurrent.atomic.AtomicReference<AgentExecutionException?>
+        latch.set(stored)
+        var callbacks = 0
+        val request = AgentExecutionRequest(
+            objective = "inert retained cleanup refusal", workspaceRoots = listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(emptyList()),
+            cancellation = AgentCancellation { callbacks++; error("scheduler/cancellation must not be reached") },
+        )
+        repeat(2) {
+            val receipt = harness.executeReceipt(request) { callbacks++; error("event/model callback must not be reached") }
+            assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+            assertTrue(receipt.failureCause === stored)
+            assertTrue((receipt.outcome as AgentExecutionOutcome.Failed).failure === facts)
+            val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.REQUEST_BOUND, evidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, evidence.cleanupDisposition)
+            assertNull(evidence.diagnostics)
+            assertNull(evidence.sandboxEvidence)
+            assertTrue(latch.get() === stored)
+            assertEquals(originalSuppressed, stored.suppressed.toList())
+        }
+        assertEquals(0, callbacks)
+        assertTrue(stored.cause === cleanup)
+    }
+
     @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
@@ -362,20 +406,23 @@ class AcpAgentHarnessTest {
                     profile = profile,
                 ).reconstruct(binary, output)
             } catch (failure: Exception) {
-                val checkpoint = output.resolve("source-tree").resolve(
-                    profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp")),
-                )
-                val checkpointDiagnostics = runCatching {
-                    if (!Files.isRegularFile(checkpoint)) "<missing>" else {
-                        val maximumBytes = 16 * 1024
-                        val bytes = Files.newInputStream(checkpoint).use { it.readNBytes(maximumBytes + 1) }
-                        bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
-                            if (bytes.size > maximumBytes) "\n<truncated>" else ""
-                    }
-                }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
+                val sourceRoot = output.resolve("source-tree")
+                val retainedDiagnostics = listOf(
+                    "checkpoint" to "module-evidence",
+                    "execution" to "module-agent-execution-evidence",
+                ).joinToString("; ") { (label, role) ->
+                    val path = sourceRoot.resolve(
+                        profile.layout.declaration(role).materialize(mapOf("module" to "decomp")),
+                    )
+                    val diagnostic = retainedArchivalDiagnostic(
+                        path,
+                        fields = if (label == "execution") setOf("outcome", "lifecycle") else null,
+                    )
+                    "$label=$diagnostic"
+                }
                 throw AssertionError(
                     "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
-                        "sandbox=${harness.latestSandboxEvidence()}; checkpoint=$checkpointDiagnostics",
+                        "sandbox=${harness.latestSandboxEvidence()}; $retainedDiagnostics",
                     failure,
                 )
             }
@@ -383,6 +430,12 @@ class AcpAgentHarnessTest {
             assertEquals(0, result.build.returnCode)
             assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
             assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val diagnostics = assertNotNull(harness.latestDiagnostics())
+            assertEquals(0, diagnostics.exitCode)
+            assertFalse(diagnostics.rootTerminationRequested)
+            assertFalse(diagnostics.forcedTermination)
+            assertTrue(diagnostics.sandboxCleanupVerified)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty())
             val extracted = temp.resolve("${base.id}-extracted")
             ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
             val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)
@@ -391,6 +444,24 @@ class AcpAgentHarnessTest {
                 ArchivalProjectAuditor.audit(extracted, profile).toJson())
         }
     }
+
+    private fun retainedArchivalDiagnostic(path: Path, fields: Set<String>? = null): String = runCatching {
+        if (!Files.isRegularFile(path)) "<missing>" else {
+            val maximumRendered = 16 * 1024
+            val maximumBytes = if (fields == null) maximumRendered else 64 * 1024
+            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
+            if (fields == null) {
+                bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
+                    if (bytes.size > maximumBytes) "\n<truncated>" else ""
+            } else if (bytes.size > maximumBytes) {
+                "<exceeds $maximumBytes bytes>"
+            } else {
+                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
+                val rendered = JsonObject(document.filterKeys { it in fields }).toString()
+                rendered.take(maximumRendered) + if (rendered.length > maximumRendered) "<truncated>" else ""
+            }
+        }
+    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
 
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
@@ -466,7 +537,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(88, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -854,7 +925,7 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `overlapping receipts retain their own request prompt and provider evidence`() {
-        // This case checks receipt isolation while both callbacks overlap, not timeout policy.
+        // Require both live invocations to remain inside their event callbacks until the test releases them.
         val firstFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
@@ -866,15 +937,22 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000),
         )
         val callbacksEntered = CountDownLatch(2)
+        val releaseCallbacks = CountDownLatch(1)
+        val activeCallbacks = AtomicInteger()
         val executor = Executors.newFixedThreadPool(2)
 
         fun submit(request: AgentExecutionRequest) = executor.submit<AgentExecutionReceipt> {
             val firstCallback = AtomicBoolean(true)
             harness.executeReceipt(request) {
                 if (firstCallback.compareAndSet(true, false)) {
+                    activeCallbacks.incrementAndGet()
                     callbacksEntered.countDown()
-                    check(callbacksEntered.await(20, TimeUnit.SECONDS)) {
-                        "overlapping ACP invocation did not reach its event callback"
+                    try {
+                        check(releaseCallbacks.await(20, TimeUnit.SECONDS)) {
+                            "overlapping ACP invocation callback was not released"
+                        }
+                    } finally {
+                        activeCallbacks.decrementAndGet()
                     }
                 }
             }
@@ -883,6 +961,10 @@ class AcpAgentHarnessTest {
         try {
             val firstFuture = submit(firstRequest)
             val secondFuture = submit(secondRequest)
+            val bothCallbacksEntered = callbacksEntered.await(20, TimeUnit.SECONDS)
+            val heldCallbackCount = activeCallbacks.get()
+            val bothInvocationsHeld = !firstFuture.isDone && !secondFuture.isDone
+            releaseCallbacks.countDown()
             val first = firstFuture.get(75, TimeUnit.SECONDS)
             val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
@@ -900,6 +982,9 @@ class AcpAgentHarnessTest {
                     "cause=${boundedPreparationCauseForTest(receipt.failureCause)}"
             }
 
+            assertTrue(bothCallbacksEntered, "both contained invocations must reach callbacks; $outcomes")
+            assertEquals(2, heldCallbackCount, "both callbacks must remain held simultaneously; $outcomes")
+            assertTrue(bothInvocationsHeld, "neither invocation may finish before callback release; $outcomes")
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding, outcomes)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding, outcomes)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256, outcomes)
@@ -917,7 +1002,18 @@ class AcpAgentHarnessTest {
             )
             assertEquals("new source\n", firstFixture.source.readText())
             assertEquals("new source\n", secondFixture.source.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, firstFixture.forbiddenCanary.readText())
+            assertEquals(FORBIDDEN_CANARY_CONTENT, secondFixture.forbiddenCanary.readText())
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, firstEvidence.cleanupDisposition, outcomes)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, secondEvidence.cleanupDisposition, outcomes)
+            listOf("first" to firstEvidence, "second" to secondEvidence).forEach { (label, evidence) ->
+                val diagnostics = assertNotNull(evidence.diagnostics, "$label: $outcomes")
+                assertTrue(diagnostics.remainingProcessIds.isEmpty(), "$label: $outcomes")
+                assertTrue(diagnostics.sandboxCleanupVerified, "$label: $outcomes")
+                assertProcessStopped(diagnostics.pid)
+            }
         } finally {
+            releaseCallbacks.countDown()
             executor.shutdownNow()
         }
     }
