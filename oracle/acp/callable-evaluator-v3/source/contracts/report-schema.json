@@ -1,0 +1,1309 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "schema": {
+      "const": "callable-library-candidate-evaluation-v3"
+    },
+    "candidateSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "profileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "phases": {
+      "type": "object",
+      "properties": {
+        "preprocess": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "compile": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "link": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "exports": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "declarations": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "gccAssertions": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        },
+        "load": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "unverified",
+                "not-attempted"
+              ]
+            },
+            "value": {
+              "const": null
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "behavior": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "refused",
+                "unknown",
+                "not-attempted"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "evidenceSha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "const": null
+                }
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidenceSha256"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "preprocess",
+        "compile",
+        "link",
+        "exports",
+        "declarations",
+        "gccAssertions",
+        "load",
+        "behavior"
+      ],
+      "additionalProperties": false
+    },
+    "admitted": {
+      "type": "boolean"
+    },
+    "runtimeRequestCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "launcherCreatedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "scopeVerifiedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "completedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "matchedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "mismatchedScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "unknownScenarioProcessCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "admissionRefusedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "scenarioCount": {
+      "const": 24
+    },
+    "processBehaviorRate": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "processCoverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "apiEntryCount": {
+      "const": null
+    },
+    "apiCompletionCount": {
+      "const": null
+    },
+    "callbackCount": {
+      "const": null
+    },
+    "apiCoverage": {
+      "const": null
+    },
+    "apiBehaviorRate": {
+      "const": null
+    },
+    "formalStructuralScore": {
+      "const": null
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "family": {
+            "enum": [
+              "acp_mix",
+              "acp_pair_scale",
+              "acp_update",
+              "acp_apply",
+              "acp_fold"
+            ]
+          },
+          "status": {
+            "enum": [
+              "admission-refused",
+              "matched",
+              "mismatched",
+              "unknown"
+            ]
+          },
+          "runtimeRequested": {
+            "type": "boolean"
+          },
+          "process": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "launcherCreated": {
+                    "type": "boolean"
+                  },
+                  "launcherPidIdentityVerified": {
+                    "type": "boolean"
+                  },
+                  "scopeVerified": {
+                    "type": "boolean"
+                  },
+                  "scopeAdmitted": {
+                    "type": "boolean"
+                  },
+                  "captureComplete": {
+                    "type": "boolean"
+                  },
+                  "waitComplete": {
+                    "type": "boolean"
+                  },
+                  "cleanupVerified": {
+                    "type": "boolean"
+                  },
+                  "workerExecVerified": {
+                    "type": "boolean"
+                  },
+                  "workerTerminationVerified": {
+                    "type": "boolean"
+                  },
+                  "rootReaped": {
+                    "type": "boolean"
+                  },
+                  "finalAbsenceVerified": {
+                    "type": "boolean"
+                  },
+                  "scopeAbsenceVerified": {
+                    "type": "boolean"
+                  },
+                  "completed": {
+                    "type": "boolean"
+                  },
+                  "termination": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "exit",
+                              "signal"
+                            ]
+                          },
+                          "value": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "workerTermination": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "exit",
+                              "signal"
+                            ]
+                          },
+                          "value": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          },
+                          "rawWaitStatus": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 65535
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value",
+                          "rawWaitStatus"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "launcherExitCode": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "workerExitCode": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "provisioningOnly": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "phase": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "runtime",
+                          "compiler",
+                          "probe",
+                          "elf-inspection",
+                          "caller-build",
+                          "helper-build",
+                          "toolchain-inspection",
+                          "unspecified"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "profileSha256": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "workerProof": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "protocolVersion": {
+                            "const": 1
+                          },
+                          "status": {
+                            "enum": [
+                              "verified",
+                              "unknown",
+                              "invalid"
+                            ]
+                          },
+                          "proofSha256": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "fileIdentityVerified": {
+                            "type": "boolean"
+                          },
+                          "pinsUnchanged": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "maxLength": 1000
+                          }
+                        },
+                        "required": [
+                          "protocolVersion",
+                          "status",
+                          "proofSha256",
+                          "fileIdentityVerified",
+                          "pinsUnchanged"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "workerProofBindings": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "protocolVersion": {
+                            "const": 1
+                          },
+                          "expected": {
+                            "type": "object",
+                            "properties": {
+                              "attempt": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$"
+                              },
+                              "phase": {
+                                "enum": [
+                                  "runtime",
+                                  "compiler",
+                                  "probe",
+                                  "elf-inspection",
+                                  "caller-build",
+                                  "helper-build",
+                                  "toolchain-inspection",
+                                  "unspecified"
+                                ]
+                              },
+                              "reportDevice": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "reportInode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "reaperDevice": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "reaperInode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "outerPidNsDevice": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "outerPidNsInode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "targetDevice": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "targetInode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "library": {
+                                "type": "object",
+                                "properties": {
+                                  "device": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 18446744073709551615
+                                  },
+                                  "inode": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 18446744073709551615
+                                  },
+                                  "size": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 16777216
+                                  },
+                                  "sha256": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$"
+                                  },
+                                  "sourcePath": {
+                                    "type": "string",
+                                    "pattern": "^/",
+                                    "maxLength": 4096
+                                  }
+                                },
+                                "required": [
+                                  "device",
+                                  "inode",
+                                  "size",
+                                  "sha256",
+                                  "sourcePath"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "attempt",
+                              "phase",
+                              "reportDevice",
+                              "reportInode",
+                              "reaperDevice",
+                              "reaperInode",
+                              "outerPidNsDevice",
+                              "outerPidNsInode",
+                              "targetDevice",
+                              "targetInode"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "launchConfigSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "environmentPinSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "monitorBinarySha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "monitorSourceSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "protocolSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "parserSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "manifestSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "targetSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "launchPinsSha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "protocolVersion",
+                          "expected",
+                          "launchConfigSha256",
+                          "environmentPinSha256",
+                          "monitorBinarySha256",
+                          "monitorSourceSha256",
+                          "protocolSha256",
+                          "parserSha256",
+                          "manifestSha256",
+                          "targetSha256",
+                          "launchPinsSha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "launchInputPins": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 256,
+                        "propertyNames": {
+                          "type": "string",
+                          "pattern": "^/[^\\u0000]*$"
+                        },
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "device": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 18446744073709551615
+                            },
+                            "inode": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 18446744073709551615
+                            },
+                            "mode": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4095
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{64}$"
+                            }
+                          },
+                          "required": [
+                            "device",
+                            "inode",
+                            "mode",
+                            "sha256"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "workerProofRawHex": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9a-f]{2})*$",
+                    "maxLength": 2048
+                  },
+                  "streamsUnambiguous": {
+                    "type": "boolean"
+                  },
+                  "stdoutHex": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{2})*$",
+                        "maxLength": 131072
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "stderrHex": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{2})*$",
+                        "maxLength": 131072
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timedOut": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "outputExceeded": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "infrastructureFailure": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "launcherCreated",
+                  "launcherPidIdentityVerified",
+                  "scopeVerified",
+                  "scopeAdmitted",
+                  "captureComplete",
+                  "waitComplete",
+                  "cleanupVerified",
+                  "workerExecVerified",
+                  "workerTerminationVerified",
+                  "rootReaped",
+                  "finalAbsenceVerified",
+                  "scopeAbsenceVerified",
+                  "completed",
+                  "termination",
+                  "workerTermination",
+                  "launcherExitCode",
+                  "workerExitCode",
+                  "provisioningOnly",
+                  "phase",
+                  "profileSha256",
+                  "workerProof",
+                  "workerProofBindings",
+                  "launchInputPins",
+                  "workerProofRawHex",
+                  "streamsUnambiguous",
+                  "stdoutHex",
+                  "stderrHex",
+                  "timedOut",
+                  "outputExceeded",
+                  "infrastructureFailure"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "completed": {
+                          "const": true
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "launcherCreated": {
+                          "const": true
+                        },
+                        "launcherPidIdentityVerified": {
+                          "const": true
+                        },
+                        "scopeVerified": {
+                          "const": true
+                        },
+                        "scopeAdmitted": {
+                          "const": true
+                        },
+                        "captureComplete": {
+                          "const": true
+                        },
+                        "waitComplete": {
+                          "const": true
+                        },
+                        "cleanupVerified": {
+                          "const": true
+                        },
+                        "workerExecVerified": {
+                          "const": true
+                        },
+                        "workerTerminationVerified": {
+                          "const": true
+                        },
+                        "rootReaped": {
+                          "const": true
+                        },
+                        "finalAbsenceVerified": {
+                          "const": true
+                        },
+                        "scopeAbsenceVerified": {
+                          "const": true
+                        },
+                        "timedOut": {
+                          "const": false
+                        },
+                        "outputExceeded": {
+                          "const": false
+                        },
+                        "infrastructureFailure": {
+                          "const": false
+                        },
+                        "provisioningOnly": {
+                          "const": false
+                        },
+                        "launcherExitCode": {
+                          "const": 0
+                        },
+                        "phase": {
+                          "const": "runtime"
+                        },
+                        "streamsUnambiguous": {
+                          "const": true
+                        },
+                        "termination": {
+                          "type": "object"
+                        },
+                        "workerTermination": {
+                          "type": "object"
+                        },
+                        "workerProof": {
+                          "type": "object"
+                        },
+                        "workerProofBindings": {
+                          "type": "object"
+                        },
+                        "launchInputPins": {
+                          "type": "object"
+                        },
+                        "stdoutHex": {
+                          "type": "string"
+                        },
+                        "stderrHex": {
+                          "type": "string"
+                        },
+                        "profileSha256": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "termination": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidenceSha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "const": null
+              }
+            ]
+          },
+          "loadObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "apiEntryObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "apiCompletionObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "callbackObservation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "not-attempted"
+                ]
+              },
+              "value": {
+                "const": null
+              }
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "family",
+          "status",
+          "runtimeRequested",
+          "process",
+          "evidenceSha256",
+          "loadObservation",
+          "apiEntryObservation",
+          "apiCompletionObservation",
+          "callbackObservation"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 24,
+      "maxItems": 24
+    },
+    "evidenceFiles": {
+      "type": "object",
+      "maxProperties": 100,
+      "propertyNames": {
+        "pattern": "^[a-z0-9-]+[.]json$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "abiAccuracy": {
+      "const": "unassessed"
+    },
+    "productionFactoryQualified": {
+      "const": false
+    },
+    "productionProviderQualified": {
+      "const": false
+    },
+    "productionFilesystemQualified": {
+      "const": false
+    },
+    "runtimeInputs": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "caller": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "pattern": "^/[^\\u0000]*$"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "library": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "pattern": "^/[^\\u0000]*$"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "caller",
+            "library"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "schema",
+    "candidateSha256",
+    "profileSha256",
+    "phases",
+    "admitted",
+    "runtimeRequestCount",
+    "launcherCreatedCount",
+    "scopeVerifiedCount",
+    "completedScenarioProcessCount",
+    "matchedScenarioProcessCount",
+    "mismatchedScenarioProcessCount",
+    "unknownScenarioProcessCount",
+    "admissionRefusedCount",
+    "scenarioCount",
+    "processBehaviorRate",
+    "processCoverage",
+    "apiEntryCount",
+    "apiCompletionCount",
+    "callbackCount",
+    "apiCoverage",
+    "apiBehaviorRate",
+    "formalStructuralScore",
+    "scenarios",
+    "evidenceFiles",
+    "abiAccuracy",
+    "productionFactoryQualified",
+    "productionProviderQualified",
+    "productionFilesystemQualified",
+    "runtimeInputs"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtimeRequestCount": {
+            "const": 0
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "phases": {
+            "properties": {
+              "load": {
+                "const": {
+                  "status": "not-attempted",
+                  "value": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "phases": {
+            "properties": {
+              "load": {
+                "const": {
+                  "status": "unverified",
+                  "value": null
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

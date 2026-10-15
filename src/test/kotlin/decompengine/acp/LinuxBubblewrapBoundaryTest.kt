@@ -41,6 +41,1085 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `mount event witness retains original phase and sticky refusal never queries again`() {
+        for (phase in listOf("CHECKPOINT", "CONTROL_ADMISSION", "REFRESH")) {
+            LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-203)).use { scratch ->
+                val check = newMountEventCheck(scratch)
+                var calls = 0
+                val unchanged = scriptedManifestMountPoll(scratch) { buffer ->
+                    calls++; buffer.setShort(6, 8); 0
+                }
+                admitMountObservation(check, unchanged, phase)
+                assertEquals(null, mountCheckField(check, "firstEventPhase"))
+                assertEquals(null, mountCheckField(check, "firstEventDiagnostic"))
+                val changed = scriptedManifestMountPoll(scratch) { buffer ->
+                    calls++; buffer.setShort(6, 0x800a.toShort()); Int.MAX_VALUE
+                }
+                val first = assertFailsWith<IOException> { admitMountObservation(check, changed, phase) }
+                assertEquals("host mounts changed during runtime manifest", first.message)
+                val diagnostic = mountDiagnostic(first)
+                val message = requireNotNull(diagnostic.message)
+                assertTrue(message.contains("phase=$phase "))
+                assertTrue(message.contains("generation=" +
+                    if (phase == "REFRESH") "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED"))
+                assertTrue(message.endsWith("outcome=EVENT rc=2147483647 revents=32778 errno=NA"))
+                scratch.close() // Any additional poll would now throw, not reproduce the event.
+                val sticky = assertFailsWith<IOException> { requireMountEventUnchanged(check, "REFRESH") }
+                assertEquals(first.message, sticky.message)
+                assertTrue(mountDiagnostic(sticky) === diagnostic)
+                assertEquals(2, calls)
+                assertTrue(mountCheckField(check, "firstEventDiagnostic") === diagnostic)
+            }
+        }
+    }
+
+    @Test
+    fun `mount query diagnostics preserve primary cleanup and nonsticky unavailable facts`() {
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-204)).use { scratch ->
+            val check = newMountEventCheck(scratch)
+            var calls = 0
+            for (events in listOf(16, 32, 65535)) {
+                val failure = assertFailsWith<IOException> {
+                    scriptedManifestMountPoll(scratch) { buffer -> calls++; buffer.setShort(6, events.toShort()); 1 }
+                }
+                assertTrue(failure.suppressed.isEmpty())
+                attachMountPollFailure(check, failure, "CONTROL_ADMISSION")
+                attachMountPollFailure(check, failure, "CHECKPOINT") // Retain one witness per primary.
+                assertEquals(1, failure.suppressed.size)
+                assertTrue(requireNotNull(mountDiagnostic(failure).message).endsWith(
+                    "outcome=INVALID_DESCRIPTOR rc=1 revents=$events errno=NA"))
+                assertTrue(requireNotNull(mountDiagnostic(failure).message).contains("phase=CONTROL_ADMISSION "))
+                val cleanup = AcpCleanupProofFailure("authored later cleanup failure")
+                failure.addSuppressed(cleanup)
+                assertTrue(failure.suppressed[1] === cleanup)
+                attachMountPollFailure(check, failure, "REFRESH") // Consumed before cleanup was added.
+                assertEquals(2, failure.suppressed.size)
+                assertEquals("mountinfo event descriptor is invalid", failure.message)
+                admitMountObservation(check, 0L, "CHECKPOINT") // Query refusal must not latch an event.
+            }
+            val syscall = assertFailsWith<LinuxSyscallException> {
+                scriptedManifestMountPoll(scratch) { calls++; com.sun.jna.Native.setLastError(Int.MIN_VALUE); Int.MIN_VALUE }
+            }
+            attachMountPollFailure(check, syscall, "CHECKPOINT")
+            assertEquals(Int.MIN_VALUE, syscall.errno)
+            assertTrue(requireNotNull(mountDiagnostic(syscall).message).endsWith(
+                "outcome=SYSCALL_ERROR rc=-2147483648 revents=NA errno=-2147483648"))
+            val cause = IOException("authored private cause text")
+            val primary = IOException("authored private query text", cause)
+            val observed = try {
+                scriptedManifestMountPoll(scratch) { calls++; throw primary }
+                error("query failure unexpectedly returned")
+            } catch (failure: Throwable) {
+                attachMountPollFailure(check, failure, "REFRESH")
+                failure
+            }
+            assertTrue(observed === primary)
+            assertTrue(observed.cause === cause)
+            assertTrue(observed.suppressed.isEmpty()) // Unowned failure: unavailable, omitted.
+            assertEquals(null, mountCheckField(check, "firstEventPhase"))
+            assertEquals(null, mountCheckField(check, "firstEventDiagnostic"))
+            scratch.close()
+            val closed = assertFailsWith<IllegalStateException> { requireMountEventUnchanged(check, "CHECKPOINT") }
+            assertEquals("mount event poll scratch is closed", closed.message)
+            assertTrue(closed.suppressed.isEmpty()) // No fresh-owned poll token; preserve unchanged.
+            assertEquals(5, calls)
+        }
+    }
+
+    @Test
+    fun `mount diagnostics are bounded stackless best effort and never cleanup authority`() {
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-205)).use { scratch ->
+            val check = newMountEventCheck(scratch)
+            val failure = assertFailsWith<IOException> { admitMountObservation(check, (1L shl 32) or 10L, "REFRESH") }
+            val diagnostic = mountDiagnostic(failure)
+            val text = requireNotNull(diagnostic.message)
+            assertTrue(text.length <= 512 && text.all { it.code in 32..126 })
+            assertEquals(null, diagnostic.cause)
+            assertTrue(diagnostic.stackTrace.isEmpty())
+            diagnostic.addSuppressed(IOException("not retained"))
+            assertTrue(diagnostic.suppressed.isEmpty())
+            assertFalse(AcpCleanupProofFailure::class.java.isInstance(diagnostic))
+            val disabled = MountDiagnosticSuppressionDisabled()
+            attachMountPollFailure(check, disabled, "CHECKPOINT")
+            assertTrue(disabled.suppressed.isEmpty())
+            assertEquals("authored suppression disabled", disabled.message)
+            val crowded = IOException("authored crowded primary")
+            val cleanups = List(9) { IOException("authored cleanup $it") }
+            cleanups.forEach(crowded::addSuppressed)
+            val owned = assertFailsWith<IOException> {
+                scriptedManifestMountPoll(scratch) { buffer -> buffer.setShort(6, 32); 1 }
+            }
+            attachMountPollFailure(check, crowded, "CHECKPOINT")
+            assertEquals(cleanups, crowded.suppressed.toList()) // Diagnostic omission never replaces facts.
+            assertTrue(owned.suppressed.isEmpty()) // Foreign identity did not claim the owned token.
+            attachMountPollFailure(check, owned, "CHECKPOINT")
+            assertEquals(1, owned.suppressed.size)
+            assertTrue(requireNotNull(mountDiagnostic(owned).message).endsWith(
+                "outcome=INVALID_DESCRIPTOR rc=1 revents=32 errno=NA"))
+            attachMountPollFailure(check, crowded, "REFRESH")
+            assertEquals(cleanups, crowded.suppressed.toList())
+            val containsCleanup = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+                .getDeclaredMethod("containsCleanupProofFailure", Throwable::class.java)
+            assertEquals(false, invokePrivate(null, containsCleanup, failure))
+            val cleanup = AcpCleanupProofFailure("authored later cleanup")
+            failure.addSuppressed(cleanup)
+            assertTrue(failure.suppressed[0] === diagnostic && failure.suppressed[1] === cleanup)
+            assertEquals(true, invokePrivate(null, containsCleanup, failure))
+            // Fault only diagnostic metadata after the real event latch; refusal must survive.
+            check.javaClass.getDeclaredField("firstEventDiagnostic").apply { isAccessible = true }.set(check, null)
+            check.javaClass.getDeclaredField("firstEventPhase").apply { isAccessible = true }.set(check, null)
+            val lostDiagnostic = assertFailsWith<IOException> { requireMountEventUnchanged(check, "CHECKPOINT") }
+            assertEquals("host mounts changed during runtime manifest", lostDiagnostic.message)
+            assertTrue(lostDiagnostic.suppressed.isEmpty())
+        }
+
+        // The private-control guards compare parsed tables, not the runtime scope's poll result.
+        val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+        val tableParser = boundaryType.getDeclaredMethod("parseHostPhysicalMounts", List::class.java, Function0::class.java)
+        val tableComparison = boundaryType.getDeclaredMethod("requirePrivateControlMountTablesUnchanged",
+            List::class.java, List::class.java, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE, LinuxFileKey::class.java)
+        fun parseTables(lines: List<String>): List<*> = invokePrivate(null, tableParser, lines, {}) as List<*>
+        fun compareTables(before: List<*>, after: List<*>, pathGuard: Boolean = true,
+            recursive: Boolean = false, selfExcluded: Boolean = false) {
+            invokePrivate(null, tableComparison, before, after, pathGuard, recursive,
+                if (selfExcluded) LinuxFileKey(987654321L, 123456789L) else null)
+        }
+        val tableContainsCleanup = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("containsCleanupProofFailure", Throwable::class.java)
+        val firstRow = "123456789 1 9:10 /table-root-canary /table-point-canary rw - tmpfs tmpfs rw"
+        val secondRow = "987654321 1 9:11 /second-root-canary /second-point-canary rw - tmpfs tmpfs rw"
+        val table = parseTables(listOf(firstRow, secondRow))
+        compareTables(table, table)
+        compareTables(table, parseTables(listOf(firstRow, secondRow)))
+        compareTables(emptyList<Any>(), emptyList<Any>())
+        val changedTables = listOf(
+            parseTables(listOf(firstRow)), // Count shrink.
+            parseTables(listOf(firstRow, secondRow, "333333333 1 9:12 /third-root-canary /third-point-canary rw - tmpfs tmpfs rw")),
+            parseTables(listOf(firstRow.replace("123456789", "223456789"), secondRow)),
+            parseTables(listOf(firstRow.replace("9:10", "8:10"), secondRow)),
+            parseTables(listOf(firstRow.replace("9:10", "9:12"), secondRow)),
+            parseTables(listOf(firstRow.replace("/table-root-canary", "/changed-root-canary"), secondRow)),
+            parseTables(listOf(firstRow.replace("/table-point-canary", "/changed-point-canary"), secondRow)),
+            parseTables(listOf(secondRow, firstRow)), // Ordered equality remains strict.
+        )
+        for (pathGuard in listOf(true, false)) {
+            for (recursive in if (pathGuard) listOf(false, true) else listOf(false)) {
+                for (selfExcluded in listOf(false, true)) {
+                    for (changed in changedTables) {
+                        val refused = assertFailsWith<IOException> {
+                            compareTables(table, changed, pathGuard, recursive, selfExcluded)
+                        }
+                        assertEquals(IOException::class.java, refused.javaClass)
+                        assertEquals("host mounts changed during private-control protection", refused.message)
+                        assertEquals(null, refused.cause)
+                        val witness = refused.suppressed.single()
+                        assertEquals("decompengine.acp.PrivateControlMountTableDiagnostic", witness.javaClass.name)
+                        val record = requireNotNull(witness.message)
+                        assertEquals("private-control-mount-v1 kind=TABLE_COMPARISON reason=PARSED_TABLE_INEQUALITY site=" +
+                            (if (pathGuard) "PATH_GUARD_POST_COVERAGE" else "DESCRIPTOR_GUARD_POST_COVERAGE") +
+                            " beforeEntries=2 afterEntries=" + changed.size + " recursive=" + recursive +
+                            " selfExclusionSpecified=" + selfExcluded + " finalControls=NOT_REVALIDATED" +
+                            " poll=NOT_PERFORMED generation=NOT_EVALUATED", record)
+                        assertTrue(record.toByteArray(Charsets.US_ASCII).size <= 512 && record.all { it.code in 32..126 })
+                        assertFalse(record.contains("canary") || record.contains("123456789") || record.contains("987654321"))
+                        assertEquals(null, witness.cause)
+                        assertTrue(witness.stackTrace.isEmpty())
+                        witness.addSuppressed(IOException("not retained"))
+                        assertTrue(witness.suppressed.isEmpty())
+                        assertFalse(AcpCleanupProofFailure::class.java.isInstance(witness))
+                        assertEquals(false, invokePrivate(null, tableContainsCleanup, refused))
+                        val cleanup = AcpCleanupProofFailure("authored later table cleanup")
+                        refused.addSuppressed(cleanup)
+                        assertTrue(refused.suppressed[0] === witness && refused.suppressed[1] === cleanup)
+                        assertEquals(true, invokePrivate(null, tableContainsCleanup, refused))
+                    }
+                }
+            }
+        }
+        val maximumRows = List(4096) { index ->
+            (100000L + index).toString() + " 1 9:10 /maximum-root-canary /maximum-point-canary rw - tmpfs tmpfs rw"
+        }
+        val maximumBefore = parseTables(maximumRows)
+        val maximumAfter = parseTables(maximumRows.toMutableList().also { it[0] = it[0].replace("100000", "999999") })
+        val maximumFailure = assertFailsWith<IOException> { compareTables(maximumBefore, maximumAfter) }
+        assertTrue(requireNotNull(maximumFailure.suppressed.single().message).contains("beforeEntries=4096 afterEntries=4096"))
+
+        // An equal result must not observe diagnostic sizes, format text or scan rows.
+        var equalCalls = 0
+        var equalSizeCalls = 0
+        var rowReads = 0
+        val equalWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { equalSizeCalls++; error("diagnostic size observed on equality") }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean { equalCalls++; return true }
+        }
+        compareTables(equalWithoutSize, emptyList<Any>())
+        assertEquals(1, equalCalls)
+        assertEquals(0, equalSizeCalls)
+        assertEquals(0, rowReads)
+
+        // The original fresh refusal exists before any fallible diagnostic size observation.
+        val sizeFailure = IOException("authored table diagnostic size failure")
+        var unequalCalls = 0
+        var failedSizeCalls = 0
+        val unequalWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { failedSizeCalls++; throw sizeFailure }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean { unequalCalls++; return false }
+        }
+        val omitted = assertFailsWith<IOException> { compareTables(unequalWithoutSize, emptyList<Any>()) }
+        assertTrue(omitted !== sizeFailure)
+        assertEquals(IOException::class.java, omitted.javaClass)
+        assertEquals("host mounts changed during private-control protection", omitted.message)
+        assertEquals(null, omitted.cause)
+        assertTrue(omitted.suppressed.isEmpty())
+        assertEquals(1, unequalCalls)
+        assertEquals(1, failedSizeCalls)
+        assertEquals(0, rowReads)
+
+        var afterSizeCalls = 0
+        val unequalWithSize = object : AbstractList<Any?>() {
+            override val size: Int get() = 1
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = false
+        }
+        val afterWithoutSize = object : AbstractList<Any?>() {
+            override val size: Int get() { afterSizeCalls++; throw sizeFailure }
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+        }
+        val afterOmitted = assertFailsWith<IOException> { compareTables(unequalWithSize, afterWithoutSize) }
+        assertTrue(afterOmitted !== sizeFailure)
+        assertEquals(IOException::class.java, afterOmitted.javaClass)
+        assertEquals("host mounts changed during private-control protection", afterOmitted.message)
+        assertEquals(null, afterOmitted.cause)
+        assertTrue(afterOmitted.suppressed.isEmpty())
+        assertEquals(1, afterSizeCalls)
+        assertEquals(0, rowReads)
+
+        val outOfBoundSize = object : AbstractList<Any?>() {
+            override val size: Int get() = 4097
+            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = false
+        }
+        val outOfBound = assertFailsWith<IOException> { compareTables(outOfBoundSize, emptyList<Any>()) }
+        assertEquals("host mounts changed during private-control protection", outOfBound.message)
+        assertTrue(outOfBound.suppressed.isEmpty()) // Never clamp or fabricate an admitted count.
+        assertEquals(0, rowReads)
+        val comparisonFailure = IOException("authored original comparison failure")
+        val throwsDuringComparison = object : AbstractList<Any?>() {
+            override val size: Int get() { error("diagnostic size after foreign comparison failure") }
+            override fun get(index: Int): Any? { error("diagnostic row scan") }
+            override fun equals(other: Any?): Boolean = throw comparisonFailure
+        }
+        val foreign = assertFailsWith<IOException> { compareTables(throwsDuringComparison, emptyList<Any>()) }
+        assertTrue(foreign === comparisonFailure)
+        assertTrue(foreign.suppressed.isEmpty())
+    }
+
+    private class MountDiagnosticSuppressionDisabled : Throwable("authored suppression disabled", null, false, false)
+
+    private fun newMountEventCheck(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch): Any =
+        Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventCheck")
+            .getDeclaredConstructor(LinuxFilesystemSyscalls.MountMetadataPollScratch::class.java)
+            .apply { isAccessible = true }.newInstance(scratch)
+
+    private fun mountEventPhase(name: String): Any =
+        Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase").enumConstants
+            .single { (it as Enum<*>).name == name }
+
+    private fun admitMountObservation(check: Any, observation: Long, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation", java.lang.Long.TYPE, value.javaClass), observation, value)
+    }
+
+    private fun requireMountEventUnchanged(check: Any, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("requireUnchanged", value.javaClass), value)
+    }
+
+    private fun attachMountPollFailure(check: Any, failure: Throwable, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("attachPollFailure", Throwable::class.java, value.javaClass), failure, value)
+    }
+
+    private fun mountCheckField(check: Any, name: String): Any? =
+        check.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(check)
+
+    private fun mountDiagnostic(failure: Throwable): Throwable = failure.suppressed.single {
+        it.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic"
+    }
+
+    private fun scriptedManifestMountPoll(
+        scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch,
+        query: (com.sun.jna.Memory) -> Int,
+    ): Long = invokePrivate(scratch, scratch.javaClass.getDeclaredMethod("pollWith", Function1::class.java), query) as Long
+
+    @Test
+    fun `manifest statx scratch owns failed construction and transfers only admitted storage`() {
+        for (primary in listOf<Throwable>(IOException("scripted initial checkpoint failure"), AssertionError("scripted constructor failure"))) {
+            var owned: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+            val cleanup = IOException("scripted statx cleanup failure")
+            val memory = ManifestStatxMemory(cleanup)
+            val observed = try {
+                initializeManifestStatxScratch { scratch ->
+                    owned = scratch
+                    replaceManifestStatxMemory(scratch, memory)
+                    throw primary
+                }
+                error("failed admission unexpectedly returned")
+            } catch (failure: Throwable) { failure }
+            assertTrue(observed === primary)
+            assertEquals(listOf(cleanup), observed.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(owned).identity(-401) }
+            checkNotNull(owned).close()
+            assertEquals(1, memory.closes)
+        }
+        var transferred: LinuxFilesystemSyscalls.StatxIdentityScratch? = null
+        val memory = ManifestStatxMemory()
+        assertEquals("admitted", initializeManifestStatxScratch { scratch ->
+            transferred = scratch
+            replaceManifestStatxMemory(scratch, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        })
+        assertEquals(0, memory.closes)
+        checkNotNull(transferred).close(); checkNotNull(transferred).close()
+        assertEquals(1, memory.closes)
+    }
+
+    private class RootObservationMemory(private val observe: () -> Unit) : com.sun.jna.Memory(256) {
+        override fun clear() { observe(); super.clear() }
+    }
+
+    private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestStatxMemory(scratch: LinuxFilesystemSyscalls.StatxIdentityScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestStatxScratch(initialize: (LinuxFilesystemSyscalls.StatxIdentityScratch) -> Any?): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedStatxScratch", Function1::class.java)
+        return invokePrivate(companion, method, initialize)
+    }
+
+    @Test
+    fun `manifest poll scratch initialization guard frees failed admissions and preserves primary failure`() {
+        for (primary in listOf<Throwable>(IOException("authored admission failure"), AssertionError("authored constructor failure"))) {
+            val handle = scriptedManifestPollHandle(-201)
+            var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+            val cleanup = IOException("authored scratch cleanup failure")
+            val memory = ManifestPollMemory(cleanup)
+            var initializations = 0
+            val failure = try {
+                initializeManifestPollScratch(handle) { owned ->
+                    initializations++
+                    scratch = owned
+                    replaceManifestPollMemory(owned, memory)
+                    throw primary
+                }
+                error("authored admission unexpectedly returned")
+            } catch (observed: Throwable) { observed }
+            assertTrue(failure === primary)
+            assertEquals(1, initializations)
+            assertEquals(listOf(cleanup), failure.suppressed.toList())
+            assertEquals(1, memory.closes)
+            assertFailsWith<IllegalStateException> { checkNotNull(scratch).poll() } // Closed before any native query.
+            checkNotNull(scratch).close()
+            assertEquals(1, memory.closes)
+            assertEquals(-201, handle.whileOpen { it })
+        }
+    }
+
+    @Test
+    fun `manifest poll scratch initialization transfers only on successful admission`() {
+        val handle = scriptedManifestPollHandle(-202)
+        var scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch? = null
+        val memory = ManifestPollMemory()
+        val result = initializeManifestPollScratch(handle) { owned ->
+            scratch = owned
+            replaceManifestPollMemory(owned, memory)
+            assertEquals(0, memory.closes)
+            "admitted"
+        }
+        assertEquals("admitted", result)
+        assertEquals(0, memory.closes)
+        checkNotNull(scratch).close(); checkNotNull(scratch).close()
+        assertEquals(1, memory.closes)
+        assertEquals(-202, handle.whileOpen { it })
+    }
+
+    private fun scriptedManifestPollHandle(fd: Int) = LinuxDescriptor(fd,
+        LinuxFileIdentity(LinuxFileKey(0, 0), 0, 0, 0, 1, 1, false, false, false))
+
+    private class ManifestPollMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(8) {
+        var closes = 0
+        override fun close() { closes++; super.close(); closeFailure?.let { throw it } }
+    }
+
+    private fun replaceManifestPollMemory(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch, memory: com.sun.jna.Memory) {
+        val field = scratch.javaClass.getDeclaredField("polled").apply { isAccessible = true }
+        (field.get(scratch) as com.sun.jna.Memory).close()
+        field.set(scratch, memory)
+    }
+
+    private fun initializeManifestPollScratch(
+        handle: LinuxDescriptor,
+        initialize: (LinuxFilesystemSyscalls.MountMetadataPollScratch) -> Any?,
+    ): Any? {
+        val scope = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+        val companion = scope.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val method = companion.javaClass.getDeclaredMethod("withOwnedPollScratch",
+            LinuxDescriptor::class.java, Function1::class.java)
+        return invokePrivate(companion, method, handle, initialize)
+    }
+
+    @Test
+    fun `manifest scopes reconcile bounded disjoint churn and retain failed cleanup protection`() {
+        withRepositoryTemporaryDirectory("acp-control-concurrency-") { base ->
+            val parent = Files.createDirectory(base.resolve("controls"))
+            Files.setPosixFilePermissions(parent, OWNER_ONLY)
+            val source = Files.writeString(base.resolve("source"), "stable-runtime-content".repeat(8192))
+            val limits = AcpRuntimeClosureLimits(256, 1024 * 1024, 8)
+            val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+            val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+            val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            val create = companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, parentType)
+            val delete = type.getDeclaredMethod("deleteAndProve")
+            val owned = mutableListOf<Any>()
+            fun newControl(creationParent: Path = parent): Any = withTemporaryParent(creationParent.toString()) {
+                val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                try { requireNotNull(invokePrivate(companion, create, limits, pinned)).also(owned::add) }
+                finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+            }
+            fun remove(control: Any) { invokePrivate(control, delete); owned.remove(control) }
+            val registry = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                .getDeclaredField("ACTIVE_PRIVATE_CONTROLS").apply { isAccessible = true }.get(null)
+            fun openDescriptorCount(): Long = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+            val baseline = openDescriptorCount()
+            val expected = calculateAcpRuntimeManifestSha256(source, limits)
+            val retiredDuringScope = newControl()
+            val reached = java.util.concurrent.CountDownLatch(2)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+            val futures = (0..1).map {
+                executor.submit<String> {
+                    var paused = false
+                    calculateAcpRuntimeManifestSha256(source, limits) {
+                        if (!paused && !Thread.holdsLock(registry) &&
+                            Thread.currentThread().stackTrace.any { it.methodName == "readIdentity" }) {
+                            paused = true
+                            reached.countDown()
+                            assertTrue(release.await(5, TimeUnit.SECONDS), "overlapping manifests were not released")
+                        }
+                    }
+                }
+            }
+            try {
+                assertTrue(reached.await(5, TimeUnit.SECONDS), "both manifests must overlap after admission")
+                remove(retiredDuringScope)
+                repeat(140) { remove(newControl()) }
+                // A retained new LIVE identity must be installed by refresh, then remain protected.
+                val persistent = newControl()
+                release.countDown()
+                futures.forEach { assertEquals(expected, it.get(5, TimeUnit.SECONDS)) }
+                remove(persistent)
+                assertEquals(baseline, openDescriptorCount())
+
+                val control = newControl()
+                val path = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+                val held = parent.resolve("held-original")
+                Files.move(path, held)
+                Files.createDirectory(path)
+                Files.writeString(path.resolve("replacement"), "keep")
+                assertFailsWith<AcpCleanupProofFailure> { invokePrivate(control, delete) }
+                assertEquals("keep", Files.readString(path.resolve("replacement")))
+                assertFailsWith<IOException> { calculateAcpRuntimeManifestSha256(path, limits) }
+                Files.delete(path.resolve("replacement")); Files.delete(path); Files.move(held, path)
+                assertFailsWith<AcpCleanupProofFailure> { invokePrivate(control, delete) }
+                owned.remove(control)
+                assertFalse(Files.exists(path))
+                assertEquals(expected, calculateAcpRuntimeManifestSha256(source, limits))
+                assertEquals(baseline, openDescriptorCount())
+
+                val scopeType = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+                val scopeCompanion = scopeType.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+                val open = scopeCompanion.javaClass.getDeclaredMethod("open", Path::class.java,
+                    LinuxFileKey::class.java, Function0::class.java)
+                val sourceRoot = Files.createDirectory(base.resolve("leased-root"))
+                Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                run {
+                    // Exercise the actual fd-owned body, not a replacement observer result.
+                    val observerField = scopeType.getDeclaredField("rootObserver").apply { isAccessible = true }
+                    val descriptorField = scopeType.getDeclaredField("rootDescriptor").apply { isAccessible = true }
+                    val identityField = scopeType.getDeclaredField("rootIdentity").apply { isAccessible = true }
+                    val currentRoot = scopeType.getDeclaredMethod("currentRoot", Function0::class.java)
+                    val scopeCheckpoint = scopeType.getDeclaredMethod("checkpoint")
+                    val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                    val noCheck = boundaryType.getDeclaredField("NO_SANDBOX_CHECKPOINT").apply { isAccessible = true }.get(null)
+                    fun observeCurrent(scope: Any): Any? = synchronized(registry) { invokePrivate(scope, currentRoot, noCheck) }
+                    val wrapper = boundaryType.getDeclaredMethod("manifestRootPhysicalLocation", LinuxDescriptor::class.java,
+                        LinuxFilesystemSyscalls.StatxIdentityScratch::class.java, List::class.java, Function0::class.java)
+                    fun field(scope: Any, name: String): Any? =
+                        scopeType.getDeclaredField(name).apply { isAccessible = true }.get(scope)
+                    @Suppress("UNCHECKED_CAST")
+                    fun observer(scope: Any) = observerField.get(scope) as (Int) -> Any
+                    val firstScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                    var secondScope: AutoCloseable? = null
+                    var boundAfterScopeClose: (() -> Unit)? = null
+                    try {
+                        val peerScope = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                        secondScope = peerScope
+                        val retainedObserver = observer(firstScope)
+                        assertTrue(retainedObserver !== observer(peerScope), "observer ownership is per scope")
+                        val descriptor = descriptorField.get(firstScope) as LinuxDescriptor
+                        val scratch = identityField.get(firstScope) as LinuxFilesystemSyscalls.StatxIdentityScratch
+                        val statistics = scratch.javaClass.getDeclaredField("statistics").apply { isAccessible = true }
+                        (statistics.get(scratch) as com.sun.jna.Memory).close()
+                        val order = mutableListOf<String>()
+                        var duringQuery: (() -> Unit)? = null
+                        statistics.set(scratch, RootObservationMemory {
+                            val ownsDescriptor = Thread.holdsLock(descriptor)
+                            assertTrue(ownsDescriptor || Thread.holdsLock(registry), "body or scope ownership covers each query")
+                            assertTrue(Thread.holdsLock(scratch), "each query retains scratch ownership")
+                            order += if (ownsDescriptor) "query" else "tail-query"
+                            duringQuery?.invoke()
+                        })
+                        var previous: Any? = null
+                        repeat(3) {
+                            order.clear()
+                            val current = requireNotNull(observeCurrent(firstScope))
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order,
+                                "two body queries and the unchanged mount/mode short-circuit queries")
+                            previous?.let { earlier -> assertEquals(earlier, current); assertTrue(earlier !== current) }
+                            previous = current
+                            assertTrue(retainedObserver === observer(firstScope), "observations reuse the same callback")
+                        }
+                        order.clear()
+                        val firstLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(listOf("query", "query"), order)
+                        order.clear()
+                        val secondLocation = descriptor.whileOpen(retainedObserver)
+                        assertEquals(firstLocation, secondLocation)
+                        assertTrue(firstLocation !== secondLocation, "immutable observations are never cached")
+                        assertEquals(listOf("query", "query"), order)
+                        val check: () -> Unit = {
+                            assertTrue(Thread.holdsLock(descriptor))
+                            order += "check"
+                        }
+                        order.clear()
+                        assertEquals(firstLocation, invokePrivate(null, wrapper, descriptor, scratch,
+                            field(firstScope, "mounts"), check))
+                        val directOrder = listOf("check", "query", "query")
+                        val fallbackOrder = listOf("check", "query") + List(sourceRoot.nameCount) { "check" } + "query"
+                        assertTrue(order == directOrder || order == fallbackOrder,
+                            "original check/query order, including every strict-walk component check: " + order)
+                        order.clear()
+                        assertEquals(firstLocation, synchronized(registry) { invokePrivate(firstScope, currentRoot, check) })
+                        assertTrue(order == directOrder + listOf("tail-query", "tail-query") ||
+                            order == fallbackOrder + listOf("tail-query", "tail-query"), "arbitrary currentRoot checks retain the wrapper route")
+                        val cancellation = IOException("root-observer arbitrary cancellation")
+                        order.clear()
+                        val cancelled = assertFailsWith<IOException> {
+                            invokePrivate(null, wrapper, descriptor, scratch, field(firstScope, "mounts"), {
+                                assertTrue(Thread.holdsLock(descriptor))
+                                order += "cancel"
+                                throw cancellation
+                            })
+                        }
+                        assertTrue(cancelled === cancellation)
+                        assertEquals(listOf("cancel"), order, "cancellation still precedes the first identity query")
+
+                        // A mutation between the two real scratch observations must be rejected.
+                        order.clear()
+                        duringQuery = {
+                            if (order.size == 2) Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                        }
+                        try {
+                            val changed = assertFailsWith<IOException> { descriptor.whileOpen(retainedObserver) }
+                            assertEquals("private-control descriptor changed during inspection", changed.message)
+                            assertEquals(listOf("query", "query"), order)
+                        } finally {
+                            duringQuery = null
+                            Files.setPosixFilePermissions(sourceRoot, OWNER_ONLY)
+                        }
+                        val relocated = base.resolve("callback-relocated-root")
+                        Files.move(sourceRoot, relocated)
+                        Files.createDirectory(sourceRoot)
+                        try {
+                            order.clear()
+                            val moved = descriptor.whileOpen(retainedObserver)
+                            assertEquals(relocated, invokePrivate(moved, moved.javaClass.getDeclaredMethod("getNamespacePath")))
+                            assertEquals(listOf("query", "query"), order)
+                            order.clear()
+                            assertFailsWith<IOException> { observeCurrent(firstScope) }
+                            assertEquals(listOf("query", "query", "tail-query", "tail-query"), order)
+                        } finally {
+                            Files.delete(sourceRoot)
+                            Files.move(relocated, sourceRoot)
+                        }
+
+                        // Bind one borrowed file check, then execute the real shared observation body.
+                        val bindDescriptor = scopeType.getDeclaredMethod("descriptorCheck", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        val originalDescriptorCheck = scopeType.getDeclaredMethod("requireDescriptor", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        @Suppress("UNCHECKED_CAST")
+                        fun bind(scope: Any, file: LinuxDescriptor, path: Path): () -> Unit =
+                            invokePrivate(scope, bindDescriptor, file, path, false) as () -> Unit
+                        @Suppress("UNCHECKED_CAST")
+                        fun fileObserver(check: () -> Unit): (Int) -> Any =
+                            check.javaClass.getDeclaredField("observer").apply { isAccessible = true }.get(check) as (Int) -> Any
+                        val boundPath = Files.writeString(sourceRoot.resolve("bound-file"), "borrowed-content\n".repeat(4096))
+                        val peerPath = Files.writeString(sourceRoot.resolve("bound-peer"), "peer-content")
+                        try {
+                            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(boundPath)).use { file ->
+                                requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(peerPath)).use { peer ->
+                                    val borrowedFds = openDescriptorCount()
+                                    val queries = mutableListOf<String>()
+                                    var duringBoundQuery: ((String) -> Unit)? = null
+                                    val previousStorage = statistics.get(scratch) as com.sun.jna.Memory
+                                    val observedStorage = RootObservationMemory {
+                                        assertTrue(Thread.holdsLock(registry), "bound checks retain ACTIVE ownership")
+                                        assertTrue(Thread.holdsLock(scratch), "bound observations retain scratch ownership")
+                                        val label = when {
+                                            Thread.holdsLock(file) -> "file"
+                                            Thread.holdsLock(peer) -> "peer"
+                                            else -> "root"
+                                        }
+                                        queries += label
+                                        duringBoundQuery?.invoke(label)
+                                    }
+                                    statistics.set(scratch, observedStorage)
+                                    try {
+                                        val check = bind(firstScope, file, boundPath)
+                                        val peerCheck = bind(firstScope, peer, peerPath)
+                                        val otherScopeCheck = bind(peerScope, file, boundPath)
+                                        val retainedFileObserver = fileObserver(check)
+                                        assertEquals(emptyList<String>(), queries, "binding performs no observation")
+                                        assertEquals(borrowedFds, openDescriptorCount(), "binding acquires no descriptor")
+                                        assertFalse((check as Any) is AutoCloseable, "the check borrows, never owns close")
+                                        assertTrue(retainedFileObserver !== fileObserver(peerCheck))
+                                        assertTrue(retainedFileObserver !== fileObserver(otherScopeCheck))
+                                        val rootQueries = List(4) { "root" }
+                                        val completeOrder = rootQueries + "file" + rootQueries
+                                        repeat(3) {
+                                            queries.clear(); check()
+                                            assertEquals(completeOrder, queries, "original first/body/final observation order")
+                                            assertTrue(retainedFileObserver === fileObserver(check))
+                                        }
+                                        queries.clear()
+                                        invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
+                                        assertEquals(completeOrder, queries, "the original entry retains the same live observations")
+                                        queries.clear(); peerCheck()
+                                        assertEquals(rootQueries + "peer" + rootQueries, queries, "fixed file/path inputs do not cross-pair")
+                                        queries.clear()
+                                        val firstFileLocation = synchronized(registry) { file.whileOpen(retainedFileObserver) }
+                                        assertEquals(listOf("file"), queries)
+                                        queries.clear()
+                                        val secondFileLocation = synchronized(registry) { file.whileOpen(retainedFileObserver) }
+                                        assertEquals(firstFileLocation, secondFileLocation)
+                                        assertTrue(firstFileLocation !== secondFileLocation, "each shared body invocation constructs a fresh location")
+                                        assertEquals(listOf("file"), queries)
+
+                                        // Both routes drive the existing hash/copy callback cadence, without a replacement query.
+                                        val hash = boundaryType.getDeclaredMethod("sha256", LinuxDescriptor::class.java,
+                                            java.lang.Long.TYPE, Function0::class.java)
+                                        queries.clear()
+                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check)
+                                        val hashOrder = queries.toList()
+                                        queries.clear()
+                                        val originalDigest = invokePrivate(null, hash, file, Files.size(boundPath), {
+                                            invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
+                                            Unit
+                                        })
+                                        assertEquals(originalDigest, boundDigest)
+                                        assertEquals(hashOrder, queries, "all original hash checkpoints still execute")
+                                        assertTrue(hashOrder.count { it == "file" } > 1, "the real multi-chunk hash repeats the bound check")
+
+                                        val permissions = Files.getPosixFilePermissions(boundPath)
+                                        Files.setPosixFilePermissions(boundPath, permissions + PosixFilePermission.OWNER_EXECUTE)
+                                        try {
+                                            val changed = assertFailsWith<IOException> { check() }
+                                            assertEquals("runtime manifest descriptor changed or crossed a mount", changed.message)
+                                        } finally { Files.setPosixFilePermissions(boundPath, permissions) }
+                                        val movedFile = sourceRoot.resolve("bound-file-moved")
+                                        Files.move(boundPath, movedFile)
+                                        Files.writeString(boundPath, "replacement-not-authorized")
+                                        try {
+                                            val changed = assertFailsWith<IOException> { check() }
+                                            assertEquals("runtime manifest descriptor has no authenticated source pathname", changed.message)
+                                            val wrongPath = bind(firstScope, peer, boundPath)
+                                            assertFailsWith<IOException> { wrongPath() }
+                                        } finally {
+                                            Files.delete(boundPath); Files.move(movedFile, boundPath)
+                                        }
+                                        check()
+
+                                        // An actual bound-body failure unwinds the original borrowed descriptor owner.
+                                        val primary = IOException("bound descriptor observation refusal")
+                                        val failingFile = requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(boundPath))
+                                        val failed = try {
+                                            failingFile.use { borrowed ->
+                                                val failedCheck = bind(firstScope, borrowed, boundPath)
+                                                duringBoundQuery = { if (Thread.holdsLock(borrowed)) throw primary }
+                                                failedCheck()
+                                            }
+                                            error("bound observation failure unexpectedly returned")
+                                        } catch (failure: Throwable) { failure }
+                                        finally { duringBoundQuery = null }
+                                        assertTrue(failed === primary)
+                                        assertFailsWith<IllegalStateException> { failingFile.whileOpen { it } }
+                                        assertEquals(borrowedFds, openDescriptorCount(), "failed bound invocation releases only its original owner")
+                                        check()
+
+                                        // Close must wait for the real file-fd observation, not just a mocked result.
+                                        val enteredFile = java.util.concurrent.CountDownLatch(1)
+                                        val releaseFile = java.util.concurrent.CountDownLatch(1)
+                                        val closingThread = AtomicReference<Thread>()
+                                        var heldFile = false
+                                        duringBoundQuery = { label ->
+                                            if (label == "file" && !heldFile) {
+                                                heldFile = true
+                                                enteredFile.countDown()
+                                                assertTrue(releaseFile.await(5, TimeUnit.SECONDS))
+                                            }
+                                        }
+                                        val checkingFile = executor.submit<Unit> { check() }
+                                        var closingFile: java.util.concurrent.Future<*>? = null
+                                        try {
+                                            assertTrue(enteredFile.await(5, TimeUnit.SECONDS))
+                                            closingFile = executor.submit { closingThread.set(Thread.currentThread()); file.close() }
+                                            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                                            while (closingThread.get()?.state != Thread.State.BLOCKED && !closingFile.isDone && System.nanoTime() < end) {
+                                                Thread.onSpinWait()
+                                            }
+                                            assertEquals(Thread.State.BLOCKED, closingThread.get()?.state)
+                                            assertFalse(closingFile.isDone, "borrowed close waits for descriptor ownership")
+                                            releaseFile.countDown()
+                                            checkingFile.get(5, TimeUnit.SECONDS)
+                                            closingFile.get(5, TimeUnit.SECONDS)
+                                        } finally {
+                                            releaseFile.countDown()
+                                            checkingFile.get(5, TimeUnit.SECONDS)
+                                            closingFile?.get(5, TimeUnit.SECONDS)
+                                            duringBoundQuery = null
+                                        }
+                                        queries.clear()
+                                        assertFailsWith<IllegalStateException> { check() }
+                                        assertEquals(rootQueries, queries, "original root checkpoint precedes closed FILE refusal, with no file query")
+                                        boundAfterScopeClose = check // Test-only retention to verify scope refusal takes precedence.
+                                    } finally {
+                                        statistics.set(scratch, previousStorage)
+                                        observedStorage.close()
+                                    }
+                                }
+                            }
+                        } finally {
+                            Files.deleteIfExists(peerPath); Files.deleteIfExists(boundPath)
+                        }
+
+                        // Run the real constructor inside the unchanged scratch admission guard.
+                        val constructor = scopeType.declaredConstructors.single { it.parameterCount == 10 }.apply { isAccessible = true }
+                        val failedMemory = ManifestStatxMemory()
+                        var constructorFailure: Throwable? = null
+                        val failedConstruction = try {
+                            initializeManifestStatxScratch { owned ->
+                                replaceManifestStatxMemory(owned, failedMemory)
+                                try {
+                                    constructor.newInstance(field(firstScope, "mountEvents"), field(firstScope, "mountPoll"),
+                                        owned, emptyList<Any>(), field(firstScope, "controls"), field(firstScope, "generation"),
+                                        descriptor, field(firstScope, "root"), null, {})
+                                } catch (failure: java.lang.reflect.InvocationTargetException) {
+                                    constructorFailure = failure.targetException
+                                    throw failure.targetException
+                                }
+                            }
+                            error("invalid constructor mount admission unexpectedly returned")
+                        } catch (failure: Throwable) { failure }
+                        assertTrue(failedConstruction === constructorFailure)
+                        assertTrue(failedConstruction is NoSuchElementException)
+                        assertEquals(1, failedMemory.closes)
+                        assertTrue(retainedObserver === observer(firstScope))
+                        invokePrivate(firstScope, scopeCheckpoint)
+
+                        // Actual checkpoint ownership serializes close until the callback has finished.
+                        val enteredQuery = java.util.concurrent.CountDownLatch(1)
+                        val releaseQuery = java.util.concurrent.CountDownLatch(1)
+                        val closeThread = AtomicReference<Thread>()
+                        var blocked = false
+                        duringQuery = {
+                            if (!blocked) {
+                                blocked = true
+                                enteredQuery.countDown()
+                                assertTrue(releaseQuery.await(5, TimeUnit.SECONDS))
+                            }
+                        }
+                        val observing = executor.submit { invokePrivate(firstScope, scopeCheckpoint) }
+                        var closing: java.util.concurrent.Future<*>? = null
+                        try {
+                            assertTrue(enteredQuery.await(5, TimeUnit.SECONDS))
+                            closing = executor.submit { closeThread.set(Thread.currentThread()); firstScope.close() }
+                            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                            while (closeThread.get()?.state != Thread.State.BLOCKED && !closing.isDone && System.nanoTime() < deadline) {
+                                Thread.onSpinWait()
+                            }
+                            assertEquals(Thread.State.BLOCKED, closeThread.get()?.state)
+                            assertFalse(closing.isDone, "scope close must not release an in-flight observer's owned inputs")
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing.get(5, TimeUnit.SECONDS)
+                            assertFailsWith<IOException> { invokePrivate(firstScope, scopeCheckpoint) }
+                            assertFailsWith<IllegalStateException> { descriptor.whileOpen(retainedObserver) }
+                            val closedScope = assertFailsWith<IOException> { checkNotNull(boundAfterScopeClose).invoke() }
+                            assertEquals("runtime manifest scope is closed", closedScope.message)
+                        } finally {
+                            releaseQuery.countDown()
+                            observing.get(5, TimeUnit.SECONDS)
+                            closing?.get(5, TimeUnit.SECONDS)
+                            duringQuery = null
+                        }
+                    } finally {
+                        try { secondScope?.close() } finally { firstScope.close() }
+                    }
+                    assertEquals(baseline, openDescriptorCount(), "observer ownership/constructor/close controls release all FDs")
+                    val admissionFailure = IOException("root-observer post-constructor admission failure")
+                    var reachedAdmission = false
+                    val failedAdmission = assertFailsWith<IOException> {
+                        invokePrivate(scopeCompanion, open, sourceRoot, null, {
+                            if (Thread.currentThread().stackTrace.any { it.methodName == "checkpointLocked" }) {
+                                reachedAdmission = true
+                                throw admissionFailure
+                            }
+                        })
+                    }
+                    assertTrue(reachedAdmission)
+                    assertTrue(failedAdmission === admissionFailure)
+                    assertEquals(baseline, openDescriptorCount(), "failed admission unwinds callback-owned scratch and descriptors")
+                }
+                val scopes = mutableListOf<AutoCloseable>()
+                try {
+                    repeat(128) {
+                        scopes += invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                    }
+                    val admittedFds = openDescriptorCount()
+                    val capacity = assertFailsWith<IOException> {
+                        invokePrivate(scopeCompanion, open, sourceRoot, null, {})
+                    }
+                    assertTrue(capacity.message.orEmpty().contains("ownership limit"))
+                    assertEquals(admittedFds, openDescriptorCount(), "scope refusal occurs before FD allocation")
+                    assertFailsWith<IOException> { newControl(sourceRoot) }
+                    assertEquals(0L, Files.list(sourceRoot).use { it.count() }, "lease denial must precede mkdir")
+                } finally { scopes.asReversed().forEach { it.close(); it.close() } }
+                assertEquals(baseline, openDescriptorCount(), "all bounded root leases release once")
+                val movedRoot = base.resolve("moved-leased-root")
+                val movedLease = invokePrivate(scopeCompanion, open, sourceRoot, null, {}) as AutoCloseable
+                try {
+                    Files.move(sourceRoot, movedRoot)
+                    Files.createDirectory(sourceRoot)
+                    assertFailsWith<IOException> { newControl() }
+                    assertEquals(0L, Files.list(parent).use { it.count() })
+                } finally {
+                    movedLease.close()
+                    Files.delete(sourceRoot)
+                    Files.move(movedRoot, sourceRoot)
+                }
+                assertEquals(baseline, openDescriptorCount(), "failed root authentication does not leak a lease")
+
+                val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                val observerField = boundaryType.getDeclaredField("privateControlTransactionObserver").apply { isAccessible = true }
+                val uuidField = boundaryType.getDeclaredField("privateControlTestUuid").apply { isAccessible = true }
+                val checkpoint = scopeType.getDeclaredMethod("checkpoint")
+                fun newScope(): AutoCloseable = invokePrivate(scopeCompanion, open, source, null, {}) as AutoCloseable
+                val transactionScope = newScope()
+                try {
+                    for (phase in listOf(PrivateControlTransactionStage.BEFORE_PUBLICATION,
+                        PrivateControlTransactionStage.BEFORE_QUARANTINE, PrivateControlTransactionStage.AFTER_UNLINK_PROOF)) {
+                        val selected = if (phase == PrivateControlTransactionStage.BEFORE_PUBLICATION) null else newControl()
+                        invokePrivate(transactionScope, checkpoint)
+                        val atPhase = java.util.concurrent.CountDownLatch(1)
+                        val releaseTransaction = java.util.concurrent.CountDownLatch(1)
+                        observerField.set(null, { observed: PrivateControlTransactionStage ->
+                            if (observed == phase) {
+                                assertTrue(Thread.holdsLock(registry))
+                                atPhase.countDown()
+                                assertTrue(releaseTransaction.await(5, TimeUnit.SECONDS))
+                            }
+                        })
+                        var mutation: java.util.concurrent.Future<Any?>? = null
+                        try {
+                            mutation = executor.submit<Any?> {
+                                if (selected == null) newControl() else { remove(selected); null }
+                            }
+                            assertTrue(atPhase.await(5, TimeUnit.SECONDS))
+                            val peerThread = AtomicReference<Thread>()
+                            val peer = executor.submit { peerThread.set(Thread.currentThread()); invokePrivate(transactionScope, checkpoint) }
+                            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                            while (peerThread.get()?.state != Thread.State.BLOCKED && !peer.isDone && System.nanoTime() < deadline) {
+                                Thread.onSpinWait()
+                            }
+                            assertEquals(Thread.State.BLOCKED, peerThread.get()?.state, "checkpoint must wait for the incomplete registry transaction")
+                            assertFalse(peer.isDone)
+                            releaseTransaction.countDown()
+                            val published = mutation.get(5, TimeUnit.SECONDS)
+                            peer.get(5, TimeUnit.SECONDS)
+                            observerField.set(null, null)
+                            if (published != null) remove(published)
+                        } finally {
+                            releaseTransaction.countDown()
+                            observerField.set(null, null)
+                            mutation?.get(5, TimeUnit.SECONDS)
+                        }
+                    }
+                    // Retaining one addition then failing on the next cannot lose the old snapshot
+                    // or leak the first temporary descriptor. A retry must install both records.
+                    val one = newControl()
+                    val two = newControl()
+                    val beforeRefresh = openDescriptorCount()
+                    var retains = 0
+                    observerField.set(null, { observed: PrivateControlTransactionStage ->
+                        if (observed == PrivateControlTransactionStage.BEFORE_MANIFEST_RETAIN && ++retains == 2) {
+                            throw IOException("injected retained-descriptor admission failure")
+                        }
+                    })
+                    assertFailsWith<IOException> { invokePrivate(transactionScope, checkpoint) }
+                    assertEquals(beforeRefresh, openDescriptorCount(), "failed transactional refresh releases all newly owned FDs")
+                    observerField.set(null, null)
+                    invokePrivate(transactionScope, checkpoint)
+                    remove(one); remove(two)
+                    invokePrivate(transactionScope, checkpoint)
+
+                    // Same namespace name never transfers a proved deletion or owner exemption.
+                    uuidField.set(null, UUID.randomUUID())
+                    val old = newControl()
+                    val oldPath = invokePrivate(old, type.getDeclaredMethod("getPath")) as Path
+                    invokePrivate(transactionScope, checkpoint)
+                    remove(old)
+                    val replacement = newControl()
+                    assertEquals(oldPath, invokePrivate(replacement, type.getDeclaredMethod("getPath")))
+                    assertTrue(old !== replacement)
+                    invokePrivate(transactionScope, checkpoint)
+                    Files.setPosixFilePermissions(oldPath, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                    assertFailsWith<IOException> { invokePrivate(transactionScope, checkpoint) }
+                    Files.setPosixFilePermissions(oldPath, OWNER_ONLY)
+                    remove(replacement)
+                } finally {
+                    observerField.set(null, null)
+                    uuidField.set(null, null)
+                    transactionScope.close()
+                }
+                assertEquals(baseline, openDescriptorCount(), "transaction pauses, failed refresh and ABA all release their leases")
+                var cancelled = false
+                val cancelledScope = invokePrivate(scopeCompanion, open, source, null, {
+                    if (cancelled) throw IOException("injected cancellation")
+                }) as AutoCloseable
+                cancelled = true
+                assertFailsWith<IOException> { invokePrivate(cancelledScope, checkpoint) }
+                cancelledScope.close()
+                assertEquals(baseline, openDescriptorCount(), "cancelled close releases without rechecking cancellation")
+                val atCapacity = (0 until 128).map { newControl() }
+                try {
+                    val fullControlFds = openDescriptorCount()
+                    val controlCapacity = assertFailsWith<IOException> { newControl() }
+                    assertTrue(controlCapacity.message.orEmpty().contains("ownership limit"))
+                    assertEquals(fullControlFds, openDescriptorCount(), "control capacity refusal retains no transferred parent FD")
+                    assertEquals(128L, Files.list(parent).use { it.count() })
+                } finally { atCapacity.asReversed().forEach(::remove) }
+                assertEquals(baseline, openDescriptorCount(), "active control capacity recovers all original descriptors")
+            } finally {
+                release.countDown()
+                executor.shutdownNow()
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+                owned.toList().asReversed().forEach { runCatching { remove(it) } }
+            }
+        }
+    }
+
+    @Test
+    fun `unproved partial control creation poisons all later authority admission without descriptor leaks`() {
+        withRepositoryTemporaryDirectory("acp-control-poison-") { base ->
+            val temporary = Files.createDirectory(base.resolve("tmp"))
+            val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                "-cp", System.getProperty("java.class.path"), LinuxBubblewrapBoundaryTest::class.java.name,
+                "private-control-poison-probe", base.toString())
+                .redirectErrorStream(true).redirectOutput(base.resolve("poison-probe.log").toFile()).start()
+            try {
+                assertTrue(process.waitFor(15, TimeUnit.SECONDS))
+                val output = Files.readString(base.resolve("poison-probe.log"))
+                assertEquals(0, process.exitValue(), output)
+                assertTrue(output.contains("private-control-poison-probe: unresolved creation retained; all authority denied; descriptors recovered"), output)
+            } finally {
+                if (process.isAlive) { process.destroyForcibly(); assertTrue(process.waitFor(5, TimeUnit.SECONDS)) }
+            }
+        }
+    }
+
+    private fun runPrivateControlPoisonProbe(base: Path) {
+        val parent = Files.createDirectory(base.resolve("controls"))
+        Files.setPosixFilePermissions(parent, OWNER_ONLY)
+        val source = Files.writeString(base.resolve("source"), "public-runtime")
+        val limits = AcpRuntimeClosureLimits(64, 4096, 8)
+        calculateAcpRuntimeManifestSha256(source, limits) // warm native ownership before counting
+        fun descriptors() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+        val baseline = descriptors()
+        val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+        val observer = boundaryType.getDeclaredField("privateControlTransactionObserver").apply { isAccessible = true }
+        val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+        val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+        val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val create = companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, parentType)
+        fun createControl(): Any = withTemporaryParent(parent.toString()) {
+            val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+            try { requireNotNull(invokePrivate(companion, create, limits, pinned)) }
+            finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+        }
+        val admissionControls = (0 until 12).map { createControl() }
+        val beforeLowLimit = descriptors()
+        val libc = com.sun.jna.NativeLibrary.getInstance(com.sun.jna.Platform.C_LIBRARY_NAME)
+        com.sun.jna.Memory(16).use { originalLimit ->
+            assertEquals(0, libc.getFunction("getrlimit").invokeInt(arrayOf(7, originalLimit)))
+            com.sun.jna.Memory(16).use { limited ->
+                limited.setLong(0, beforeLowLimit + 6)
+                limited.setLong(8, originalLimit.getLong(8))
+                assertEquals(0, libc.getFunction("setrlimit").invokeInt(arrayOf(7, limited)))
+                try {
+                    assertFailsWith<IOException> { calculateAcpRuntimeManifestSha256(source, limits) }
+                } finally {
+                    assertEquals(0, libc.getFunction("setrlimit").invokeInt(arrayOf(7, originalLimit)))
+                }
+            }
+        }
+        assertEquals(beforeLowLimit, descriptors(), "partial scope admission under low RLIMIT releases every opened FD")
+        admissionControls.forEach { invokePrivate(it, type.getDeclaredMethod("deleteAndProve")) }
+        assertEquals(baseline, descriptors())
+        calculateAcpRuntimeManifestSha256(source, limits)
+        observer.set(null, { phase: PrivateControlTransactionStage ->
+            if (phase == PrivateControlTransactionStage.CREATED_UNPINNED) throw IOException("injected pre-pin failure")
+        })
+        assertFailsWith<AcpCleanupProofFailure> { createControl() }
+        observer.set(null, null)
+        assertEquals(baseline, descriptors())
+        assertEquals(1L, Files.list(parent).use { it.count() }, "unproved entry must remain in place")
+        assertFailsWith<IOException> { calculateAcpRuntimeManifestSha256(source, limits) }
+        assertFailsWith<IOException> { requireAcpPrivateControlsUnexposed(source, false) }
+        requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(source)).use {
+            assertFailsWith<IOException> { requireAcpPrivateControlDescriptorUnexposed(it) }
+        }
+        assertFailsWith<IOException> { createControl() }
+        assertEquals(1L, Files.list(parent).use { it.count() }, "poison prevents subsequent mkdir")
+        assertEquals(baseline, descriptors())
+        println("private-control-poison-probe: unresolved creation retained; all authority denied; descriptors recovered")
+    }
+
+    @Test
     fun `configured temporary parent pins private controls and exact fd probe beside a disjoint workspace`() {
         PROBE_RESULT.getOrNull()?.let { fixture ->
             assertTrue(fixture.startsWith(repositoryRoot()))
@@ -418,11 +1497,112 @@ class LinuxBubblewrapBoundaryTest {
         }
     }
 
+    private data class ProbeFdSnapshot(
+        val entries: Map<Int, String>,
+        val collectorTargetFds: List<Int>,
+        val truncated: Boolean,
+        val scan: String,
+    )
+
+    /** Metadata only; proc-fd-directory targets do not establish collector ownership. */
+    private fun probeFdSnapshot(): ProbeFdSnapshot {
+        val entries = sortedMapOf<Int, String>()
+        val collectorTargets = mutableListOf<Int>()
+        var truncated = false
+        var scan = "observed"
+        fun unknown(failure: Throwable): String = when (failure) {
+            is java.nio.file.NoSuchFileException -> "vanished"
+            is java.nio.file.AccessDeniedException -> "denied"
+            else -> "other"
+        }
+        try {
+            val root = Path.of("/proc/self/fd")
+            val collectorTarget = root.toRealPath()
+            Files.list(root).use { paths ->
+                val iterator = paths.iterator()
+                var visited = 0
+                while (visited < 128 && iterator.hasNext()) {
+                    val path = iterator.next()
+                    visited++
+                    val fd = path.fileName.toString().toIntOrNull()
+                    if (fd == null) { scan = "unknown-name"; continue }
+                    entries[fd] = try {
+                        val target = Files.readSymbolicLink(path)
+                        val text = target.toString()
+                        if (target == collectorTarget) {
+                            collectorTargets += fd
+                            "kind=collector-target ownership=UNATTRIBUTED identity=unknown"
+                        } else if (text.length > 4096) {
+                            "unknown=oversized-target"
+                        } else {
+                            val first = Files.readAttributes(path, "unix:dev,ino,mode")
+                            val secondTarget = Files.readSymbolicLink(path)
+                            val second = Files.readAttributes(path, "unix:dev,ino,mode")
+                            if (target != secondTarget || first != second) {
+                                "unknown=changed-during-snapshot"
+                            } else {
+                                val device = (first["dev"] as? Number)?.toLong()
+                                val inode = (first["ino"] as? Number)?.toLong()
+                                val mode = (first["mode"] as? Number)?.toInt()
+                                val kind = when {
+                                    text.startsWith("anon_inode:") -> "anon_inode"
+                                    text.startsWith("socket:[") -> "socket"
+                                    text.startsWith("pipe:[") -> "pipe"
+                                    mode == null -> "unknown"
+                                    mode and 0xf000 == 0x8000 -> "regular"
+                                    mode and 0xf000 == 0x4000 -> "directory"
+                                    else -> "other"
+                                }
+                                val hash = MessageDigest.getInstance("SHA-256")
+                                    .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+                                "kind=$kind dev=$device ino=$inode mode=$mode targetSha256=$hash"
+                            }
+                        }
+                    } catch (failure: Exception) { "unknown=" + unknown(failure) }
+                }
+                truncated = iterator.hasNext()
+            }
+        } catch (failure: Exception) { scan = "unknown-" + unknown(failure) }
+        return ProbeFdSnapshot(entries, collectorTargets.sorted(), truncated, scan)
+    }
+
+    private fun probeFdDelta(before: ProbeFdSnapshot, after: ProbeFdSnapshot): String {
+        // ASCII-only metadata. Bound rendering before append; retain deltas before full snapshots.
+        val output = StringBuilder(16 * 1024)
+        var clipped = false
+        fun row(value: String) {
+            if (output.length + value.length + 1 <= 16 * 1024 - 64) output.append(value).append('\n')
+            else clipped = true
+        }
+        row("fdSnapshots metadataOnly=true maxEntries=128 unknownIsNotClosed=true countsAndSnapshotsAreSeparateObservations=true")
+        row("before scan=${before.scan} truncated=${before.truncated} collectorTargetFdsUNATTRIBUTED=${before.collectorTargetFds}")
+        row("after scan=${after.scan} truncated=${after.truncated} collectorTargetFdsUNATTRIBUTED=${after.collectorTargetFds}")
+        (before.entries.keys + after.entries.keys).sorted().forEach { fd ->
+            val old = before.entries[fd]
+            val current = after.entries[fd]
+            if (old != current) {
+                val oldState = old ?: "not-observed"
+                val newState = current ?: "not-observed"
+                row("delta fd=$fd before=$oldState after=$newState")
+            }
+        }
+        before.entries.forEach { (fd, value) -> row("before fd=$fd $value") }
+        after.entries.forEach { (fd, value) -> row("after fd=$fd $value") }
+        output.append("fdDiagnosticRenderTruncated=$clipped")
+        return output.toString()
+    }
+
     private fun runPrivateControlBindProbe(base: Path) {
         fun command(vararg argv: String) {
             val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
-            assertTrue(process.waitFor(5, TimeUnit.SECONDS))
-            assertEquals(0, process.exitValue(), process.inputStream.readNBytes(4096).toString(Charsets.UTF_8))
+            process.outputStream.use {
+                process.errorStream.use {
+                    process.inputStream.use { input ->
+                        assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                        assertEquals(0, process.exitValue(), input.readNBytes(4096).toString(Charsets.UTF_8))
+                    }
+                }
+            }
         }
         command("mount", "--make-rprivate", "/")
         val parent = Files.createDirectory(base.resolve("controls"))
@@ -509,7 +1689,8 @@ class LinuxBubblewrapBoundaryTest {
         val controls = mutableListOf<Any>()
         val mounts = mutableListOf<Path>()
         var verifiedScaleDigest: String? = null
-        fun newControl(cleanupLimits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(64, 4096, 8)): Any = withTemporaryParent(parent.toString()) {
+        fun newControl(cleanupLimits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(64, 4096, 8),
+            creationParent: Path = parent): Any = withTemporaryParent(creationParent.toString()) {
             val pinnedParent = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
             try {
                 requireNotNull(invokePrivate(companion, create, cleanupLimits, pinnedParent))
@@ -540,6 +1721,83 @@ class LinuxBubblewrapBoundaryTest {
         }
         var probeFailure: Throwable? = null
         try {
+            val scopeType = Class.forName("decompengine.acp.RuntimePrivateControlScope")
+            val scopeCompanion = scopeType.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+            val openScope = scopeCompanion.javaClass.getDeclaredMethod("open", Path::class.java,
+                LinuxFileKey::class.java, Function0::class.java)
+            for (crossFilesystem in listOf(false, true)) {
+                val suffix = if (crossFilesystem) "cross-filesystem" else "same-filesystem"
+                val physicalParent = Files.createDirectory(base.resolve("lease-parent-$suffix"))
+                if (crossFilesystem) {
+                    command("mount", "-t", "tmpfs", "-o", "size=1m,mode=700", "tmpfs", physicalParent.toString())
+                    mounts.add(physicalParent)
+                }
+                Files.setPosixFilePermissions(physicalParent, OWNER_ONLY)
+                val sourceRoot = Files.createDirectory(base.resolve("lease-source-$suffix"))
+                val nested = alias(physicalParent, "lease-source-$suffix/descendant")
+                val beforeLease = openDescriptorCount()
+                val lease = invokePrivate(scopeCompanion, openScope, sourceRoot, null, {}) as AutoCloseable
+                try {
+                    assertFailsWith<IOException> { newControl(creationParent = physicalParent) }
+                    assertFailsWith<IOException> { newControl(creationParent = nested) }
+                    assertEquals(0L, Files.list(physicalParent).use { it.count() }, "nested alias registration denial precedes mkdir")
+                } finally { lease.close() }
+                assertEquals(beforeLease, openDescriptorCount())
+                val existing = newControl(creationParent = physicalParent)
+                try {
+                    assertFailsWith<IOException> { invokePrivate(scopeCompanion, openScope, sourceRoot, null, {}) }
+                    assertFailsWith<IOException> { calculateAcpRuntimeManifestSha256(sourceRoot, AcpRuntimeClosureLimits(64, 4096, 8)) }
+                    assertEquals(beforeLease + 2, openDescriptorCount(), "failed reverse-order scope admission releases all owned descriptors")
+                } finally {
+                    invokePrivate(existing, type.getDeclaredMethod("deleteAndProve"))
+                    controls.remove(existing)
+                }
+                assertEquals(beforeLease, openDescriptorCount())
+                val disjointSource = Files.writeString(workspace.resolve("cross-mount-refresh-$suffix"), "stable-disjoint-content")
+                val disjointLease = invokePrivate(scopeCompanion, openScope, disjointSource, null, {}) as AutoCloseable
+                try {
+                    requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(disjointSource)).use { boundDescriptor ->
+                        val bindCheck = scopeType.getDeclaredMethod("descriptorCheck", LinuxDescriptor::class.java,
+                            Path::class.java, Boolean::class.javaPrimitiveType)
+                        @Suppress("UNCHECKED_CAST")
+                        val boundCheck = invokePrivate(disjointLease, bindCheck, boundDescriptor, disjointSource, false) as () -> Unit
+                        val boundObserver = boundCheck.javaClass.getDeclaredField("observer").apply { isAccessible = true }
+                        val sameObserver = boundObserver.get(boundCheck)
+                        boundCheck()
+                        assertTrue(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                            "the real disjoint lease begins on the fast route before registry addition")
+                        val addition = newControl(creationParent = nested)
+                        try {
+                            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(disjointSource)).use { descriptor ->
+                                invokePrivate(disjointLease, scopeType.getDeclaredMethod("requireDescriptor", LinuxDescriptor::class.java,
+                                    Path::class.java, Boolean::class.javaPrimitiveType), descriptor, disjointSource, false)
+                            }
+                            if (!crossFilesystem) {
+                                assertFalse(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                    "a persistent same-filesystem control through another mount must disable namespace fast translation")
+                            }
+                            assertTrue(calculateAcpRuntimeManifestSha256(disjointSource, AcpRuntimeClosureLimits(64, 4096, 8)).matches(Regex("[0-9a-f]{64}")))
+                            boundCheck()
+                            assertTrue(sameObserver === boundObserver.get(boundCheck), "registry refresh does not replace the bound callback")
+                            if (!crossFilesystem) assertFalse(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                "the same bound check follows actual fast-to-fallback registry reconciliation")
+                        } finally {
+                            invokePrivate(addition, type.getDeclaredMethod("deleteAndProve"))
+                            controls.remove(addition)
+                            try {
+                                boundCheck()
+                                assertTrue(scopeType.getDeclaredField("fast").apply { isAccessible = true }.getBoolean(disjointLease),
+                                    "proved deletion returns the same bound check to the current fast route")
+                                assertTrue(sameObserver === boundObserver.get(boundCheck))
+                            } finally {
+                                disjointLease.close()
+                            }
+                        }
+                    }
+                } finally { disjointLease.close() }
+                assertEquals(beforeLease, openDescriptorCount())
+            }
+            println("private-control-bind-probe: nestedSameAndCrossFilesystemLeasesDenyBothAdmissionOrders=true persistentCrossMountRefreshPassed=true")
             val first = newControl()
             val firstPath = controlPath(first)
             val privateChild = Files.createDirectory(firstPath.resolve("private-child"))
@@ -549,6 +1807,7 @@ class LinuxBubblewrapBoundaryTest {
             val childAlias = alias(privateChild, "alias-child")
             val fileAlias = alias(canary, "alias-file")
             val beforeNestedAdmission = openDescriptorCount()
+            val beforeNestedDescriptors = probeFdSnapshot()
             for (temporaryParent in listOf(firstPath, privateChild, rootAlias, childAlias)) {
                 val beforeEntries = Files.list(firstPath).use { it.map { entry -> entry.fileName.toString() }.toList().toSet() }
                 withTemporaryParent(temporaryParent.toString()) {
@@ -580,7 +1839,12 @@ class LinuxBubblewrapBoundaryTest {
                 command("umount", mountedPrivateParent.toString())
                 Files.delete(mountedPrivateParent)
             }
-            assertEquals(beforeNestedAdmission, openDescriptorCount(), "rejected nested controls must release parent descriptors")
+            val afterNestedAdmission = openDescriptorCount()
+            val afterNestedDescriptors = probeFdSnapshot()
+            assertEquals(beforeNestedAdmission, afterNestedAdmission,
+                "rejected nested controls must release parent descriptors" +
+                    if (beforeNestedAdmission != afterNestedAdmission) "\n" +
+                        probeFdDelta(beforeNestedDescriptors, afterNestedDescriptors) else "")
             val cleanupOuter = newControl()
             val cleanupInner = newControl()
             val cleanupOuterPath = controlPath(cleanupOuter)
@@ -785,12 +2049,13 @@ class LinuxBubblewrapBoundaryTest {
             println("private-control-bind-probe: scaleEntries=4097 activeControls=${controls.size} actualBindMounts=${mounts.size}")
 
             // A second invocation can register and remove a real control while the manifest is
-            // running. The lease owns independent descriptors and refuses even restored membership.
+            // running. Independent scope descriptors reconcile proved disjoint deletion.
+            val registryMonitor = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                .getDeclaredField("ACTIVE_PRIVATE_CONTROLS").apply { isAccessible = true }.get(null)
             var checks = 0
             var registryChanged = false
-            val registryFailure = assertFailsWith<IOException> {
-                calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
-                    if (++checks == 400) {
+            val churnDigest = calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+                    if (++checks >= 400 && !registryChanged && !Thread.holdsLock(registryMonitor)) {
                         java.util.concurrent.CompletableFuture.runAsync {
                             val concurrent = newControl()
                             invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve"))
@@ -799,10 +2064,9 @@ class LinuxBubblewrapBoundaryTest {
                         registryChanged = true
                     }
                 }
-            }
             assertTrue(registryChanged)
-            assertTrue(registryFailure.message.orEmpty().contains("private controls changed"), registryFailure.toString())
-            assertEquals(retainedDescriptorCount, openDescriptorCount(), "registry drift must release retained descriptors")
+            assertEquals(scaleDigest, churnDigest)
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "registry refresh must release retained descriptors")
 
             checks = 0
             var controlModeChanged = false
@@ -850,8 +2114,7 @@ class LinuxBubblewrapBoundaryTest {
             val copyControl = newControl(largeLimits)
             byteCheckpoints = 0
             var controlDuringCopy = false
-            val copyFailure = assertFailsWith<IOException> {
-                invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
+            val copiedSnapshot = requireNotNull(invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
                     AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, copyControl, {
                         if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
                             val concurrent = newControl()
@@ -859,16 +2122,35 @@ class LinuxBubblewrapBoundaryTest {
                             controls.remove(concurrent)
                             controlDuringCopy = true
                         }
-                    })
-            }
+                    }))
             assertTrue(controlDuringCopy)
-            assertTrue(copyFailure.message.orEmpty().contains("private controls changed"), copyFailure.toString())
-            assertTrue(Files.list(controlPath(copyControl)).use { it.findAny().isEmpty }, "rejected copy must prove cleanup of its partial snapshot")
+            val copiedSource = invokePrivate(copiedSnapshot, copiedSnapshot.javaClass.getDeclaredMethod("getSource")) as Path
+            // Source lives inside its exact private owner; compare all copied bytes directly.
+            assertEquals(Files.size(largeSource), Files.size(copiedSource))
+            assertEquals(Files.mismatch(largeSource, copiedSource), -1L)
+            val copiedContainer = requireNotNull(invokePrivate(copiedSnapshot, copiedSnapshot.javaClass.getDeclaredMethod("getContainer")))
+            invokePrivate(copiedContainer, copiedContainer.javaClass.getDeclaredMethod("deleteAndProve"))
+            assertTrue(Files.list(controlPath(copyControl)).use { it.findAny().isEmpty }, "successful copy cleanup must be proved")
             assertEquals(largeDigest, calculateAcpRuntimeManifestSha256(largeSource, largeLimits))
             invokePrivate(copyControl, type.getDeclaredMethod("deleteAndProve"))
             controls.remove(copyControl)
             assertEquals(retainedDescriptorCount, openDescriptorCount(), "large hash/copy refusal must release retained descriptors")
-            println("private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true partialCopyRegistryDriftRefused=true")
+            val cancelledCopyControl = newControl(largeLimits)
+            byteCheckpoints = 0
+            val cancelledCopy = assertFailsWith<IOException> {
+                invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, cancelledCopyControl, {
+                        if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
+                            throw IOException("injected partial-copy cancellation")
+                        }
+                    })
+            }
+            assertEquals("injected partial-copy cancellation", cancelledCopy.message)
+            assertTrue(Files.list(controlPath(cancelledCopyControl)).use { it.findAny().isEmpty }, "failed partial copy cleanup must be proved")
+            invokePrivate(cancelledCopyControl, type.getDeclaredMethod("deleteAndProve"))
+            controls.remove(cancelledCopyControl)
+            assertEquals(retainedDescriptorCount, openDescriptorCount())
+            println("private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true disjointCopyRegistryChurnPassed=true partialCopyCancellationCleaned=true")
 
             // Keep the original mountinfo handle: moving an existing bind and restoring it before
             // the final table comparison must still leave a detectable kernel event.
@@ -902,7 +2184,7 @@ class LinuxBubblewrapBoundaryTest {
                     val scopeFrames = Thread.currentThread().stackTrace.filter {
                         it.className == "decompengine.acp.RuntimePrivateControlScope"
                     }
-                    if (!mountChanged && scopeFrames.any { it.methodName == "checkpoint" } &&
+                    if (!mountChanged && scopeFrames.any { it.methodName == "checkpointLocked" } &&
                         scopeFrames.any { it.methodName == "requireDescriptor" }) {
                         moveMount(mountInitial, mountMoved)
                         moveMount(mountMoved, mountInitial)
@@ -926,7 +2208,8 @@ class LinuxBubblewrapBoundaryTest {
                 }
             }
             assertTrue(replaced)
-            assertTrue(replacementFailure.message.orEmpty().contains("authenticated source pathname"), replacementFailure.toString())
+            assertTrue(replacementFailure.message.orEmpty().contains("authenticated source pathname") ||
+                replacementFailure.message.orEmpty().contains("descriptor pathname changed during inspection"), replacementFailure.toString())
             assertEquals("replacement-content", Files.readString(replacedFile))
             assertEquals(retainedDescriptorCount, openDescriptorCount(), "unknown descriptor names must release the scope")
 
@@ -985,8 +2268,7 @@ class LinuxBubblewrapBoundaryTest {
         assertEquals(verifiedScaleDigest, calculateAcpRuntimeManifestSha256(closure, scaleLimits))
         var emptyChecks = 0
         var admittedFromEmpty = false
-        val emptyFailure = assertFailsWith<IOException> {
-            calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+        val emptyDigest = calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
                 if (++emptyChecks == 400) {
                     val concurrent = newControl()
                     try { invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve")) }
@@ -994,9 +2276,8 @@ class LinuxBubblewrapBoundaryTest {
                     admittedFromEmpty = true
                 }
             }
-        }
         assertTrue(admittedFromEmpty)
-        assertTrue(emptyFailure.message.orEmpty().contains("private controls changed"), emptyFailure.toString())
+        assertEquals(verifiedScaleDigest, emptyDigest)
     }
 
     @Test
@@ -1563,6 +2844,46 @@ class LinuxBubblewrapBoundaryTest {
             Files.deleteIfExists(validationSource)
         }
         assertEquals(before, controlDirectories())
+
+        val revalidationCheckpoint = AtomicBoolean(false)
+        val commandObserved = AtomicBoolean(false)
+        val startHookReached = AtomicBoolean(false)
+        val revalidationUnits = mutableListOf<String>()
+        val revalidationScopes = mutableListOf<AcpSandboxScopeIdentity>()
+        val recordUnit = unitObserver(revalidationUnits)
+        val revalidationBoundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = AcpSandboxCommandObserver { command ->
+                commandObserved.set(true)
+                recordUnit.beforeStart(command)
+            },
+            launchHook = AcpSandboxLaunchHook { stage ->
+                if (stage == AcpSandboxLaunchStage.BEFORE_SCOPE_START) startHookReached.set(true)
+            },
+            scopeObserver = AcpSandboxScopeObserver { revalidationScopes.add(it) },
+        )
+        val revalidationFailure = IOException("injected launch mount revalidation deadline")
+        try {
+            val failure = assertFailsWith<IOException> {
+                revalidationBoundary.launch(probeLaunch(listOf("netns")), true) {
+                    val stack = Thread.currentThread().stackTrace
+                    if (stack.none { it.methodName == "requireBoundaryUnchanged" } &&
+                        stack.any { it.className == "decompengine.acp.PinnedReadOnlyMount" && it.methodName == "requireUnchanged" } &&
+                        revalidationCheckpoint.compareAndSet(false, true)
+                    ) throw revalidationFailure
+                }
+            }
+            assertTrue(failure === revalidationFailure, "launch cleanup must preserve the injected primary")
+            assertTrue(revalidationCheckpoint.get(), "launch mounts must be revalidated before command construction")
+            assertFalse(commandObserved.get(), "mount revalidation must precede the command observer")
+            assertFalse(startHookReached.get(), "mount revalidation must precede scope start")
+            assertTrue(revalidationUnits.isEmpty())
+            assertTrue(revalidationScopes.isEmpty())
+            assertTrue(revalidationBoundary.evidence(null).launches.isEmpty())
+        } finally {
+            revalidationBoundary.close()
+        }
+        assertBoundaryResidueAbsent(before, revalidationUnits, revalidationScopes)
 
         val launchBoundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
         val nprocCheckpoint = AtomicBoolean(false)
@@ -2268,6 +3589,7 @@ class LinuxBubblewrapBoundaryTest {
         fun main(args: Array<String>) {
             require(args.size == 2)
             when (args[0]) {
+                "private-control-poison-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlPoisonProbe(Path.of(args[1]))
                 "private-control-bind-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
                 "statx-policy-probe" -> LinuxBubblewrapBoundaryTest().runStatxPolicyProbe(Path.of(args[1]))
                 else -> error("unknown native boundary probe")

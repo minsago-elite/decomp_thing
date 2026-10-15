@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 2,
+  "target": "x86_64 SysV AMD64 ELF LP64; C11; GCC; no LTO, external libraries, injected headers or export scripts",
+  "environment": {
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "TMPDIR": "/tmp"
+  },
+  "commands": {
+    "preprocess": [
+      "/usr/bin/gcc",
+      "-E",
+      "-P",
+      "-std=c11",
+      "/work/candidate.c",
+      "-o",
+      "/work/candidate.i"
+    ],
+    "compile": [
+      "/usr/bin/gcc",
+      "-std=c11",
+      "-O2",
+      "-fPIC",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-fast-math",
+      "-ffp-contract=off",
+      "-fvisibility=default",
+      "-c",
+      "/work/candidate.i",
+      "-o",
+      "/work/candidate.o"
+    ],
+    "link": [
+      "/usr/bin/gcc",
+      "-shared",
+      "-Wl,-z,relro,-z,now,-z,noexecstack,--no-undefined",
+      "/work/candidate.o",
+      "-o",
+      "/work/libcandidate.so"
+    ]
+  },
+  "exports": "Provide external function definitions acp_mix acp_pair_scale acp_update acp_apply acp_fold and writable object acp_state. Ordinary external definitions have default public visibility.",
+  "bounds": {
+    "memoryBytes": 536870912,
+    "swapBytes": 0,
+    "tasks": 32,
+    "compilerSeconds": 30,
+    "runtimeSeconds": 5,
+    "outputBytesPerStream": 65536,
+    "sourceBytes": 262144,
+    "virtualAddressSpaceBytes": 2147483648,
+    "cpuSeconds": 30,
+    "helperOutputBytesPerStream": 1048576,
+    "elfInspectionSeconds": 10
+  },
+  "toolchainEnvironmentPinSha256": "df06d577d23d2f147671412434577eaa560ec6edeac91158a6e6d62c076ba0a6",
+  "gccIdentity": {
+    "executable": "/usr/bin/gcc",
+    "realpath": "/usr/x86_64-pc-linux-gnu/gcc-bin/16/x86_64-pc-linux-gnu-gcc",
+    "sha256": "95802777c75a38582efb76cb15eb5cb34bfad66bcbef5c1c265c0a1f2e51132c",
+    "target": "x86_64-pc-linux-gnu",
+    "version": "gcc (Gentoo 16.2.1_p20260926 p1) 16.2.1 20260926"
+  },
+  "analysisIsolation": {
+    "engine": "bubblewrap",
+    "namespaces": "unshare-all",
+    "capabilities": "none",
+    "environment": {
+      "PATH": "/usr/bin:/bin",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "TMPDIR": "/tmp",
+      "LD_LIBRARY_PATH": "/usr/lib/gcc/x86_64-pc-linux-gnu/16:/usr/lib/llvm/23/lib64"
+    },
+    "readOnlySystemMounts": [
+      "/usr",
+      "/lib",
+      "/lib64"
+    ],
+    "readOnlyHelper": "/probe",
+    "readOnlyOwnedSourceWork": "/work",
+    "sourceArgument": "/work/<relative-source-path>",
+    "expectedSourceWork": "separate trusted fixture clone; never mapped into candidate probe",
+    "temporaryFilesystem": {
+      "path": "/tmp",
+      "bytes": 16777216
+    },
+    "hostPathsOutsideMounts": "inaccessible"
+  }
+}

@@ -1,0 +1,364 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Protected worker exec monitor wire record v1",
+  "description": "One canonical ASCII newline record, not worker output. External parser additionally enforces byte/order/binding/native-wait invariants. No production or API authority from schema validity.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "a": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "p": {
+          "enum": [
+            "compiler",
+            "probe",
+            "runtime",
+            "elf-inspection",
+            "caller-build",
+            "helper-build",
+            "toolchain-inspection",
+            "unspecified"
+          ],
+          "type": "string"
+        },
+        "t": {
+          "const": "exec"
+        },
+        "s": {
+          "const": 1,
+          "type": "integer"
+        },
+        "c": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "ed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "ei": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "od": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "oi": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "rd": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "ri": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "w": {
+          "type": "integer",
+          "const": 263551
+        },
+        "cf": {
+          "type": "integer",
+          "const": 1
+        },
+        "dp": {
+          "type": "integer",
+          "const": 0
+        },
+        "b": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": [
+            {
+              "type": "integer",
+              "const": 1
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 4
+            }
+          ],
+          "additionalItems": false
+        },
+        "l": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          },
+          "description": "Optional sealed library device/inode/size; parser requires exact expected binding when present."
+        }
+      },
+      "required": [
+        "v",
+        "a",
+        "p",
+        "t",
+        "s",
+        "c",
+        "ed",
+        "ei",
+        "od",
+        "oi",
+        "rd",
+        "ri",
+        "w",
+        "cf",
+        "dp",
+        "b"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "a": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "p": {
+          "enum": [
+            "compiler",
+            "probe",
+            "runtime",
+            "elf-inspection",
+            "caller-build",
+            "helper-build",
+            "toolchain-inspection",
+            "unspecified"
+          ],
+          "type": "string"
+        },
+        "t": {
+          "const": "term"
+        },
+        "s": {
+          "const": 2,
+          "type": "integer"
+        },
+        "c": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "r": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "k": {
+          "enum": [
+            "exit",
+            "signal"
+          ]
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "required": [
+        "v",
+        "a",
+        "p",
+        "t",
+        "s",
+        "c",
+        "r",
+        "k",
+        "n"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "a": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "p": {
+          "enum": [
+            "compiler",
+            "probe",
+            "runtime",
+            "elf-inspection",
+            "caller-build",
+            "helper-build",
+            "toolchain-inspection",
+            "unspecified"
+          ],
+          "type": "string"
+        },
+        "t": {
+          "const": "error"
+        },
+        "s": {
+          "const": 1,
+          "type": "integer"
+        },
+        "g": {
+          "enum": [
+            "arguments",
+            "protection",
+            "visibility",
+            "barrier",
+            "target",
+            "fork",
+            "trace",
+            "exec",
+            "child-fds",
+            "detach",
+            "wait",
+            "channel",
+            "library"
+          ]
+        },
+        "e": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "a",
+        "p",
+        "t",
+        "s",
+        "g",
+        "e"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1,
+          "type": "integer"
+        },
+        "a": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "p": {
+          "enum": [
+            "compiler",
+            "probe",
+            "runtime",
+            "elf-inspection",
+            "caller-build",
+            "helper-build",
+            "toolchain-inspection",
+            "unspecified"
+          ],
+          "type": "string"
+        },
+        "t": {
+          "const": "error"
+        },
+        "s": {
+          "const": 2,
+          "type": "integer"
+        },
+        "g": {
+          "enum": [
+            "arguments",
+            "protection",
+            "visibility",
+            "barrier",
+            "target",
+            "fork",
+            "trace",
+            "exec",
+            "child-fds",
+            "detach",
+            "wait",
+            "channel",
+            "library"
+          ]
+        },
+        "e": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "a",
+        "p",
+        "t",
+        "s",
+        "g",
+        "e"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
