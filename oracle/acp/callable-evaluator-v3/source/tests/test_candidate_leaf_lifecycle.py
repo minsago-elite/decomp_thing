@@ -7,6 +7,7 @@ import os
 import stat
 from types import SimpleNamespace
 from copy import deepcopy
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 import sys
 import tempfile
@@ -31,6 +32,136 @@ class CandidateLeafLifecycle(unittest.TestCase):
 
     def leaf(self, scope, name='leaf'):
         path=self.root/name;path.mkdir();scope.own(path);return path
+
+    @contextmanager
+    def runner_refusal(self, leaf, *, attempted=False):
+        """Actual controller refusal paths; no mocked cleanup or completion policy."""
+        import bounded_runtime as runtime
+        bounds=runtime.execution_bounds(managed_scope=True,phase='compiler')
+        primary=OSError('authored ambiguous Popen failure') if attempted else ValueError('authored preparation refusal')
+        receipt={'directory':self.root/'authored-receipt','fd':None}
+        launch={'argv':['NOT_EXECUTED'],'proofBinding':{},'pins':{}}
+        forbidden=AssertionError('prelaunch control forbids process, policy and descriptor effects')
+        denied=[]
+        with ExitStack() as effects:
+            effects.enter_context(patch.object(runtime,'_work_directory',return_value=leaf))
+            effects.enter_context(patch.object(runtime,'_worker_environment'))
+            effects.enter_context(patch.object(runtime,'_create_worker_receipt',return_value=receipt))
+            effects.enter_context(patch.object(runtime,'_prepare_launch',
+                return_value=launch,side_effect=None if attempted else primary))
+            popen=effects.enter_context(patch.object(runtime.subprocess,'Popen',
+                side_effect=primary if attempted else forbidden))
+            effects.enter_context(patch.object(runtime.time,'monotonic',return_value=1.0))
+            effects.enter_context(patch.object(runtime.os,'getuid',return_value=1000))
+            for name in ('open','close','fstat','stat','lstat','pread','read','write','pidfd_open'):
+                denied.append(effects.enter_context(patch.object(runtime.os,name,side_effect=forbidden)))
+            for name in ('process_identity','_admit_scope','_kill_owned_scope','_kill_launcher',
+                         'scope_processes','owned_processes','process_limits'):
+                denied.append(effects.enter_context(patch.object(runtime,name,side_effect=forbidden)))
+            denied.append(effects.enter_context(patch.object(runtime.selectors,'DefaultSelector',side_effect=forbidden)))
+            try:
+                yield (lambda: runtime._run_scoped(['NOT_EXECUTED'],leaf,{},b'',bounds,provisioning=False)),primary,popen
+            finally:
+                for effect in denied:effect.assert_not_called()
+
+    def test_actual_prelaunch_refusal_reclaims_owned_leaf_without_completion_credit(self):
+        import bounded_runtime as runtime
+        for returned in (False,True):
+            scope=e.WorkerLeaves();leaf=self.leaf(scope,'prelaunch-'+str(returned))
+            (leaf/'copied-input').write_bytes(b'consumed controller input')
+            with self.runner_refusal(leaf) as (operation,primary,popen):
+                if returned:
+                    def refused():
+                        try:operation()
+                        except ValueError as error:
+                            self.assertIs(primary,error)
+                            return {'status':'unknown'},error.bounded_result
+                    value=scope.call(leaf,refused)
+                    self.assertEqual('unknown',value[0]['status'])
+                else:
+                    with self.assertRaises(ValueError) as caught:scope.call(leaf,operation)
+                    self.assertIs(primary,caught.exception)
+                popen.assert_not_called()
+            result=primary.bounded_result
+            self.assertTrue(result['cleanupVerified']);self.assertTrue(result['finalAbsenceVerified'])
+            self.assertFalse(result['launcherCreated']);self.assertFalse(result['rootReaped'])
+            self.assertIsNone(result['rootPid']);self.assertIsNone(result['kernelScope'])
+            self.assertFalse(runtime.worker_execution_complete(result))
+            self.assertEqual('retained',result['_receiptCleanup']['status'])
+            scope.close();self.assertFalse(leaf.exists())
+
+    def test_actual_popen_attempt_without_handle_retains_leaf_and_primary(self):
+        scope=e.WorkerLeaves();leaf=self.leaf(scope,'attempted-no-handle')
+        with self.runner_refusal(leaf,attempted=True) as (operation,primary,popen):
+            with self.assertRaises(OSError) as caught:scope.call(leaf,operation)
+            self.assertIs(primary,caught.exception);popen.assert_called_once()
+        result=primary.bounded_result
+        self.assertFalse(result['launcherCreated']);self.assertIsNone(result['rootPid'])
+        self.assertFalse(result['cleanupVerified']);self.assertFalse(result['finalAbsenceVerified'])
+        self.assertFalse(e._cleanup_proven(result))
+        scope.close();self.assertTrue(leaf.exists())
+
+    def test_prelaunch_cleanup_requires_every_explicit_exact_controller_fact(self):
+        with self.runner_refusal(self.root) as (operation,primary,popen):
+            with self.assertRaises(ValueError):operation()
+            popen.assert_not_called()
+        original=primary.bounded_result;self.assertTrue(e._cleanup_proven(original))
+        facts=('cleanupVerified','finalAbsenceVerified','launcherCreated','launcherPidIdentityVerified',
+               'scopeVerified','scopeAdmitted','waitComplete','rootReaped','workerExecVerified',
+               'workerTerminationVerified','rootPid','kernelScope')
+        vector=0
+        for field in facts:
+            for replacement in ('missing',False,True,0,1,None,{}):
+                if replacement!='missing' and type(replacement) is type(original[field]) and replacement==original[field]:continue
+                with self.subTest(field=field,replacement=replacement):
+                    result=deepcopy(original)
+                    if replacement=='missing':del result[field]
+                    else:result[field]=replacement
+                    scope=e.WorkerLeaves();leaf=self.leaf(scope,'bad-fact-'+str(vector));vector+=1
+                    self.assertFalse(e._cleanup_proven(result))
+                    scope.call(leaf,lambda: ({},result));scope.close();self.assertTrue(leaf.exists())
+        for result in (None,{},False,0):
+            self.assertFalse(e._cleanup_proven(result))
+
+    def test_prelaunch_cleanup_preserves_sticky_peers_and_mixed_inspection_refusal(self):
+        for unsafe in (False,True):
+            scope=e.WorkerLeaves();peer=self.leaf(scope,'peer-'+str(unsafe));library=peer/'library.so'
+            library.write_bytes(b'owned mounted input');work=self.leaf(scope,'work-'+str(unsafe))
+            if unsafe:scope.call(peer,lambda: ({},None))
+            with self.runner_refusal(work) as (operation,primary,popen):
+                with self.assertRaises(ValueError):scope.call(work,operation,mounted=(library,))
+                popen.assert_not_called()
+            scope.close();self.assertFalse(work.exists());self.assertEqual(unsafe,peer.exists())
+            if unsafe:self.assertEqual(b'owned mounted input',library.read_bytes())
+        with self.runner_refusal(self.root) as (operation,primary,popen):
+            with self.assertRaises(ValueError):operation()
+            popen.assert_not_called()
+        for index,rows in enumerate(((primary.bounded_result,{}),({},primary.bounded_result),
+                                     (clean(),primary.bounded_result))):
+            scope=e.WorkerLeaves();leaf=self.leaf(scope,'inspection-'+str(index))
+            scope.call(leaf,lambda: {'execution':rows[0],'sectionsExecution':rows[1]})
+            scope.close();self.assertEqual(index!=2,leaf.exists())
+        scope=e.WorkerLeaves();leaf=self.leaf(scope,'sticky-work')
+        scope.call(leaf,lambda: ({},None))
+        with self.runner_refusal(leaf) as (operation,primary,popen):
+            with self.assertRaises(ValueError):scope.call(leaf,operation)
+            popen.assert_not_called()
+        scope.close();self.assertTrue(leaf.exists())
+
+    def test_prelaunch_cleanup_retains_replacements_and_unknown_subtrees(self):
+        for replaced in (False,True):
+            scope=e.WorkerLeaves();leaf=self.leaf(scope,'protected-prelaunch-'+str(replaced))
+            with self.runner_refusal(leaf) as (operation,primary,popen):
+                with self.assertRaises(ValueError):scope.call(leaf,operation)
+                popen.assert_not_called()
+            if replaced:
+                held=self.root/'held-prelaunch';leaf.rename(held);leaf.mkdir()
+                (leaf/'canary').write_bytes(b'foreign replacement')
+            else:(leaf/'unexpected').mkdir()
+            scope.close();self.assertTrue(leaf.exists())
+            if replaced:
+                self.assertTrue(held.exists());self.assertEqual(b'foreign replacement',(leaf/'canary').read_bytes())
+            else:self.assertTrue((leaf/'unexpected').is_dir())
 
     def test_consumed_verified_flat_leaf_reclaimed_without_following_links(self):
         scope=e.WorkerLeaves();leaf=self.leaf(scope)

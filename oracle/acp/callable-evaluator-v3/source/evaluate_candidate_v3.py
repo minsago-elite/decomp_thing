@@ -294,6 +294,16 @@ _LEAF_SCOPE = ContextVar('candidate_worker_leaves', default=None)
 
 
 def _cleanup_proven(result):
+    # These controller facts are emitted only before any Popen attempt. An
+    # attempted launch without a handle leaves both absence facts unverified.
+    if (type(result) is dict and result.get('cleanupVerified') is True
+            and result.get('finalAbsenceVerified') is True
+            and all(result.get(key) is False for key in
+                    ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified', 'scopeAdmitted',
+                     'waitComplete', 'rootReaped', 'workerExecVerified', 'workerTerminationVerified'))
+            and 'rootPid' in result and result['rootPid'] is None
+            and 'kernelScope' in result and result['kernelScope'] is None):
+        return True
     return (type(result) is dict and all(result.get(key) is True for key in
             ('cleanupVerified', 'finalAbsenceVerified', 'rootReaped', 'scopeVerified', 'scopeAdmitted'))
             and type(result.get('kernelScope')) is dict
