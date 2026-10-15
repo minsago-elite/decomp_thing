@@ -695,25 +695,160 @@ def _contained_recipe(argv: list[str], cwd: Path) -> dict:
             'environment': environment, 'chdir': next(v for k, v in pairs if k == '--chdir')}
 
 
-def _create_worker_receipt() -> dict:
-    root = BASE / 'exec-proof-receipts'
-    root.mkdir(mode=0o700, exist_ok=True)
-    metadata = root.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.getuid():
-        raise ValueError('protected receipt root identity/mode differs')
-    root_identity = (metadata.st_dev, metadata.st_ino)
-    directory = private_directory(root / uuid.uuid4().hex)
-    directory_metadata = directory.lstat()
-    path = directory / 'worker-proof.jsonl'
-    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDWR, 0o600)
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size or metadata.st_nlink != 1:
+class _ReceiptInitializationState:
+    """Three local FD obligations, never namespace removal or worker authority."""
+    __slots__ = ('fds', 'acquired', 'attempted', 'succeeded', 'transferred',
+                 'stage', 'mkdir_returned', 'alias_uncertain')
+
+    def __init__(self):
+        self.fds = [None, None, None]  # Storage exists before any open.
+        self.acquired = self.attempted = self.succeeded = self.transferred = 0
+        self.stage = 0
+        self.mkdir_returned = self.alias_uncertain = False
+
+    def admit(self, index):
+        self.acquired |= 1 << index
+        for other in (0, 1, 2):
+            if other != index and self.fds[other] is not None and self.fds[other] == self.fds[index]:
+                self.alias_uncertain = True
+                raise ValueError('receipt initialization descriptor alias')
+
+    def close(self, index):
+        descriptor = self.fds[index]
+        if descriptor is None:
+            return
+        mask = 0
+        for other in (0, 1, 2):
+            if self.fds[other] == descriptor:
+                mask |= 1 << other
+                self.fds[other] = None
+        self.attempted |= mask  # Terminal BEFORE close; never retry an uncertain integer.
         os.close(descriptor)
-        raise ValueError('protected receipt initial identity differs')
-    return {'path': path, 'directory': directory, 'fd': descriptor, 'device': metadata.st_dev,
-            'inode': metadata.st_ino, 'directoryDevice': directory_metadata.st_dev,
-            'directoryInode': directory_metadata.st_ino, 'rootDevice': root_identity[0],
-            'rootInode': root_identity[1]}
+        self.succeeded |= mask
+
+    def close_all(self):
+        first = None
+        for index in (2, 1, 0):
+            try:
+                self.close(index)
+            except BaseException as error:
+                if first is None:
+                    first = error
+        return first
+
+    def discharged(self):
+        return (not self.alias_uncertain and self.fds[0] is None and self.fds[1] is None and
+                self.fds[2] is None and self.acquired == (self.succeeded | self.transferred))
+
+    def facts(self):
+        return {'status': 'retained', 'reason': 'initialization-partial-or-unverified',
+                'stage': self.stage, 'acquiredMask': self.acquired, 'closeAttemptedMask': self.attempted,
+                'closeSucceededMask': self.succeeded, 'transferredMask': self.transferred,
+                'mkdirReturned': self.mkdir_returned,
+                'closeUncertain': self.alias_uncertain or bool(self.attempted & ~self.succeeded)}
+
+
+def _create_worker_receipt(*, deadline=None, initialization=None) -> dict:
+    state = _ReceiptInitializationState() if initialization is None else initialization
+    if (type(state) is not _ReceiptInitializationState or state.stage != 0 or state.acquired or
+            state.attempted or state.succeeded or state.transferred or state.mkdir_returned or
+            state.alias_uncertain or state.fds != [None, None, None]):
+        raise ValueError('fresh private receipt initialization state required')
+
+    def timely():
+        if deadline is not None:
+            _controller_metadata_timely(deadline)
+
+    def observe(operation, *args, **kwargs):
+        timely()
+        value = operation(*args, **kwargs)
+        timely()
+        return value
+
+    def directory_identity(metadata):
+        if (not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or
+                metadata.st_uid != observe(os.getuid)):
+            raise ValueError('protected receipt directory identity/mode differs')
+        return metadata.st_dev, metadata.st_ino
+
+    try:
+        timely()
+        state.stage = 1
+        root = BASE / 'exec-proof-receipts'
+        observe(root.mkdir, mode=0o700, exist_ok=True)
+        state.stage = 2
+        root_identity = directory_identity(observe(root.lstat))
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        state.stage = 3
+        timely()
+        state.fds[0] = os.open(root, flags)
+        state.admit(0)
+        timely()
+        if directory_identity(observe(os.fstat, state.fds[0])) != root_identity:
+            raise ValueError('protected receipt root binding differs')
+        if directory_identity(observe(root.lstat)) != root_identity:
+            raise ValueError('protected receipt named root differs')
+        state.stage = 4
+        component = observe(lambda: uuid.uuid4().hex)
+        if (type(component) is not str or len(component) != 32 or
+                any(c not in '0123456789abcdef' for c in component)):
+            raise ValueError('fixed receipt component required')
+        state.stage = 5
+        timely()
+        os.mkdir(component, mode=0o700, dir_fd=state.fds[0])
+        state.mkdir_returned = True  # Returned mkdir is NOT created-inode authentication.
+        timely()
+        state.stage = 6
+        timely()
+        state.fds[1] = os.open(component, flags, dir_fd=state.fds[0])
+        state.admit(1)
+        timely()
+        state.stage = 7
+        directory_metadata = observe(os.fstat, state.fds[1])
+        directory_expected = directory_identity(directory_metadata)
+        if directory_identity(observe(os.stat, component, dir_fd=state.fds[0], follow_symlinks=False)) != directory_expected:
+            raise ValueError('protected receipt child binding differs')
+        state.stage = 8
+        timely()
+        state.fds[2] = os.open('worker-proof.jsonl', os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDWR,
+                               0o600, dir_fd=state.fds[1])
+        state.admit(2)
+        timely()
+        state.stage = 9
+        metadata = observe(os.fstat, state.fds[2])
+        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600 or
+                metadata.st_size or metadata.st_nlink != 1 or metadata.st_uid != observe(os.getuid)):
+            raise ValueError('protected receipt initial identity differs')
+        named = observe(os.stat, 'worker-proof.jsonl', dir_fd=state.fds[1], follow_symlinks=False)
+        if ((named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_size, named.st_nlink) !=
+                (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_size, metadata.st_nlink)):
+            raise ValueError('protected receipt report binding differs')
+        state.stage = 10
+        timely()
+        directory = root / component
+        receipt = {'path': directory / 'worker-proof.jsonl', 'directory': directory, 'fd': state.fds[2],
+                   'device': metadata.st_dev, 'inode': metadata.st_ino,
+                   'directoryDevice': directory_metadata.st_dev, 'directoryInode': directory_metadata.st_ino,
+                   'rootDevice': root_identity[0], 'rootInode': root_identity[1]}
+        timely()
+        state.stage = 11
+        state.close(1)
+        timely()
+        state.close(0)
+        timely()
+        state.stage = 12
+        timely()
+        state.stage = 13
+        state.transferred = 4
+        state.fds[2] = None
+        return receipt  # No fallible observation/construction after transfer.
+    except BaseException as primary:
+        state.close_all()
+        try:
+            primary.receiptInitialization = state.facts()
+        except BaseException:
+            pass
+        raise
 
 
 def _reclaim_worker_receipt(receipt, result, *, provisioning=False):
@@ -1980,6 +2115,8 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                   workerProofRaw=b'', workerProofBindings=None, launchInputPins=None, provisioningOnly=provisioning, infrastructureReason=None,
                   bounds=bounds, rootPid=None, kernelScope=None, stdout=b'', stderr=b'')
     process = selector = receipt = launch = scope_evidence = root_start = None
+    receipt_initialization = _ReceiptInitializationState()
+    result['_receiptCleanup'] = {'status': 'retained', 'reason': 'initialization-partial-or-unverified'}
     launch_attempted = False
     launcher_pidfd = None
     phase_elapsed = cleanup_began = verification_end = None
@@ -1987,7 +2124,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
     try:
         cwd = _work_directory(cwd)
         _worker_environment(environment, cwd)
-        receipt = _create_worker_receipt()
+        receipt = _create_worker_receipt(deadline=phase_end, initialization=receipt_initialization)
         if provisioning:
             # No report descriptor/channel exists for this fixed trusted compiler exception.
             os.close(receipt['fd']); receipt['fd'] = None
@@ -2053,7 +2190,10 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         result['infrastructureFailure'] = True
         result['infrastructureReason'] = 'scope-launch-or-worker-controller-failed'
         result.update(failureClass=type(failure).__name__, reason='bounded controller refused or failed')
-        failure.bounded_result = result
+        try:
+            failure.bounded_result = result
+        except BaseException:
+            pass
         raise
     finally:
         primary_failure = sys.exception()
@@ -2116,7 +2256,7 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
                 if result['launcherExitCode'] is None:
                     result['launcherExitCode'] = process.returncode if type(process.returncode) is int else None
             elif not launch_attempted:
-                result.update(finalAbsenceVerified=True, cleanupVerified=True)
+                result.update(finalAbsenceVerified=True, cleanupVerified=cleanup_failure is None and receipt_initialization.discharged())
             else:
                 # No process handle means no owned PID/cgroup identity to verify safely.
                 result.update(finalAbsenceVerified=False, cleanupVerified=False)
@@ -2198,7 +2338,13 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         if result['phaseElapsedSeconds'] >= timeout or phase_deadline is not None and time.monotonic() >= phase_end:
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         reclamation_failure = None
-        result['_receiptCleanup'] = _reclaim_worker_receipt(receipt, result, provisioning=provisioning)
+        if receipt is None:
+            try:
+                result['_receiptCleanup'] = receipt_initialization.facts()
+            except BaseException:
+                pass  # Preallocated generic retained facts remain; never cleanup authority.
+        else:
+            result['_receiptCleanup'] = _reclaim_worker_receipt(receipt, result, provisioning=provisioning)
         if result['_receiptCleanup']['status'] == 'refused':
             reclamation_failure = ValueError('owned receipt directory reclamation failed')
             reclamation_failure.bounded_result = result
@@ -2210,6 +2356,10 @@ def _run_scoped(argv, cwd, environment, stdin, bounds, *, provisioning, runtime_
         if result['phaseElapsedSeconds'] >= timeout or phase_deadline is not None and time.monotonic() >= phase_end:
             result.update(timedOut=True, infrastructureFailure=True, infrastructureReason='phase-budget-exhausted', exitCode=None)
         result['elapsedSeconds'] = round(time.monotonic() - began, 6)
+        if not receipt_initialization.discharged():
+            # Actual caller-owned obligations, independent of optional annotations/facts.
+            result.update(cleanupVerified=False, infrastructureFailure=True,
+                          infrastructureReason='receipt-initialization-close-unverified', exitCode=None)
         if cleanup_failure is not None:
             # Fixed three-stage secondary metadata only; never serialize exception objects or
             # invoke their equality/formatting. Metadata failure cannot replace the primary.

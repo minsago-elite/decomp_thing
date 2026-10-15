@@ -2729,4 +2729,279 @@ class LaunchConfigCaptureTests(unittest.TestCase):
                     value.parser.parse_proof.assert_not_called()
 
 
+class _ReceiptInitializationFilesystem:
+    """Three authored descriptors; all OS/clock/path effects stay virtual."""
+    component = 'a' * 32
+
+    def __init__(self):
+        self.base=Path('/authored/receipt-resource');self.root=self.base/'exec-proof-receipts'
+        self.state=runtime._ReceiptInitializationState();self.now=0.0;self.counts={};self.events=[]
+        self.arguments=[];self.fds={};self.acquired=[];self.closed=[];self.fail=None;self.late=None
+        self.error=OSError('authored initialization operation');self.close_errors={};self.alias=None
+        self.metadata_changes={};self.clock_count=0;self.expire_clock=None;self.expired_at=None
+        self.uuid_component=self.component;self.created=False;self.origin_traceback=None
+
+    def act(self,label,value=None,*,can_fail=True):
+        self.counts[label]=self.counts.get(label,0)+1;token=label+'#'+str(self.counts[label])
+        self.events.append((token,self.state.stage))
+        if can_fail and self.fail==token:
+            try:raise self.error
+            except BaseException as primary:
+                self.origin_traceback=primary.__traceback__;raise
+        if self.late==token:self.now=5.0;self.expired_at=len(self.events)
+        return value
+
+    def clock(self):
+        self.clock_count+=1;self.events.append(('clock#'+str(self.clock_count),self.state.stage))
+        if self.expire_clock==self.clock_count:
+            self.now=5.0;self.expired_at=len(self.events)
+        return self.now
+
+    def metadata(self,role):
+        values=dict(st_dev=7,st_ino={'root':11,'child':12,'report':13}[role],
+                    st_mode=(stat.S_IFREG|0o600) if role=='report' else (stat.S_IFDIR|0o700),
+                    st_uid=1000,st_size=0,st_nlink=1)
+        values.update(self.metadata_changes.get(role,{}));return types.SimpleNamespace(**values)
+
+    def mkdir_root(self,path,*,mode,exist_ok):
+        self.arguments.append(('root-mkdir',path,mode,exist_ok));return self.act('root-mkdir')
+
+    def lstat(self,path):
+        assert path==self.root
+        value=self.metadata('root')
+        if self.metadata_changes.get('named-root') and self.counts.get('root-lstat',0):
+            value=types.SimpleNamespace(**{**vars(value),**self.metadata_changes['named-root']})
+        return self.act('root-lstat',value)
+
+    def uuid(self):return self.act('uuid',types.SimpleNamespace(hex=self.uuid_component))
+
+    def mkdir_child(self,name,mode=0o777,*,dir_fd=None):
+        self.arguments.append(('child-mkdir',name,mode,dir_fd));self.act('child-mkdir');self.created=True
+
+    def open(self,name,flags,mode=0o777,*,dir_fd=None):
+        role='root' if name==self.root else 'child' if name==self.component else 'report'
+        assert (role=='root' and dir_fd is None) or (role=='child' and dir_fd==101) or (
+            role=='report' and name=='worker-proof.jsonl' and dir_fd==102)
+        self.arguments.append(('open',role,name,flags,mode,dir_fd));self.act('open-'+role)
+        descriptor={'root':101,'child':102,'report':103}[role]
+        if self.alias==role:descriptor=101
+        self.fds.setdefault(descriptor,role);self.acquired.append(descriptor)
+        self.act('opened-'+role,can_fail=False);return descriptor
+
+    def fstat(self,descriptor):
+        role=self.fds[descriptor];return self.act('fstat-'+role,self.metadata(role))
+
+    def stat(self,name,*,dir_fd,follow_symlinks):
+        role='child' if name==self.component else 'report'
+        assert follow_symlinks is False and dir_fd==(101 if role=='child' else 102)
+        value=self.metadata(role);value=types.SimpleNamespace(**{**vars(value),**self.metadata_changes.get('named-'+role,{})})
+        return self.act('named-'+role,value)
+
+    def close(self,descriptor):
+        assert descriptor in self.fds and descriptor not in self.closed
+        self.closed.append(descriptor);self.fds.pop(descriptor);self.act('close-'+str(descriptor),can_fail=False)
+        if descriptor in self.close_errors:raise self.close_errors[descriptor]
+
+    def effects(self):
+        stack=ExitStack();owner=self;divide=Path.__truediv__
+        def joined(path,name):
+            value=divide(path,name)
+            if owner.state.stage==10:
+                owner.act('construct-directory' if name==owner.component else 'construct-report')
+            return value
+        for target,name,effect in ((runtime,'BASE',self.base),(runtime.time,'monotonic',self.clock),
+                (runtime.os,'open',self.open),(runtime.os,'fstat',self.fstat),(runtime.os,'stat',self.stat),
+                (runtime.os,'mkdir',self.mkdir_child),(runtime.os,'close',self.close),
+                (runtime.os,'getuid',lambda:self.act('getuid',1000)),(runtime.uuid,'uuid4',self.uuid),
+                (Path,'mkdir',lambda path,**kwargs:self.mkdir_root(path,**kwargs)),
+                (Path,'lstat',lambda path:self.lstat(path)),(Path,'__truediv__',joined)):
+            stack.enter_context(patch.object(target,name,**({'new':effect} if name=='BASE' or target is Path else {'side_effect':effect})))
+        for name in ('read','write','unlink','rmdir','pidfd_open','kill','killpg'):
+            stack.enter_context(patch.object(runtime.os,name,side_effect=AssertionError('no extra OS operation')))
+        return stack
+
+    def create(self,*,deadline=5.0,direct=False):
+        result=error=None
+        with self.effects():
+            try:
+                result=runtime._create_worker_receipt() if direct else runtime._create_worker_receipt(
+                    deadline=deadline,initialization=self.state)
+            except BaseException as failure:error=failure
+        return result,error
+
+
+class ReceiptInitializationResources(unittest.TestCase):
+    def assert_once_closed(self,value):
+        self.assertEqual(len(value.closed),len(set(value.closed)))
+        self.assertEqual(set(value.acquired),set(value.closed));self.assertFalse(value.fds)
+
+    def test_receipt_factory_transfers_only_report_after_parent_closes_and_retains_none_compatibility(self):
+        for deadline,direct in ((5.0,False),(None,False),(None,True)):
+            with self.subTest(deadline=deadline,direct=direct):
+                value=_ReceiptInitializationFilesystem();receipt,error=value.create(deadline=deadline,direct=direct)
+                self.assertIsNone(error);self.assertEqual([102,101],value.closed);self.assertEqual({103:'report'},value.fds)
+                self.assertEqual({'path','directory','fd','device','inode','directoryDevice','directoryInode','rootDevice','rootInode'},set(receipt))
+                self.assertEqual(103,receipt['fd']);self.assertEqual((7,13),(receipt['device'],receipt['inode']))
+                self.assertEqual((7,12),(receipt['directoryDevice'],receipt['directoryInode']))
+                self.assertEqual((7,11),(receipt['rootDevice'],receipt['rootInode']))
+                self.assertEqual(value.root/value.component/'worker-proof.jsonl',receipt['path'])
+                opens=[row for row in value.arguments if row[0]=='open']
+                directory_flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+                self.assertEqual([directory_flags,directory_flags,os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_RDWR],[row[3]for row in opens])
+                self.assertEqual([None,101,102],[row[5]for row in opens]);self.assertEqual(0o600,opens[2][4])
+                self.assertIn(('child-mkdir',value.component,0o700,101),value.arguments)
+                self.assertIn(('root-mkdir',value.root,0o700,True),value.arguments)
+                if not direct:
+                    self.assertEqual(7,value.state.acquired);self.assertEqual(3,value.state.succeeded)
+                    self.assertEqual(4,value.state.transferred);self.assertTrue(value.state.discharged())
+                    self.assertFalse(any(stage==13 for _,stage in value.events))
+                if deadline is None:self.assertEqual(0,value.clock_count)
+                value.close(103);self.assert_once_closed(value)
+
+    def test_receipt_factory_each_fallible_operation_closes_acquired_only_and_preserves_exact_primary(self):
+        baseline=_ReceiptInitializationFilesystem();receipt,error=baseline.create();self.assertIsNone(error)
+        tokens=[token for token,_ in baseline.events if not token.startswith(('clock#','opened-','close-'))]
+        for token in tokens:
+            with self.subTest(operation=token):
+                value=_ReceiptInitializationFilesystem();value.fail=token;receipt,error=value.create()
+                self.assertIsNone(receipt);self.assertIs(value.error,error);self.assert_once_closed(value)
+                self.assertEqual(list(reversed(value.acquired)),value.closed)
+                traceback=error.__traceback__
+                while traceback.tb_next is not None:traceback=traceback.tb_next
+                self.assertEqual('act',traceback.tb_frame.f_code.co_name)
+                self.assertIs(value.origin_traceback,traceback)
+        for role,changes in (('root',{'st_mode':stat.S_IFLNK|0o700}),('root',{'st_uid':99}),
+                ('child',{'st_mode':stat.S_IFDIR|0o755}),('child',{'st_uid':99}),
+                ('report',{'st_mode':stat.S_IFIFO|0o600}),('report',{'st_mode':stat.S_IFREG|0o644}),
+                ('report',{'st_uid':99}),('report',{'st_size':1}),('report',{'st_nlink':2})):
+            with self.subTest(role=role,changes=changes):
+                value=_ReceiptInitializationFilesystem();value.metadata_changes[role]=changes
+                receipt,error=value.create();self.assertIsNone(receipt);self.assertIsInstance(error,ValueError);self.assert_once_closed(value)
+        value=_ReceiptInitializationFilesystem();value.fail='open-report#1';value.error=OSError(24,'authored EMFILE')
+        receipt,error=value.create();self.assertIs(value.error,error);self.assertEqual([102,101],value.closed)
+        self.assertTrue(value.state.mkdir_returned);self.assertEqual(3,value.state.acquired)
+        for component in ('A'*32,'a'*31,'../escape',None):
+            value=_ReceiptInitializationFilesystem();value.uuid_component=component
+            receipt,error=value.create();self.assertIsNone(receipt);self.assertIsInstance(error,ValueError)
+            self.assertFalse(value.created);self.assert_once_closed(value)
+        value=_ReceiptInitializationFilesystem();value.fail='child-mkdir#1';value.error=FileExistsError('authored collision')
+        receipt,error=value.create();self.assertIs(value.error,error);self.assertFalse(value.state.mkdir_returned)
+        self.assertEqual([101],value.acquired);self.assert_once_closed(value)
+
+    def test_receipt_factory_unique_once_close_uncertainty_and_denied_annotations_keep_primary(self):
+        class Denied(Exception):
+            __notes__=object()
+            def __setattr__(self,name,value):raise MemoryError('annotation denied')
+            def __eq__(self,other):raise AssertionError('no exception equality')
+            def __bool__(self):raise AssertionError('no exception truthiness')
+            def __str__(self):raise AssertionError('no exception text')
+            def add_note(self,*args):raise MemoryError('notes denied')
+        for mask in range(1,8):
+            with self.subTest(closeMask=mask):
+                value=_ReceiptInitializationFilesystem();primary=Denied();secondary=KeyboardInterrupt()
+                value.fail='fstat-report#1';value.error=primary
+                value.close_errors={fd:secondary for bit,fd in enumerate((101,102,103))if mask&(1<<bit)}
+                receipt,error=value.create();self.assertIsNone(receipt);self.assertIs(primary,error)
+                self.assertEqual([103,102,101],value.closed);self.assert_once_closed(value)
+                self.assertEqual(7,value.state.attempted);self.assertEqual(7^mask,value.state.succeeded)
+                self.assertFalse(value.state.discharged());self.assertTrue(value.state.facts()['closeUncertain'])
+        for errors in ((101,),(102,),(101,102),(101,102,103)):
+            value=_ReceiptInitializationFilesystem();same=Denied();value.close_errors={fd:same for fd in errors}
+            receipt,error=value.create();self.assertIsNone(receipt);self.assertIs(same,error);self.assert_once_closed(value)
+            self.assertEqual(0,value.state.transferred);self.assertFalse(value.state.discharged())
+        for alias in ('child','report'):
+            value=_ReceiptInitializationFilesystem();value.alias=alias
+            receipt,error=value.create();self.assertIsNone(receipt);self.assertIsInstance(error,ValueError)
+            self.assertTrue(value.state.alias_uncertain);self.assertFalse(value.state.discharged())
+            self.assert_once_closed(value)
+
+    def test_receipt_factory_original_end_refuses_each_late_observation_and_still_closes_once(self):
+        baseline=_ReceiptInitializationFilesystem();receipt,error=baseline.create();self.assertIsNone(error)
+        tokens=[token for token,_ in baseline.events if not token.startswith('clock#')]
+        vectors=[('operation',token)for token in tokens]+[('clock',number)for number in range(1,baseline.clock_count+1)]
+        for kind,point in vectors:
+            with self.subTest(kind=kind,point=point):
+                value=_ReceiptInitializationFilesystem()
+                if kind=='operation':value.late=point
+                else:value.expire_clock=point
+                receipt,error=value.create();self.assertIsNone(receipt);self.assertIsInstance(error,TimeoutError)
+                self.assertEqual(0,value.state.transferred);self.assert_once_closed(value)
+                self.assertEqual(value.state.acquired,value.state.succeeded)
+                self.assertTrue(value.state.discharged());self.assertFalse(value.state.facts()['closeUncertain'])
+                self.assertTrue(all(token.startswith(('clock#','close-'))for token,_ in value.events[value.expired_at:]))
+        for deadline in (True,float('nan'),float('inf'),'5'):
+            value=_ReceiptInitializationFilesystem();receipt,error=value.create(deadline=deadline)
+            self.assertIsNone(receipt);self.assertIsInstance(error,ValueError);self.assertFalse(value.acquired)
+
+    def test_receipt_factory_namespace_observations_never_authorize_partial_name_deletion(self):
+        for role in ('named-root','named-child','named-report'):
+            value=_ReceiptInitializationFilesystem();value.metadata_changes[role]={'st_ino':99}
+            receipt,error=value.create();self.assertIsNone(receipt);self.assertIsInstance(error,ValueError)
+            self.assert_once_closed(value);self.assertEqual('retained',value.state.facts()['status'])
+        # Matching replacement/ABA observations are not original mkdir-inode proof.
+        # The resource path may return, but grants no removal/creation chronology fact.
+        value=_ReceiptInitializationFilesystem();value.metadata_changes['child']={'st_ino':99}
+        receipt,error=value.create();self.assertIsNone(error);self.assertEqual(99,receipt['directoryInode'])
+        facts=value.state.facts();self.assertEqual('retained',facts['status']);self.assertTrue(facts['mkdirReturned'])
+        self.assertNotIn('createdInodeAuthenticated',facts);self.assertNotIn('namespaceRemoved',facts)
+        value.close(103);self.assert_once_closed(value)
+
+    def test_actual_runner_reads_owned_initialization_state_despite_denied_facts_and_bounded_result(self):
+        class Denied(Exception):
+            def __setattr__(self,name,value):raise MemoryError('all annotations denied')
+        for close_uncertain,deny_facts,prelaunch in ((True,False,False),(True,True,False),
+                (False,False,False),(False,True,False),(False,False,True)):
+            with self.subTest(closeUncertain=close_uncertain,denyFacts=deny_facts,prelaunch=prelaunch):
+                value=_ReceiptInitializationFilesystem();primary=Denied();observed=[];states=[];ends=[]
+                if not prelaunch:value.fail='fstat-report#1';value.error=primary
+                if close_uncertain:value.close_errors[103]=OSError('authored uncertain report close')
+                factory=runtime._create_worker_receipt;finish=runtime._finish_worker_proof
+                def actual_factory(*,deadline,initialization):
+                    states.append(initialization);ends.append(deadline);value.state=initialization
+                    return factory(deadline=deadline,initialization=initialization)
+                def actual_finish(result,*args,**kwargs):
+                    observed.append(result);answer=finish(result,*args,**kwargs)
+                    if close_uncertain and deny_facts:
+                        # Adversarial later mutable observation cannot restore credit;
+                        # the REAL early proof body still ran, and no proof is fabricated.
+                        result['cleanupVerified']=True
+                    return answer
+                def refused_prepare(*args,**kwargs):
+                    try:raise primary
+                    except Denied as error:
+                        value.origin_traceback=error.__traceback__;raise
+                bounds={'supervisor':{},'wallSeconds':5.0,'outputBytesPerStream':1024}
+                with value.effects(),ExitStack() as effects:
+                    effects.enter_context(patch.object(runtime,'_work_directory',return_value=Path('/authored/work')))
+                    effects.enter_context(patch.object(runtime,'_worker_environment'))
+                    effects.enter_context(patch.object(runtime,'_create_worker_receipt',side_effect=actual_factory))
+                    effects.enter_context(patch.object(runtime,'_finish_worker_proof',side_effect=actual_finish))
+                    prepare=effects.enter_context(patch.object(runtime,'_prepare_launch',side_effect=refused_prepare))
+                    for target,name in ((runtime.subprocess,'Popen'),(runtime,'process_identity'),(runtime,'owned_processes'),
+                            (runtime,'scope_processes'),(runtime,'_kill_owned_scope'),(runtime,'_kill_launcher'),
+                            (runtime.selectors,'DefaultSelector')):
+                        effects.enter_context(patch.object(target,name,side_effect=AssertionError('no launch/query/cleanup authority')))
+                    if deny_facts:effects.enter_context(patch.object(runtime._ReceiptInitializationState,'facts',side_effect=MemoryError('facts denied')))
+                    caught=caught_traceback=None
+                    try:runtime._run_scoped(['NOT-EXECUTED'],Path('/authored/work'),{},b'',bounds,provisioning=False)
+                    except Denied as error:caught=error;caught_traceback=error.__traceback__
+                self.assertIs(primary,caught);self.assertIsNotNone(caught_traceback)
+                while caught_traceback.tb_next is not None:caught_traceback=caught_traceback.tb_next
+                self.assertIs(value.origin_traceback,caught_traceback)
+                self.assertEqual([5.0],ends);self.assertEqual(1,len(states))
+                self.assertIs(value.state,states[0]);self.assertEqual(1,len(observed));result=observed[0]
+                self.assertEqual(close_uncertain is False,result['cleanupVerified']);self.assertTrue(result['finalAbsenceVerified'])
+                self.assertTrue(result['infrastructureFailure']);self.assertFalse(result['rootReaped']);self.assertIsNone(result['kernelScope'])
+                self.assertFalse(result['workerExecVerified']);self.assertFalse(result['workerTerminationVerified']);self.assertIsNone(result['exitCode'])
+                self.assertEqual('unknown',result['workerProof']['status']);self.assertEqual('launch-not-prepared',result['workerProof']['reason'])
+                self.assertEqual('retained',result['_receiptCleanup']['status']);self.assertNotIn('removed',result['_receiptCleanup'])
+                self.assert_once_closed(value)
+                if close_uncertain:self.assertEqual('receipt-initialization-close-unverified',result['infrastructureReason'])
+                if prelaunch:
+                    self.assertEqual(4,value.state.transferred);self.assertTrue(value.state.discharged())
+                    self.assertEqual([102,101,103],value.closed);prepare.assert_called_once()
+                else:
+                    self.assertEqual(0,value.state.transferred);self.assertEqual([103,102,101],value.closed);prepare.assert_not_called()
+
+
 if __name__=='__main__':unittest.main()
