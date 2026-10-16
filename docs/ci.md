@@ -181,12 +181,21 @@ That heavier gate compiles both binaries, runs complete evidence-only source-tre
 
 ### Real Angr proposal qualification
 
-The core partition selects `realAngrQualification` when the workflow, Gradle build,
-Angr requirement/runner, or exploration source/tests change. It compares the checkout
-to its first parent, including the base parent of a pull-request merge checkout.
-Unrelated changes reuse the deterministic adapter suite without installing Angr.
+The core partition selects `realAngrQualification` when the workflow, Docker
+production pin, Gradle build, Angr requirement/runner/selector, or exploration
+source/tests change. Pull requests compare against their event base SHA; pushes
+compare the complete update against the event's previous SHA, fetching that
+specific commit if needed. An absent/zero/unavailable base conservatively selects
+qualification. Authored local-Git fixtures in Actions cover multi-commit pushes,
+shallow history, production-pin changes, unrelated updates and missing bases.
+Unrelated changes reuse the deterministic adapter suite without installing Angr;
+selected runs cache package downloads without reusing prior qualification results.
+The shared `angr-compatibility.txt` constrains bitstring to 4.4.0 in both Docker and
+qualification: the unconstrained 5.0 release removed `ConstBitStream` used by this
+Angr version. Docker also checks that the installed Angr imports successfully.
 
-The selected lane installs `angr==9.2.213` into a workspace virtual environment and
+The selected lane requires matching Docker/default and requirements Angr pins
+(currently `9.2.213`) before installing into a workspace virtual environment and
 runs the existing branching argv/stdin fixture once. Its dedicated Gradle task
 requires an absolute executable `ANGR_PYTHON`, disables cached test credit, and gives
 the test JVM a small explicit environment without parent credentials. The ordinary

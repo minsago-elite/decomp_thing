@@ -9,20 +9,23 @@ export TMPDIR="$evidence/tmp"
 export PIP_CACHE_DIR="$PWD/build/pip-download-cache"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONNOUSERSITE=1
+python3 scripts/check-angr-pin.py > "$evidence/pin-selection.json"
 python3 -m venv "$venv"
 export ANGR_PYTHON="$venv/bin/python"
 "$ANGR_PYTHON" -m pip --disable-pip-version-check --no-input install \
   --timeout 30 --retries 2 --report "$evidence/pip-install.json" \
-  --requirement requirements/angr-qualification.txt
+  --constraint requirements/angr-compatibility.txt --requirement requirements/angr-qualification.txt
 "$ANGR_PYTHON" -m pip list --format=json > "$evidence/packages.json"
 git rev-parse HEAD > "$evidence/checkout.txt"
 git rev-parse 'HEAD^{tree}' > "$evidence/tree.txt"
-sha256sum build.gradle.kts requirements/angr-qualification.txt scripts/ci-qualify-angr.sh \
+sha256sum .github/workflows/ci.yml Dockerfile build.gradle.kts requirements/angr-qualification.txt requirements/angr-compatibility.txt \
+  scripts/ci-qualify-angr.sh scripts/select-angr-qualification.sh scripts/check-angr-pin.py \
   src/main/kotlin/decompengine/exploration/AutomaticExploration.kt \
   src/test/kotlin/decompengine/exploration/AutomaticExplorationTest.kt > "$evidence/source-sha256.txt"
 gcc --version > "$evidence/gcc-version.txt"
 "$ANGR_PYTHON" - <<'PY'
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -33,8 +36,11 @@ import archinfo
 import claripy
 import cle
 import pyvex
+import bitstring
 
-assert angr.__version__ == "9.2.213", angr.__version__
+expected_pins = json.loads(Path("build/angr-qualification/pin-selection.json").read_text())
+assert angr.__version__ == expected_pins["angrVersion"], angr.__version__
+assert importlib.metadata.version("bitstring") == expected_pins["bitstringVersion"]
 def identity(path):
     p = Path(path).resolve(strict=True)
     return {"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
@@ -42,8 +48,8 @@ record = {
     "pythonVersion": sys.version,
     "python": identity(sys.executable),
     "platform": platform.platform(),
-    "modules": {m.__name__: {"version": m.__version__, **identity(m.__file__)}
-                for m in (angr, archinfo, claripy, cle, pyvex)},
+    "modules": {m.__name__: {"version": importlib.metadata.version(m.__name__), **identity(m.__file__)}
+                for m in (angr, archinfo, claripy, cle, pyvex, bitstring)},
     "command": ["./gradlew", "--no-daemon", "realAngrQualification"],
     "interpreter": os.environ["ANGR_PYTHON"],
     "scope": "authored argv/stdin proposal fixture; no equivalence or process-attestation credit",

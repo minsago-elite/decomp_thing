@@ -191,20 +191,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 2
-      - name: Select relevant real Angr qualification
-        id: angr-changes
-        if: matrix.shard == 'core'
-        run: |
-          if git diff --quiet HEAD^ HEAD -- \
-            .github/workflows/ci.yml build.gradle.kts requirements/angr-qualification.txt \
-            scripts/ci-qualify-angr.sh src/main/kotlin/decompengine/exploration \
-            src/test/kotlin/decompengine/exploration; then
-            echo 'required=false' >> "$GITHUB_OUTPUT"
-          else
-            diff_status=$?
-            test "$diff_status" -eq 1
-            echo 'required=true' >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -241,6 +227,15 @@ jobs:
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
+      - name: Verify real Angr qualification selection and pin controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-angr-qualification-selection.py
+      - name: Select relevant real Angr qualification
+        id: angr-changes
+        if: matrix.shard == 'core'
+        env:
+          ANGR_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/select-angr-qualification.sh
       - name: Prepare root-owned oracle JVM and system libraries
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
@@ -258,11 +253,19 @@ jobs:
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Qualify pinned credential-free third-party ACP initialize
+        id: goose-initialize
         if: matrix.shard == 'live'
+        continue-on-error: true
         run: scripts/ci-qualify-goose-acp.sh
       - name: Qualify pinned credential-free codex-acp authentication boundary
-        if: matrix.shard == 'live'
+        if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
         run: scripts/ci-qualify-codex-acp.sh
+      - name: Cache real Angr package downloads
+        uses: actions/cache@v6
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        with:
+          path: ${{ github.workspace }}/build/pip-download-cache
+          key: angr-pip-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements/angr-qualification.txt', 'requirements/angr-compatibility.txt') }}
       - name: Install real Angr qualification prerequisite
         if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
         run: sudo apt-get install -y --no-install-recommends python3-venv
@@ -294,6 +297,11 @@ jobs:
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
         run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
+      - name: Require third-party ACP initialize qualification
+        if: always() && matrix.shard == 'live'
+        env:
+          GOOSE_INITIALIZE_OUTCOME: ${{ steps.goose-initialize.outcome }}
+        run: test "$GOOSE_INITIALIZE_OUTCOME" = success
       - name: Release root-owned application-bundled Ghidra
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
