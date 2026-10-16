@@ -179,6 +179,37 @@ scripts/validate-archival-docker.sh
 
 That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated rich and stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project. The explicit evidence-only policy retains every raw model entity and its planned ownership while compiling diagnostic inventory sources. It preserves unsupported display text as evidence, keeps implementation acceptance false, and does not claim that the diagnostic executable reproduces the input program's ABI or behavior. The ordinary generated-C declaration and implementation gates remain strict.
 
+### Real Angr proposal qualification
+
+The core partition selects `realAngrQualification` when the workflow, Docker
+production pin, Gradle build, Angr requirement/runner/selector, or exploration
+source/tests change. Pull requests compare against their event base SHA; pushes
+compare the complete update against the event's previous SHA, fetching that
+specific commit if needed. An absent/zero/unavailable base conservatively selects
+qualification. Authored local-Git fixtures in Actions cover multi-commit pushes,
+shallow history, production-pin changes, unrelated updates and missing bases.
+Unrelated changes reuse the deterministic adapter suite without installing Angr;
+selected runs cache package downloads without reusing prior qualification results.
+The shared `angr-compatibility.txt` constrains bitstring to 4.4.0 in both Docker and
+qualification: the unconstrained 5.0 release removed `ConstBitStream` used by this
+Angr version. Docker also checks that the installed Angr imports successfully.
+
+The selected lane requires matching Docker/default and requirements Angr pins
+(currently `9.2.213`) before installing into a workspace virtual environment and
+runs the existing branching argv/stdin fixture once. Its dedicated Gradle task
+requires an absolute executable `ANGR_PYTHON`, disables cached test credit, and gives
+the test JVM a small explicit environment without parent credentials. The ordinary
+optional test reports SKIP when the interpreter is absent. Missing configuration,
+no matching test, a skipped test, or a failed discovery cannot qualify the lane.
+
+`real-angr-qualification` retains the checkout/tree, source digests, pip install
+report and resolved package versions, interpreter/module identities, compiler
+version, exact Gradle command, compiled fixture and C source, candidate bytes,
+search diagnostics and JUnit result. The adapter's 60-second search bound and
+dedicated task's three-minute timeout sit inside an eight-minute Actions step.
+These results concern proposal discovery on the authored fixture; they establish
+neither equivalence nor production execution attestation.
+
 ### Reporting skipped or unrun verification
 
 Record the source commit/ref, exact command and selected lane, required-host flags
