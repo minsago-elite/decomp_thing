@@ -2310,6 +2310,62 @@ class UploadServerTest {
         }
     }
 
+    @Test
+    fun `selected canonical receipt and ordinary links survive a full unselected receipt directory without extra workflows`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++; error("No analyzer expected") },
+            JobReconstructor { _, _ -> executions++; error("No reconstruction expected") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val reports = dataDir.resolve("$id/reports")
+            val project = reports.resolve("source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true)
+            reports.resolve("ordinary-summary.json").writeText("{}")
+            val revisions = project.resolve("reports/repair-revisions")
+            val receipt = Files.list(revisions).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            // Explicit unselected namespace entries, not9,999real agent invocations or receipt proofs.
+            repeat(9_999) { index ->
+                val ordinal = 90_000_000 + index
+                Files.createFile(revisions.resolve("revision_${ordinal}_0123456789abcdef.acp-receipt.json"))
+            }
+            val snapshot = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val context = WebReportContext(reports)
+            val target = "reports/source-tree/reports/repair-revisions/${receipt.fileName}"
+            val listed = listLegacyArtifactSummaries(context, snapshot)
+            assertTrue(listed.any { it.relativePath == target && it.displayName == "Repair evidence" })
+            assertTrue(listed.any { it.relativePath == "reports/ordinary-summary.json" })
+            assertEquals(1, listed.count { "/repair-revisions/" in it.relativePath })
+            val before = recordedProjectBytes(project)
+            repeat(2) {
+                val response = request(server, "GET", "/jobs/$id")
+                val body = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("ACP receipt is complete; repair acceptance was not established." in body, body)
+                assertTrue("/jobs/$id/artifacts/reports/ordinary-summary.json" in body, body)
+                assertFalse("Artifact listing is unavailable" in body || "PRIVATE-" in body || "revision_90000000" in body, body)
+            }
+            assertEquals(0, executions)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+
+            val displacedReceipt = project.resolve("PRIVATE-displaced-receipt.json")
+            Files.move(receipt, displacedReceipt)
+            Files.createSymbolicLink(receipt, displacedReceipt)
+            assertFalse(listLegacyArtifactSummaries(context, snapshot).any { it.relativePath == target })
+            Files.delete(receipt)
+            Files.move(displacedReceipt, receipt)
+            val displacedDirectory = project.resolve("PRIVATE-displaced-revisions")
+            Files.move(revisions, displacedDirectory)
+            Files.createSymbolicLink(revisions, displacedDirectory)
+            val linkedDirectory = listLegacyArtifactSummaries(context, snapshot)
+            assertFalse(linkedDirectory.any { "/repair-revisions/" in it.relativePath })
+            assertTrue(linkedDirectory.any { it.relativePath == "reports/ordinary-summary.json" })
+            assertEquals(0, executions)
+        }
+    }
+
     private class RecordedRestoreFailure : IllegalStateException("authored rollback refusal")
 
     private fun recordedRepairProfile() = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(

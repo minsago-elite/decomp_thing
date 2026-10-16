@@ -47,6 +47,29 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
                 }
                 return FileVisitResult.SKIP_SUBTREE
             }
+            if (directory == sourceReports.resolve("repair-revisions")) {
+                // Canonical receipts have graph-derived names. Do not walk every historical file
+                // merely to discard references outside this selected page. No raw path enters the DTO.
+                if (recordedRepair != null) {
+                    (recordedRepair.attempts.asSequence() + listOfNotNull(recordedRepair.pending).asSequence()).forEach { attempt ->
+                        val identity = attempt.identity
+                        if (identity.rawIdentityWithheld ||
+                            !Regex("revision_[0-9]{8}_[0-9a-f]{16}").matches(identity.value)) return@forEach
+                        val name = "${identity.value}.acp-receipt.json"
+                        val logical = "reports/repair-revisions/$name"
+                        if (recordedRepairArtifactReference(recordedRepair.corpusSha256, logical) !in references) return@forEach
+                        require(++entries <= 10_000) { "report listing exceeds its entry bound" }
+                        val receipt = try {
+                            Files.readAttributes(directory.resolve(name), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                        } catch (_: java.nio.file.NoSuchFileException) { null }
+                        if (receipt?.isRegularFile == true) {
+                            val relative = "source-tree/reports/repair-revisions/$name"
+                            summaries += WebArtifactSummary("${context.artifactPrefix}/$relative", "Repair evidence", receipt.size())
+                        }
+                    }
+                }
+                return FileVisitResult.SKIP_SUBTREE
+            }
             return if (directory == root.resolve("runs") ||
                 directory == sourceReports.resolve("repair-revisions/blobs"))
                 FileVisitResult.SKIP_SUBTREE else FileVisitResult.CONTINUE
