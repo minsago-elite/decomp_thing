@@ -10,9 +10,16 @@ import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 
 /** Qualification runs the bundled Java API worker on independently inspected stripped ELF input. */
 class ReferencedDataBytesRealGhidraTest {
@@ -85,9 +92,11 @@ class ReferencedDataBytesRealGhidraTest {
                 assertEquals(expected.getValue(name), window.segments.joinToString("") { it.hex!! })
             }
         }
-        val planning = GhidraHeadlessProgramModelAnalyzer(
+        val planningWork = root.resolve("planning-analysis")
+        val planningAnalyzer = GhidraHeadlessProgramModelAnalyzer(
             limits = GhidraProgramModelExportLimits(Duration.ofMinutes(2)),
-            recoveryMode = GhidraProgramModelRecoveryMode.PLANNING).analyze(binary, root.resolve("planning-analysis"))
+            recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
+        val planning = planningAnalyzer.analyze(binary, planningWork)
         assertEquals(4, planning.schemaVersion)
         assertEquals(model.globals.associate { it.id to it.byteEvidence }, planning.globals.associate { it.id to it.byteEvidence },
             "planning and full exports must retain identical windows")
@@ -98,6 +107,63 @@ class ReferencedDataBytesRealGhidraTest {
         model.globals.forEach { global ->
             assertTrue(prompt.contains(ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence))))
         }
+        // Reuse real exporter checkpoints for this exact stripped fixture, not authored sidecars.
+        val planningModelPath = planningWork.resolve("reports/program_model.json")
+        val retainedModel = planningModelPath.readBytes()
+        val statePath = planningWork.resolve("reports/program_model.json.export/state.json")
+        val retainedState = statePath.readBytes()
+        val batches = planningWork.resolve("reports/program_model.json.export/planning-batches")
+        val retainedBatches = Files.list(batches).use { paths ->
+            paths.sorted().toList().associateWith { it.readBytes() }
+        }
+        assertTrue(planning.functions.isNotEmpty())
+        assertTrue(retainedBatches.keys.any { it.fileName.toString().endsWith(".checkpoint") })
+        val planningPrompt = GeneratedCModulePrompt.render(request.copy(model = planning)).evidence
+        val retainedInput = binary.readBytes()
+        Files.delete(planningModelPath) // Force final reassembly while retaining every committed batch.
+        val resumed = planningAnalyzer.analyze(binary, planningWork)
+        val resumedBytes = planningModelPath.readBytes()
+        assertEquals(planning, resumed)
+        assertContentEquals(retainedModel, resumedBytes)
+        assertContentEquals(retainedState, statePath.readBytes())
+        retainedBatches.forEach { (path, bytes) -> assertContentEquals(bytes, path.readBytes(), path.toString()) }
+        assertEquals(resumed, ProgramModelJson.readCanonical(resumedBytes))
+        assertEquals(resumed, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(resumedBytes).model)
+        val progress = Json.parseToJsonElement(planningWork.resolve("reports/program_model.json.progress.json").readText()).jsonObject
+        assertEquals("complete", progress.getValue("phase").jsonPrimitive.content)
+        assertEquals(planning.functions.size, progress.getValue("completed").jsonPrimitive.int)
+        assertEquals(planning.functions.size, progress.getValue("reused").jsonPrimitive.int)
+        val resumedPrompt = GeneratedCModulePrompt.render(request.copy(model = resumed)).evidence
+        assertEquals(planningPrompt, resumedPrompt)
+        resumed.globals.forEach { global ->
+            assertTrue(resumedPrompt.contains(ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence))))
+        }
+
+        // A valid same-size byte edit cannot reuse the original checkpoint's fragment commitment.
+        val beforeHex = "\"hex\":\"${expected.getValue("half_value")}\""
+        val afterHex = "\"hex\":\"010000000000e03f\""
+        val globalFragment = retainedBatches.entries.single { (path, bytes) ->
+            path.fileName.toString().endsWith(".globals.fragment") && bytes.decodeToString().contains(beforeHex)
+        }
+        val changedFragment = globalFragment.value.decodeToString().replace(beforeHex, afterHex).toByteArray()
+        assertFalse(globalFragment.value.contentEquals(changedFragment))
+        assertEquals(globalFragment.value.size, changedFragment.size)
+        val changedModel = resumedBytes.decodeToString().replace(beforeHex, afterHex).toByteArray()
+        assertFalse(resumedBytes.contentEquals(changedModel))
+        assertEquals(resumedBytes.size, changedModel.size)
+        assertFalse(ProgramModelJson.readCanonical(changedModel) == resumed,
+            "the edit remains a canonical model payload; only its retained commitment is stale")
+        Files.write(globalFragment.key, changedFragment)
+        assertFailsWith<IllegalArgumentException> { planningAnalyzer.analyze(binary, planningWork) }
+        assertTrue(planningWork.resolve("reports/ghidra_stderr.log").readText()
+            .contains("planning batch checkpoint does not authenticate its fragment"))
+        assertContentEquals(resumedBytes, planningModelPath.readBytes(), "refusal preserves the prior complete model")
+        assertContentEquals(retainedState, statePath.readBytes())
+        retainedBatches.forEach { (path, bytes) ->
+            assertContentEquals(if (path == globalFragment.key) changedFragment else bytes, path.readBytes(), path.toString())
+        }
+        assertContentEquals(retainedInput, binary.readBytes())
+
         val modelPath = root.resolve("analysis/reports/program_model.json")
         val digest = MessageDigest.getInstance("SHA-256").digest(binary.readBytes()).joinToString("") { "%02x".format(it) }
         root.resolve("fixture-evidence.txt").writeText("inputSha256=$digest\n" + addresses.entries.joinToString("\n") { "${it.key}=0x${it.value.toString(16)}:${expected.getValue(it.key)}" } + "\nmodelBytes=${modelPath.readBytes().size}\n")
