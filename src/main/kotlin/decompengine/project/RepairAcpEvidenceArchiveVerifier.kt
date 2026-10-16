@@ -13,8 +13,12 @@ import decompengine.repair.RepairResourceBudget
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
+import decompengine.repair.requireRepairReleaseGraphAdmission
+import decompengine.repair.repairRevisionDirectoryEntryLimit
+import decompengine.repair.requireSingleLegacyRollbackOrigin
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.nio.file.Files
 import java.util.Collections
 import java.util.Base64
 import java.util.TreeMap
@@ -78,6 +82,24 @@ internal class ArchivedRepairReleaseLineage private constructor(
  * and sends every immutable invocation through the independent schema-v2 ACP receipt verifier.
  */
 internal object RepairAcpEvidenceArchiveVerifier {
+    // Count observations before deduplication: a weakly consistent directory iterator may repeat.
+    // The caller owns and closes the stream even when either admission check refuses an entry.
+    internal fun boundedDeclaredSourceEntryNames(entries: Iterable<Path>, maximumEntries: Int): Set<String> {
+        require(maximumEntries > 0)
+        val names = linkedSetOf<String>()
+        var observedEntries = 0
+        for (entry in entries) {
+            require(observedEntries < maximumEntries) {
+                "repair release declared source inventory exceeds its entry bound"
+            }
+            observedEntries++
+            require(names.add(entry.fileName.toString())) {
+                "repair release declared source inventory contains a duplicate entry"
+            }
+        }
+        return names
+    }
+
     fun verifyIfPresent(
         projectDir: Path,
         payloadSha256: Map<String, String>,
@@ -120,10 +142,46 @@ internal object RepairAcpEvidenceArchiveVerifier {
             payloadSizes,
         )
         val graph = parseGraph(graphBytes)
-        require(graphBytes.size.toLong() <= graph.budget.maximumGraphBytes) {
-            "repair release graph exceeds its persisted byte bound"
+        require(graph.nodes.size <= graph.budget.maximumRevisionNodes) {
+            "repair release graph has no bounded revision lineage"
         }
-        require(graph.schemaVersion == 3) {
+        var declaredSourcesScanned = false
+        fun scanDeclaredSources(consume: (String, ByteArray) -> Unit) {
+            check(!declaredSourcesScanned) { "repair release declared source inventory was already consumed" }
+            declaredSourcesScanned = true
+            // Resource inventory only: include irrelevant files and empty directories. The
+            // manifest/stable read checks byte identity, never an external historical origin.
+            val names = Files.newDirectoryStream(projectDir.resolve(REPAIR_STATE_PREFIX.removeSuffix("/"))).use { entries ->
+                boundedDeclaredSourceEntryNames(entries, repairRevisionDirectoryEntryLimit(graph.budget))
+            }
+            val declaredPaths = repairPaths.filter(REPAIR_LEGACY_GRAPH_PATH::matches).sorted()
+            require(names.filter { REPAIR_LEGACY_GRAPH_PATH.matches(REPAIR_STATE_PREFIX + it) }.toSet() ==
+                declaredPaths.map { it.substringAfterLast('/') }.toSet()) {
+                "repair release declared source inventory differs from its payload"
+            }
+            require(declaredPaths.size <= graph.budget.maximumStateDirectoryEntries) {
+                "repair release declared graph candidate count exceeds its entry budget"
+            }
+            var remaining = graph.budget.maximumIndexEvidenceBytes
+            declaredPaths.forEach { path ->
+                val admitted = requireNotNull(payloadSizes[path]) { "declared legacy graph size is missing" }
+                require(admitted in 1..minOf(graph.budget.maximumGraphBytes, remaining, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES)) {
+                    "repair release declared source exceeds its remaining evidence budget"
+                }
+                remaining -= admitted
+                // Exact admitted size closes growth between metadata admission and stable read.
+                val bytes = readPayloadFile(projectDir, path, admitted, payloadSha256, payloadSizes)
+                require(bytes.size.toLong() == admitted)
+                // Preserve existing byte-credit refusal precedence (including its digest diagnostic).
+                consume(path.substringAfterLast('/'), bytes)
+                verifyPreservedLegacyBytes(path, bytes)
+            }
+        }
+        requireRepairReleaseGraphAdmission(graphBytes, graph.budget) { consume -> scanDeclaredSources(consume) }
+        // Combined admission consumes at most one inventory; fallback preserves ordinary inventory checks.
+        // Validate their resource inventory even when byte-credit admission returns early.
+        if (!declaredSourcesScanned) scanDeclaredSources { _, _ -> }
+        require(graph.schemaVersion in 3..4) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
         require(graph.pending == null) {
@@ -143,13 +201,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
             "repair release evidence contains extra or stale state artifacts: ${unknownRepairPaths.sorted()}"
         }
         repairPaths.filter(REPAIR_LEGACY_PATH::matches).forEach { path ->
-            val digest = requireNotNull(REPAIR_LEGACY_PATH.matchEntire(path)).groupValues[1]
-            val bytes = readPayloadFile(projectDir, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
-                payloadSha256, payloadSizes)
-            require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
-            val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
-            require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..2) {
-                "preserved legacy repair evidence has an unsupported schema"
+            // A bounded graph scan already authenticated these same bytes; do not reread bodies.
+            if (!declaredSourcesScanned || !REPAIR_LEGACY_GRAPH_PATH.matches(path)) {
+                val bytes = readPayloadFile(projectDir, path, MAXIMUM_REPAIR_GRAPH_RELEASE_BYTES,
+                    payloadSha256, payloadSizes)
+                verifyPreservedLegacyBytes(path, bytes)
             }
         }
 
@@ -171,6 +227,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
             manifestByPath,
             repairProfile,
         )
+        require(graph.nodes.none { it.status == "rejected" && it.rollbackRecord == null }) {
+            "repair release rejected attempt lacks a finalized rollback record"
+        }
         val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
         verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
         verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes, reconstructionProfile)
@@ -252,7 +311,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
         val root = graph.nodes.first()
         require(root.status == "root" && root.parentId == null && root.ordinal == 0 &&
-            root.repairMetadata == null && !root.recoveredAfterCrash
+            root.repairMetadata == null && !root.recoveredAfterCrash && root.rollbackRecord == null
         ) { "repair release graph root is invalid" }
         val rootPaths = root.changes.map(ReleaseRepairDelta::path)
         require(rootPaths.isNotEmpty() && rootPaths == rootPaths.distinct().sorted() &&
@@ -358,6 +417,27 @@ internal object RepairAcpEvidenceArchiveVerifier {
             require(node.sourceRevisionSha256 == revisionSha256(candidate.values)) {
                 "repair release graph revision digest is invalid: ${node.id}"
             }
+            node.rollbackRecord?.let { rollback ->
+                require(node.status == "rejected" && rollback.attemptId == node.id &&
+                    rollback.runId == node.repairMetadata?.runId &&
+                    rollback.targetRevisionId == derivedHead &&
+                    rollback.expectedSourceRevisionSha256 == revisionSha256(accepted.values)
+                ) { "repair release rollback outcome is cross-paired with its attempt or target: ${node.id}" }
+                if (rollback.legacyPendingStateUnknown && node.changes.isNotEmpty()) {
+                    require(rollback.candidateSourceInstallStarted == null) {
+                        "repair release legacy changed attempt has a fabricated source-install marker: ${node.id}"
+                    }
+                } else if (rollback.legacyPendingStateUnknown) {
+                    require(rollback.candidateSourceInstallStarted == false) {
+                        "repair release legacy unchanged attempt has a fabricated source-install marker: ${node.id}"
+                    }
+                }
+                if (rollback.state == "not_required_verified") {
+                    require(rollback.candidateSourceInstallStarted == false) {
+                        "repair release rollback is marked unnecessary after a source exchange may have started: ${node.id}"
+                    }
+                }
+            }
             val metadata = requireNotNull(node.repairMetadata)
             require(metadata.iterationIndex == previousIteration + 1) {
                 "repair release graph iteration indexes are not contiguous"
@@ -455,6 +535,17 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 acceptedRevision,
             )
         }
+    }
+
+    private fun verifyPreservedLegacyBytes(path: String, bytes: ByteArray): JsonObject {
+        val digest = requireNotNull(REPAIR_LEGACY_PATH.matchEntire(path)).groupValues[1]
+        require(sha256(bytes) == digest) { "preserved legacy repair evidence has changed" }
+        val legacy = strictObject(bytes, GRAPH_JSON_LIMITS, "preserved legacy repair evidence")
+        val maximumSchema = if (REPAIR_LEGACY_GRAPH_PATH.matches(path)) 3 else 2
+        require((legacy["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1) in 1..maximumSchema) {
+            "preserved legacy repair evidence has an unsupported schema"
+        }
+        return legacy
     }
 
     private fun verifyReceipts(
@@ -866,10 +957,17 @@ internal object RepairAcpEvidenceArchiveVerifier {
     private fun parseGraph(bytes: ByteArray): ReleaseRepairGraph {
         val root = strictObject(bytes, GRAPH_JSON_LIMITS, "repair release graph")
         val schema = root.requiredInt("schemaVersion", "repair release graph")
-        require(schema in 1..3) { "unsupported repair release graph schema" }
-        require(schema == 3) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
+        require(schema in 1..4) { "unsupported repair release graph schema" }
+        require(schema in 3..4) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
         root.requireExactKeys(GRAPH_FIELDS, "repair release graph")
         val budget = parseBudget(root.requiredObject("budget", "repair release graph"))
+        val nodes = root.requiredArray("nodes", "repair release graph")
+        if (schema >= 4) {
+            val nullRecordStyles = nodes.map { it.requiredObject("repair release graph node") }
+                .filter { it["rollbackRecord"] == null || it["rollbackRecord"] is JsonNull }
+                .map { "rollbackRecord" in it }.distinct()
+            require(nullRecordStyles.size <= 1) { "repair release graph mixes null rollback node encodings" }
+        }
         return ReleaseRepairGraph(
             schemaVersion = schema,
             budget = budget,
@@ -883,7 +981,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             headId = root.requiredString("headId", "repair release graph"),
             nextOrdinal = root.requiredInt("nextOrdinal", "repair release graph"),
             storedBlobBytes = root.requiredNonNegativeLong("storedBlobBytes", "repair release graph"),
-            nodes = root.requiredArray("nodes", "repair release graph").map { parseNode(it, schema) },
+            nodes = nodes.map { parseNode(it, schema) },
             pending = root.getValue("pending").takeUnless { it is JsonNull },
             provisionalHeadId = root.optionalString("provisionalHeadId", "repair release graph"),
             fullyAcceptedHeadId = root.optionalString("fullyAcceptedHeadId", "repair release graph"),
@@ -894,7 +992,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun parseNode(element: JsonElement, schemaVersion: Int): ReleaseRepairNode {
         val root = element.requiredObject("repair release graph node")
-        root.requireExactKeys(NODE_FIELDS, "repair release graph node")
+        // Only a null schema4 node record may be omitted. Null presence is homogeneous above;
+        // archive whitespace remains independent of the persistent graph's canonical formatting.
+        val fields = if (schemaVersion >= 4 && "rollbackRecord" in root) NODE_FIELDS_V4 else NODE_FIELDS_V3
+        root.requireExactKeys(fields, "repair release graph node")
         return ReleaseRepairNode(
             id = root.requiredString("id", "repair release graph node"),
             parentId = root.optionalString("parentId", "repair release graph node"),
@@ -911,6 +1012,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             recoveredAfterCrash = root.requiredBoolean("recoveredAfterCrash", "repair release graph node"),
             changes = root.requiredArray("changes", "repair release graph node").map(::parseDelta),
             validationProof = root.optionalValidationProof("validationProof", "repair release graph node"),
+            rollbackRecord = if (schemaVersion >= 4) root.optionalRollbackRecord("rollbackRecord") else null,
         ).also { node ->
             require((node.evidenceKind == null) == (node.evidenceSummary == null)) {
                 "repair release graph evidence kind and summary are incomplete: ${node.id}"
@@ -953,6 +1055,33 @@ internal object RepairAcpEvidenceArchiveVerifier {
             afterBytes = root.requiredNonNegativeLong("afterBytes", "repair release graph delta"),
         )
     }
+
+    private fun JsonObject.optionalRollbackRecord(field: String): ReleaseRollbackRecord? =
+        get(field)?.takeUnless { it is JsonNull }?.let { element ->
+            val root = element.requiredObject("repair release rollback record")
+            root.requireExactKeys(ROLLBACK_RECORD_FIELDS, "repair release rollback record")
+            ReleaseRollbackRecord(
+                schemaVersion = root.requiredInt("schemaVersion", "repair release rollback record"),
+                attemptId = root.requiredString("attemptId", "repair release rollback record"),
+                runId = root.optionalString("runId", "repair release rollback record"),
+                targetRevisionId = root.requiredString("targetRevisionId", "repair release rollback record"),
+                expectedSourceRevisionSha256 = root.requiredSha256(
+                    "expectedSourceRevisionSha256", "repair release rollback record",
+                ),
+                state = root.requiredString("state", "repair release rollback record"),
+                failureStage = root.optionalString("failureStage", "repair release rollback record"),
+                failureCode = root.optionalString("failureCode", "repair release rollback record"),
+                observedSourceRevisionSha256 = root.optionalSha256(
+                    "observedSourceRevisionSha256", "repair release rollback record",
+                ),
+                legacyPendingStateUnknown = root.requiredBoolean(
+                    "legacyPendingStateUnknown", "repair release rollback record",
+                ),
+                candidateSourceInstallStarted = root.requiredNullableBoolean(
+                    "candidateSourceInstallStarted", "repair release rollback record",
+                ),
+            )
+        }
 
     private fun parseRegressionInput(element: JsonElement): ReleaseRegressionInput {
         val root = element.requiredObject("repair release regression input")
@@ -1070,9 +1199,64 @@ private data class ReleaseRepairNode(
     val recoveredAfterCrash: Boolean,
     val changes: List<ReleaseRepairDelta>,
     val validationProof: ReleaseValidationProof?,
+    val rollbackRecord: ReleaseRollbackRecord?,
 ) {
     val evidence: ReleaseRepairEvidence?
         get() = evidenceKind?.let { ReleaseRepairEvidence(it, evidenceSummary.orEmpty(), evidenceArtifact) }
+}
+
+private val RELEASE_ROLLBACK_FAILURE_PAIRS = setOf(
+    "source_restore" to "unrecognized_source_state",
+    "source_restore" to "restore_operation_failed",
+    "source_verification" to "target_digest_mismatch",
+    "source_verification" to "restore_operation_failed",
+)
+
+private data class ReleaseRollbackRecord(
+    val schemaVersion: Int,
+    val attemptId: String,
+    val runId: String?,
+    val targetRevisionId: String,
+    val expectedSourceRevisionSha256: String,
+    val state: String,
+    val failureStage: String?,
+    val failureCode: String?,
+    val observedSourceRevisionSha256: String?,
+    val legacyPendingStateUnknown: Boolean,
+    val candidateSourceInstallStarted: Boolean?,
+) {
+    init {
+        require(schemaVersion == 1)
+        require(attemptId.matches(Regex("revision_[A-Za-z0-9_]+")))
+        require(runId == null || runId.matches(Regex("run_[0-9]{8}")))
+        require(targetRevisionId.matches(Regex("(?:root|revision)_[A-Za-z0-9_]+")))
+        require(state in setOf(
+            "restored_verified", "restored_after_failure", "not_required_verified",
+        ))
+        require(failureStage == null || failureStage in setOf("source_restore", "source_verification"))
+        require(failureCode == null || failureCode in setOf(
+            "restore_operation_failed", "unrecognized_source_state", "target_digest_mismatch",
+        ))
+        require((failureStage == null) == (failureCode == null))
+        if (failureStage != null) require((failureStage to requireNotNull(failureCode)) in RELEASE_ROLLBACK_FAILURE_PAIRS) {
+            "repair release rollback failure stage/code pair is invalid"
+        }
+        require(legacyPendingStateUnknown || candidateSourceInstallStarted != null) {
+            "repair release native rollback requires a known source-install marker"
+        }
+        require(observedSourceRevisionSha256 == null || observedSourceRevisionSha256.matches(SHA256))
+        if (state == "restored_after_failure") require(failureCode != null)
+        if (state in setOf("restored_verified", "not_required_verified")) require(failureCode == null)
+        if (state in setOf("restored_verified", "restored_after_failure", "not_required_verified")) {
+            require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
+        }
+        if (state == "not_required_verified") require(candidateSourceInstallStarted == false) {
+            "repair release not-required rollback requires an unstarted source-install marker"
+        }
+        if (state == "restored_verified") require(candidateSourceInstallStarted != false) {
+            "repair release failure-free restored rollback has an unstarted source-install marker"
+        }
+    }
 }
 
 private data class ReleaseRepairDelta(
@@ -1219,6 +1403,8 @@ private data class ReleaseRepairRun(
     val expectedObservationsSha256: String?,
     val originalBinarySha256: String?,
     val lastEvidence: ReleaseRepairEvidence?,
+    val rollbackFailureAttemptId: String?,
+    val rollbackResolution: String?,
 )
 
 private fun JsonObject.optionalSha256(field: String, label: String): String? = optionalString(field, label)?.also {
@@ -1244,8 +1430,18 @@ private fun JsonObject.optionalValidationProof(field: String, label: String): Re
 
 private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
     val root = element.requiredObject("repair release run")
-    root.requireExactKeys(RUN_FIELDS, "repair release run")
-    require(root.requiredInt("schemaVersion", "repair release run") == 1) { "unsupported repair release run schema" }
+    val version = root.requiredInt("schemaVersion", "repair release run")
+    require(version in 1..2) { "unsupported repair release run schema" }
+    root.requireExactKeys(RUN_FIELDS + if (version == 2) RUN_ROLLBACK_FIELDS else emptySet(), "repair release run")
+    val failureAttempt = if (version == 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
+    val resolution = if (version == 2) root.optionalString("rollbackResolution", "repair release run") else null
+    val status = root.requiredString("status", "repair release run")
+    require((status == "rollback_failed") == (failureAttempt != null) &&
+        (failureAttempt == null) == (resolution == null) &&
+        (failureAttempt == null || failureAttempt.matches(Regex("revision_[A-Za-z0-9_]+"))) &&
+        (resolution == null || resolution in setOf("restore_failed_unresolved", "restored_after_failure"))) {
+        "repair release rollback run fields are inconsistent"
+    }
     return ReleaseRepairRun(
         root, root.requiredString("id", "repair release run"),
         root.requiredString("status", "repair release run"),
@@ -1260,11 +1456,13 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
         root.optionalSha256("expectedObservationsSha256", "repair release run"),
         root.optionalSha256("originalBinarySha256", "repair release run"),
         root.optionalEvidence("lastEvidence", "repair release run"),
+        failureAttempt, resolution,
     )
 }
 
 /** Independent run admission; serialized success flags cannot supply missing validation authority. */
 private fun verifyRunContract(graph: ReleaseRepairGraph) {
+    requireSingleLegacyRollbackOrigin(graph.nodes.mapNotNull { it.rollbackRecord?.legacyPendingStateUnknown })
     require(graph.runs.isNotEmpty() && graph.runs.size <= graph.budget.maximumRevisionNodes) {
         "repair release requires bounded durable run evidence"
     }
@@ -1319,6 +1517,26 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
             }
             if (node.status in setOf("accepted", "provisional")) require(node.validationProof != null) {
                 "repair release revision has no validation proof"
+            }
+        }
+        run.rollbackFailureAttemptId?.let { attemptId ->
+            val node = requireNotNull(nodes[attemptId]) { "repair release rollback attempt is missing" }
+            val record = requireNotNull(node.rollbackRecord) { "repair release rollback record is missing" }
+            require(node.status == "rejected" && node.repairMetadata?.runId == run.id &&
+                record.attemptId == attemptId && record.runId == run.id &&
+                run.rollbackResolution == "restored_after_failure" && record.state == run.rollbackResolution &&
+                record.failureStage != null && record.failureCode != null) {
+                "repair release rollback run is cross-paired with its finalized record"
+            }
+        }
+        val failedRecords = attemptsByRun[run.id].orEmpty().mapNotNull { it.rollbackRecord }
+            .filter { it.failureCode != null }
+        if (run.document.requiredInt("schemaVersion", "repair release run") == 1) {
+            // A genuine committed failure upgrades its owning run; legacy bytes cannot hide it.
+            require(failedRecords.isEmpty()) { "schema-1 repair release run owns failure-coded rollback records" }
+        } else {
+            require(failedRecords.all { it.attemptId == run.rollbackFailureAttemptId }) {
+                "repair release rollback record lacks its run failure link"
             }
         }
         val accepted = attemptsByRun[run.id].orEmpty().filter { it.status == "accepted" }
@@ -1506,6 +1724,18 @@ private fun JsonObject.requiredBoolean(field: String, label: String): Boolean {
     return value.booleanOrNull ?: error("$label is missing boolean $field")
 }
 
+private fun JsonObject.requiredNullableBoolean(field: String, label: String): Boolean? {
+    require(field in this) { "$label is missing boolean $field" }
+    return when (val value = getValue(field)) {
+        JsonNull -> null
+        is JsonPrimitive -> {
+            require(!value.isString) { "$label $field must be a JSON boolean or null" }
+            value.booleanOrNull ?: error("$label has invalid boolean $field")
+        }
+        else -> error("$label has invalid boolean $field")
+    }
+}
+
 private fun JsonObject.requiredSha256(field: String, label: String): String =
     requiredString(field, label).also { require(it.matches(SHA256)) { "$label $field is not lowercase SHA-256" } }
 
@@ -1585,9 +1815,15 @@ private val BUDGET_FIELDS = setOf(
     "maximumDiscoveryDepth", "maximumStateDirectoryEntries", "maximumGraphLockWaitMillis", "maximumRevisionNodes",
     "maximumGraphBytes", "maximumStoredBlobBytes",
 )
-private val NODE_FIELDS = setOf(
+private val NODE_FIELDS_V3 = setOf(
     "id", "parentId", "ordinal", "status", "sourceRevisionSha256", "changedModules", "invalidatedModules",
     "evidenceKind", "evidenceArtifact", "evidenceSummary", "repairMetadata", "recoveredAfterCrash", "changes", "validationProof",
+)
+private val NODE_FIELDS_V4 = NODE_FIELDS_V3 + "rollbackRecord"
+private val ROLLBACK_RECORD_FIELDS = setOf(
+    "schemaVersion", "attemptId", "runId", "targetRevisionId", "expectedSourceRevisionSha256", "state",
+    "failureStage", "failureCode", "observedSourceRevisionSha256", "legacyPendingStateUnknown",
+    "candidateSourceInstallStarted",
 )
 private val DELTA_FIELDS = setOf(
     "path", "beforeSha256", "beforeBytes", "afterSha256", "beforeBlobSha256", "afterBlobSha256", "afterBytes",
@@ -1628,7 +1864,10 @@ private val RUN_FIELDS = setOf(
     "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
     "expectedObservationsSha256", "originalBinarySha256", "lastEvidence",
 )
+private val RUN_ROLLBACK_FIELDS = setOf("rollbackFailureAttemptId", "rollbackResolution")
 private val TERMINAL_RUN_STATUSES = setOf(
     "fully_accepted", "compile_valid", "no_changes", "rejected", "iteration_exhausted", "resource_exhausted",
-    "cancelled", "interrupted", "validation_failed",
+    "cancelled", "interrupted", "validation_failed", "rollback_failed",
 )
+
+private val REPAIR_LEGACY_GRAPH_PATH = Regex("reports/repair-revisions/legacy-graph-([0-9a-f]{64})\\.json")

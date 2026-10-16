@@ -66,6 +66,7 @@ internal fun repairRunLabel(status: String?): String = when (status) {
     "no_changes" -> "no-change"
     "iteration_exhausted", "resource_exhausted" -> "limit-exhausted"
     "validation_failed" -> "validation-failed"
+    "rollback_failed" -> "rollback-failed"
     "rejected" -> "rejected"
     "cancelled" -> "cancelled"
     "interrupted" -> "interrupted"
@@ -74,3 +75,109 @@ internal fun repairRunLabel(status: String?): String = when (status) {
 }
 
 internal fun JsonObject.historyText(name: String): String? = (this[name] as? JsonPrimitive)?.contentOrNull
+
+/** Fixed typed facts only; peer diagnostics and exceptions never supply a rollback outcome. */
+internal fun repairRollbackRunLabel(run: RepairRunState): String? = run.rollbackFailureAttemptId?.let {
+    "rollback attempt: ${repairPublicRevisionLabel(it)} (${requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-')})"
+}
+
+/** Legacy run records admit broader identifiers than the public canonical identity vocabulary. */
+internal fun repairPublicRevisionLabel(value: String): String = value.takeIf {
+    it == "root" || it == "baseline" ||
+        it.matches(Regex("(?:root_[0-9a-f]{24}|revision_[0-9]{8}_[0-9a-f]{16})"))
+} ?: "unavailable"
+
+/** Shared fixed labels over captured canonical metadata; receipt verification is separate. */
+internal fun recordedRepairAttemptLabel(attempt: RepairRecordedAttempt): String {
+    if (attempt.kind == RepairRecordedAttemptKind.PENDING) return "pending"
+    val invocation = attempt.invocation
+    when (invocation?.terminal) {
+        RepairRecordedTerminal.NO_CHANGES -> return "no-change"
+        RepairRecordedTerminal.REFUSED -> return "refused"
+        RepairRecordedTerminal.CANCELLED -> return "cancelled"
+        RepairRecordedTerminal.LIMIT_EXHAUSTED -> return "limit-exhausted"
+        RepairRecordedTerminal.PROCESS_CRASHED -> return "process-crashed"
+        else -> Unit
+    }
+    when (attempt.after?.kind) {
+        RepairRecordedEvidenceKind.NO_CHANGE -> return "no-change"
+        RepairRecordedEvidenceKind.REFUSED -> return "refused"
+        RepairRecordedEvidenceKind.CANCELLED -> return "cancelled"
+        RepairRecordedEvidenceKind.LIMIT_EXHAUSTED -> return "limit-exhausted"
+        RepairRecordedEvidenceKind.PROCESS_CRASHED -> return "process-crashed"
+        RepairRecordedEvidenceKind.VALIDATION_FAILED -> return "validation-failed"
+        else -> Unit
+    }
+    return when (attempt.status) {
+        ModuleRevisionStatus.REJECTED -> "rejected"
+        ModuleRevisionStatus.PROVISIONAL -> "provisional"
+        ModuleRevisionStatus.ACCEPTED -> when {
+            attempt.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE && invocation == null -> "accepted"
+            attempt.publicationMode == RepairPublicationMode.ACP_RELEASE &&
+                invocation?.assessment == RepairAgentAssessmentStatus.ACCEPTED &&
+                invocation.terminal == RepairRecordedTerminal.COMPLETED &&
+                invocation.receiptReleaseComplete -> "accepted"
+            else -> "unverified"
+        }
+        else -> "unverified"
+    }
+}
+
+internal fun recordedRepairRollbackLabel(rollback: RepairRecordedRollback?): String = when {
+    rollback == null -> "Unverified; restoration completion or failure is not recorded."
+    rollback.legacyPendingStateUnknown -> "Unverified; the legacy restoration state is unknown."
+    else -> when (rollback.state) {
+        RepairRollbackState.RESTORE_IN_PROGRESS -> "Recorded restoration is in progress."
+        RepairRollbackState.RESTORE_FAILED_UNRESOLVED -> "Recorded restoration failed and remains unresolved."
+        RepairRollbackState.RESTORED_VERIFIED -> "Recorded restoration completed and was verified."
+        RepairRollbackState.RESTORED_AFTER_FAILURE -> "Recorded restoration completed after failure; the earlier failure is retained."
+        RepairRollbackState.NOT_REQUIRED_VERIFIED -> "Recorded restoration was not required; candidate source installation did not begin."
+    }
+}
+
+internal fun recordedRepairKindLabel(kind: RepairRecordedFailureKind): String = when (kind) {
+    RepairRecordedFailureKind.COMPILE -> "Compile repair"
+    RepairRecordedFailureKind.BEHAVIOR -> "Behavior repair"
+    RepairRecordedFailureKind.OTHER -> "Revision attempt"
+}
+
+internal fun recordedRepairSummary(attempt: RepairRecordedAttempt): String =
+    "${recordedRepairKindLabel(attempt.failureKind)} — ${recordedRepairAttemptLabel(attempt)}"
+
+internal fun recordedRepairEvidenceLabel(kind: RepairRecordedEvidenceKind): String = when (kind) {
+    RepairRecordedEvidenceKind.BUILD -> "Build validation"
+    RepairRecordedEvidenceKind.BEHAVIOR -> "Behavior validation"
+    RepairRecordedEvidenceKind.REGRESSION -> "Regression validation"
+    RepairRecordedEvidenceKind.RECOVERY -> "Recovery"
+    RepairRecordedEvidenceKind.VALIDATION -> "Validation"
+    RepairRecordedEvidenceKind.NO_CHANGE -> "No-change"
+    RepairRecordedEvidenceKind.REFUSED -> "Refusal"
+    RepairRecordedEvidenceKind.CANCELLED -> "Cancellation"
+    RepairRecordedEvidenceKind.LIMIT_EXHAUSTED -> "Limit exhaustion"
+    RepairRecordedEvidenceKind.PROCESS_CRASHED -> "Process failure"
+    RepairRecordedEvidenceKind.VALIDATION_FAILED -> "Validation failure"
+    RepairRecordedEvidenceKind.OTHER -> "Repair"
+}
+
+/** The caller supplies an independently obtained content-check result, never an acceptance grant. */
+internal enum class RepairRecordedReceiptCheck { NOT_READ, UNAVAILABLE, CORRUPT, VERIFIED }
+internal fun recordedRepairAssuranceLabel(attempt: RepairRecordedAttempt,
+    receiptCheck: RepairRecordedReceiptCheck = RepairRecordedReceiptCheck.NOT_READ): String {
+    if (attempt.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+        return "Test-only evidence; release completeness is not established."
+    if (attempt.publicationMode != RepairPublicationMode.ACP_RELEASE)
+        return "Evidence assurance is unavailable; release completeness is not recorded."
+    val invocation = attempt.invocation
+    return when (receiptCheck) {
+        RepairRecordedReceiptCheck.NOT_READ -> "ACP receipt content has not been read; release completeness is not established."
+        RepairRecordedReceiptCheck.UNAVAILABLE -> "ACP receipt is unavailable; release completeness is not established."
+        RepairRecordedReceiptCheck.CORRUPT -> "ACP receipt is corrupt; release completeness is not established."
+        RepairRecordedReceiptCheck.VERIFIED -> when {
+            invocation == null || invocation.terminal != RepairRecordedTerminal.COMPLETED || !invocation.receiptReleaseComplete ->
+                "ACP receipt was verified; release completeness is not established."
+            recordedRepairAttemptLabel(attempt) == "accepted" ->
+                "Release-complete ACP receipt was verified; the repair outcome is recorded metadata."
+            else -> "ACP receipt is complete; repair acceptance was not established."
+        }
+    }
+}

@@ -274,6 +274,41 @@ class BoundedProgramModelAcquisitionProcessTest {
     }
 
     @Test
+    fun `cleanup waits for the Java exit observation after the actual process handle is absent`() = fixture { f ->
+        f.fifo()
+        val delayJavaExit = AtomicBoolean(true)
+        val lagObservations = AtomicInteger()
+        val reader = f.reader("fifo", starter = { command, work ->
+            val child = f.start(command, work)
+            ProcessView(child, alive = {
+                if (Thread.currentThread().name == "fixture-model-control" &&
+                    !child.toHandle().isAlive && delayJavaExit.get()) {
+                    lagObservations.incrementAndGet()
+                    true // Explicitly model Java exit notification lagging the real handle.
+                } else child.isAlive
+            })
+        })
+        val call = f.call(reader, 10_000)
+        try {
+            f.assertNativePipeRead()
+            call.thread.interrupt()
+            f.assertChildAbsent()
+            awaitCondition(500, "owned controller did not recheck the delayed Java exit observation") {
+                lagObservations.get() >= 2
+            }
+            assertEquals(1, f.ownership.retainedInvocations(), "unsettled Java exit observation still owns capacity")
+            assertEquals(1, f.control.activeCount, "the actual owned controller must keep waiting")
+        } finally {
+            delayJavaExit.set(false)
+        }
+        call.join()
+        assertTrue(call.failure.get() is InterruptedException, "the extra exit observation preserves cancellation")
+        f.assertChildAbsent()
+        f.assertReleased()
+        f.assertPriorEvidence()
+    }
+
+    @Test
     fun `descendant holding framed output open is killed with its observed parent lineage`() = fixture { f ->
         f.fifo()
         val call = f.call(f.reader("descendant-fifo"), 1_500)
@@ -807,7 +842,8 @@ class BoundedProgramModelAcquisitionProcessTest {
 
     private class ProcessView(private val child: Process, private val stdout: InputStream = child.inputStream,
         private val stdin: OutputStream = child.outputStream,
-        private val handle: ProcessHandle = child.toHandle()) : Process() {
+        private val handle: ProcessHandle = child.toHandle(),
+        private val alive: () -> Boolean = { child.isAlive }) : Process() {
         override fun getOutputStream(): OutputStream = stdin
         override fun getInputStream(): InputStream = stdout
         override fun getErrorStream(): InputStream = child.errorStream
@@ -816,7 +852,7 @@ class BoundedProgramModelAcquisitionProcessTest {
         override fun exitValue(): Int = child.exitValue()
         override fun destroy() { child.destroy() }
         override fun destroyForcibly(): Process { child.destroyForcibly(); return this }
-        override fun isAlive(): Boolean = child.isAlive
+        override fun isAlive(): Boolean = alive()
         override fun toHandle(): ProcessHandle = handle
     }
 }
