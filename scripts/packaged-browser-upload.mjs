@@ -8,8 +8,9 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
     const original = window.fetch; const keys = [];
     const retained = JSON.parse(sessionStorage.getItem('decomp.upload.v1:/nested') ?? 'null');
-    let hidden = retained !== null;
+    let hidden = retained !== null; let malformedMetadata = false;
     Object.defineProperty(window, '__uploadProof', { value: () => ({ requests: keys.length, sameKey: (keys.length === 2 && keys[0] === keys[1]) || (keys.length === 1 && retained?.key === keys[0]), hidden }) });
+    Object.defineProperty(window, '__malformNextJobMetadata', { value: () => { malformedMetadata = true; } });
     window.fetch = async function(input, options) {
       if (options?.method === 'POST' && String(input).endsWith('/api/v1/jobs')) {
         keys.push(new Headers(options.headers).get('Idempotency-Key'));
@@ -17,7 +18,17 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
         if (!hidden && response.status === 201) { hidden = true; await response.text(); throw new TypeError('Isolated test loses publication response'); }
         return response;
       }
-      return original.apply(this, arguments);
+      const response = await original.apply(this, arguments);
+      const prefix = '/nested/api/v1/jobs/';
+      const path = new URL(String(input), location.href).pathname;
+      if (malformedMetadata && (!options?.method || options.method === 'GET') && response.status === 200 &&
+          path.startsWith(prefix) && /^[0-9a-f]{32}$/.test(path.slice(prefix.length))) {
+        malformedMetadata = false;
+        const document = await response.clone().json(); document.data.binary.entryPoint = 0;
+        const headers = new Headers(response.headers); headers.delete('Content-Length');
+        return new Response(JSON.stringify(document), { status: 200, headers });
+      }
+      return response;
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
@@ -26,6 +37,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
     view.setUint32(20, 1, true); view.setUint16(52, 64, true);
+    view.setBigUint64(24, 0xffffffffffffffffn, true);
     const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'inert-browser-fixture.elf'));
     const picker = document.querySelector('#binary-file'); picker.focus(); picker.files = transfer.files;
     picker.dispatchEvent(new Event('change', { bubbles: true }));
@@ -60,8 +72,51 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
+  const retainedFiles = new Map(await Promise.all(files.map(async name => [name, await fs.readFile(join(data, ids[0], name))])));
+  const metadata = await evaluate(tab, `(async () => {
+    const response = await fetch('/nested/api/v1/jobs/${ids[0]}');
+    if (response.status !== 200) throw new Error('Expected the real job metadata response');
+    const { data: job } = await response.json();
+    const section = document.querySelector('section[aria-labelledby="job-title"]');
+    const facts = Object.fromEntries([...section.querySelectorAll('dl.job-facts dt')]
+      .map(dt => [dt.textContent, dt.nextElementSibling.textContent]));
+    const times = [...section.querySelectorAll('time')].map(time => ({ raw: time.dateTime, title: time.title }));
+    return { job, facts, times, filename: section.querySelector('h2').textContent,
+      identityShown: section.innerText.includes('Job identity: ' + job.jobId),
+      digestUnavailable: section.innerText.includes('Input SHA-256') && section.innerText.includes('Not reported by the job API') };
+  })()`);
+  assert.equal(metadata.job.jobId, ids[0]);
+  assert.equal(metadata.filename, 'inert-browser-fixture.elf');
+  assert.equal(metadata.identityShown, true);
+  assert.equal(metadata.job.binary.entryPoint, '0xffffffffffffffff');
+  assert.equal(metadata.facts['Entry address'], '0xffffffffffffffff');
+  assert.deepEqual(['Format', 'Machine', 'Endianness', 'Object type', 'OS ABI'].map(key => metadata.facts[key]),
+    ['ELF64', 'x86-64', 'little', 'EXEC', 'System V']);
+  assert.equal(metadata.facts.Size, '64 bytes');
+  assert.equal(metadata.facts['Workflow state'], 'Uploaded');
+  assert.equal(metadata.facts['Accepted revision'], 'No accepted revision recorded');
+  assert.deepEqual(metadata.times, [{ raw: metadata.job.createdAt, title: metadata.job.createdAt },
+    { raw: metadata.job.updatedAt, title: metadata.job.updatedAt }]);
+  assert.equal(metadata.digestUnavailable, true);
+  await evaluate(tab, `window.__malformNextJobMetadata(); [...document.querySelectorAll('button')].find(button => button.textContent === 'Refresh job').click()`);
+  await ready(tab, `document.querySelector('[role="alert"]')?.textContent.includes('No binary facts can be shown;') && [...document.querySelectorAll('button')].some(button => button.textContent === 'Refresh job' && !button.disabled)`,
+    'malformed metadata is a limitation');
+  assert.equal(await evaluate(tab, `document.body.innerText.includes('Binary metadata') || document.body.innerText.includes('0xffffffffffffffff') || [...document.querySelectorAll('dt')].some(dt => dt.textContent === 'Entry address')`), false);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Refresh job').click()`);
+  await ready(tab, `document.body.innerText.includes('0xffffffffffffffff') && document.body.innerText.includes('inert-browser-fixture.elf')`,
+    'explicit refresh recovers the same real metadata');
+  assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
+  assert.deepEqual((await fs.readdir(join(data, ids[0]))).sort(), files.sort());
+  for (const [name, bytes] of retainedFiles) assert.deepEqual(await fs.readFile(join(data, ids[0], name)), bytes,
+    'Metadata views changed the uploaded job: ' + name);
+  assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
+  assert.deepEqual(tab.exceptions, []);
   return { keyboardSubmit: true, publicationResponseLost: true, reloadRecovery: true, sameKeyRetry: true, jobsCreated: 1,
-    executionStarted: false, jobReload: true, browserStorageEntries: 0, requests: tab.requests };
+    executionStarted: false, jobReload: true, browserStorageEntries: 0,
+    metadata: { realBackend: true, maximumUint64EntryPoint: metadata.facts['Entry address'], supportedElfFacts: true,
+      exactBytes: true, timestampAttributesPreserved: true, sharedStatusLabel: true, inputDigestUnavailable: true,
+      malformedResponseSimulated: true, malformedFactsWithheld: true, explicitRefreshRecovered: true,
+      exactUploadedFilesPreserved: true }, requests: tab.requests };
 }
 
 export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
