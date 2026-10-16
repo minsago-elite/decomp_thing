@@ -163,6 +163,12 @@ class WebJobService(
         attempts?.let { return it }
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
+            try {
+                store.prepareStorageDirectories()
+            } catch (failure: Exception) {
+                throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
+                    "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+            }
             decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
             acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
