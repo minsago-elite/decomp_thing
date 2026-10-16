@@ -5,12 +5,37 @@ cd "$(dirname "$0")/.."
 repair_gradle_home="${GRADLE_USER_HOME:-$PWD/build/gradle-user-home}"
 repair_node_home="${DECOMP_TEST_FRONTEND_NODE_HOME:-}"
 repair_preparation_args=(:testClasses :installDist :stageOracleNativeLibraries --no-daemon)
+repair_verify_installed_io=false
+case "$#" in
+  0) ;;
+  1)
+    if [[ "$1" != "--ci-verify-installed-analysis-io" ]]; then
+      echo "unsupported repair snapshot option" >&2
+      exit 2
+    fi
+    if [[ -z "${GRADLE_USER_HOME:-}" || -n "$repair_node_home" ]]; then
+      echo "combined CI preparation requires explicit GRADLE_USER_HOME and no frontend Node override" >&2
+      exit 2
+    fi
+    repair_verify_installed_io=true
+    repair_preparation_args=(:verifyAnalysisIoHelperInstalled "${repair_preparation_args[@]}")
+    ;;
+  *)
+    echo "unsupported repair snapshot arguments" >&2
+    exit 2
+    ;;
+esac
 if [[ -n "$repair_node_home" ]]; then
   repair_preparation_args+=("-PfrontendNodeHome=$repair_node_home")
 fi
 # Compile and authenticate the real application/helper dependency closure with host credentials.
 # Namespace root maps only this user's UID and cannot lease the host-root-owned compiler inode.
-GRADLE_USER_HOME="$repair_gradle_home" ./gradlew "${repair_preparation_args[@]}"
+if [[ "$repair_verify_installed_io" == true ]]; then
+  GRADLE_USER_HOME="$repair_gradle_home" ./gradlew "${repair_preparation_args[@]}" \
+    | tee build/analysis-native-installed-verification.txt
+else
+  GRADLE_USER_HOME="$repair_gradle_home" ./gradlew "${repair_preparation_args[@]}"
+fi
 
 repair_fixture_directory="$PWD/build"
 mkdir -p "$repair_fixture_directory"

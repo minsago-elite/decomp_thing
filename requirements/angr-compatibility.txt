@@ -1,0 +1,3 @@
+# angr 9.2.213 uses ConstBitStream, removed in bitstring 5.
+# Shared by Docker and the actual discovery qualification.
+bitstring==4.4.0

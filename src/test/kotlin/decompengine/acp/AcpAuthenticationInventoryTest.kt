@@ -67,12 +67,16 @@ class AcpAuthenticationInventoryTest {
     }
 
     @Test fun `replacement-marker matches cannot cause unbounded intermediate preview growth`() {
+        val secrets = listOf("r", "e", "d", "a", "c", "t", "[", "]")
         val inventory = AcpAuthenticationInventory.capture(listOf(
             AuthMethod.AgentAuth(AuthMethodId("id"), "r".repeat(512), "r".repeat(2048)),
-        ), listOf("r", "e", "d", "a", "c", "t", "[", "]"))
+        ), secrets)
         val method = inventory.methods.single()
-        assertEquals("[oversized text omitted]", method.namePreview)
-        assertEquals("[oversized text omitted]", method.descriptionPreview)
+        assertEquals("", method.namePreview)
+        assertEquals("", method.descriptionPreview)
+        for (preview in listOf(method.namePreview, method.descriptionPreview!!)) {
+            secrets.forEach { assertTrue(!preview.contains(it)) }
+        }
     }
 
     @Test fun `unpaired surrogates fail as authentication inventory errors`() {

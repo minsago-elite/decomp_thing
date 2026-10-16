@@ -434,7 +434,7 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
-        if (value.length > 16_384) return "[oversized text omitted]"
+        if (value.length > 16_384) return omission("[oversized text omitted]")
         var safe = value.replace(removableControls, "")
         // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
         // "[redacted]X"); repeat replacement passes until the output is stable and omit
@@ -443,19 +443,26 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
             val next = redact(safe)
             if (next == safe) break
             safe = next
-            if (safe.length > 16_384) return "[oversized text omitted]"
+            if (safe.length > 16_384) return omission("[oversized text omitted]")
         }
         if (safe.length > maximumCharacters) {
             var end = maximumCharacters
             if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
             safe = safe.take(end) + "… [preview truncated]"
         }
-        if (leaks(safe)) return "[unredactable text omitted]"
+        if (leaks(safe)) return omission("[unredactable text omitted]")
         return safe
     }
 
+    // Fixed diagnostic text can itself be a configured secret; no fixed replacement is always safe.
+    private fun omission(marker: String): String = if (leaks(marker)) "" else marker
+
     private fun redact(source: String): String {
         var safe = source
+        // Consume both Basic scheme and credential before the generic field rule can remove
+        // just the scheme and leave an unregistered encoded credential behind. Do this before
+        // configured replacements too: a secret can itself match a header or scheme fragment.
+        safe = safe.replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")
         secrets.forEach { safe = safe.replace(it, "[redacted]") }
         safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
         safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
