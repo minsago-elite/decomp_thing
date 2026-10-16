@@ -250,9 +250,12 @@ class LinuxBubblewrapBoundaryTest {
         var beforeDecode: ((com.sun.jna.Memory) -> Unit)? = null
         var closes = 0
         override fun clear() { observe(); super.clear() }
-        override fun getInt(offset: Long): Int {
-            if (offset == 0L) beforeDecode?.invoke(this)
-            return super.getInt(offset)
+        override fun read(offset: Long, buffer: ByteArray, index: Int, length: Int) {
+            assertEquals(0L, offset)
+            assertEquals(0, index)
+            assertEquals(256, length)
+            beforeDecode?.invoke(this)
+            super.read(offset, buffer, index, length)
         }
         override fun close() { closes++; super.close() }
     }
