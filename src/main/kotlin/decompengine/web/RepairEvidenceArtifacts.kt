@@ -3,6 +3,7 @@ package decompengine.web
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import decompengine.repair.*
 
 private val SAFE_REPAIR_ARTIFACT_SEGMENT = Regex("[A-Za-z0-9._-]{1,160}")
 
@@ -50,4 +51,52 @@ internal fun safeRepairEvidenceTarget(
     return artifacts.asSequence().map { it.relativePath }.firstOrNull { it in candidates &&
         it.startsWith("reports/") && it.split('/').all(SAFE_REPAIR_ARTIFACT_SEGMENT::matches)
     }
+}
+
+internal const val MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS = 100
+internal fun visibleRecordedRepairAttempts(snapshot: RepairHistorySnapshot): List<RepairRecordedAttempt> =
+    snapshot.attempts.takeLast(MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS) + listOfNotNull(snapshot.pending)
+
+internal data class RecordedRepairHistoryView(
+    val recorded: RepairHistoryReadResult,
+    val targets: Map<RepairRecordedArtifactReference, String> = emptyMap(),
+    val evidenceStates: Map<RepairRecordedArtifactReference, RepairEvidenceArtifactState> = emptyMap(),
+    val receiptStates: Map<RepairRecordedIdentity, RepairEvidenceArtifactState> = emptyMap(),
+)
+
+internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =
+    buildSet {
+        visibleRecordedRepairAttempts(snapshot).forEach { attempt ->
+            attempt.before?.artifact?.let(::add)
+            attempt.after?.artifact?.let(::add)
+            attempt.invocation?.artifact?.let(::add)
+        }
+    }
+
+/** Fixed selected report namespace only; canonical H/G/binding/blobs are never evidence reads. */
+internal fun recordedRepairLogicalArtifactPath(target: String, reports: WebReportContext): String? {
+    val prefix = "${reports.artifactPrefix}/"
+    if (!target.startsWith(prefix)) return null
+    val suffix = target.removePrefix(prefix)
+    val relative = if (suffix.startsWith("source-tree/reports/")) suffix.removePrefix("source-tree/reports/") else suffix
+    if (relative.startsWith("source-tree/") || relative.startsWith("runs/")) return null
+    val logical = "reports/$relative"
+    val parts = logical.split('/')
+    if (logical.length > 4096 || parts.size !in 2..32 ||
+        parts.any { it == "." || it == ".." || !SAFE_REPAIR_ARTIFACT_SEGMENT.matches(it) }) return null
+    if (logical == "reports/repair_history.json") return null
+    if (parts[1] == "repair-revisions" &&
+        (parts.size != 3 || !Regex("revision_[0-9]{8}_[0-9a-f]{16}\\.acp-receipt\\.json").matches(parts[2]))) return null
+    return logical
+}
+
+/** No first-match shortcut: duplicate or ambiguous checked targets withhold the link. */
+internal fun recordedRepairEvidenceTarget(reference: RepairRecordedArtifactReference, snapshot: RepairHistorySnapshot,
+    reports: WebReportContext, artifacts: List<WebArtifactSummary>?): String? {
+    val matches = artifacts.orEmpty().filter { artifact ->
+        recordedRepairLogicalArtifactPath(artifact.relativePath, reports)?.let {
+            recordedRepairArtifactReference(snapshot.corpusSha256, it) == reference
+        } == true
+    }
+    return matches.singleOrNull()?.relativePath
 }

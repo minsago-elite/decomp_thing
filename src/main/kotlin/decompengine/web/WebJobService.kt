@@ -308,6 +308,19 @@ class WebJobService(
     internal fun listArtifactSummaries(jobId: String, runId: String? = null): List<WebArtifactSummary> =
         listLegacyArtifactSummaries(reportContext(jobId, runId))
 
+    @Synchronized
+    internal fun listArtifactSummaries(jobId: String, runId: String?,
+        recordedRepair: decompengine.repair.RepairHistorySnapshot?): List<WebArtifactSummary> =
+        listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair)
+
+    /** Authorize the selected durable job/run before the fixed retained canonical read. */
+    @Synchronized
+    internal fun readRecordedRepairHistory(jobId: String, runId: String? = null): decompengine.repair.RepairHistoryReadResult {
+        requireInitializedRead()
+        val selected = reportContext(jobId, runId)
+        return store.readRecordedRepairHistory(jobId, selected.runId)
+    }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {

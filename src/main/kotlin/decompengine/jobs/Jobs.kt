@@ -12,6 +12,8 @@ import decompengine.oracle.core.StrictJsonException
 import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.RepairHistoryReadResult
+import decompengine.repair.readSelectedJobRecordedRepairHistory
 import java.io.IOException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -243,6 +245,13 @@ class JobStore internal constructor(
         }
         return artifact
     }
+
+    /** Fixed selected layout only; service authorization and H reconciliation remain separate. */
+    internal fun readRecordedRepairHistory(
+        jobId: String,
+        runId: String?,
+        cancel: () -> Unit = {},
+    ): RepairHistoryReadResult = readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel)
 
     internal fun readArtifact(
         jobId: String,

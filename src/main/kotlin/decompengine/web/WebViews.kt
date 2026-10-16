@@ -232,7 +232,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
     artifacts: List<WebArtifactSummary>? = null,
     repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null,
-    repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null): WebApplicationDocument {
+    repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null,
+    recordedRepairHistory: RecordedRepairHistoryView? = null): WebApplicationDocument {
     requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
@@ -342,7 +343,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${runCatching { renderRepairHistory(job, reports, repairHistory, artifacts, repairEvidenceArtifactStates, repairReceiptBindingStates) }
+            ${runCatching { recordedRepairHistory?.let { renderRecordedRepairHistory(job, it) }
+                ?: renderRepairHistory(job, reports, repairHistory, artifacts, repairEvidenceArtifactStates, repairReceiptBindingStates) }
                 .getOrElse { renderRepairHistory(job, reports, null, artifacts, null) }}
             ${renderArtifacts(job, artifacts)}
           </main>
@@ -542,6 +544,93 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
     """.trimIndent()
 }
 
+/** Canonical captured metadata only. Arbitrary history/peer text is never a presentation input. */
+internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryView): String {
+    val snapshot = view.recorded.snapshot
+    if (snapshot == null) return if (view.recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED)
+        "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No canonical repair history is recorded.</p></section>"
+    else "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or corrupt.</p></section>"
+    fun evidence(label: String, value: decompengine.repair.RepairRecordedEvidence?): String {
+        if (value == null) return ""
+        val kind = when (value.kind) {
+            decompengine.repair.RepairRecordedEvidenceKind.BUILD -> "Build validation"
+            decompengine.repair.RepairRecordedEvidenceKind.BEHAVIOR -> "Behavior validation"
+            decompengine.repair.RepairRecordedEvidenceKind.REGRESSION -> "Regression validation"
+            decompengine.repair.RepairRecordedEvidenceKind.RECOVERY -> "Recovery"
+            decompengine.repair.RepairRecordedEvidenceKind.VALIDATION -> "Validation"
+            else -> "Repair"
+        }
+        val reference = value.artifact
+        val target = reference?.let(view.targets::get)
+        val detail = when {
+            reference == null -> "Evidence artifact was not retained."
+            view.evidenceStates[reference] == RepairEvidenceArtifactState.CORRUPT -> "Retained evidence is corrupt."
+            target == null || view.evidenceStates[reference] != RepairEvidenceArtifactState.AVAILABLE -> "Retained evidence is unavailable."
+            else -> "<a href=\"${artifactHref(job, target)}\">Open retained evidence</a>"
+        }
+        return "<p class=\"evidence-line\"><b>$label:</b> $kind evidence · $detail</p>"
+    }
+    fun assurance(attempt: decompengine.repair.RepairRecordedAttempt): String {
+        if (attempt.publicationMode == decompengine.repair.RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            return "Test-only evidence; release completeness is not established."
+        if (attempt.publicationMode != decompengine.repair.RepairPublicationMode.ACP_RELEASE)
+            return "Evidence assurance is unavailable; release completeness is not recorded."
+        val invocation = attempt.invocation
+        return when (view.receiptStates[attempt.identity]) {
+            RepairEvidenceArtifactState.CORRUPT -> "ACP receipt is corrupt; release completeness is not established."
+            RepairEvidenceArtifactState.AVAILABLE -> when {
+                invocation == null || invocation.terminal != decompengine.repair.RepairRecordedTerminal.COMPLETED || !invocation.receiptReleaseComplete ->
+                    "ACP receipt was verified; release completeness is not established."
+                decompengine.repair.recordedRepairAttemptLabel(attempt) == "accepted" ->
+                    "Release-complete ACP receipt was verified; the repair outcome is recorded metadata."
+                else -> "ACP receipt is complete; repair acceptance was not established."
+            }
+            else -> "ACP receipt is unavailable; release completeness is not established."
+        }
+    }
+    val visible = visibleRecordedRepairAttempts(snapshot)
+    val items = visible.joinToString("") { attempt ->
+        val index = attempt.iterationIndex ?: attempt.ordinal
+        val kind = when (attempt.failureKind) {
+            decompengine.repair.RepairRecordedFailureKind.COMPILE -> "Compile repair"
+            decompengine.repair.RepairRecordedFailureKind.BEHAVIOR -> "Behavior repair"
+            else -> "Revision attempt"
+        }
+        val outcome = decompengine.repair.recordedRepairAttemptLabel(attempt)
+        """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
+          <div class="history-title"><strong>$kind — ${outcome.escapeHtml()}</strong>${statusPill(outcome)}</div>
+          <p>Attempt revision: <code>${attempt.identity.value.escapeHtml()}</code></p>
+          <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
+          <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
+          ${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
+          <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
+        </div></article>""".trimIndent()
+    }
+    val runs = snapshot.runs.takeLast(100).joinToString("") { run ->
+        val failure = run.rollbackFailureAttempt?.let { attempt ->
+            "<br>Rollback failure attempt: <code>${attempt.value.escapeHtml()}</code> · " +
+                requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-').escapeHtml()
+        }.orEmpty()
+        "<p class=\"repair-run\">Repair run: ${repairRunLabel(run.status.name.lowercase()).escapeHtml()} · " +
+            "${run.attemptedCount}/${run.maximumAttempts} attempts$failure</p>"
+    }
+    val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
+        if (snapshot.pending?.rollback?.failureCode != null) 1 else 0
+    val omittedAttempts = snapshot.attempts.size - minOf(snapshot.attempts.size, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
+    return """<section class="panel history-panel"><h2>Repair History</h2>
+      <p>Recorded repair metadata; current source and execution have not been revalidated.</p>
+      <p>Published revision: <code>${snapshot.publishedHead.value.escapeHtml()}</code><br>
+      Provisional revision: <code>${(snapshot.provisionalHead?.value ?: "none").escapeHtml()}</code><br>
+      Fully accepted revision: <code>${(snapshot.fullyAcceptedHead?.value ?: "none").escapeHtml()}</code></p>
+      <p>History projection: ${view.recorded.projection.status.name.lowercase().replace('_', '-').escapeHtml()}</p>
+      <p>Recorded restoration failure records retained: $failures</p>
+      ${if (snapshot.runs.size > 100) "<p>${snapshot.runs.size - 100} earlier recorded runs omitted.</p>" else ""}
+      $runs${if (omittedAttempts > 0) "<p>$omittedAttempts earlier recorded attempts omitted.</p>" else ""}
+      ${if (visible.isEmpty()) "<p>No repair attempts are recorded.</p>" else "<div class=\"history-list\">$items</div>"}
+      <p class="history-privacy-note">Prompts, source contents, diagnostics, and peer text are withheld. Retained evidence links use the job’s checked artifact access.</p>
+    </section>""".trimIndent()
+}
+
 fun renderRepairHistory(
     job: Job,
     reportContext: WebReportContext? = null,
@@ -562,8 +651,12 @@ fun renderRepairHistory(
         val attempted = run.historyCount("attemptedCount")
         val maximum = run.historyCount("maximumAttempts")
         val accepted = safeRevisionIdentity(run.historyText("acceptedHeadId"))
+        val rollback = decompengine.repair.repairRollbackRunLabel(
+            decompengine.repair.parseRepairRunState(run.toString()))?.let {
+            "<br>${it.escapeHtml()}"
+        }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${label.escapeHtml()} · $attempted/$maximum attempts" +
-            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code></p>"
+            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code>$rollback</p>"
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->
@@ -640,7 +733,8 @@ private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): St
     historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
 
 private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
-    "rejected" -> "Completed; the rejected candidate did not advance the source head."
+    // Rejection alone carries no canonical restoration state.
+    "rejected" -> "Unverified; this history does not record restoration completion or failure."
     "fully_accepted" -> if (repairAttemptLabel(iteration) == "accepted") {
         "Not required; the candidate was accepted."
     } else "Unverified; the accepted disposition lacks a complete canonical assessment."

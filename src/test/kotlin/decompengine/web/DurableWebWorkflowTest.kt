@@ -47,6 +47,44 @@ import kotlin.test.assertTrue
 
 class DurableWebWorkflowTest {
     @Test
+    fun `recorded repair reads authorize the selected job and run before fixed source tree access`() = withRoot { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("history.elf", elfFixture())
+        val other = store.createFromUpload("other.elf", elfFixture())
+        service(store, listOf(adapter { DurableWebWorkflowOutcome.Completed() })).use { service ->
+            service.initializeExistingStorage()
+            val first = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id),
+                DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            val second = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id),
+                DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            val project = service.reportContext(job.id, first.runId).reportsDirectory.resolve("source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-original")
+            val profile = decompengine.repair.DeclarativeRepairIndexProfile("PRIVATE-profile", decompengine.repair.RepairIndexLayout(
+                listOf("code.c"), listOf("code.c"), modules = listOf(decompengine.repair.RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+            decompengine.repair.ModuleRevisionGraph.open(project, profile).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
+                graph.reject(attempt)
+            }
+            val graph = project.resolve("reports/repair-revisions/graph.json").readBytes()
+            assertEquals(decompengine.repair.RepairHistoryReadStatus.RECORDED,
+                service.readRecordedRepairHistory(job.id, first.runId).status)
+            assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+                service.readRecordedRepairHistory(job.id, second.runId).status)
+            assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED,
+                service.readRecordedRepairHistory(job.id).status)
+            assertEquals("RUN_NOT_FOUND", assertFailsWith<WebJobServiceException> {
+                service.readRecordedRepairHistory(other.id, first.runId)
+            }.code)
+            assertEquals("RUN_NOT_FOUND", assertFailsWith<WebJobServiceException> {
+                service.readRecordedRepairHistory(job.id, "run_unowned")
+            }.code)
+            assertContentEquals(graph, project.resolve("reports/repair-revisions/graph.json").readBytes())
+        }
+    }
+
+    @Test
     fun `failed final publication remains explicitly unavailable and is never retried by the worker`() {
         listOf(WorkflowStoreFaultPoint.AFTER_TEMP_FSYNC, WorkflowStoreFaultPoint.AFTER_RENAME).forEach { point -> withRoot { root ->
             val store = JobStore(root)
@@ -599,7 +637,8 @@ class DurableWebWorkflowTest {
     private fun version(service: WebJobService, jobId: String) =
         webJob(service.presentation(jobId)).getValue("version").jsonPrimitive.content
     private fun withRoot(action: (Path) -> Unit) {
-        val root = createTempDirectory("durable-web-")
+        val parent = Path.of("build/test-tmp/durable-web").toAbsolutePath().createDirectories()
+        val root = Files.createTempDirectory(parent, "case-")
         try { action(root) } finally { root.toFile().deleteRecursively() }
     }
     private companion object {

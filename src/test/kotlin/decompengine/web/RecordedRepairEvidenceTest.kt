@@ -1,0 +1,71 @@
+package decompengine.web
+
+import decompengine.repair.*
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.createDirectories
+import kotlin.io.path.writeText
+import kotlin.test.*
+
+class RecordedRepairEvidenceTest {
+    @Test
+    fun `opaque targets require one checked selected namespace match and reject ambiguity`() {
+        val (reports, snapshot) = fixture()
+        val context = WebReportContext(reports, "reports/runs/run_selected", "run_selected")
+        val reference = recordedRepairArtifactReference(snapshot.corpusSha256, "reports/after.json")
+        val target = "reports/runs/run_selected/source-tree/reports/after.json"
+        val entry = WebArtifactSummary(target, "Repair evidence", 2)
+        assertEquals(target, recordedRepairEvidenceTarget(reference, snapshot, context, listOf(entry)))
+        assertNull(recordedRepairEvidenceTarget(reference, snapshot, context, null))
+        assertNull(recordedRepairEvidenceTarget(reference, snapshot, context, listOf(entry, entry)))
+        assertNull(recordedRepairEvidenceTarget(reference, snapshot, context,
+            listOf(entry, entry.copy(relativePath = "reports/runs/run_selected/after.json"))))
+        assertNull(recordedRepairEvidenceTarget(reference, snapshot, context,
+            listOf(entry.copy(relativePath = target.replace("run_selected", "run_other")))))
+        assertNull(recordedRepairEvidenceTarget(recordedRepairArtifactReference("0".repeat(64), "reports/after.json"),
+            snapshot, context, listOf(entry)))
+        for (denied in listOf("reports/repair_history.json", "reports/repair-revisions/graph.json",
+            "reports/repair-revisions/recovery-binding.json", "reports/repair-revisions/blobs/abc",
+            "reports/runs/run_other/after.json", "reports/../after.json", "reports//after.json")) {
+            val ref = recordedRepairArtifactReference(snapshot.corpusSha256, denied)
+            val path = "${context.artifactPrefix}/source-tree/$denied"
+            assertNull(recordedRepairEvidenceTarget(ref, snapshot, context, listOf(entry.copy(relativePath = path))), denied)
+        }
+    }
+
+    @Test
+    fun `checked listing adds only referenced regular source tree reports and never source or canonical payloads`() {
+        val (reports, snapshot) = fixture()
+        val context = WebReportContext(reports)
+        assertTrue(listLegacyArtifactSummaries(context).isEmpty())
+        val listed = listLegacyArtifactSummaries(context, snapshot)
+        assertEquals(listOf("reports/source-tree/reports/after.json"), listed.map { it.relativePath })
+        assertEquals(listOf("Repair evidence"), listed.map { it.displayName })
+        val report = reports.resolve("source-tree/reports/after.json")
+        val foreign = reports.resolve("PRIVATE-foreign.json")
+        foreign.writeText("PRIVATE-unrelated")
+        Files.delete(report)
+        Files.createSymbolicLink(report, foreign)
+        val linked = listLegacyArtifactSummaries(context, snapshot)
+        assertFalse(linked.any { it.relativePath == "reports/source-tree/reports/after.json" })
+        assertNull(recordedRepairEvidenceTarget(requireNotNull(snapshot.attempts.single().after?.artifact), snapshot, context, linked))
+    }
+
+    private fun fixture(): Pair<Path, RepairHistorySnapshot> {
+        val parent = Path.of("build/test-tmp/recorded-repair-artifacts").toAbsolutePath().createDirectories()
+        val reports = Files.createTempDirectory(parent, "case-")
+        val project = reports.resolve("source-tree").createDirectories()
+        project.resolve("code.c").writeText("PRIVATE-source")
+        val profile = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(listOf("code.c"), listOf("code.c"),
+            modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            graph.enableRunContract()
+            val attempt = graph.beginAttempt(listOf("code.c"))
+            graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
+            graph.reject(attempt, RepairEvidence("valid", "PRIVATE-summary", "reports/after.json"))
+        }
+        project.resolve("reports/after.json").writeText("{}")
+        project.resolve("reports/PRIVATE-unreferenced.json").writeText("PRIVATE-unreferenced")
+        return reports to requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+    }
+}

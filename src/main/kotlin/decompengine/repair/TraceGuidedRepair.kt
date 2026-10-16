@@ -1355,7 +1355,9 @@ class TraceGuidedRepairLoop private constructor(
 
     private fun finishFailedRun(graph: ModuleRevisionGraph, failure: Exception) {
         val provider = failure.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull()
+        val canonical = graph.snapshot.runs.lastOrNull()
         val status = when {
+            canonical?.status == RepairRunStatus.ROLLBACK_FAILED -> RepairRunStatus.ROLLBACK_FAILED
             graph.snapshot.pendingAttemptId != null -> RepairRunStatus.VALIDATION_FAILED
             provider?.cleanupVerified == false || provider?.failureKind == RepairValidationFailureKind.CLEANUP_UNVERIFIED -> RepairRunStatus.VALIDATION_FAILED
             provider?.failureKind == RepairValidationFailureKind.RESOURCE_EXHAUSTED -> RepairRunStatus.RESOURCE_EXHAUSTED

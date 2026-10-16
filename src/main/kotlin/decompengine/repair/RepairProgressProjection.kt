@@ -25,7 +25,7 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
     fun state(graph: ModuleRevisionGraph, phase: AgentWorkflowPhase? = null, revisionId: String? = null) = observe {
         val snapshot = graph.snapshot
         val run = snapshot.runs.lastOrNull() ?: return@observe
-        val actualPhase = phase ?: when (run.status) {
+        val actualPhase = if (run.status == RepairRunStatus.ROLLBACK_FAILED) AgentWorkflowPhase.FAILED else phase ?: when (run.status) {
             RepairRunStatus.FULLY_ACCEPTED -> AgentWorkflowPhase.ACCEPTED
             RepairRunStatus.COMPILE_VALID -> AgentWorkflowPhase.COMPILE_VALID
             RepairRunStatus.ITERATION_EXHAUSTED -> AgentWorkflowPhase.EXHAUSTED
@@ -33,7 +33,7 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
             RepairRunStatus.CANCELLED -> AgentWorkflowPhase.CANCELLED
             RepairRunStatus.INTERRUPTED -> AgentWorkflowPhase.INTERRUPTED
             RepairRunStatus.NO_CHANGES, RepairRunStatus.REJECTED -> AgentWorkflowPhase.REJECTED
-            RepairRunStatus.VALIDATION_FAILED -> AgentWorkflowPhase.FAILED
+            RepairRunStatus.VALIDATION_FAILED, RepairRunStatus.ROLLBACK_FAILED -> AgentWorkflowPhase.FAILED
             RepairRunStatus.RUNNING -> AgentWorkflowPhase.UNRESOLVED
         }
         val accepted = if (actualPhase == AgentWorkflowPhase.ACCEPTED) {

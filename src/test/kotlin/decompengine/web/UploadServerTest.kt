@@ -20,6 +20,19 @@ import decompengine.project.ArchivalPackager
 import decompengine.repair.ModuleRevisionAttempt
 import decompengine.repair.ModuleRevisionGraphTest
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
+import decompengine.repair.ModuleRevisionGraph
+import decompengine.repair.DeclarativeRepairIndexProfile
+import decompengine.repair.RepairIndexLayout
+import decompengine.repair.RepairModuleEvidence
+import decompengine.repair.RevisionRepairMetadata
+import decompengine.repair.RepairEvidence
+import decompengine.repair.RepairPublicationMode
+import decompengine.repair.ModuleRevisionFaultInjector
+import decompengine.repair.ModuleRevisionFaultPoint
+import decompengine.repair.readProjectRecordedRepairHistory
+import decompengine.presentRecordedRepairHistory
+import decompengine.project.sha256
+import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -46,6 +59,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class UploadServerTest {
     private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
@@ -604,6 +618,7 @@ class UploadServerTest {
             release.countDown()
             executor.shutdownNow()
         }
+    }
     @Test
     fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
         val root = createTempDirectory("web-listing-admission-")
@@ -626,7 +641,6 @@ class UploadServerTest {
         } finally { server.stop() }
     }
 
-    }
 
     @Test
     fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
@@ -669,13 +683,16 @@ class UploadServerTest {
     fun `completion publication racing the stop signal is repaired to failed`() {
         val root = createTempDirectory("web-completion-fence-")
         val analyzing = java.util.concurrent.CountDownLatch(1)
+        val completed = java.util.concurrent.CountDownLatch(1)
         lateinit var server: UploadServer
         server = UploadServer("127.0.0.1", 0, root,
             analyzer = JobAnalyzer { _, _ ->
                 analyzing.countDown()
                 check(server.requestStopSignalled().await(15, java.util.concurrent.TimeUnit.SECONDS))
             }, executor = Executor { task ->
-                Thread(task, "web-stop-race-worker").apply { isDaemon = true; start() }
+                Thread({
+                    try { task.run() } finally { completed.countDown() }
+                }, "web-stop-race-worker").apply { isDaemon = true; start() }
             })
         server.start()
         try {
@@ -685,12 +702,8 @@ class UploadServerTest {
             server.requestStop()
             // The stop signal is published while the worker is mid-operation; the completion
             // decision observes it and persists failed instead of a completed publication.
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
-            var job = decompengine.jobs.JobStore(root).get(id)
-            while (job.status != "failed" && System.nanoTime() < deadline) {
-                Thread.sleep(20)
-                job = decompengine.jobs.JobStore(root).get(id)
-            }
+            assertTrue(completed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val job = decompengine.jobs.JobStore(root).get(id)
             assertEquals("failed", job.status)
             assertEquals("Server stopped before the operation reported completion", job.statusMessage)
         } finally {
@@ -1229,6 +1242,108 @@ class UploadServerTest {
     }
 
     @Test
+    fun `actual canonical rejected history survives reconnect and empty H without private payload or writes`() {
+        withServer { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            produceRecordedRepairHistory(project)
+            val before = recordedProjectBytes(project)
+            repeat(2) {
+                val response = request(server, "GET", "/jobs/$id")
+                val body = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("Compile repair — rejected" in body, body)
+                assertTrue("Recorded restoration completed and was verified." in body, body)
+                assertTrue("Fully accepted revision: <code>none</code>" in body, body)
+                assertTrue("Test-only evidence; release completeness is not established." in body, body)
+                assertTrue("Before:</b> Build validation evidence · Retained evidence is corrupt." in body, body)
+                assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
+                for (private in listOf("PRIVATE-", "code.c", "<script>private", "bounded failure")) assertFalse(private in body, body)
+            }
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+            assertTrue("repair iteration 1: rejected" in cli, cli)
+            assertTrue("Recorded restoration completed and was verified." in cli, cli)
+
+            project.resolve("reports/repair_history.json").writeText("")
+            val emptyH = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Compile repair — rejected" in emptyH, emptyH)
+            assertTrue("History projection: empty" in emptyH, emptyH)
+            project.resolve("reports/repair-revisions/graph.json").writeText("")
+            val invalidGraph = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Repair history is unavailable or corrupt." in invalidGraph, invalidGraph)
+            assertFalse("Recorded restoration completed" in invalidGraph, invalidGraph)
+        }
+    }
+
+    @Test
+    fun `actual restoration failure stays visible after recovery and HTTP server restart`() {
+        val parent = Path.of("build/test-tmp/recorded-history-http").toAbsolutePath().createDirectories()
+        val dataDir = Files.createTempDirectory(parent, "restart-")
+        val initial = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
+            JobReconstructor { _, _ -> error("read only") }, Executor(Runnable::run))
+        var active: UploadServer? = initial
+        try {
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-original")
+            val profile = recordedRepairProfile()
+            var armed = false
+            ModuleRevisionGraph.openForTesting(project, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback")
+                    throw RecordedRestoreFailure()
+            }).use { graph ->
+                graph.enableRunContract()
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate".toByteArray()))
+                armed = true
+                assertFailsWith<RecordedRestoreFailure> { graph.reject(attempt) }
+            }
+            val failed = request(initial, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Recorded restoration failed and remains unresolved." in failed, failed)
+            assertEquals("PRIVATE-candidate", Files.readString(project.resolve("code.c")))
+            ModuleRevisionGraph.open(project, profile).close() // Authored recovery, never performed by the HTTP reader.
+            assertEquals("PRIVATE-original", Files.readString(project.resolve("code.c")))
+            initial.stop(0)
+            active = null
+            val restarted = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
+                JobReconstructor { _, _ -> error("read only") }, Executor(Runnable::run))
+            active = restarted
+            restarted.start()
+            val recovered = request(restarted, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in recovered, recovered)
+            assertTrue("Recorded restoration failure records retained: 1" in recovered, recovered)
+            assertFalse("PRIVATE-" in recovered, recovered)
+            val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+            assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in cli, cli)
+        } finally { active?.stop(0) }
+    }
+
+    @Test
+    fun `canonical authored receipt is checked separately and later corruption cannot become release acceptance`() {
+        withServer { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true)
+            val valid = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Compile repair — rejected" in valid, valid)
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in valid, valid)
+            assertFalse("Release-complete ACP receipt was verified" in valid, valid)
+            val receipt = Files.list(project.resolve("reports/repair-revisions")).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            receipt.writeText("{\"PRIVATE-corrupt-receipt\":true}")
+            val corrupt = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Compile repair — rejected" in corrupt, corrupt)
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in corrupt, corrupt)
+            assertFalse("PRIVATE-" in corrupt, corrupt)
+        }
+    }
+
+    @Test
     fun `job state page shows status metadata and repair iteration history`() {
         withServer { server, dataDir ->
             val upload = upload(server, "fixture.elf", elfFixture(), acceptJson = true)
@@ -1274,7 +1389,7 @@ class UploadServerTest {
             assertTrue(body.contains("Repair History"))
             assertTrue(body.contains("Attempt 1"))
             assertTrue(body.contains("Behavior repair — rejected"))
-            assertTrue(body.contains("Rollback: Completed; the rejected candidate did not advance the source head."))
+            assertTrue(body.contains("Rollback: Unverified; this history does not record restoration completion or failure."))
             assertTrue(body.contains("Test-only evidence; release completeness is not established."))
             assertTrue(body.contains("<b>Before:</b> Behavior validation evidence · Retained evidence is corrupt."))
             assertTrue(body.contains("<b>After:</b> Behavior validation evidence · <a href=\"/jobs/$jobId/artifacts/reports/after.behavior.json\">Open retained evidence</a>"))
@@ -1949,13 +2064,49 @@ class UploadServerTest {
         }
     }
 
+    private class RecordedRestoreFailure : IllegalStateException("authored rollback refusal")
+
+    private fun recordedRepairProfile() = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(
+        listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+
+    /** Producer and authored receipt data only; no agent process or runtime is qualified here. */
+    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false) {
+        val original = "PRIVATE-original-source".toByteArray()
+        val candidate = "PRIVATE-candidate-source".toByteArray()
+        Files.write(project.resolve("code.c"), original)
+        val reports = project.resolve("reports").createDirectories()
+        reports.resolve("before.json").writeText("not JSON")
+        reports.resolve("after.json").writeText("{\"retained\":true}")
+        ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argv"), "PRIVATE-stdin".toByteArray())))
+            graph.beginRun(2, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            val corpus = graph.retainedRegressionCorpus()
+            val metadata = RevisionRepairMetadata(1, "compile", if (receipt) "bounded failure" else "<script>private PRIVATE-prompt</script>",
+                "PRIVATE-summary", corpus.inputs.map { it.id }, RepairEvidence("compile", "PRIVATE-before", "reports/before.json"),
+                corpus.sha256, publicationMode = if (receipt) RepairPublicationMode.ACP_RELEASE else RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+            graph.installCandidate(attempt, mapOf("code.c" to candidate))
+            if (receipt) graph.persistAndBindAgentInvocation(attempt,
+                ModuleRevisionGraphTest().completeAcpReceiptDocument(project, attempt, "code.c", original, candidate))
+            graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after.json"))
+        }
+    }
+
+    private fun recordedProjectBytes(root: Path): Map<String, ByteArray> = Files.walk(root).use { paths ->
+        paths.filter { Files.isRegularFile(it) }.toList().associate { root.relativize(it).toString() to it.readBytes() }
+    }
+
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
         profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
-        val dataDir = createTempDirectory("web-jobs-")
+        val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
+        val dataDir = Files.createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
         val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
         server.start()
