@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 import runpy
 import tempfile
@@ -647,5 +653,108 @@ class GccOracleSourceFetchTest(unittest.TestCase):
             self.assertEqual(target, reused)
 
 
+def _native_deadline_fixture(case: str, root: Path) -> None:
+    """Child-only authored timer fixture; no network, verifier child or source release."""
+    if case not in {"attempt", "total", "attempt-unwind"}:
+        raise ValueError("unknown native deadline case")
+    root = root.resolve()
+    if not root.is_relative_to((REPOSITORY_ROOT / "build").resolve()):
+        raise ValueError("native deadline fixture must stay in the repository build directory")
+    namespace = fetch_artifact.__globals__
+    namespace["FETCH_TIMEOUT_SECONDS"] = 0.20
+    namespace["FETCH_TOTAL_SECONDS"] = 3.0 if case == "attempt" else 1.20
+    Clock = namespace["FetchClock"]
+    Deadline = namespace["FetchDeadline"]
+    prior_handler = signal.getsignal(signal.SIGALRM)
+    prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    observation = {
+        "case": case,
+        "fetcherSha256": hashlib.sha256((REPOSITORY_ROOT / "scripts/fetch-gcc-oracle-source.py").read_bytes()).hexdigest(),
+        "fixtureSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "pythonVersion": sys.version,
+        "scope": "actual FetchClock signal delivery in one authored child; no network or release proof",
+    }
+    (root / "verified-cache").write_bytes(b"previous verified fixture")
+    (root / "owned-staging").write_bytes(b"partial unverified fixture")
+    (root / "observation.json").write_text(json.dumps(observation) + "\n")
+    started = time.monotonic()
+    if case == "attempt":
+        ticks = 0
+        try:
+            with Clock(time.monotonic) as clock:
+                clock.arm(attempt=True)
+                while True:
+                    ticks += 1
+                    time.sleep(0.01)  # No cooperative clock.check: delivery must interrupt progress.
+        except Deadline as failure:
+            observation.update(phase=failure.phase, elapsedSeconds=time.monotonic() - started,
+                progressTicks=ticks, timerDisarmed=signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0),
+                handlerRestored=signal.getsignal(signal.SIGALRM) == prior_handler,
+                maskRestored=signal.pthread_sigmask(signal.SIG_BLOCK, set()) == prior_mask)
+            (root / "observation.json").write_text(json.dumps(observation) + "\n")
+            return
+    else:
+        with Clock(time.monotonic) as clock:
+            if case == "attempt-unwind":
+                clock.arm(attempt=True)
+            try:
+                while True:
+                    time.sleep(0.01)
+            finally:
+                (root / "python-finally-entered").write_text("entered")
+                if case == "attempt-unwind":
+                    time.sleep(10)  # The original total guard must stay armed during this unwind.
+                (root / "python-finally-completed").write_text("completed")
+    raise AssertionError("native deadline fixture unexpectedly returned")
+
+
+class GccOracleSourceFetchNativeDeadlineTest(unittest.TestCase):
+    def run_fixture(self, case):
+        build = REPOSITORY_ROOT / "build"
+        build.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build, prefix="fetch-native-deadline-") as temporary:
+            root = Path(temporary)
+            command = [sys.executable, "-B", str(Path(__file__).resolve()), "--native-deadline-fixture", case, str(root)]
+            started = time.monotonic()
+            result = subprocess.run(command, cwd=REPOSITORY_ROOT,
+                env={"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(root)},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8, check=False)
+            observation = json.loads((root / "observation.json").read_text())
+            observation.update(returnCode=result.returncode, childWallSeconds=time.monotonic() - started,
+                command=command, finallyEntered=(root / "python-finally-entered").exists(),
+                finallyCompleted=(root / "python-finally-completed").exists())
+            self.assertEqual(b"previous verified fixture", (root / "verified-cache").read_bytes())
+            self.assertEqual(b"partial unverified fixture", (root / "owned-staging").read_bytes())
+            self.assertEqual("", result.stdout, result.stdout)
+            self.assertEqual("", result.stderr, result.stderr)
+            print("native-fetch-deadline " + json.dumps(observation, sort_keys=True), flush=True)
+            return observation
+
+    def test_actual_attempt_alarm_interrupts_progress_and_restores_owned_signal_state(self):
+        observed = self.run_fixture("attempt")
+        self.assertEqual(0, observed["returnCode"], observed)
+        self.assertEqual("attempt", observed["phase"], observed)
+        self.assertGreater(observed["progressTicks"], 1, observed)
+        self.assertLess(observed["elapsedSeconds"], 2, observed)
+        self.assertTrue(observed["timerDisarmed"], observed)
+        self.assertTrue(observed["handlerRestored"], observed)
+        self.assertTrue(observed["maskRestored"], observed)
+
+    def test_actual_total_alarm_exits124_without_python_cleanup_or_cache_overwrite(self):
+        observed = self.run_fixture("total")
+        self.assertEqual(124, observed["returnCode"], observed)
+        self.assertFalse(observed["finallyEntered"], observed)
+        self.assertFalse(observed["finallyCompleted"], observed)
+
+    def test_actual_attempt_unwind_remains_under_the_original_fatal_total_alarm(self):
+        observed = self.run_fixture("attempt-unwind")
+        self.assertEqual(124, observed["returnCode"], observed)
+        self.assertTrue(observed["finallyEntered"], observed)
+        self.assertFalse(observed["finallyCompleted"], observed)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 4 and sys.argv[1] == "--native-deadline-fixture":
+        _native_deadline_fixture(sys.argv[2], Path(sys.argv[3]))
+    else:
+        unittest.main()
