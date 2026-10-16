@@ -157,7 +157,8 @@ class RepairHistoryPresentationTest {
         val html = renderRepairHistory(job, payload = payload, authorizedArtifacts = artifacts,
             artifactStates = mapOf("reports/before.diff.json" to RepairEvidenceArtifactState.CORRUPT))
 
-        assertTrue(html.contains("Rollback: Completed; the rejected candidate did not advance the source head."), html)
+        assertTrue(html.contains("Rollback: Unverified; this history does not record restoration completion or failure."), html)
+        assertFalse(html.contains("Rollback: Completed;"), html)
         assertTrue(html.contains("Test-only evidence; release completeness is not established."), html)
         assertTrue(html.contains("Retained evidence is corrupt."), html)
         assertTrue(html.contains("Evidence artifact is unavailable."), html)

@@ -644,7 +644,8 @@ private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): St
     historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
 
 private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
-    "rejected" -> "Completed; the rejected candidate did not advance the source head."
+    // Rejection alone carries no canonical restoration state.
+    "rejected" -> "Unverified; this history does not record restoration completion or failure."
     "fully_accepted" -> if (repairAttemptLabel(iteration) == "accepted") {
         "Not required; the candidate was accepted."
     } else "Unverified; the accepted disposition lacks a complete canonical assessment."

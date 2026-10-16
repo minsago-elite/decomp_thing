@@ -190,7 +190,7 @@ class ModuleRevisionGraphTest {
             reportContext = decompengine.web.WebReportContext(project.resolve("reports")),
             payload = rejectedProjection,
         )
-        assertTrue(rejectedHtml.contains("Rollback: Completed; the rejected candidate did not advance the source head."), rejectedHtml)
+        assertTrue(rejectedHtml.contains("Rollback: Unverified; this history does not record restoration completion or failure."), rejectedHtml)
         assertTrue(rejectedHtml.contains("ACP receipt is unavailable; release completeness is not established."), rejectedHtml)
         assertFalse(rejectedHtml.contains("bounded failure"), rejectedHtml)
         assertFalse(rejectedHtml.contains("provider invocation failed"), rejectedHtml)

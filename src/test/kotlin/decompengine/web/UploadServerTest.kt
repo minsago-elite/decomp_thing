@@ -1273,7 +1273,7 @@ class UploadServerTest {
             assertTrue(body.contains("Repair History"))
             assertTrue(body.contains("Attempt 1"))
             assertTrue(body.contains("Behavior repair — rejected"))
-            assertTrue(body.contains("Rollback: Completed; the rejected candidate did not advance the source head."))
+            assertTrue(body.contains("Rollback: Unverified; this history does not record restoration completion or failure."))
             assertTrue(body.contains("Test-only evidence; release completeness is not established."))
             assertTrue(body.contains("<b>Before:</b> Behavior validation evidence · Retained evidence is corrupt."))
             assertTrue(body.contains("<b>After:</b> Behavior validation evidence · <a href=\"/jobs/$jobId/artifacts/reports/after.behavior.json\">Open retained evidence</a>"))
