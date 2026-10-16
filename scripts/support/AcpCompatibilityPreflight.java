@@ -78,6 +78,7 @@ public final class AcpCompatibilityPreflight {
             writeEvidence(evidence, document);
             System.out.println(completedResult.getStableDescriptor());
         } catch (Throwable failure) {
+            AcpCompatibilityFailureSummary.report(null, failure);
             var document = baseEvidence(
                 "failed",
                 agentId,
