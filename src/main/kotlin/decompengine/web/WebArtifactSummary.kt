@@ -27,9 +27,17 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
     Files.walkFileTree(root, object : java.nio.file.SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
             require(++entries <= 10_000 && root.relativize(directory).nameCount <= 32) { "report listing exceeds its traversal bound" }
+            if (directory == sourceTree) {
+                // Visit only the fixed report namespace: unrelated source entries are not artifacts.
+                if (recordedRepair != null) {
+                    val reportAttributes = try {
+                        Files.readAttributes(sourceReports, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                    } catch (_: java.nio.file.NoSuchFileException) { null }
+                    if (reportAttributes?.isDirectory == true) Files.walkFileTree(sourceReports, this)
+                }
+                return FileVisitResult.SKIP_SUBTREE
+            }
             return if (directory == root.resolve("runs") ||
-                (directory == sourceTree && recordedRepair == null) ||
-                (directory.parent == sourceTree && directory != sourceReports) ||
                 directory == sourceReports.resolve("repair-revisions/blobs"))
                 FileVisitResult.SKIP_SUBTREE else FileVisitResult.CONTINUE
         }

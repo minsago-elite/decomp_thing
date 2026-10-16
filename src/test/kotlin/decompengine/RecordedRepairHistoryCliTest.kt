@@ -1,6 +1,13 @@
 package decompengine
 
 import decompengine.repair.*
+import decompengine.agent.AgentExecutionEvent
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import java.io.ByteArrayOutputStream
@@ -12,6 +19,27 @@ import kotlin.io.path.writeText
 import kotlin.test.*
 
 class RecordedRepairHistoryCliTest {
+    @Test
+    fun `actual trace guided rejection reconnects through CLI without repeating the agent or validator`() {
+        val project = root()
+        val fixture = produceRejectedRecordedTraceHistory(project)
+        val before = contents(project)
+        val first = captureCli(project)
+        val second = captureCli(project)
+        assertEquals(first, second)
+        assertTrue("repair iteration 1: rejected" in first, first)
+        assertTrue("repair run run_00000001: rejected" in first, first)
+        assertTrue("Recorded restoration was not required; candidate source installation did not begin." in first, first)
+        assertTrue("fully accepted revision: none" in first, first)
+        assertTrue("retained regression cases: 1" in first, first)
+        assertFalse("Recorded restoration completed and was verified." in first, first)
+        assertFalse("PRIVATE" in first || "code.c" in first || "reports/" in first, first)
+        fixture.assertSingleInvocation()
+        val after = contents(project)
+        assertEquals(before.keys, after.keys)
+        before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+    }
+
     @Test
     fun `actual read only CLI reconnects to canonical history without another repair or private text`() {
         for (detached in listOf(false, true)) {
@@ -98,4 +126,74 @@ class RecordedRepairHistoryCliTest {
     private fun contents(root: Path): Map<String, ByteArray> = Files.walk(root).use { paths ->
         paths.filter { Files.isRegularFile(it) }.toList().associate { root.relativize(it).toString() to it.readBytes() }
     }
+}
+
+/** Actual repair producer with authored in-memory agent/validation; no compiler or model is run. */
+internal class RecordedTraceHistoryFixture {
+    val agentInvocations = java.util.concurrent.atomic.AtomicInteger()
+    val validations = java.util.concurrent.atomic.AtomicInteger()
+
+    fun assertSingleInvocation() {
+        assertEquals(1, agentInvocations.get())
+        assertEquals(1, validations.get())
+    }
+}
+
+internal fun produceRejectedRecordedTraceHistory(project: Path): RecordedTraceHistoryFixture {
+    val fixture = RecordedTraceHistoryFixture()
+    val original = "PRIVATE-original-source".toByteArray()
+    val candidate = "PRIVATE-candidate-source".toByteArray()
+    Files.createDirectories(project)
+    Files.write(project.resolve("code.c"), original)
+    val profile = DeclarativeRepairIndexProfile("PRIVATE-trace-profile", RepairIndexLayout(
+        listOf("code.c"), listOf("code.c"),
+        modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+    val harness = object : CapturedRepairAgentHarness {
+        override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionResult =
+            error("recorded trace fixture requires captured staging")
+
+        override fun executeCaptured(request: AgentExecutionRequest, initialFiles: Map<String, ByteArray>,
+            output: BoundedRepairOutput, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionResult {
+            fixture.agentInvocations.incrementAndGet()
+            assertContentEquals(original, initialFiles.getValue("code.c"))
+            val path = AgentWorkspacePath(request.workspaceRoots.single().id, "code.c")
+            output.replace(path.relativePath, candidate)
+            return AgentExecutionResult(AgentStopReason.COMPLETED, "<script>PRIVATE-peer</script>",
+                listOf(AgentFileChange(path, AgentFileChangeKind.MODIFIED, sha256(original), sha256(candidate), candidate.size.toLong())))
+        }
+    }
+    val validation = object : RepairValidationStrategy {
+        override val assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS
+        override fun requireAvailable() = Unit
+        override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure {
+            fixture.validations.incrementAndGet()
+            assertContentEquals(candidate, Files.readAllBytes(projectDir.resolve("code.c")))
+            assertContentEquals(original, Files.readAllBytes(project.resolve("code.c")))
+            return CompileFailure(listOf("authored-validator"), 1, "", "code.c: PRIVATE diagnostic")
+        }
+        override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path = error("compile rejection fixture")
+        override fun evaluateBehavior(id: String, projectDir: Path, originalBinary: Path, rebuiltBinary: Path,
+            inputs: List<ProcessInput>, reportsDir: Path, budget: RepairResourceBudget) = error("compile rejection fixture")
+    }
+    val history = RepairHistory(project.resolve("reports/repair_history.json"))
+    TraceGuidedRepairLoop.forTesting(harness, history, profile, validation, CapturedRepairStagingAuthority).use { loop ->
+        val iteration = loop.repairCompileError(project, CompileFailure(listOf("authored-validator"), 1, "",
+            "code.c: <script>PRIVATE initial diagnostic</script>"),
+            listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argument"), "PRIVATE-stdin".toByteArray())))
+        assertEquals(RepairAttemptDisposition.REJECTED, iteration.disposition)
+    }
+    fixture.assertSingleInvocation()
+    assertContentEquals(original, Files.readAllBytes(project.resolve("code.c")))
+    ModuleRevisionGraph.open(project, profile).use { graph ->
+        assertEquals(null, graph.snapshot.pendingAttemptId)
+        val node = graph.snapshot.nodes.last()
+        assertEquals(ModuleRevisionStatus.REJECTED, node.status)
+        assertEquals(RepairPublicationMode.TEST_ONLY_NON_RELEASE, node.repairMetadata?.publicationMode)
+        assertEquals(RepairRunStatus.REJECTED, graph.snapshot.runs.single().status)
+        assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, node.rollbackRecord?.state)
+        assertEquals(false, node.rollbackRecord?.candidateSourceInstallStarted)
+        assertEquals(node.rollbackRecord?.expectedSourceRevisionSha256, node.rollbackRecord?.observedSourceRevisionSha256)
+        assertEquals(1, graph.retainedRegressionCorpus().inputs.size)
+    }
+    return fixture
 }

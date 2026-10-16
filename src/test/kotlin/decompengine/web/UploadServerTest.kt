@@ -29,10 +29,12 @@ import decompengine.repair.RepairModuleEvidence
 import decompengine.repair.RevisionRepairMetadata
 import decompengine.repair.RepairEvidence
 import decompengine.repair.RepairPublicationMode
+import decompengine.repair.RepairRollbackState
 import decompengine.repair.ModuleRevisionFaultInjector
 import decompengine.repair.ModuleRevisionFaultPoint
 import decompengine.repair.readProjectRecordedRepairHistory
 import decompengine.presentRecordedRepairHistory
+import decompengine.produceRejectedRecordedTraceHistory
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -59,6 +61,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
@@ -1241,6 +1244,50 @@ class UploadServerTest {
             assertTrue(dataDir.resolve(jobId).resolve("input.elf").readBytes().startsWith(byteArrayOf(0x7f, 0x45, 0x4c, 0x46)))
             assertTrue(dataDir.resolve(jobId).resolve("job.json").exists())
         }
+    }
+
+    @Test
+    fun `actual trace guided rejection survives server restart with matching CLI and private safe HTTP history`() {
+        val parent = Path.of("build/test-tmp/recorded-trace-http").toAbsolutePath().createDirectories()
+        val dataDir = Files.createTempDirectory(parent, "case-")
+        fun server() = UploadServer("127.0.0.1", 0, dataDir,
+            JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
+        var active: UploadServer? = server()
+        try {
+            val initial = requireNotNull(active)
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            val fixture = produceRejectedRecordedTraceHistory(project)
+            val before = recordedProjectBytes(project)
+            repeat(2) { index ->
+                if (index == 1) {
+                    requireNotNull(active).stop(0)
+                    active = null
+                    active = server().also { it.start() }
+                }
+                val response = request(requireNotNull(active), "GET", "/jobs/$id")
+                val body = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("Compile repair — rejected" in body, body)
+                assertTrue("Repair run: rejected" in body, body)
+                assertTrue("Recorded restoration was not required; candidate source installation did not begin." in body, body)
+                assertTrue("Fully accepted revision: <code>none</code>" in body, body)
+                assertTrue("Test-only evidence; release completeness is not established." in body, body)
+                assertTrue("Retained regression cases:</b> 1" in body, body)
+                assertFalse("PRIVATE" in body || "code.c" in body || "Recorded restoration completed and was verified." in body, body)
+                val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+                assertTrue("repair iteration 1: rejected" in cli, cli)
+                assertTrue("repair run run_00000001: rejected" in cli, cli)
+                assertTrue("Recorded restoration was not required; candidate source installation did not begin." in cli, cli)
+                assertFalse("PRIVATE" in cli, cli)
+                fixture.assertSingleInvocation()
+            }
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+        } finally { active?.stop(0) }
     }
 
     @Test

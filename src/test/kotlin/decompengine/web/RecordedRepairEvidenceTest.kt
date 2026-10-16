@@ -51,6 +51,40 @@ class RecordedRepairEvidenceTest {
         assertNull(recordedRepairEvidenceTarget(requireNotNull(snapshot.attempts.single().after?.artifact), snapshot, context, linked))
     }
 
+    @Test
+    fun `source entries do not consume the report listing budget but report entries still do`() {
+        val (reports, snapshot) = fixture()
+        val project = reports.resolve("source-tree")
+        repeat(10_001) { index ->
+            if (index % 2 == 0) Files.createFile(project.resolve("extra-$index.c"))
+            else Files.createDirectory(project.resolve("extra-directory-$index"))
+        }
+        val context = WebReportContext(reports)
+        val listed = listLegacyArtifactSummaries(context, snapshot)
+        assertEquals(listOf("reports/source-tree/reports/after.json"), listed.map { it.relativePath })
+        assertEquals("reports/source-tree/reports/after.json", recordedRepairEvidenceTarget(
+            requireNotNull(snapshot.attempts.single().after?.artifact), snapshot, context, listed))
+
+        repeat(10_001) { index -> Files.createFile(project.resolve("reports/overflow-$index.json")) }
+        val failure = assertFailsWith<IllegalArgumentException> { listLegacyArtifactSummaries(context, snapshot) }
+        assertTrue(failure.message.orEmpty().startsWith("report listing exceeds its "), failure.message)
+    }
+
+    @Test
+    fun `fixed source report traversal never follows a linked report root`() {
+        val (reports, snapshot) = fixture()
+        val context = WebReportContext(reports)
+        val project = reports.resolve("source-tree")
+        val sourceReports = project.resolve("reports")
+        val displaced = project.resolve("PRIVATE-displaced-reports")
+        Files.move(sourceReports, displaced)
+        Files.createSymbolicLink(sourceReports, displaced)
+        val listed = listLegacyArtifactSummaries(context, snapshot)
+        assertTrue(listed.isEmpty(), listed.toString())
+        assertNull(recordedRepairEvidenceTarget(requireNotNull(snapshot.attempts.single().after?.artifact),
+            snapshot, context, listed))
+    }
+
     private fun fixture(): Pair<Path, RepairHistorySnapshot> {
         val parent = Path.of("build/test-tmp/recorded-repair-artifacts").toAbsolutePath().createDirectories()
         val reports = Files.createTempDirectory(parent, "case-")
