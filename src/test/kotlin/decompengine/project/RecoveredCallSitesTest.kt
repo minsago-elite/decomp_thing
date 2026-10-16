@@ -153,7 +153,7 @@ class RecoveredCallSitesTest {
     }
 
     @Test
-    fun `real static Ghidra export preserves repeated direct indirect and tail sites beside schema two model`() =
+    fun `real static Ghidra export preserves repeated direct indirect and tail sites beside current model four`() =
         withTemporaryRoot { root ->
             assumeTrue(System.getenv("RUN_REAL_GHIDRA_CALL_SITES") == "true", "real Ghidra call-site fixture is opt-in")
             val source = root.resolve("calls.s")
@@ -183,7 +183,8 @@ class RecoveredCallSitesTest {
             val analyzer = GhidraHeadlessProgramModelAnalyzer(recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
             val first = analyzer.analyzeWithCallSites(binary, root.resolve("first"))
             val second = analyzer.analyzeWithCallSites(binary, root.resolve("second"))
-            assertEquals(2, first.programModel.schemaVersion)
+            assertEquals(4, first.programModel.schemaVersion)
+            assertTrue(first.programModel.globals.all { it.byteEvidence?.schemaVersion == 2 })
             assertEquals(first.programModel.toJson(), second.programModel.toJson())
             assertEquals(first.callSites.artifactSha256, second.callSites.artifactSha256)
             assertEquals(sha256(Files.readAllBytes(binary)), first.callSites.bindings.inputSha256)

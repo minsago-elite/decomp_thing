@@ -10,6 +10,8 @@ import com.sun.jna.Structure
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -1060,6 +1062,9 @@ internal object LinuxFilesystemSyscalls {
         private var closed = false
         // Explicit NUL storage avoids per-call JNA NativeString allocation; allocate before native ownership.
         private val emptyPath = byteArrayOf(0)
+        // Heap-only decoding storage is allocated before the existing single native owner.
+        private val decodedStatistics = ByteArray(STATX_BYTES.toInt())
+        private val decodedView = ByteBuffer.wrap(decodedStatistics).order(ByteOrder.nativeOrder())
         private val statistics = Memory(STATX_BYTES)
 
         @Synchronized
@@ -1089,8 +1094,10 @@ internal object LinuxFilesystemSyscalls {
                     } else query(statistics)
                 }
             }
-            return (if (observed == null) null else decodeDescriptorStatxIdentity(statistics))
-                ?: if (fallback == null) descriptorProcIdentity(fd) else fallback()
+            return (if (observed == null) null else {
+                statistics.read(0, decodedStatistics, 0, decodedStatistics.size)
+                decodeDescriptorStatxIdentity(decodedView)
+            }) ?: if (fallback == null) descriptorProcIdentity(fd) else fallback()
         }
 
         @Synchronized
@@ -1099,6 +1106,25 @@ internal object LinuxFilesystemSyscalls {
             closed = true
             statistics.close()
         }
+    }
+
+    // Same field interpretation as the generic decoder, over the just-copied owned snapshot.
+    private fun decodeDescriptorStatxIdentity(statistics: ByteBuffer): LinuxFileIdentity? {
+        if (statistics.getInt(0) and STATX_IDENTITY_MASK != STATX_IDENTITY_MASK) return null
+        val mountId = statistics.getLong(0x90)
+        if (mountId <= 0) throw IOException("descriptor statx returned an invalid mount identity")
+        val major = statistics.getInt(0x88).toLong() and 0xffffffffL
+        val minor = statistics.getInt(0x8c).toLong() and 0xffffffffL
+        // Linux dev_t encoding, including synthetic Btrfs subvolume st_dev identities.
+        val device = ((major and 0xfffL) shl 8) or ((major and 0xfffff000L) shl 32) or
+            (minor and 0xffL) or ((minor and 0xffffff00L) shl 12)
+        val mode = statistics.getShort(0x1c).toInt() and 0xffff
+        val type = mode and 0xf000
+        return LinuxFileIdentity(
+            LinuxFileKey(device, statistics.getLong(0x20)), mode,
+            statistics.getInt(0x14), statistics.getInt(0x18), statistics.getInt(0x10), mountId,
+            isRegularFile = type == 0x8000, isDirectory = type == 0x4000, isSymbolicLink = type == 0xa000,
+        )
     }
 
     /** One descriptor-relative query preserves live checks without repeated stat/fdinfo reads. */

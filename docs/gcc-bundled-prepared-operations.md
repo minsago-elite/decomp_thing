@@ -22,7 +22,7 @@ dedicated scratch mount meeting the containment prerequisites below.
 ```sh
 mkdir -m 700 results
 llm_bin_patch gcc-engine-plan cc1 /data/gcc-cc1.stripped \
-  --profile /data/compiler-engines.json \
+  --profile /data/compiler-engines-exporter13.json \
   --ghidra-archive /data/ghidra_12.1.3_PUBLIC_20260817.zip \
   --output "$PWD/results" --scratch /mnt/gcc-scratch
 ```

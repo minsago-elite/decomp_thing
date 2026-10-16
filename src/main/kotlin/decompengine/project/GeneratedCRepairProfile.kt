@@ -291,10 +291,12 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             )
         }
 
-        val modelRoot = Json.parseToJsonElement(decodeGeneratedCText(requireNotNull(modelBytes), modelRelative)).jsonObject
+        // Share canonical model admission: bounded chunks/depth, strict duplicate keys and
+        // eager evidence budgets before retaining subsequent globals or oversized payloads.
+        val modelRoot = parseCheckpointedProgramModelJson(requireNotNull(modelBytes).inputStream()) { }
         modelRoot.requireExactKeys(MODEL_ROOT_KEYS, modelRelative)
         val modelSchemaVersion = modelRoot.requiredInt("schemaVersion", modelRelative)
-        require(modelSchemaVersion in 1..2) {
+        require(modelSchemaVersion in 1..4) {
             "unsupported generated C program-model schemaVersion"
         }
         fun modelKeys(legacyKeys: Set<String>): Set<String> = if (modelSchemaVersion == 1) legacyKeys
@@ -303,7 +305,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             val field = if (modelSchemaVersion == 1) "status" else "extractionStatus"
             require(requiredBoundedString(field, modelRelative, evidenceIdentifierLimit(budget)) in
                 setOf("recovered", "partial", "failed", "synthetic")) { "unsupported model extraction status" }
-            if (modelSchemaVersion == 2) {
+            if (modelSchemaVersion >= 2) {
                 require(requiredBoundedString("recoveryAssessment", modelRelative, evidenceIdentifierLimit(budget)) == "unassessed") {
                     "extracted model cannot supply a scored recovery assessment"
                 }
@@ -396,9 +398,14 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             strings.preflightStringElements(modelRelative, textLimit, allowBlank = true)
             function.requireNullableBoundedString("decompiledC", modelRelative, textLimit, allowBlank = true)
         }
+        val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
         globalElements.forEach { element ->
             val global = element.jsonObject
-            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS), "$modelRelative global")
+            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS) +
+                if (modelSchemaVersion >= 3) setOf("byteEvidence") else emptySet(), "$modelRelative global")
+            if (modelSchemaVersion >= 3) {
+                ReferencedDataByteEvidenceJson.parseForModel(global.getValue("byteEvidence"), modelSchemaVersion, byteEvidenceBudget)
+            }
             global.requiredBoundedString("id", modelRelative, identifierLimit)
             global.requiredBoundedString("name", modelRelative, identifierLimit)
             global.requiredBoundedString("address", modelRelative, identifierLimit)

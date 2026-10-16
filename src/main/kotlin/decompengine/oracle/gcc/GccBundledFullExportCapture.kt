@@ -4,6 +4,7 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
+import decompengine.project.ReferencedDataByteEvidenceJson
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -131,7 +132,7 @@ internal object GccBundledFullExportCapture {
         "referencedGlobals", "strings", "decompiledC",
     )
     private val GLOBAL_FIELDS = listOf(
-        "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
+        "id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment",
     )
     private val TYPE_FIELDS = listOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment")
     private val FUNCTION_ARRAY_FIELDS = setOf("calls", "referencedGlobals", "strings")
@@ -252,12 +253,13 @@ internal object GccBundledFullExportCapture {
         val model = capture.read(reports, "program_model.json", minOf(limits.assembledModelBytes, MAXIMUM_MODEL_BYTES))
         requireFullModelHeader(model, expectedInput)
         val modelVerifier = ExactByteVerifier(model, "GCC full program model", MAXIMUM_MODEL_BYTES)
-        modelVerifier.accept("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
+        modelVerifier.accept("{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
 
         val functionNames = captureDirectoryFiles(functions, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
         require(functionNames.size.toLong() == progress.total &&
             functionNames.all { it.matches(Regex("fn_[0-9a-f]{16}\\.json")) }
         ) { "GCC full export function records differ from the completed progress inventory" }
+        val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
         val globalNames = captureDirectoryFiles(globals, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(globalNames.all { it.matches(Regex("global_[0-9a-f]{16}\\.json")) }) {
             "GCC full export global record names are invalid"
@@ -286,7 +288,7 @@ internal object GccBundledFullExportCapture {
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
                         requireFullFunctionRecord(bytes, name.removeSuffix(".json"), globalIds, sourceAddresses, referencedGlobalIds)
-                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"))
+                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"), byteEvidenceBudget)
                     "types" -> requireFullTypeRecord(bytes, name.removeSuffix(".json"), sourceAddresses)
                     "failures" -> requireFullFailureRecord(
                         bytes, name.removeSuffix(".json"), functionStatuses[name.removeSuffix(".json")],
@@ -418,7 +420,7 @@ internal object GccBundledFullExportCapture {
             "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 11L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 13L &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool
@@ -479,7 +481,7 @@ internal object GccBundledFullExportCapture {
     }
 
     private fun requireFullModelHeader(model: ByteArray, inputSha256: String) {
-        val prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
+        val prefix = "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n".toByteArray(StandardCharsets.UTF_8)
         val suffix = "  ]\n}\n".toByteArray(StandardCharsets.UTF_8)
         require(model.size >= prefix.size + suffix.size && model.copyOfRange(0, prefix.size).contentEquals(prefix) &&
             model.copyOfRange(model.size - suffix.size, model.size).contentEquals(suffix)
@@ -556,13 +558,16 @@ internal object GccBundledFullExportCapture {
         return false
     }
 
-    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
+    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String, budget: ReferencedDataByteEvidenceJson.Budget): String {
         val root = requireFullNamedRecord(bytes, expectedId, "recovered", setOf(
-            "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
+            "id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment",
         ))
         val address = string(root, "address")
         require(canonicalAddress(address) && expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')) {
             "GCC full global record identity does not match its canonical 64-bit address"
+        }
+        requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4, budget)) {
+            "eligible bundled exporter global lacks supplied byte evidence schema 2"
         }
         requirePrettyExporterRecord(bytes, root, "global", GLOBAL_FIELDS, nullableField = "initializer")
         return address
@@ -816,6 +821,7 @@ internal object GccBundledFullExportCapture {
                     }
                     verifier.accept("]")
                 }
+                field == "byteEvidence" -> verifier.accept(ReferencedDataByteEvidenceJson.render(requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(value, 4))))
                 field == nullableField && value == JsonNull -> verifier.accept("null")
                 else -> verifier.acceptExporterString(string(root, field))
             }

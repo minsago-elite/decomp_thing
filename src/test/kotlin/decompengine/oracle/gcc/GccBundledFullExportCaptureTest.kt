@@ -92,7 +92,12 @@ class GccBundledFullExportCaptureTest {
         for (mutate in listOf<(Path) -> Unit>(
             { path -> writeState(path, recoveryMode = "planning") },
             { path -> writeState(path, inputSha256 = "f".repeat(64)) },
-            { path -> writeState(path, exporterVersion = 10) },
+            { path -> writeState(path, exporterVersion = 11) },
+            { path -> writeState(path, exporterVersion = 12) },
+            { path ->
+                val model = path.resolve("reports/program_model.json")
+                Files.writeString(model, Files.readString(model).replace("\"schemaVersion\": 4", "\"schemaVersion\": 3"))
+            },
             { path -> writeProgress(path, completed = 0, phase = "decompiling") },
             { path -> Files.writeString(path.resolve("reports/program_model.json.export/planning-batches/stray"), "x") },
         )) fixture { root, run, reports ->
@@ -1045,6 +1050,39 @@ class GccBundledFullExportCaptureTest {
         }
     }
 
+    @Test
+    fun `schema four global requires valid exact byte evidence`() {
+        val valid = globalRecord("global_0000000000400100", JsonPrimitive("0x400100"))
+        for (invalid in listOf(
+            valid.replace("\"hex\":\"00\"", "\"hex\":\"0A\""),
+            valid.replace("\"requestedLength\":1", "\"requestedLength\":2"),
+            valid.replace("\"widthBasis\":\"pcode_load\"", "\"widthBasis\":\"unknown_width\""),
+            valid.replace("\"availability\":\"available\"", "\"availability\":\"unknown\""),
+        )) fixture { root, run, reports ->
+            installSidecar(root, "global", invalid)
+            assertFailsWith<IllegalArgumentException> { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+        }
+    }
+
+    @Test
+    fun `bundled full capture rejects null and historical byte evidence but preserves collection omissions`() {
+        val id = "global_0000000000400100"
+        for (invalid in listOf(JsonNull, JsonObject(byteEvidenceFixture().jsonObject + ("schemaVersion" to JsonPrimitive(1))))) {
+            fixture { root, run, reports ->
+                installSidecar(root, "global", globalRecord(id, JsonPrimitive("0x400100"), byteEvidence = invalid))
+                assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+            }
+        }
+        for (reason in listOf("model_window_limit", "model_requested_byte_limit", "reference_work_limit")) fixture { root, run, reports ->
+            val evidence = kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"schemaVersion":2,"windows":[],"omissionReason":null,"collectionOmissions":["$reason"]}""",
+            )
+            installSidecar(root, "global", globalRecord(id, JsonPrimitive("0x400100"), byteEvidence = evidence))
+            val captured = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertTrue(captured.programModel.decodeToString().contains("\"collectionOmissions\":[\"$reason\"]"))
+        }
+    }
+
     private fun fixture(action: (Path, LinuxDescriptor, decompengine.acp.LinuxFileIdentity) -> Unit) {
         val temporaryRoot = Files.createDirectories(Path.of("build", "gcc-full-export-capture-tests"))
         val root = Files.createTempDirectory(temporaryRoot, "gcc-full-export-capture-").toRealPath()
@@ -1092,7 +1130,7 @@ class GccBundledFullExportCaptureTest {
         root: Path,
         recoveryMode: String = "full",
         inputSha256: String = inputSha(),
-        exporterVersion: Int = 11,
+        exporterVersion: Int = 13,
         language: String = "x86:LE:64:default",
         compilerSpec: String = "gcc",
     ) {
@@ -1163,10 +1201,15 @@ class GccBundledFullExportCaptureTest {
         name: JsonElement = JsonPrimitive("g"),
         type: JsonElement = JsonPrimitive("int"),
         initializer: JsonElement = JsonNull,
+        byteEvidence: JsonElement = byteEvidenceFixture(),
     ) = prettyRecord(
         "id" to JsonPrimitive(id), "name" to name, "address" to address, "type" to type,
-        "initializer" to initializer, "extractionStatus" to JsonPrimitive(status),
+        "initializer" to initializer, "byteEvidence" to byteEvidence, "extractionStatus" to JsonPrimitive(status),
         "recoveryAssessment" to JsonPrimitive("unassessed"),
+    )
+
+    private fun byteEvidenceFixture() = kotlinx.serialization.json.Json.parseToJsonElement(
+        """{"schemaVersion":2,"windows":[{"address":"0x400100","requestedLength":1,"origin":{"instructionAddress":"0x400010","referenceAddress":"0x400100","operandIndex":0,"widthBasis":"pcode_load"},"availability":"available","segments":[{"offset":0,"length":1,"availability":"available","hex":"00","reason":null}]}],"omissionReason":null,"collectionOmissions":[]}""",
     )
 
     private fun typeId(path: String = "/scalar") = "type_" + OracleArtifacts.sha256(path.toByteArray())
@@ -1248,7 +1291,7 @@ class GccBundledFullExportCaptureTest {
     }
 
     private fun modelText(record: String, global: String? = null, type: String? = null) =
-        "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"${inputSha()}\",\n  \"functions\": [\n" +
+        "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"${inputSha()}\",\n  \"functions\": [\n" +
             "$record\n  ],\n  \"globals\": [\n${global?.let { "$it\n" } ?: ""}  ],\n" +
             "  \"types\": [\n${type?.let { "$it\n" } ?: ""}  ]\n}\n"
 }

@@ -156,6 +156,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode session --no-sandbox
+      - name: Exercise exact packaged binary metadata and malformed-response recovery
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -391,6 +397,8 @@ jobs:
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
+            --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
+            --tests decompengine.project.GhidraReferencedBytesExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
             --tests decompengine.project.NativeCallCollectorRealTest \
             --tests decompengine.project.NativeCallObservationsV1Test \

@@ -77,10 +77,19 @@ import pathlib
 import subprocess
 import sys
 
+from oracle.referenced_data_bytes import decode_program_model_bytes, validate_evidence
+
 root = pathlib.Path(sys.argv[1])
 for name in ("symbols-a", "stripped-a"):
-    model = json.loads((root / name / "analysis/reports/program_model.json").read_text())
-    assert model["schemaVersion"] == 2
+    model_bytes = (root / name / "analysis/reports/program_model.json").read_bytes()
+    model = decode_program_model_bytes(model_bytes)
+    assert type(model["schemaVersion"]) is int and model["schemaVersion"] == 4
+    byte_budget = [0, 0]
+    for item in model["globals"]:
+        # This is an active bundled exporter capture, whose emitted globals are
+        # eligible references; generic model4 null is not a producer cutoff proof.
+        assert item["byteEvidence"] is not None
+        validate_evidence(item["byteEvidence"], byte_budget, schema_version=2)
     for kind in ("functions", "globals", "types"):
         assert all(item["recoveryAssessment"] == "unassessed" for item in model[kind])
         assert all(item["extractionStatus"] in ("recovered", "partial", "failed", "synthetic") for item in model[kind])
