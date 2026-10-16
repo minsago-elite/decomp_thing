@@ -6,6 +6,7 @@ repair_gradle_home="${GRADLE_USER_HOME:-$PWD/build/gradle-user-home}"
 repair_node_home="${DECOMP_TEST_FRONTEND_NODE_HOME:-}"
 repair_preparation_args=(:testClasses :installDist :stageOracleNativeLibraries --no-daemon)
 repair_verify_installed_io=false
+repair_test_shard=""
 case "$#" in
   0) ;;
   1)
@@ -25,6 +26,13 @@ case "$#" in
     exit 2
     ;;
 esac
+if [[ "$repair_verify_installed_io" == true ]]; then
+  case "${DECOMP_CI_TEST_SHARD:-}" in
+    ""|core) ;; # Preserve the existing combined invocation for legacy callers.
+    core-main) repair_test_shard=core-main ;;
+    *) echo "unsupported repair snapshot CI partition" >&2; exit 2 ;;
+  esac
+fi
 if [[ -n "$repair_node_home" ]]; then
   repair_preparation_args+=("-PfrontendNodeHome=$repair_node_home")
 fi
@@ -51,6 +59,7 @@ unshare -Ur -m bash -c '
   repair_output_mount="$2"
   repair_gradle_home="$3"
   repair_node_home="$4"
+  repair_test_shard="$5"
   cleanup_mounts() {
     repair_status=$?
     umount "$repair_output_mount" || repair_status=1
@@ -69,8 +78,11 @@ unshare -Ur -m bash -c '
   if [[ -n "$repair_node_home" ]]; then
     repair_gradle_args+=("-PfrontendNodeHome=$repair_node_home")
   fi
+  if [[ -n "$repair_test_shard" ]]; then
+    repair_gradle_args+=("-PciTestShard=$repair_test_shard")
+  fi
   DECOMP_TEST_REPAIR_SOURCE_TMPFS="$repair_source_mount" \
     DECOMP_TEST_REPAIR_OUTPUT_TMPFS="$repair_output_mount" \
     GRADLE_USER_HOME="$repair_gradle_home" \
     ./gradlew "${repair_gradle_args[@]}"
-' bash "$repair_source_mount" "$repair_output_mount" "$repair_gradle_home" "$repair_node_home"
+' bash "$repair_source_mount" "$repair_output_mount" "$repair_gradle_home" "$repair_node_home" "$repair_test_shard"

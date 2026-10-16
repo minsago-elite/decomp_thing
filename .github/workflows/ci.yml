@@ -141,6 +141,9 @@ jobs:
           node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify JVM web contracts and distribution contents
+        env:
+          DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
+          DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
           ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
@@ -162,6 +165,18 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Preserve focused dashboard rows during actual background updates
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode live --no-sandbox
+      - name: Verify bounded dashboard paging with ten thousand persisted jobs
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -191,7 +206,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, live]
+        include:
+          - shard: core
+            test-shard: core-main
+          - shard: oracle
+            test-shard: core-oracle
+          - shard: live
+            test-shard: live
     steps:
       - uses: actions/checkout@v7
         with:
@@ -233,6 +254,9 @@ jobs:
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
+      - name: Check CI partition routing and report ownership controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-ci-partitions.py
       - name: Verify real Angr qualification selection and pin controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-angr-qualification-selection.py
@@ -294,7 +318,7 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
-          DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
       - name: Retain Kotlin partition reports
         run: |
@@ -302,6 +326,8 @@ jobs:
           mv build/reports/tests/test build/reports/tests/full-suite
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
+        env:
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
       - name: Require third-party ACP initialize qualification
         if: always() && matrix.shard == 'live'
@@ -363,13 +389,35 @@ jobs:
 
   kotlin:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     needs: kotlin-suite
     if: ${{ !cancelled() }}
     steps:
-      - name: Require both Kotlin test partitions
+      - name: Require all Kotlin test partitions
         env:
           SHARD_RESULT: ${{ needs.kotlin-suite.result }}
         run: test "$SHARD_RESULT" = success
+      - uses: actions/checkout@v7
+      - name: Download only standard Kotlin test reports in separate artifact directories
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: kotlin-*-test-reports
+          merge-multiple: false
+          path: build/ci-partition-reports
+          digest-mismatch: error
+      - name: Require report ownership and reject cross-partition duplicate tests
+        run: |
+          python3 scripts/test-ci-partitions.py --check-reports build/ci-partition-reports \
+            --output build/ci-partition-inventory.json
+      - name: Retain partition inventory result
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kotlin-partition-inventory
+          if-no-files-found: warn
+          path: build/ci-partition-inventory.json
 
   bundled-ghidra:
     runs-on: ubuntu-24.04

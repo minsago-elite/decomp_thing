@@ -1,5 +1,5 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
@@ -23,7 +23,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(null);
+  const [livePaused, setLivePaused] = useState(false);
+  const [liveDeferred, setLiveDeferred] = useState(false);
   const form = useRef<HTMLFormElement>(null);
+  const list = useRef<HTMLUListElement>(null);
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const errorNotice = useRef<HTMLParagraphElement>(null);
@@ -40,6 +43,21 @@ export function Dashboard({ basePath }: { basePath: string }) {
   // Only one extra bounded page is retained; continuation pages stay server-backed.
   const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
   const cursor = cursors[pageIndex] ?? null;
+  const failRead = useCallback((failure: unknown) => {
+    setPhase('error');
+    if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
+      firstPage.current = null;
+      setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
+    } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
+      setError(withApiFailureReference('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.', failure));
+    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
+      setError(withApiFailureReference('Another job listing is in progress. Wait a moment, then refresh jobs to retry.', failure));
+    } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
+      setError(withApiFailureReference('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.', failure));
+    } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
+      setError(withApiFailureReference('This page snapshot expired. Refresh jobs to start a new snapshot.', failure));
+    } else setError(withApiFailureReference('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.', failure));
+  }, []);
   useEffect(() => {
     const restore = () => {
       const restored = currentFilters(); setSelection(restored); setDraft(restored.filters);
@@ -69,22 +87,65 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
-      setPhase('error');
-      if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
-        firstPage.current = null;
-        setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
-      } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
-        setError(withApiFailureReference('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.', failure));
-      } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
-        setError(withApiFailureReference('Another job listing is in progress. Wait a moment, then refresh jobs to retry.', failure));
-      } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
-        setError(withApiFailureReference('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.', failure));
-      } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-        setError(withApiFailureReference('This page snapshot expired. Refresh jobs to start a new snapshot.', failure));
-      } else setError(withApiFailureReference('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.', failure));
+      failRead(failure);
     });
     return () => { controller.abort(); };
-  }, [selection, cursor, pageIndex, refresh, client]);
+  }, [selection, cursor, pageIndex, refresh, client, failRead]);
+  useEffect(() => { setLiveDeferred(false); }, [selection, cursor, pageIndex, refresh, client]);
+  useEffect(() => {
+    // Continuations retain their immutable server snapshot. Only the visible first page
+    // receives fresh bounded snapshots, with one read at a time and no error retry.
+    if (phase !== 'ready' || !selection.valid || pageIndex !== 0 || cursor || !data || livePaused) return;
+    const snapshot = data;
+    let disposed = false; let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let request: AbortController | null = null;
+    const params = new URLSearchParams(filterSearch(selection.filters));
+    params.set('limit', selection.filters.limit);
+    function schedule() {
+      if (!disposed && !stopped && timer === undefined && !request && document.visibilityState === 'visible') {
+        timer = setTimeout(() => { void read(); }, 30_000);
+      }
+    }
+    async function read() {
+      timer = undefined;
+      if (disposed || stopped || request || document.visibilityState !== 'visible') return;
+      const controller = new AbortController(); request = controller;
+      try {
+        const response = await client.get('jobs', `/jobs?${params}`, { signal: controller.signal });
+        if (disposed || controller.signal.aborted) return;
+        const sameOrder = snapshot.items.length === response.data.items.length &&
+          snapshot.items.every((job, index) => job.jobId === response.data.items[index]?.jobId);
+        if (!sameOrder && list.current?.contains(document.activeElement)) {
+          // Keep the complete old page and its cursor together, rather than mixing
+          // new row facts with a different server snapshot or retaining a queue.
+          setLiveDeferred(true);
+          return;
+        }
+        firstPage.current = { selection, refresh, client, data: response.data };
+        setLiveDeferred(false); setData(response.data);
+      } catch (failure: unknown) {
+        if (!disposed && !controller.signal.aborted) { stopped = true; failRead(failure); }
+      } finally {
+        if (request === controller) request = null;
+        schedule();
+      }
+    }
+    function visibility() {
+      if (document.visibilityState !== 'visible') {
+        if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+        request?.abort();
+      } else schedule();
+    }
+    document.addEventListener('visibilitychange', visibility);
+    schedule();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      request?.abort();
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [phase, selection, cursor, pageIndex, refresh, client, data, livePaused, failRead]);
 
   function apply(filters: JobFilters) {
     const search = filterSearch(filters);
@@ -134,13 +195,20 @@ export function Dashboard({ basePath }: { basePath: string }) {
     {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
     {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>
+      <button type="button" aria-pressed={livePaused} disabled={phase !== 'ready' || pageIndex !== 0}
+        onClick={() => setLivePaused(value => !value)}>{livePaused ? 'Resume live updates' : 'Pause live updates'}</button>
       <p>{selection.filters.sort === 'oldest' ? 'Oldest' : 'Newest'} jobs first. Completion does not establish validated reconstruction.</p></div>
+    <p>{livePaused ? 'Live updates are paused. Refresh jobs to read the current list.'
+      : phase !== 'ready' ? 'Live updates pause until the job library is available.'
+      : pageIndex === 0 ? 'The visible first page checks for updates. Row order stays fixed while a job link is focused.'
+      : 'Live updates pause on later pages. Refresh jobs to return to the current first page.'}</p>
+    {phase === 'ready' && liveDeferred && <p role="status">New or changed jobs are available. The displayed rows are an earlier snapshot. Refresh jobs to update this list.</p>}
     <h3 ref={results} tabIndex={-1}>Job results</h3>
     <p role="status">{phase === 'loading' && selection.valid
       ? loadingStatus
       : phase === 'ready' && data ? `${data.items.length} jobs on this page. No total count is available.` : ''}</p>
     {phase === 'ready' && retainedEmpty && <p>{filtered ? 'No jobs match these filters.' : 'No uploaded jobs yet.'}</p>}
-    {data && <ul class="job-list" aria-label="Uploaded jobs">
+    {data && <ul ref={list} class="job-list" aria-label="Uploaded jobs">
       {data.items.map(job => <li key={job.jobId}>
         <h4><a href={jobPath(basePath, job.jobId)}>{job.displayFilename}</a></h4>
         <JobSummary job={job} />

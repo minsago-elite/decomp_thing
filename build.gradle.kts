@@ -1659,17 +1659,33 @@ tasks.test {
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
         null -> useJUnitPlatform()
-        "core" -> useJUnitPlatform { excludeTags("ci-live") }
+        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    // A package and its complement partition future classes without a hand-maintained inventory.
+    when (shard) {
+        "core-main" -> filter {
+            includeTestsMatching("*")
+            excludeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        "core-oracle" -> filter {
+            includeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        else -> Unit
     }
     if (isolateV3BoundaryTests.get() && shard != "live") {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
     if (shard != "live") {
-        dependsOn(snapshotCapsuleAuditDataTest)
         // Its production RSS monitor observes process-wide history, including earlier tests.
         filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
+    }
+    if (shard == null || shard == "core" || shard == "core-oracle") {
+        // These existing required gates have one owner in partitioned CI; full/core retain them.
+        dependsOn(snapshotCapsuleAuditDataTest)
         dependsOn("gccCompilerEnginePlanningIsolated")
     }
     configureOracleTestRuntime(this)
@@ -1691,7 +1707,7 @@ tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
     maxParallelForks = 1
     outputs.upToDateWhen { false }
     outputs.cacheIf("GCC planning tests must measure a fresh test JVM") { false }
-    onlyIf { providers.gradleProperty("ciTestShard").orNull != "live" }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle") }
     configureOracleTestRuntime(this)
     // Leave headroom below the unchanged 2 GiB production/fixture RSS cap, even with live env flags.
     maxHeapSize = "512m"
@@ -1710,7 +1726,8 @@ private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String)
         outputs.upToDateWhen { false }
         outputs.cacheIf("V3 boundary tests must measure a fresh test JVM") { false }
         onlyIf {
-            isolateV3BoundaryTests.get() && providers.gradleProperty("ciTestShard").orNull != "live"
+            isolateV3BoundaryTests.get() &&
+                providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle")
         }
         configureOracleTestRuntime(this)
     }

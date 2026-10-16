@@ -20,7 +20,47 @@ this does not raise its production/fixture RSS cap.
 
 `DECOMP_CI_TEST_SHARD=core` selects tests excluding the `ci-live` tag and retains
 these isolated checks. `live` selects only that tag; the full default selects
-both. Hosted workflows additionally prepare fixtures and run credential-free
+both. These existing entry points retain their full selections.
+
+Hosted CI splits ordinary core tests into `core-main` (the complement of
+`decompengine.oracle.*`) and `core-oracle` (that namespace recursively), each
+excluding `ci-live`. Gradle's [test-name filters](https://docs.gradle.org/current/javadoc/org/gradle/api/tasks/testing/TestFilter.html)
+select a package recursively and its complement; new classes enter their group
+automatically. Both selections fail if no tests match. The existing `kotlin-core`
+job runs `core-main`; `kotlin-oracle` runs `core-oracle`. `kotlin-live` retains its
+tag selection and preflights. The `kotlin` aggregate requires all three jobs.
+
+`core-oracle` owns the isolated GCC planning class, the three isolated V3 boundary
+methods and the 115 synthetic class-data controls. The class-data gate still runs
+before expensive Kotlin compilation in its owning task graph. The isolated
+workers keep their existing heaps, RSS bounds and fresh execution. `core-main`
+retains real Angr selection/qualification and the quota-backed repair snapshot
+follow-up. All three jobs retain their existing hosted runtime, sandbox, quota,
+scratch provisioning and unconditional cleanup. Each uploads its own
+`kotlin-core`, `kotlin-oracle` or `kotlin-live` test-report artifact.
+The quota follow-up receives `core-main` in its nested test invocation, keeping
+the selected repair fixture while its host-side preparation remains unchanged.
+This prevents that follow-up from starting the isolated GCC/class-data gates
+again. Nonowning or unknown CI selectors refuse before preparation; legacy
+combined and local invocations keep their original selection.
+
+`scripts/test-ci-partitions.py` exercises the actual shell entry point with an
+inert Gradle argument recorder, including full/legacy/live selections, each new
+partition and refusal before invocation for unsupported values. Before accepting
+the split, compare the complete current XML execution union against the qualified
+original inventory, preserving explicit skips and isolated executions. In
+particular, the quota snapshot method's full-suite skip and separately required
+pass are distinct executions. Job/step durations and total runner time describe
+different costs; the historical elapsed observations alone establish no speedup.
+The aggregate also downloads only the three standard Kotlin test-report artifacts
+into separate named directories. Its Python XML check requires nonempty reports,
+correct oracle/complement ownership, no failed cases and no test identity shared
+across partitions. Within one partition, the quota fixture's skip/pass pair stays
+distinct. `kotlin-partition-inventory` retains counts and input hashes; routing and
+report-placement regression controls run in the core job. This placement check
+complements the complete original-inventory comparison above.
+
+Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.
 
@@ -38,6 +78,13 @@ It also rejects changes to checked frontend or contract inputs produced by those
 commands. CI restores npm's package-download cache keyed to the lockfile, while
 each job still installs clean `node_modules` and builds the current bundle. No
 generated bundle or `node_modules` tree is restored.
+Its existing deliberate contract-drift fixtures retain four
+`expected-web-api-rejection` records in `api-drift-tests.txt`: changed generated
+types, changed generated schema, changed source schema and an unsupported schema
+keyword. Each records exit 1 without a signal, a bounded rejection diagnostic
+with the fixture root redacted, and unchanged hashes for all four fixture inputs.
+The authored bad inputs are expected refusals within the passing test; this
+receipt supplies no clean/cache-hit or broader integration qualification.
 Gradle jobs restore the shared master dependency cache on pull requests; only
 master writes new Gradle cache entries, avoiding one large cache per pull request.
 
@@ -68,9 +115,15 @@ pushes to master or tags. It builds the archives from the current checkout, runs
 contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
 permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
 Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
-session exchange/reload/logout, and the explicit Vite proxy against the same ZIP.
+session exchange/reload/logout, exact binary metadata, focused live updates,
+10,000-job paging and the explicit Vite proxy against the same ZIP.
 The application process has no Node/npm on PATH and starts from an unrelated
-directory; these preview journeys create no jobs or workflow execution.
+directory. Session/proxy journeys preserve empty job storage; metadata, live and
+scale journeys use authored inert job fixtures and start no workflow execution.
+The JVM web-contract step uses those same pinned Chrome/Node paths to require the
+existing real-browser session-expiry, private-read refusal and fresh operator-link
+exchange test. Its injected monotonic clock advances the session age without a
+wall-clock wait; ordinary hosts without Chrome retain the opt-in test behavior.
 
 `scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
 x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
@@ -111,8 +164,8 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Lane | Scheduling and responsibility | Source |
 | --- | --- | --- |
 | Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
-| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
-| Kotlin core / live / aggregate | Normal; core and tagged live tests run separately with required hosted fixtures. Live also runs the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires both partitions to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
+| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
+| Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
 | GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
