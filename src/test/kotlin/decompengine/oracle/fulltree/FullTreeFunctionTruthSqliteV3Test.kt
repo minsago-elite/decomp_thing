@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxSyscallException
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.OracleSchemaException
 import decompengine.oracle.core.OracleSchemas
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -1023,6 +1024,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertEquals(first.indexArtifactSha256, validated.indexArtifactSha256)
             assertEquals(first.outputBytes, validated.outputBytes)
 
+            assertStrictV3Schemas(first)
             assertPublicInlineSiteConflationRejected(first, fixture, root, limits)
             assertPublicTypedTupleAndOriginMutationsRejected(first, fixture, root, limits)
 
@@ -1045,7 +1047,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             }
             assertEquals(forgedBytes, v3TreeBytes(forged), "rejected candidate bytes remain unchanged")
 
-            assertSelfConsistentMutationsRejected(first, root)
+            assertSelfConsistentMutationsRejected(first, fixture, root, limits)
             assertV3RawInputPathReplacementIsDetected(fixture, root)
             assertV3CandidateSnapshotRejectsRaces(first, root)
             assertV3StagingIsReauthenticatedAroundFreeze(first, root)
@@ -1253,10 +1255,66 @@ class FullTreeFunctionTruthSqliteV3Test {
         })
     }
 
+    private fun assertStrictV3Schemas(expected: FullTreeFunctionTruthV3Generation) {
+        val index = parseControlObject(expected.root.resolve("index.json"))
+        val shard = parseControlObject(expected.root.resolve(
+            (index.controlArray("shards").first() as JsonObject).controlString("path"),
+        ))
+        var rejected = 0
+        fun reject(schema: String, document: JsonObject, label: String) {
+            val failure = assertFailsWith<OracleSchemaException>(label) {
+                OracleSchemas.validate(schema, document)
+            }
+            assertTrue(failure.message.orEmpty().contains("$schema schema validation"), label)
+            rejected++
+        }
+        val documents = listOf(
+            Triple(FullTreeFunctionTruthSqliteV3.INDEX_SCHEMA_NAME, index, setOf(
+                "schemaVersion", "complete", "oracle", "counts", "shards", "exclusions",
+                "indexSha256", "identityReconciliation",
+            )),
+            Triple(FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME, shard, setOf(
+                "schemaVersion", "oracle", "shard", "counts", "functions", "nonEmitted", "sourceEntities",
+            )),
+        )
+        documents.forEach { (schema, document, required) ->
+            OracleSchemas.validate(schema, document)
+            assertEquals(required, document.keys, "$schema positive fixture has every required root field")
+            reject(schema, document.withField("unexpectedField", JsonPrimitive(true)), "$schema extra root field")
+            reject(schema, document.withField("schemaVersion", JsonPrimitive(1)), "$schema rejects old wire version")
+            required.forEach { field ->
+                reject(schema, JsonObject(document - field), "$schema missing $field")
+                reject(schema, document.withField(field, JsonNull), "$schema mistyped $field")
+            }
+        }
+        val schema = FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME
+        val rows = shard.controlArray("sourceEntities").controlObjects("source entities")
+        val row = rows.first { it.controlArray("edges").isNotEmpty() }
+        fun withRow(changed: JsonObject): JsonObject = shard.withField(
+            "sourceEntities", JsonArray(rows.map { if (it == row) changed else it }),
+        )
+        reject(schema, withRow(row.withField("unexpectedField", JsonPrimitive(true))), "extra source field")
+        row.keys.forEach { field ->
+            reject(schema, withRow(JsonObject(row - field)), "missing source field $field")
+        }
+        listOf("entityKind", "identityObservability", "denominatorDisposition").forEach { field ->
+            reject(schema, withRow(row.withField(field, JsonPrimitive("unsupported"))), "unknown source $field")
+        }
+        val edge = row.controlArray("edges").first()
+        val atLimit = withRow(row.withField("edges", JsonArray(List(32) { edge })))
+        // This is a schema cardinality control, not a claim that repeated edges match raw DWARF.
+        OracleSchemas.validate(schema, atLimit)
+        reject(schema, withRow(row.withField("edges", JsonArray(List(33) { edge }))), "33 identity edges")
+        println("truth-v3-schema-negative cases=$rejected rejected=schema-validation")
+    }
+
     private fun assertSelfConsistentMutationsRejected(
         expected: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
         root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
     ) {
+        val baselineBytes = v3TreeBytes(expected.root)
         val index = parseControlObject(expected.root.resolve("index.json"))
         val shard = parseControlObject(expected.root.resolve((index.controlArray("shards").single() as JsonObject).controlString("path")))
         val rows = shard.controlArray("sourceEntities").controlObjects("source entities")
@@ -1342,15 +1400,29 @@ class FullTreeFunctionTruthSqliteV3Test {
             Files.list(candidate.resolve("shards")).use { paths ->
                 paths.forEach { OracleSchemas.validate(FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME, parseControlObject(it)) }
             }
-            assertFailsWith<FullTreeFunctionTruthV3Exception>("rehashed ${case.name} mutation must fail raw-derived byte comparison") {
+            val candidateBytes = v3TreeBytes(candidate)
+            val totalBytes = candidateBytes.values.sumOf { it.size.toLong() }
+            // Admit growing mutations to the component comparison so its byte cap cannot mask
+            // the intended mismatch. Public validation keeps its separate raw-derived cap.
+            val comparisonBytes = maxOf(expected.outputBytes, totalBytes)
+            assertTrue(comparisonBytes <= minOf(
+                limits.maximumOutputBytes,
+                fixture.scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("serializedBytes"),
+            ), "${case.name} stays within the unchanged configured/authenticated output ceilings")
+            val failure = assertFailsWith<FullTreeFunctionTruthV3Exception>("rehashed ${case.name} mutation must fail raw-derived byte comparison") {
                 FullTreeFunctionTruthSqliteV3.compareV3CandidateTreeBytes(
                     candidate,
                     expected.root,
                     changedIndex.controlArray("shards").size.toLong() + 2L,
-                    expected.outputBytes,
+                    comparisonBytes,
                 )
             }
+            assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", failure.message,
+                "${case.name} must reach the intended comparison after byte admission")
+            assertEquals(candidateBytes, v3TreeBytes(candidate), "${case.name} rejected bytes stay unchanged")
+            println("truth-v3-component-mutation case=${case.name.replace(' ', '-')} bytes=$totalBytes rejected=raw-rederivation")
         }
+        assertEquals(baselineBytes, v3TreeBytes(expected.root), "all component mutations preserve the raw-derived baseline")
     }
 
     private fun assertPublicInlineSiteConflationRejected(
