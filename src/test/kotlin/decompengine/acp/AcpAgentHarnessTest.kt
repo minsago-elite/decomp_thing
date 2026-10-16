@@ -63,12 +63,48 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.collect
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @Test
+    fun `fixture manifest acquisition bounds fresh mount-event retries and preserves other failures`() {
+        val events = List(3) { java.io.IOException("host mounts changed during runtime manifest") }
+        var attempts = 0
+        val digest = "a".repeat(64)
+        assertEquals(digest, acquireFixtureRuntimeManifest {
+            val attempt = attempts++
+            if (attempt < 2) throw events[attempt]
+            digest
+        })
+        assertEquals(3, attempts)
+
+        attempts = 0
+        val persistent = assertFailsWith<java.io.IOException> {
+            acquireFixtureRuntimeManifest { throw events[attempts++] }
+        }
+        assertSame(events.last(), persistent, "persistent instability preserves the last original refusal")
+        assertEquals(3, attempts)
+
+        listOf(
+            java.io.IOException("runtime manifest input changed"),
+            IllegalStateException("host mounts changed during runtime manifest"),
+        ).forEach { other ->
+            attempts = 0
+            val failure = assertFailsWith<Exception> {
+                acquireFixtureRuntimeManifest {
+                    attempts++
+                    throw other
+                }
+            }
+            assertSame(other, failure)
+            assertEquals(1, attempts, "other failures propagate immediately")
+        }
+    }
+
     @Test
     fun `session preference failure context retains only the existing closed mount witness`() {
         val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
@@ -2610,6 +2646,19 @@ class AcpAgentHarnessTest {
         }.toByteArray(),
     )
 
+    /** Acquire trusted fixture input before constructing a harness or starting protocol work. */
+    private fun acquireFixtureRuntimeManifest(calculate: () -> String): String {
+        var attempt = 1
+        while (true) {
+            try {
+                return calculate()
+            } catch (failure: java.io.IOException) {
+                if (attempt == 3 || failure.message != "host mounts changed during runtime manifest") throw failure
+                attempt++
+            }
+        }
+    }
+
     private fun harness(
         mode: String,
         sentinel: String = "literal-argv",
@@ -2640,7 +2689,7 @@ class AcpAgentHarnessTest {
                         AcpSandboxReadOnlyMount(
                             script,
                             AGENT_SCRIPT_DESTINATION,
-                            calculateAcpRuntimeManifestSha256(script),
+                            acquireFixtureRuntimeManifest { calculateAcpRuntimeManifestSha256(script) },
                         ),
                     ),
                 ),
