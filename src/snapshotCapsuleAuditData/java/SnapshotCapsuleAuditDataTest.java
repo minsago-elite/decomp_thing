@@ -76,17 +76,17 @@ public final class SnapshotCapsuleAuditDataTest implements Opcodes {
     static void admission(byte[] b)throws Exception{SnapshotCapsuleAudit.rawAdmission(b,new SnapshotCapsuleAudit.Work());}
     static void helperControls()throws Exception{
         yes("feasible prepared state fixed recipes",()->checkHelpers(helperData()));
-        for(int guard=0;guard<6;guard++){final int selected=guard;mutateHelper("guard inverted "+guard,"stopBeforeOuterStart",m->{int seen=0;for(var n:m.instructions)if(n instanceof JumpInsnNode j&&seen++==selected){j.setOpcode(j.getOpcode()==IFEQ?IFNE:j.getOpcode()==IFNE?IFEQ:j.getOpcode()==IFNULL?IFNONNULL:IF_ACMPNE);break;}});}
-        mutateHelper("enabled guard inverted","active",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j){j.setOpcode(IFEQ);break;}});
+        for(int guard=0;guard<6;guard++){final int selected=guard;mutateHelper("guard inverted "+guard,"stopBeforeOuterStart",m->{int seen=0;for(var n:m.instructions)if(n instanceof JumpInsnNode j&&seen++==selected){m.instructions.set(j,new JumpInsnNode(j.getOpcode()==IFEQ?IFNE:j.getOpcode()==IFNE?IFEQ:j.getOpcode()==IFNULL?IFNONNULL:IF_ACMPNE,j.label));break;}});}
+        mutateHelper("enabled guard inverted","active",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j){m.instructions.set(j,new JumpInsnNode(IFEQ,j.label));break;}});
         mutateHelper("invalid flag cleared","bad",m->{m.instructions.set(real(m).get(0),new InsnNode(ICONST_0));});
-        mutateHelper("owner comparison inverted","active",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j&&j.getOpcode()==IF_ACMPEQ){j.setOpcode(IF_ACMPNE);break;}});
+        mutateHelper("owner comparison inverted","active",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j&&j.getOpcode()==IF_ACMPEQ){m.instructions.set(j,new JumpInsnNode(IF_ACMPNE,j.label));break;}});
         mutateHelper("always invalid trap","active",m->{m.instructions.clear();m.instructions.add(new InsnNode(ICONST_0));m.instructions.add(new InsnNode(IRETURN));});
         mutateHelper("site token self comparison","stopBeforeOuterStart",m->{for(var n:m.instructions)if(n instanceof FieldInsnNode f&&f.name.equals("token")){m.instructions.set(n,new VarInsnNode(ALOAD,1));break;}});
         mutateHelper("purpose getter ignored","stopBeforeOuterStart",m->{for(var n:m.instructions)if(n instanceof MethodInsnNode call&&call.name.equals("getPurpose")){call.name="otherPurpose";break;}});
         mutateHelper("first use reset","stopBeforeOuterStart",m->{var x=new InsnList();x.add(new InsnNode(ICONST_0));x.add(new FieldInsnNode(PUTSTATIC,H,"stopped","Z"));m.instructions.insert(x);});
         mutateHelper("clean predicate lies","stopped",m->{m.instructions.clear();m.instructions.add(new InsnNode(ICONST_1));m.instructions.add(new InsnNode(IRETURN));});
         mutateHelper("unknown internal call","stopBeforeOuterStart",m->{for(var n:m.instructions)if(n instanceof MethodInsnNode call&&call.name.equals("event")){call.name="unknown";break;}});
-        mutateHelper("overflow event guard removed","event",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j){j.setOpcode(IFEQ);break;}});
+        mutateHelper("overflow event guard removed","event",m->{for(var n:m.instructions)if(n instanceof JumpInsnNode j){m.instructions.set(j,new JumpInsnNode(IFEQ,j.label));break;}});
         mutateHelper("counter operand wrong","stopBeforeOuterStart",m->{for(var n:m.instructions)if(n instanceof IntInsnNode i&&i.operand==97){i.operand=98;break;}});
         mutateHelper("prepare owner replaced","prepare",m->{for(var n:m.instructions)if(n instanceof MethodInsnNode call&&call.name.equals("currentThread")){call.name="otherThread";break;}});
         mutateHelper("return substitute","stopBeforeOuterStart",m->{m.instructions.clear();m.instructions.add(new InsnNode(RETURN));});
