@@ -154,9 +154,17 @@ class ReferencedDataBytesRealGhidraTest {
         assertFalse(ProgramModelJson.readCanonical(changedModel) == resumed,
             "the edit remains a canonical model payload; only its retained commitment is stale")
         Files.write(globalFragment.key, changedFragment)
-        assertFailsWith<IllegalArgumentException> { planningAnalyzer.analyze(binary, planningWork) }
-        assertTrue(planningWork.resolve("reports/ghidra_stderr.log").readText()
-            .contains("planning batch checkpoint does not authenticate its fragment"))
+        val refusal = assertFailsWith<IllegalArgumentException> { planningAnalyzer.analyze(binary, planningWork) }
+        assertTrue(refusal.message.orEmpty().startsWith("Ghidra program recovery failed with exit code 1;"),
+            refusal.message)
+        // Headless script diagnostics and the worker's final failure can use different streams.
+        val refusalDiagnostics = listOf("ghidra_stdout.log", "ghidra_stderr.log").map {
+            planningWork.resolve("reports/$it").readText()
+        }
+        val checkpointName = globalFragment.key.fileName.toString().removeSuffix(".globals.fragment") + ".checkpoint"
+        assertTrue(refusalDiagnostics.any {
+            it.contains("planning batch checkpoint does not authenticate its fragment: $checkpointName")
+        }, refusalDiagnostics.joinToString("\n") { it.takeLast(4096) })
         assertContentEquals(resumedBytes, planningModelPath.readBytes(), "refusal preserves the prior complete model")
         assertContentEquals(retainedState, statePath.readBytes())
         retainedBatches.forEach { (path, bytes) ->
