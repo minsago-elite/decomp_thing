@@ -304,7 +304,9 @@ class GccFunctionRecoveryTest(unittest.TestCase):
 
     @contextmanager
     def staged_text(self, name: str, payload: str) -> Iterator[Path]:
-        with tempfile.TemporaryDirectory(prefix="function-score-raw-") as temporary:
+        parent = REPOSITORY_ROOT / "build" / "function-score-fixtures"
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="function-score-raw-", dir=parent) as temporary:
             path = Path(temporary) / name
             path.write_text(payload, encoding="utf-8")
             yield path
@@ -315,7 +317,9 @@ class GccFunctionRecoveryTest(unittest.TestCase):
         source: Path,
         mutation: Callable[[dict[str, Any]], None],
     ) -> Iterator[Path]:
-        with tempfile.TemporaryDirectory(prefix="function-score-mutation-") as temporary:
+        parent = REPOSITORY_ROOT / "build" / "function-score-fixtures"
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="function-score-mutation-", dir=parent) as temporary:
             value = copy.deepcopy(json.loads(source.read_text(encoding="utf-8")))
             mutation(value)
             path = Path(temporary) / source.name
