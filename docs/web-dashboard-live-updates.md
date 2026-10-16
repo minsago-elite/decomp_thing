@@ -44,7 +44,12 @@ request or workflow start. The test does not certify polling performance,
 storage-quota concurrency, full WCAG compliance or production scale.
 
 The CI packaged browser job runs this journey with scratch under repository
-`build/`, alongside its existing verification. Local subject execution remains
+`build/`, alongside its existing verification. It also reuses the same built
+archive for the existing 10,000-job scale journey: 50 bounded pages, immutable
+continuations, exact row order, retained first-page return, filters and keyboard
+recovery after a failed continuation. This checks the interaction between live
+first-page cache updates and the existing pagination contract without another
+archive build or a claimed cold-load performance result. Local subject execution remains
 on hold: no local tests, compilation, syntax checks or browser run are claimed.
 Required Actions and automatic review must qualify the exact published source
 before completion is recorded.
