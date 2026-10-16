@@ -143,6 +143,77 @@ val stageFrontend = tasks.register<Sync>("stageFrontend") {
 }
 
 sourceSets.main { resources.srcDir(stageFrontend) }
+
+// Offline synthetic class DATA only: keep application/test outputs and native oracles off this classpath.
+val snapshotCapsuleAuditAsm by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+dependencies {
+    add(snapshotCapsuleAuditAsm.name, "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.0")
+}
+val snapshotCapsuleAuditData = sourceSets.create("snapshotCapsuleAuditData") {
+    java.setSrcDirs(listOf("src/snapshotCapsuleAuditData/java"))
+    compileClasspath = files(snapshotCapsuleAuditAsm)
+    runtimeClasspath = output + compileClasspath
+}
+val verifySnapshotCapsuleAuditAsm = tasks.register("verifySnapshotCapsuleAuditAsm") {
+    group = "verification"
+    description = "Checks the exact shaded ASM artifact before isolated class-data compilation or execution"
+    inputs.files(snapshotCapsuleAuditAsm)
+    doLast {
+        val jar = snapshotCapsuleAuditAsm.singleFile
+        check(jar.name == "kotlin-compiler-embeddable-2.4.0.jar" && jar.length() == 60_351_320L) {
+            "snapshot capsule fixture ASM artifact differs"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        jar.inputStream().use { input ->
+            val buffer = ByteArray(65_536)
+            var remaining = 60_351_320L
+            while (remaining > 0) {
+                val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                check(read > 0) { "snapshot capsule fixture ASM artifact is truncated" }
+                digest.update(buffer, 0, read)
+                remaining -= read
+            }
+            check(input.read() == -1) { "snapshot capsule fixture ASM artifact exceeds its bound" }
+        }
+        check(digest.digest().joinToString("") { "%02x".format(it) } ==
+            "c2b25e8c1c93ec416ba4327f5e31eaec0f0c8847241b9353e294b8db9dce564f") {
+            "snapshot capsule fixture ASM artifact checksum differs"
+        }
+    }
+}
+tasks.named<JavaCompile>(snapshotCapsuleAuditData.compileJavaTaskName) {
+    dependsOn(verifySnapshotCapsuleAuditAsm)
+    classpath = files(snapshotCapsuleAuditAsm)
+    options.release.set(21)
+    options.compilerArgs.add("-proc:none")
+}
+val snapshotCapsuleAuditDataTest = tasks.register<JavaExec>("snapshotCapsuleAuditDataTest") {
+    group = "verification"
+    description = "Runs all 115 synthetic class-data controls without application classes or native oracle execution"
+    dependsOn(verifySnapshotCapsuleAuditAsm, tasks.named(snapshotCapsuleAuditData.classesTaskName))
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    classpath = files(snapshotCapsuleAuditData.output.classesDirs, snapshotCapsuleAuditAsm)
+    mainClass.set("SnapshotCapsuleAuditDataTest")
+    maxHeapSize = "256m"
+    timeout.set(Duration.ofMinutes(2))
+    jvmArgs("-XX:-UsePerfData")
+    doFirst {
+        check(classpath.files == snapshotCapsuleAuditData.output.classesDirs.files + snapshotCapsuleAuditAsm.files) {
+            "snapshot capsule fixture classpath differs"
+        }
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs()) { "snapshot capsule fixture temporary directory unavailable" }
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+}
+// Refuse isolated data-fixture failures before expensive Kotlin compilation in the same graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(snapshotCapsuleAuditDataTest) }
+}
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
@@ -1596,6 +1667,7 @@ tasks.test {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
     if (shard != "live") {
+        dependsOn(snapshotCapsuleAuditDataTest)
         // Its production RSS monitor observes process-wide history, including earlier tests.
         filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
         dependsOn("gccCompilerEnginePlanningIsolated")

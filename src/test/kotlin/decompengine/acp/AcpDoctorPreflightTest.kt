@@ -2,6 +2,7 @@ package decompengine.acp
 
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.doctor.CommandProbe
 import decompengine.doctor.CommandProbeResult
@@ -32,6 +33,44 @@ import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
+    @Test
+    fun `doctor failure context withholds private text and retains only fixed mount witness fields`() {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
+        val witness = constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null) as Throwable
+        val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
+            stackTrace = arrayOf(StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "checkpoint", "PRIVATE-file", 123))
+            addSuppressed(witness)
+            addSuppressed(java.io.IOException("PRIVATE-suppressed"))
+        }
+        val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE-failure",
+            details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+        val context = doctorFailureContext(failure)
+        assertTrue("failureKind=CONFIGURATION phase=missing cleanup=missing" in context, context)
+        assertTrue("private-control-checkpoint" in context, context)
+        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
+        assertFalse("PRIVATE" in context || "/" in context, context)
+        assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+    }
+
+    @Test
+    fun `doctor failure context bounds cause cycles stack prefixes and foreign witness messages`() {
+        val first = java.io.IOException("PRIVATE-first")
+        val second = IllegalStateException("PRIVATE-second")
+        first.initCause(second); second.initCause(first)
+        first.stackTrace = (List(32) { StackTraceElement("PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 1) } +
+            StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "checkpoint", "PRIVATE-file", 123)).toTypedArray()
+        first.addSuppressed(Throwable("mount-event-v1 phase=CHECKPOINT PRIVATE-forged"))
+        val context = doctorFailureContext(AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), first))
+        assertFalse("PRIVATE" in context || "mount-event-v1" in context || "private-control-checkpoint" in context, context)
+        assertTrue(context.length <= 4096)
+        assertTrue(context.split(" -> ").size <= 8)
+    }
+
     @Test
     fun `cancelled preflight retains terminal receipt before launch and during initialize`() {
         requireLiveSandboxHost()
@@ -212,7 +251,8 @@ class AcpDoctorPreflightTest {
     @Test
     fun `preflight proves descendant cleanup and fails closed on shutdown output overflow`() {
         requireLiveSandboxHost()
-        val temporary = createTempDirectory("doctor-acp-cleanup-")
+        val parent = Path.of("build/test-tmp/acp-doctor-preflight").toAbsolutePath().createDirectories()
+        val temporary = Files.createTempDirectory(parent, "cleanup-")
         val childHarness = factoryHarness(writeProvisioning(
             temporary.resolve("child.json"),
             mode = "doctor-preflight-child-hang",
@@ -233,7 +273,9 @@ class AcpDoctorPreflightTest {
             burstHarness.preflight(AcpPreflightWorkflow.RECONSTRUCT)
         }
 
-        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, overflow.failure.kind)
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, overflow.failure.kind,
+            if (overflow.failure.kind == AgentFailureKind.RESOURCE_EXHAUSTED) null else
+                runCatching { doctorFailureContext(overflow) }.getOrDefault("Doctor failure context unavailable"))
         val receipt = assertNotNull(overflow.receipt)
         assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
         val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
@@ -243,6 +285,53 @@ class AcpDoctorPreflightTest {
         assertTrue(diagnostics.outputLimitExceeded)
         assertTrue(diagnostics.remainingProcessIds.isEmpty())
         assertTrue(diagnostics.sandboxCleanupVerified)
+    }
+
+    /** Test diagnostics: typed facts and checked witness text; private messages and paths withheld. */
+    private fun doctorFailureContext(failure: AgentExecutionException): String {
+        val evidence = failure.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+        val diagnostics = evidence?.diagnostics
+        val types = mapOf("decompengine.agent.AgentExecutionException" to "agent-execution",
+            "java.io.IOException" to "io", "java.lang.IllegalStateException" to "illegal-state",
+            "decompengine.acp.LinuxSyscallException" to "syscall",
+            "decompengine.acp.AcpCleanupProofFailure" to "cleanup-proof",
+            "decompengine.acp.AcpPhaseTimeout" to "phase-timeout")
+        val frames = mapOf(
+            ("decompengine.acp.RuntimePrivateControlScope" to "checkpoint") to "private-control-checkpoint",
+            ("decompengine.acp.RuntimePrivateControlScope" to "requireMountsUnchanged") to "mount-check",
+            ("decompengine.acp.RuntimePrivateControlScope" to "requireDescriptor") to "descriptor-revalidation",
+            ("decompengine.acp.RuntimePrivateControlScope" to "currentRoot") to "root-identity",
+            ("decompengine.acp.RuntimePrivateControlScope" to "requireRootUnexposed") to "private-control-coverage",
+            ("decompengine.acp.LinuxBubblewrapBoundaryKt" to "requirePrivateControlRegistryHealthy") to "registry-health",
+            ("decompengine.acp.RuntimePrivateControlScope\$MountEventCheck" to "requireUnchanged") to "mount-check",
+            ("decompengine.acp.RuntimePrivateControlScope\$MountEventCheck" to "eventFailure") to "mount-event",
+            ("decompengine.acp.LinuxFilesystemSyscalls\$MountMetadataPollScratch" to "pollDescriptor") to "mount-poll",
+            ("decompengine.acp.ProductionAcpSandboxExecution" to "<init>") to "sandbox-construction",
+            ("decompengine.acp.AcpAgentHarness" to "executeInternalReceipt") to "harness-receipt")
+        val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+            "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+            "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val pending = java.util.ArrayDeque<Throwable>()
+        val seen = ArrayList<Throwable>(8)
+        val causes = ArrayList<String>(8)
+        pending.add(failure)
+        failure.receipt?.failureCause?.let { pending.add(it) }
+        while (pending.isNotEmpty() && seen.size < 8) {
+            val current = pending.removeFirst()
+            if (seen.any { it === current }) continue
+            seen.add(current)
+            val name = current.javaClass.name
+            val record = if (name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+                current.message?.takeIf { it.length <= 512 && witness.matches(it) } else null
+            val sites = current.stackTrace.asSequence().take(32).mapNotNull { frames[it.className to it.methodName] }.take(2).joinToString(",")
+            causes.add(record ?: "${types[name] ?: "other"}[$sites]")
+            current.cause?.let { if (pending.size < 16) pending.add(it) }
+            current.suppressed.take(2).forEach { if (pending.size < 16) pending.add(it) }
+        }
+        return ("failureKind=${failure.failure.kind.name} phase=${evidence?.phaseReached?.name ?: "missing"} " +
+            "cleanup=${evidence?.cleanupDisposition?.name ?: "missing"} negotiated=${evidence?.negotiatedAgent != null} " +
+            "diagnostics=${diagnostics != null} remainingProcesses=${diagnostics?.remainingProcessIds?.size ?: "missing"} " +
+            "outputOverflow=${diagnostics?.outputLimitExceeded ?: "missing"} causes=" + causes.joinToString(" -> ")).take(4096)
     }
 
     private fun factoryHarness(configuration: Path): AcpAgentHarness {
