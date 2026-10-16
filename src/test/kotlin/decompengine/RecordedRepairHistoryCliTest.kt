@@ -20,6 +20,51 @@ import kotlin.test.*
 
 class RecordedRepairHistoryCliTest {
     @Test
+    fun `actual CLI reaches every cancelled run without attempts and preserves empty canonical history`() {
+        val project = root()
+        project.resolve("code.c").writeText("PRIVATE-source")
+        val profile = DeclarativeRepairIndexProfile("PRIVATE-profile", RepairIndexLayout(
+            listOf("code.c"), listOf("code.c"),
+            modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            graph.enableRunContract()
+            graph.synchronizeRepairHistory()
+        }
+        val emptyBefore = contents(project)
+        val empty = captureCli(project)
+        assertTrue("history page 1 of 1" in empty && "No repair attempts are recorded." in empty, empty)
+        val emptyAfter = contents(project)
+        assertEquals(emptyBefore.keys, emptyAfter.keys)
+        emptyBefore.forEach { (name, bytes) -> assertContentEquals(bytes, emptyAfter.getValue(name), name) }
+        ModuleRevisionGraph.open(project, profile).use { graph ->
+            repeat(101) {
+                graph.beginRun(1, 60_000)
+                graph.finishRun(RepairRunStatus.CANCELLED, RepairEvidence("cancelled", "PRIVATE-before-any-attempt"))
+            }
+            graph.synchronizeRepairHistory()
+        }
+        val snapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+        assertTrue(snapshot.attempts.isEmpty() && snapshot.pending == null)
+        val before = contents(project)
+        val runRows = Regex("repair run (run_[0-9]{8}): cancelled ")
+        val pages = (1..6).map { number ->
+            val output = if (number == 1) captureCli(project) else
+                captureCli(project, "--page", number.toString(), "--graph", snapshot.graphSha256)
+            assertTrue("history page $number of 6" in output && "No repair attempts are recorded." in output, output)
+            assertFalse("PRIVATE" in output || "code.c" in output, output)
+            val rows = runRows.findAll(output).map { it.groupValues[1] }.toList()
+            assertEquals(if (number == 6) 1 else 20, rows.size, output)
+            if (number < 6) assertTrue("Older history:" in output, output)
+            if (number > 1) assertTrue("Newer history:" in output, output)
+            rows
+        }
+        assertEquals(snapshot.runs.map { it.identity.value }, pages.reversed().flatten())
+        val after = contents(project)
+        assertEquals(before.keys, after.keys)
+        before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+    }
+
+    @Test
     fun `actual CLI reaches an older trace producer attempt and its corpus case pages without another execution`() {
         val project = root()
         val fixture = producePagedRecordedTraceHistory(project)

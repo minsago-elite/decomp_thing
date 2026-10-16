@@ -1250,6 +1250,59 @@ class UploadServerTest {
     }
 
     @Test
+    fun `canonical empty and run only HTTP histories expose every cancelled run without another workflow`() {
+        withServer(JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-source")
+            val profile = recordedRepairProfile()
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                graph.enableRunContract()
+                graph.synchronizeRepairHistory()
+            }
+            val emptySnapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val emptyBefore = recordedProjectBytes(project)
+            val empty = request(server, "GET", "/jobs/$id")
+            assertEquals(200, empty.status)
+            val emptyBody = empty.body.decodeToString()
+            assertTrue("History page 1 of 1" in emptyBody && "No repair attempts are recorded." in emptyBody, emptyBody)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyPage=2&historyGraph=${emptySnapshot.graphSha256}").status)
+            val emptyAfter = recordedProjectBytes(project)
+            assertEquals(emptyBefore.keys, emptyAfter.keys)
+            emptyBefore.forEach { (name, bytes) -> assertContentEquals(bytes, emptyAfter.getValue(name), name) }
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                repeat(101) {
+                    graph.beginRun(1, 60_000)
+                    graph.finishRun(RepairRunStatus.CANCELLED, RepairEvidence("cancelled", "PRIVATE-before-any-attempt"))
+                }
+                graph.synchronizeRepairHistory()
+            }
+            val snapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            assertTrue(snapshot.attempts.isEmpty() && snapshot.pending == null)
+            val before = recordedProjectBytes(project)
+            assertEquals(409, request(server, "GET", "/jobs/$id?historyGraph=${emptySnapshot.graphSha256}").status)
+            val runRows = Regex("Repair run: cancelled · 0/1 attempts · <code>(run_[0-9]{8})</code>")
+            val pages = (1..2).map { number ->
+                val path = if (number == 1) "/jobs/$id" else "/jobs/$id?historyPage=2&historyGraph=${snapshot.graphSha256}"
+                val response = request(server, "GET", path)
+                assertEquals(200, response.status)
+                val body = response.body.decodeToString()
+                assertTrue("History page $number of 2" in body && "No repair attempts are recorded." in body, body)
+                assertFalse("PRIVATE" in body || "code.c" in body, body)
+                val rows = runRows.findAll(body).map { it.groupValues[1] }.toList()
+                assertEquals(if (number == 1) 100 else 1, rows.size, body)
+                assertTrue((if (number == 1) "Older history" else "Newer history") in body, body)
+                rows
+            }
+            assertEquals(snapshot.runs.map { it.identity.value }, pages.reversed().flatten())
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+        }
+    }
+
+    @Test
     fun `older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures`() {
         val parent = Path.of("build/test-tmp/recorded-paged-http").toAbsolutePath().createDirectories()
         val dataDir = Files.createTempDirectory(parent, "case-")
