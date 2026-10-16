@@ -20,6 +20,52 @@ import kotlin.test.*
 
 class RecordedRepairHistoryCliTest {
     @Test
+    fun `actual CLI reaches an older trace producer attempt and its corpus case pages without another execution`() {
+        val project = root()
+        val fixture = producePagedRecordedTraceHistory(project)
+        val recorded = readProjectRecordedRepairHistory(project)
+        val snapshot = requireNotNull(recorded.snapshot)
+        val before = contents(project)
+        val latest = captureCli(project)
+        assertFalse(Regex("repair iteration 1:").containsMatchIn(latest), latest)
+        assertTrue("Older history: --page 2 --case-page 1 --graph ${snapshot.graphSha256}" in latest, latest)
+        val older = captureCli(project, "--page", "6", "--graph", snapshot.graphSha256)
+        assertTrue("repair iteration 1: rejected" in older, older)
+        assertTrue("summary: Compile repair — rejected" in older, older)
+        assertTrue("evidence assurance: Test-only evidence; release completeness is not established." in older, older)
+        assertTrue("after: Build validation evidence; recorded reference artifact_" in older, older)
+        val first = snapshot.attempts.first()
+        assertTrue("recorded run: ${first.run?.value}" in older, older)
+        assertTrue("retained case corpus: ${first.corpusSha256}" in older, older)
+        assertTrue(first.retainedCases.first().value in older, older)
+        assertFalse(first.retainedCases.last().value in older, older)
+        val laterCases = captureCli(project, "--page", "6", "--case-page", "2", "--graph", snapshot.graphSha256)
+        assertTrue(first.retainedCases.last().value in laterCases, laterCases)
+        assertFalse(first.retainedCases.first().value in laterCases, laterCases)
+        assertTrue("Previous case references:" in laterCases, laterCases)
+        assertFalse("PRIVATE" in older || "code.c" in older || "reports/" in older, older)
+        fixture.assertSingleInvocation()
+        val after = contents(project)
+        assertEquals(before.keys, after.keys)
+        before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+        assertEquals(2, presentRecordedRepairHistory(recorded,
+            RepairRecordedHistorySelection(1, 1, "0".repeat(64))).exitCode)
+        assertEquals(2, presentRecordedRepairHistory(recorded,
+            RepairRecordedHistorySelection(99, 1, snapshot.graphSha256)).exitCode)
+    }
+
+    @Test
+    fun `history arguments reject duplicate unknown unbound malformed and oversized page selections`() {
+        val valid = parseRecordedRepairHistoryArguments(listOf("project", "--page", "2", "--case-page", "2", "--graph", "a".repeat(64)))
+        assertEquals(RepairRecordedHistorySelection(2, 2, "a".repeat(64)), valid.selection)
+        val invalid = listOf(emptyList(), listOf("project", "--page"), listOf("project", "--unknown", "1"),
+            listOf("project", "--page", "1", "--page", "1"), listOf("project", "--page", "2"),
+            listOf("project", "--case-page", "2"), listOf("project", "--graph", "PRIVATE")) +
+            listOf("0", "-1", "01", "+1", "1e2", "2147483648", "1".repeat(100)).map { listOf("project", "--page", it) }
+        invalid.forEach { args -> assertFailsWith<IllegalArgumentException> { parseRecordedRepairHistoryArguments(args) } }
+    }
+
+    @Test
     fun `actual trace guided rejection reconnects through CLI without repeating the agent or validator`() {
         val project = root()
         val fixture = produceRejectedRecordedTraceHistory(project)
@@ -111,13 +157,13 @@ class RecordedRepairHistoryCliTest {
         return Files.createTempDirectory(parent, "case-")
     }
 
-    private fun captureCli(root: Path): String {
+    private fun captureCli(root: Path, vararg options: String): String {
         val bytes = ByteArrayOutputStream()
         val original = System.out
         try {
             PrintStream(bytes, true, Charsets.UTF_8).use { output ->
                 System.setOut(output)
-                main(arrayOf("repair-history", root.toString()))
+                main(arrayOf("repair-history", root.toString(), *options))
             }
         } finally { System.setOut(original) }
         return bytes.toString(Charsets.UTF_8)
@@ -139,7 +185,8 @@ internal class RecordedTraceHistoryFixture {
     }
 }
 
-internal fun produceRejectedRecordedTraceHistory(project: Path): RecordedTraceHistoryFixture {
+internal fun produceRejectedRecordedTraceHistory(project: Path, caseCount: Int = 1): RecordedTraceHistoryFixture {
+    require(caseCount in 1..100)
     val fixture = RecordedTraceHistoryFixture()
     val original = "PRIVATE-original-source".toByteArray()
     val candidate = "PRIVATE-candidate-source".toByteArray()
@@ -179,7 +226,8 @@ internal fun produceRejectedRecordedTraceHistory(project: Path): RecordedTraceHi
     TraceGuidedRepairLoop.forTesting(harness, history, profile, validation, CapturedRepairStagingAuthority).use { loop ->
         val iteration = loop.repairCompileError(project, CompileFailure(listOf("authored-validator"), 1, "",
             "code.c: <script>PRIVATE initial diagnostic</script>"),
-            listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argument"), "PRIVATE-stdin".toByteArray())))
+            List(caseCount) { index -> ProcessInput(if (caseCount == 1) "PRIVATE-case" else "PRIVATE-case-${index.toString().padStart(3, '0')}",
+                listOf("PRIVATE-argument"), "PRIVATE-stdin".toByteArray()) })
         assertEquals(RepairAttemptDisposition.REJECTED, iteration.disposition)
     }
     fixture.assertSingleInvocation()
@@ -193,7 +241,30 @@ internal fun produceRejectedRecordedTraceHistory(project: Path): RecordedTraceHi
         assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, node.rollbackRecord?.state)
         assertEquals(false, node.rollbackRecord?.candidateSourceInstallStarted)
         assertEquals(node.rollbackRecord?.expectedSourceRevisionSha256, node.rollbackRecord?.observedSourceRevisionSha256)
-        assertEquals(1, graph.retainedRegressionCorpus().inputs.size)
+        assertEquals(caseCount, graph.retainedRegressionCorpus().inputs.size)
     }
+    return fixture
+}
+
+/** Put the real trace-guided attempt beyond both bounded tails using explicit test-host graph writes. */
+internal fun producePagedRecordedTraceHistory(project: Path): RecordedTraceHistoryFixture {
+    val fixture = produceRejectedRecordedTraceHistory(project, 25)
+    project.resolve("reports/iteration_1.validation.json").writeText("{\"retained\":true}")
+    val profile = DeclarativeRepairIndexProfile("PRIVATE-trace-profile", RepairIndexLayout(
+        listOf("code.c"), listOf("code.c"),
+        modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+    ModuleRevisionGraph.open(project, profile).use { graph ->
+        for (index in 2..101) {
+            val corpus = graph.retainedRegressionCorpus()
+            val metadata = RevisionRepairMetadata(index, "behavior", "PRIVATE-padding", "PRIVATE-padding",
+                corpus.inputs.map { it.id }, RepairEvidence("behavior", "PRIVATE-before", "reports/PRIVATE-unavailable-$index.json"),
+                corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+            graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-padding-$index".toByteArray()))
+            graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-padding"))
+        }
+        graph.synchronizeRepairHistory()
+    }
+    fixture.assertSingleInvocation()
     return fixture
 }

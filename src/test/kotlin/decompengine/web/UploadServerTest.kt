@@ -35,6 +35,8 @@ import decompengine.repair.ModuleRevisionFaultPoint
 import decompengine.repair.readProjectRecordedRepairHistory
 import decompengine.presentRecordedRepairHistory
 import decompengine.produceRejectedRecordedTraceHistory
+import decompengine.producePagedRecordedTraceHistory
+import decompengine.repair.RepairRecordedHistorySelection
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -1247,6 +1249,107 @@ class UploadServerTest {
     }
 
     @Test
+    fun `older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures`() {
+        val parent = Path.of("build/test-tmp/recorded-paged-http").toAbsolutePath().createDirectories()
+        val dataDir = Files.createTempDirectory(parent, "case-")
+        fun server() = UploadServer("127.0.0.1", 0, dataDir,
+            JobAnalyzer { _, _ -> error("history read must not analyze") },
+            JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
+        var active: UploadServer? = server()
+        try {
+            val initial = requireNotNull(active)
+            initial.start()
+            val id = uploadedJobId(initial)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            val fixture = producePagedRecordedTraceHistory(project)
+            val recorded = readProjectRecordedRepairHistory(project)
+            val snapshot = requireNotNull(recorded.snapshot)
+            val first = snapshot.attempts.first()
+            val before = recordedProjectBytes(project)
+            val evidencePath = "reports/source-tree/reports/iteration_1.validation.json"
+            repeat(2) { index ->
+                if (index == 1) {
+                    requireNotNull(active).stop(0)
+                    active = null
+                    active = server().also { it.start() }
+                }
+                val current = requireNotNull(active)
+                val latest = request(current, "GET", "/jobs/$id").body.decodeToString()
+                assertFalse("aria-label=\"Attempt 1\"" in latest, latest)
+                assertFalse(evidencePath in latest, latest)
+                assertTrue("historyPage=2" in latest && "historyGraph=${snapshot.graphSha256}" in latest, latest)
+                val query = "historyPage=2&historyGraph=${snapshot.graphSha256}"
+                val response = request(current, "GET", "/jobs/$id?$query")
+                val older = response.body.decodeToString()
+                assertEquals(200, response.status)
+                assertTrue("aria-label=\"Attempt 1\"" in older && "Compile repair — rejected" in older, older)
+                assertTrue("$evidencePath\">Open retained evidence" in older, older)
+                assertTrue("Recorded reference: <code>${first.after?.artifact?.value}</code>" in older, older)
+                assertTrue("Recorded run: <code>${first.run?.value}</code>" in older, older)
+                assertTrue(first.retainedCases.first().value in older, older)
+                assertFalse(first.retainedCases.last().value in older, older)
+                assertTrue("Retained case corpus: <code>${first.corpusSha256}</code>" in older, older)
+                assertTrue("Test-only evidence; release completeness is not established." in older, older)
+                val cases = request(current, "GET", "/jobs/$id?$query&historyCasesPage=2").body.decodeToString()
+                assertTrue(first.retainedCases.last().value in cases, cases)
+                assertFalse(first.retainedCases.first().value in cases, cases)
+                assertFalse("PRIVATE" in cases || "code.c" in cases, cases)
+                assertEquals(200, request(current, "GET", "/jobs/$id/artifacts/$evidencePath").status)
+                val cli = presentRecordedRepairHistory(recorded,
+                    RepairRecordedHistorySelection(6, 1, snapshot.graphSha256)).lines.joinToString("\n")
+                assertTrue("Compile repair — rejected" in cli && first.retainedCases.first().value in cli, cli)
+                fixture.assertSingleInvocation()
+                for (bad in listOf("historyPage=2", "$query&historyPage=2", "historyPage=0",
+                    "$query&historyCasesPage=999", "historyPage=999&historyGraph=${snapshot.graphSha256}",
+                    "$query&other=value", "historyPage=2147483648", "historyGraph=PRIVATE")) {
+                    assertEquals(400, request(current, "GET", "/jobs/$id?$bad").status, bad)
+                }
+                assertEquals(404, request(current, "GET", "/jobs/$id?runId=run_missing&$query").status)
+            }
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            val profile = DeclarativeRepairIndexProfile("PRIVATE-trace-profile", RepairIndexLayout(
+                listOf("code.c"), listOf("code.c"),
+                modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
+            ModuleRevisionGraph.open(project, profile).use { graph ->
+                graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-later-case")))
+                graph.synchronizeRepairHistory()
+            }
+            val grown = readProjectRecordedRepairHistory(project)
+            val grownSnapshot = requireNotNull(grown.snapshot)
+            assertNotEquals(snapshot.graphSha256, grownSnapshot.graphSha256)
+            val afterGrowth = recordedProjectBytes(project)
+            val current = requireNotNull(active)
+            assertEquals(409, request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${snapshot.graphSha256}").status)
+            assertEquals(2, presentRecordedRepairHistory(grown,
+                RepairRecordedHistorySelection(6, 1, snapshot.graphSha256)).exitCode)
+            val fresh = request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}").body.decodeToString()
+            assertTrue(first.retainedCases.first().value in fresh, fresh)
+            val afterStale = recordedProjectBytes(project)
+            assertEquals(afterGrowth.keys, afterStale.keys)
+            afterGrowth.forEach { (name, bytes) -> assertContentEquals(bytes, afterStale.getValue(name), name) }
+            val history = project.resolve("reports/repair_history.json")
+            history.writeText(Files.readString(history).take(32))
+            val truncatedProjection = request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}")
+            assertEquals(200, truncatedProjection.status)
+            assertTrue("Compile repair — rejected" in truncatedProjection.body.decodeToString())
+            val graphFile = project.resolve("reports/repair-revisions/graph.json")
+            graphFile.writeText(Files.readString(graphFile).take(32))
+            val invalidBefore = recordedProjectBytes(project)
+            assertEquals(409, request(current, "GET", "/jobs/$id?historyPage=2&historyGraph=${grownSnapshot.graphSha256}").status)
+            val invalid = request(current, "GET", "/jobs/$id").body.decodeToString()
+            assertTrue("Repair history is unavailable or corrupt." in invalid, invalid)
+            assertFalse("Compile repair — rejected" in invalid, invalid)
+            assertEquals(1, presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).exitCode)
+            val invalidAfter = recordedProjectBytes(project)
+            assertEquals(invalidBefore.keys, invalidAfter.keys)
+            invalidBefore.forEach { (name, bytes) -> assertContentEquals(bytes, invalidAfter.getValue(name), name) }
+            fixture.assertSingleInvocation()
+        } finally { active?.stop(0) }
+    }
+
+    @Test
     fun `actual trace guided rejection survives server restart with matching CLI and private safe HTTP history`() {
         val parent = Path.of("build/test-tmp/recorded-trace-http").toAbsolutePath().createDirectories()
         val dataDir = Files.createTempDirectory(parent, "case-")
@@ -1377,6 +1480,38 @@ class UploadServerTest {
             val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
             assertTrue("Recorded restoration completed after failure; the earlier failure is retained." in cli, cli)
         } finally { active?.stop(0) }
+    }
+
+    @Test
+    fun `older canonical receipt is verified only on its selected page and corruption preserves rejection`() {
+        withServer { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            produceRecordedRepairHistory(project, receipt = true, padding = 100)
+            val snapshot = requireNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val first = snapshot.attempts.first()
+            val query = "historyPage=2&historyGraph=${snapshot.graphSha256}"
+            val receiptPath = "reports/source-tree/reports/repair-revisions/${first.identity.value}.acp-receipt.json"
+            val before = recordedProjectBytes(project)
+            val latest = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertFalse("ACP receipt is complete; repair acceptance was not established." in latest, latest)
+            assertFalse(receiptPath in latest, latest)
+            val selected = request(server, "GET", "/jobs/$id?$query").body.decodeToString()
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in selected, selected)
+            assertTrue(receiptPath in selected, selected)
+            assertTrue("Compile repair — rejected" in selected, selected)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+            val receipt = Files.list(project.resolve("reports/repair-revisions")).use { files ->
+                files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
+            }
+            receipt.writeText("{\"PRIVATE-corrupt-receipt\":true}")
+            val corrupt = request(server, "GET", "/jobs/$id?$query").body.decodeToString()
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in corrupt, corrupt)
+            assertTrue("Compile repair — rejected" in corrupt, corrupt)
+            assertFalse("Release-complete ACP receipt was verified" in corrupt || "PRIVATE-" in corrupt, corrupt)
+        }
     }
 
     @Test
@@ -2127,7 +2262,9 @@ class UploadServerTest {
         listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
 
     /** Producer and authored receipt data only; no agent process or runtime is qualified here. */
-    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false, detached: Boolean = true) {
+    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false, detached: Boolean = true,
+        padding: Int = 0) {
+        require(padding in 0..100)
         val original = "PRIVATE-original-source".toByteArray()
         val candidate = "PRIVATE-candidate-source".toByteArray()
         Files.write(project.resolve("code.c"), original)
@@ -2158,6 +2295,20 @@ class UploadServerTest {
             assertEquals(!detached, rollback.candidateSourceInstallStarted)
             assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
             assertContentEquals(original, project.resolve("code.c").readBytes())
+        }
+        if (padding > 0) ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+            if (graph.snapshot.runs.lastOrNull()?.terminal == false)
+                graph.finishRun(RepairRunStatus.REJECTED, RepairEvidence("rejected", "authored padding boundary"))
+            val corpus = graph.retainedRegressionCorpus()
+            for (index in 2..padding + 1) {
+                val metadata = RevisionRepairMetadata(index, "behavior", "PRIVATE-padding", "PRIVATE-padding",
+                    corpus.inputs.map { it.id }, RepairEvidence("behavior", "PRIVATE-padding"), corpus.sha256,
+                    publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+                graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-padding-$index".toByteArray()))
+                graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-padding"))
+            }
+            graph.synchronizeRepairHistory()
         }
     }
 

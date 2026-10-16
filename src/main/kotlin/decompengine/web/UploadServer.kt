@@ -775,23 +775,28 @@ class UploadServer(
 
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
-        val selectedRun = exchange.requestURI.rawQuery?.let {
-            require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
-            it.removePrefix("runId=")
+        val query = parseRecordedRepairHistoryQuery(exchange.requestURI.rawQuery)
+        val reports = query.runId?.let { jobs.reportContext(jobId, it) } ?: view.reports
+        val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
+        val page = try {
+            decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
+        } catch (failure: decompengine.repair.RepairRecordedSelectionFailure) {
+            val status = if (failure.problem == decompengine.repair.RepairRecordedSelectionProblem.OUT_OF_RANGE) 400 else 409
+            exchange.sendHtml(status, renderErrorPage(status, "History selection unavailable", requireNotNull(failure.message)))
+            return
         }
-        val reports = selectedRun?.let { jobs.reportContext(jobId, it) } ?: view.reports
+        // Resolve all page/stale checks before any report, evidence or receipt payload work.
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
-        val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
         // The fixed reader already captured diagnostic H once. Never reread it as display input.
         val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
         val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
-        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, recorded.snapshot) }.getOrNull()
+        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, page?.snapshot, page) }.getOrNull()
         val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
             repairEvidenceArtifactStates(jobId, reports, history, it)
         } }
-        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts)
+        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page)
         exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
@@ -805,9 +810,13 @@ class UploadServer(
 
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
     private fun recordedRepairEvidenceView(jobId: String, context: WebReportContext,
-        recorded: decompengine.repair.RepairHistoryReadResult, artifacts: List<WebArtifactSummary>?): RecordedRepairHistoryView {
-        val snapshot = recorded.snapshot ?: return RecordedRepairHistoryView(recorded)
-        val targets = recordedRepairArtifactReferences(snapshot).mapNotNull { reference ->
+        recorded: decompengine.repair.RepairHistoryReadResult, artifacts: List<WebArtifactSummary>?,
+        page: decompengine.repair.RepairRecordedHistoryPage?): RecordedRepairHistoryView {
+        val snapshot = recorded.snapshot?.takeIf { recorded.status == decompengine.repair.RepairHistoryReadStatus.RECORDED }
+            ?: return RecordedRepairHistoryView(recorded, runId = context.runId)
+        val selected = requireNotNull(page)
+        require(selected.snapshot === snapshot) { "Recorded history page does not match its capture." }
+        val targets = recordedRepairArtifactReferences(snapshot, selected).mapNotNull { reference ->
             recordedRepairEvidenceTarget(reference, snapshot, context, artifacts)?.let { reference to it }
         }.toMap()
         val captured = mutableMapOf<String, Result<ByteArray>>()
@@ -831,7 +840,7 @@ class UploadServer(
             if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
                 RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
         }
-        val receipts = visibleRecordedRepairAttempts(snapshot).filter { it.invocation != null }.associate { attempt ->
+        val receipts = selected.attempts.filter { it.invocation != null }.associate { attempt ->
             val invocation = requireNotNull(attempt.invocation)
             val target = targets[invocation.artifact]
             val bytes = if (target == null || attempt.identity.rawIdentityWithheld) null else readOnce(target).getOrNull()
@@ -850,7 +859,7 @@ class UploadServer(
             }
             attempt.identity to state
         }
-        return RecordedRepairHistoryView(recorded, targets, evidence, receipts)
+        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId)
     }
 
     private data class RepairReceiptExpectation(

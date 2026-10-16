@@ -26,6 +26,109 @@ class RepairHistorySnapshotTest {
         ProcessInput("PRIVATE-other-case", emptyList(), byteArrayOf()))
 
     @Test
+    fun recordedPagesKeepOneCaptureDisjointRowsPendingAndBoundedCaseReferences() {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(List(25) { ProcessInput("PRIVATE-case-${it.toString().padStart(3, '0')}") })
+            repeat(3) { index ->
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata(graph, index + 1))
+                graph.installCandidate(attempt, mapOf("code.c" to "candidate-$index".toByteArray()))
+                graph.reject(attempt)
+            }
+            val pending = graph.beginAttempt(listOf("code.c"), metadata(graph, 4))
+            val snapshot = view(capture(root))
+            val latest = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), 2)
+            val older = RepairRecordedHistoryPage.select(snapshot,
+                RepairRecordedHistorySelection(2, expectedGraphSha256 = snapshot.graphSha256), 2)
+            assertEquals(2, latest.totalPages)
+            assertEquals(listOf(2, 3, 4), latest.attempts.map { it.iterationIndex })
+            assertEquals(listOf(1), older.attempts.map { it.iterationIndex })
+            assertTrue(older.attempts.none { it.kind == RepairRecordedAttemptKind.PENDING })
+            assertEquals(snapshot.attempts.map { it.identity }, (older.attempts +
+                latest.attempts.filter { it.kind == RepairRecordedAttemptKind.FINALIZED }).map { it.identity })
+            val secondCases = RepairRecordedHistoryPage.select(snapshot,
+                RepairRecordedHistorySelection(1, 2, snapshot.graphSha256), 2)
+            val attempt = latest.attempts.first()
+            assertEquals(20, latest.caseReferences(attempt).size)
+            assertEquals(5, secondCases.caseReferences(attempt).size)
+            assertEquals(attempt.retainedCases, latest.caseReferences(attempt) + secondCases.caseReferences(attempt))
+            assertFailsWith<IllegalArgumentException> { latest.caseReferences(older.attempts.single()) }
+            assertFailsWith<IllegalArgumentException> {
+                RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), 101)
+            }
+            for (selection in listOf(RepairRecordedHistorySelection(Int.MAX_VALUE, 1, snapshot.graphSha256),
+                RepairRecordedHistorySelection(1, Int.MAX_VALUE, snapshot.graphSha256))) {
+                val failure = assertFailsWith<RepairRecordedSelectionFailure> {
+                    RepairRecordedHistoryPage.select(snapshot, selection, 2)
+                }
+                assertEquals(RepairRecordedSelectionProblem.OUT_OF_RANGE, failure.problem)
+            }
+            val changed = assertFailsWith<RepairRecordedSelectionFailure> {
+                RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(1, 1, "0".repeat(64)), 2)
+            }
+            assertEquals(RepairRecordedSelectionProblem.CHANGED, changed.problem)
+            graph.reject(pending)
+            assertEquals(pending.id, latest.attempts.last().identity.value) // Capture remains immutable after producer writes.
+        }
+    }
+
+    @Test
+    fun recordedRunPagesReachEveryRunWhenNoAttemptsWereMadeAndEmptyHistoryHasOnePage() {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            graph.enableRunContract()
+            val empty = RepairRecordedHistoryPage.select(view(capture(root)), RepairRecordedHistorySelection(), 2)
+            assertEquals(1, empty.totalPages)
+            assertTrue(empty.attempts.isEmpty() && empty.runs.isEmpty())
+            repeat(5) {
+                graph.beginRun(1, 60_000)
+                graph.finishRun(RepairRunStatus.CANCELLED, RepairEvidence("cancelled", "authored before execution"))
+            }
+            val snapshot = view(capture(root))
+            val pages = (1..3).map { number -> RepairRecordedHistoryPage.select(snapshot,
+                RepairRecordedHistorySelection(number, 1, snapshot.graphSha256), 2) }
+            assertTrue(pages.all { it.totalPages == 3 && it.attempts.isEmpty() && it.runs.size <= 2 })
+            assertEquals(snapshot.runs.map { it.identity }, pages.reversed().flatMap { it.runs }.map { it.identity })
+        }
+    }
+
+    @Test
+    fun historicalAttemptRetainsItsOwnCorpusAndCaseReferencesAfterCorpusGrowth() {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            graph.enableRunContract()
+            graph.retainRegressionInputs(inputs.take(1))
+            val firstCorpus = graph.retainedRegressionCorpus()
+            val first = graph.beginAttempt(listOf("code.c"), metadata(graph, 1))
+            graph.installCandidate(first, mapOf("code.c" to "first candidate".toByteArray()))
+            graph.reject(first, RepairEvidence("rejected", "PRIVATE-peer"))
+            val firstView = view(capture(root)).attempts.single()
+            assertEquals(firstCorpus.sha256, firstView.corpusSha256)
+            val firstReference = firstView.retainedCases.single()
+
+            graph.retainRegressionInputs(inputs)
+            val expanded = graph.retainedRegressionCorpus()
+            assertNotEquals(firstCorpus.sha256, expanded.sha256)
+            val second = graph.beginAttempt(listOf("code.c"), metadata(graph, 2))
+            graph.installCandidate(second, mapOf("code.c" to "second candidate".toByteArray()))
+            graph.reject(second, RepairEvidence("rejected", "PRIVATE-peer"))
+            val captured = view(capture(root))
+            val historical = captured.attempts.first()
+            val latest = captured.attempts.last()
+            assertEquals(firstCorpus.sha256, historical.corpusSha256)
+            assertEquals(firstReference, historical.retainedCases.single())
+            assertEquals(expanded.sha256, latest.corpusSha256)
+            assertEquals(expanded.sha256, captured.corpusSha256)
+            val expandedReference = RepairHistoryIdentityReferences(expanded.sha256).case(firstCorpus.inputs.single().id)
+            assertTrue(expandedReference in latest.retainedCases)
+            assertNotEquals(firstReference, expandedReference)
+            assertFalse("PRIVATE" in publicSurface(captured))
+            assertEquals("base", root.resolve("code.c").readText())
+        }
+    }
+
+    @Test
     fun actualPendingAndOrdinaryRestorationRetainCompleteRecords() {
         val root = root()
         val progress = mutableListOf<Captured>()
@@ -292,7 +395,7 @@ class RepairHistorySnapshotTest {
         } }
         val snapshot = view(captured)
         val attempt = snapshot.attempts.single()
-        assertEquals(2, snapshot.viewSchemaVersion)
+        assertEquals(3, snapshot.viewSchemaVersion)
         assertEquals(1, attempt.iterationIndex)
         assertEquals(RepairRecordedFailureKind.COMPILE, attempt.failureKind)
         assertEquals(RepairRecordedEvidenceKind.BUILD, attempt.before?.kind)

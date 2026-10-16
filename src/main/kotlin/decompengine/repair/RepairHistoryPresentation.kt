@@ -134,3 +134,50 @@ internal fun recordedRepairRollbackLabel(rollback: RepairRecordedRollback?): Str
         RepairRollbackState.NOT_REQUIRED_VERIFIED -> "Recorded restoration was not required; candidate source installation did not begin."
     }
 }
+
+internal fun recordedRepairKindLabel(kind: RepairRecordedFailureKind): String = when (kind) {
+    RepairRecordedFailureKind.COMPILE -> "Compile repair"
+    RepairRecordedFailureKind.BEHAVIOR -> "Behavior repair"
+    RepairRecordedFailureKind.OTHER -> "Revision attempt"
+}
+
+internal fun recordedRepairSummary(attempt: RepairRecordedAttempt): String =
+    "${recordedRepairKindLabel(attempt.failureKind)} — ${recordedRepairAttemptLabel(attempt)}"
+
+internal fun recordedRepairEvidenceLabel(kind: RepairRecordedEvidenceKind): String = when (kind) {
+    RepairRecordedEvidenceKind.BUILD -> "Build validation"
+    RepairRecordedEvidenceKind.BEHAVIOR -> "Behavior validation"
+    RepairRecordedEvidenceKind.REGRESSION -> "Regression validation"
+    RepairRecordedEvidenceKind.RECOVERY -> "Recovery"
+    RepairRecordedEvidenceKind.VALIDATION -> "Validation"
+    RepairRecordedEvidenceKind.NO_CHANGE -> "No-change"
+    RepairRecordedEvidenceKind.REFUSED -> "Refusal"
+    RepairRecordedEvidenceKind.CANCELLED -> "Cancellation"
+    RepairRecordedEvidenceKind.LIMIT_EXHAUSTED -> "Limit exhaustion"
+    RepairRecordedEvidenceKind.PROCESS_CRASHED -> "Process failure"
+    RepairRecordedEvidenceKind.VALIDATION_FAILED -> "Validation failure"
+    RepairRecordedEvidenceKind.OTHER -> "Repair"
+}
+
+/** The caller supplies an independently obtained content-check result, never an acceptance grant. */
+internal enum class RepairRecordedReceiptCheck { NOT_READ, UNAVAILABLE, CORRUPT, VERIFIED }
+internal fun recordedRepairAssuranceLabel(attempt: RepairRecordedAttempt,
+    receiptCheck: RepairRecordedReceiptCheck = RepairRecordedReceiptCheck.NOT_READ): String {
+    if (attempt.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+        return "Test-only evidence; release completeness is not established."
+    if (attempt.publicationMode != RepairPublicationMode.ACP_RELEASE)
+        return "Evidence assurance is unavailable; release completeness is not recorded."
+    val invocation = attempt.invocation
+    return when (receiptCheck) {
+        RepairRecordedReceiptCheck.NOT_READ -> "ACP receipt content has not been read; release completeness is not established."
+        RepairRecordedReceiptCheck.UNAVAILABLE -> "ACP receipt is unavailable; release completeness is not established."
+        RepairRecordedReceiptCheck.CORRUPT -> "ACP receipt is corrupt; release completeness is not established."
+        RepairRecordedReceiptCheck.VERIFIED -> when {
+            invocation == null || invocation.terminal != RepairRecordedTerminal.COMPLETED || !invocation.receiptReleaseComplete ->
+                "ACP receipt was verified; release completeness is not established."
+            recordedRepairAttemptLabel(attempt) == "accepted" ->
+                "Release-complete ACP receipt was verified; the repair outcome is recorded metadata."
+            else -> "ACP receipt is complete; repair acceptance was not established."
+        }
+    }
+}

@@ -9,6 +9,24 @@ import kotlin.test.*
 
 class RecordedRepairEvidenceTest {
     @Test
+    fun `history query is closed and page references cannot be borrowed from another capture`() {
+        val graph = "a".repeat(64)
+        val parsed = parseRecordedRepairHistoryQuery("runId=run_selected&historyPage=2&historyCasesPage=2&historyGraph=$graph")
+        assertEquals("run_selected", parsed.runId)
+        assertEquals(RepairRecordedHistorySelection(2, 2, graph), parsed.selection)
+        for (query in listOf("", "historyPage=2", "historyCasesPage=2", "historyPage=1&historyPage=1",
+            "runId=one&runId=two", "historyGraph=PRIVATE", "unknown=1", "historyPage=01",
+            "historyPage=2147483648", "historyPage=%31", "runId=../private", "historyPage=")) {
+            assertFailsWith<IllegalArgumentException>(query) { parseRecordedRepairHistoryQuery(query) }
+        }
+        val (reports, snapshot) = fixture()
+        val other = fixture().second
+        val foreignPage = RepairRecordedHistoryPage.select(other, RepairRecordedHistorySelection(), 100)
+        assertFailsWith<IllegalArgumentException> { recordedRepairArtifactReferences(snapshot, foreignPage) }
+        assertFailsWith<IllegalArgumentException> { listLegacyArtifactSummaries(WebReportContext(reports), snapshot, foreignPage) }
+    }
+
+    @Test
     fun `opaque targets require one checked selected namespace match and reject ambiguity`() {
         val (reports, snapshot) = fixture()
         val context = WebReportContext(reports, "reports/runs/run_selected", "run_selected")

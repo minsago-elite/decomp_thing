@@ -313,6 +313,12 @@ class WebJobService(
         recordedRepair: decompengine.repair.RepairHistorySnapshot?): List<WebArtifactSummary> =
         listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair)
 
+    @Synchronized
+    internal fun listArtifactSummaries(jobId: String, runId: String?,
+        recordedRepair: decompengine.repair.RepairHistorySnapshot?,
+        page: decompengine.repair.RepairRecordedHistoryPage?): List<WebArtifactSummary> =
+        listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair, page)
+
     /** Authorize the selected durable job/run before the fixed retained canonical read. */
     @Synchronized
     internal fun readRecordedRepairHistory(jobId: String, runId: String? = null): decompengine.repair.RepairHistoryReadResult {

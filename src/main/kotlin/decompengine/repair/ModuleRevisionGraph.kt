@@ -5294,24 +5294,31 @@ private fun recordedHistoryView(
             it.candidateSourceInstallStarted)
     }
     val attempts = state.nodes.filter { it.status != ModuleRevisionStatus.ROOT }.map { node ->
+        val metadata = node.repairMetadata
         RepairRecordedAttempt(RepairRecordedAttemptKind.FINALIZED, identities.revision(node.id),
             identity(node.parentId), node.ordinal,
             if (state.schemaVersion < 3 && node.status == ModuleRevisionStatus.ACCEPTED) ModuleRevisionStatus.LEGACY_UNVERIFIED else node.status,
             node.sourceRevisionSha256,
             identity(node.repairMetadata?.runId), node.repairMetadata?.publicationMode, rollback(node.rollbackRecord),
             invocation(node.repairMetadata?.agentInvocation),
-            node.repairMetadata?.retainedRegressionIds.orEmpty().map(identities::case),
+            metadata?.retainedRegressionIds.orEmpty().map { id ->
+                identities.case(id, requireNotNull(metadata?.regressionCorpusSha256))
+            },
             node.repairMetadata?.iterationIndex, failureKind(node.repairMetadata?.failureKind),
             node.repairMetadata?.before?.let { evidence(it.kind, it.artifactPath) },
-            evidence(node.evidenceKind, node.evidenceArtifact))
+            evidence(node.evidenceKind, node.evidenceArtifact), metadata?.regressionCorpusSha256)
     }
-    val pending = state.pending?.let {
-        RepairRecordedAttempt(RepairRecordedAttemptKind.PENDING, identities.revision(it.id), identity(it.parentId),
-            it.ordinal, null, it.candidateSourceRevisionSha256, identity(it.repairMetadata?.runId),
-            it.repairMetadata?.publicationMode, rollback(it.rollbackRecord), invocation(it.repairMetadata?.agentInvocation),
-            it.repairMetadata?.retainedRegressionIds.orEmpty().map(identities::case),
-            it.repairMetadata?.iterationIndex, failureKind(it.repairMetadata?.failureKind),
-            it.repairMetadata?.before?.let { before -> evidence(before.kind, before.artifactPath) }, null)
+    val pending = state.pending?.let { pending ->
+        val metadata = pending.repairMetadata
+        RepairRecordedAttempt(RepairRecordedAttemptKind.PENDING, identities.revision(pending.id), identity(pending.parentId),
+            pending.ordinal, null, pending.candidateSourceRevisionSha256, identity(pending.repairMetadata?.runId),
+            pending.repairMetadata?.publicationMode, rollback(pending.rollbackRecord), invocation(pending.repairMetadata?.agentInvocation),
+            metadata?.retainedRegressionIds.orEmpty().map { id ->
+                identities.case(id, requireNotNull(metadata?.regressionCorpusSha256))
+            },
+            pending.repairMetadata?.iterationIndex, failureKind(pending.repairMetadata?.failureKind),
+            pending.repairMetadata?.before?.let { before -> evidence(before.kind, before.artifactPath) }, null,
+            metadata?.regressionCorpusSha256)
     }
     val runs = state.runs.map {
         RepairRecordedRun(it.schemaVersion, identities.revision(it.id), it.status, identities.revision(it.baselineId),

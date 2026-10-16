@@ -17,11 +17,121 @@ internal class RepairHistorySnapshot internal constructor(
     val pending: RepairRecordedAttempt?,
     retainedCases: List<RepairRecordedIdentity>,
 ) {
-    val viewSchemaVersion: Int get() = 2
+    val viewSchemaVersion: Int get() = 3
     val qualification: RepairRecordedQualification get() = RepairRecordedQualification.RECORDED_METADATA_ONLY
     val runs: List<RepairRecordedRun> = immutableRecordedList(runs)
     val attempts: List<RepairRecordedAttempt> = immutableRecordedList(attempts)
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
+}
+
+/** Continuations name the same captured graph; no selection grants filesystem authority. */
+internal data class RepairRecordedHistorySelection(
+    val pageNumber: Int = 1,
+    val casePageNumber: Int = 1,
+    val expectedGraphSha256: String? = null,
+) {
+    init {
+        require(pageNumber > 0 && casePageNumber > 0) { "Recorded history page is invalid." }
+        require(expectedGraphSha256 == null || GRAPH_DIGEST.matches(expectedGraphSha256)) {
+            "Recorded history graph identity is invalid."
+        }
+        require((pageNumber == 1 && casePageNumber == 1) || expectedGraphSha256 != null) {
+            "Continued history selection requires the recorded graph identity."
+        }
+    }
+
+    val isDefault: Boolean get() = pageNumber == 1 && casePageNumber == 1 && expectedGraphSha256 == null
+
+    private companion object { val GRAPH_DIGEST = Regex("[0-9a-f]{64}") }
+}
+
+internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: String?): RepairRecordedHistorySelection {
+    fun number(value: String?): Int {
+        if (value == null) return 1
+        require(value.isNotEmpty() && value.length <= 10 && value[0] in '1'..'9' && value.all { it in '0'..'9' }) {
+            "Recorded history page is invalid."
+        }
+        return requireNotNull(value.toIntOrNull()) { "Recorded history page is invalid." }
+    }
+    return RepairRecordedHistorySelection(number(page), number(cases), graph)
+}
+
+internal enum class RepairRecordedSelectionProblem { UNAVAILABLE, CHANGED, OUT_OF_RANGE }
+internal class RepairRecordedSelectionFailure(val problem: RepairRecordedSelectionProblem) : RuntimeException(
+    when (problem) {
+        RepairRecordedSelectionProblem.UNAVAILABLE -> "Recorded history selection is unavailable. Reload the latest history."
+        RepairRecordedSelectionProblem.CHANGED -> "Recorded history changed. Reload the latest history before continuing."
+        RepairRecordedSelectionProblem.OUT_OF_RANGE -> "Recorded history page is out of range."
+    }, null, false, false,
+)
+
+/** Fixed-size windows over one immutable capture, including pending only on the latest page. */
+internal class RepairRecordedHistoryPage private constructor(
+    val snapshot: RepairHistorySnapshot,
+    val selection: RepairRecordedHistorySelection,
+    val pageSize: Int,
+    val totalPages: Int,
+    val attemptStart: Int,
+    val attemptEnd: Int,
+    val runStart: Int,
+    val runEnd: Int,
+    val casePages: Int,
+) {
+    val attempts: List<RepairRecordedAttempt> = immutableRecordedList(
+        snapshot.attempts.subList(attemptStart, attemptEnd) +
+            listOfNotNull(snapshot.pending.takeIf { selection.pageNumber == 1 }))
+    val runs: List<RepairRecordedRun> = immutableRecordedList(snapshot.runs.subList(runStart, runEnd))
+    val earlierAttempts: Int get() = attemptStart
+    val newerAttempts: Int get() = snapshot.attempts.size - attemptEnd
+    val earlierRuns: Int get() = runStart
+    val newerRuns: Int get() = snapshot.runs.size - runEnd
+
+    fun caseReferences(attempt: RepairRecordedAttempt): List<RepairRecordedIdentity> {
+        require(attempts.any { it === attempt }) { "Recorded attempt is outside the selected history page." }
+        if (attempt.corpusSha256 == null) return emptyList()
+        val start = minOf(attempt.retainedCases.size.toLong(),
+            (selection.casePageNumber - 1).toLong() * CASE_PAGE_SIZE).toInt()
+        return immutableRecordedList(attempt.retainedCases.subList(start,
+            minOf(attempt.retainedCases.size.toLong(), start.toLong() + CASE_PAGE_SIZE).toInt()))
+    }
+
+    companion object {
+        const val CASE_PAGE_SIZE = 20
+        fun select(snapshot: RepairHistorySnapshot, selection: RepairRecordedHistorySelection,
+            pageSize: Int): RepairRecordedHistoryPage {
+            require(pageSize in 1..100) { "Recorded history window exceeds its bound." }
+            if (selection.expectedGraphSha256 != null && selection.expectedGraphSha256 != snapshot.graphSha256)
+                throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.CHANGED)
+            fun pages(count: Int, size: Int): Int = maxOf(1L, (count.toLong() + size - 1) / size).toInt()
+            val total = maxOf(pages(snapshot.attempts.size, pageSize), pages(snapshot.runs.size, pageSize))
+            if (selection.pageNumber > total)
+                throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.OUT_OF_RANGE)
+            fun bounds(count: Int): Pair<Int, Int> {
+                val end = (count.toLong() - (selection.pageNumber - 1).toLong() * pageSize)
+                    .coerceIn(0L, count.toLong()).toInt()
+                return maxOf(0, end - pageSize) to end
+            }
+            val (first, end) = bounds(snapshot.attempts.size)
+            val (runFirst, runEnd) = bounds(snapshot.runs.size)
+            val visible = snapshot.attempts.subList(first, end) +
+                listOfNotNull(snapshot.pending.takeIf { selection.pageNumber == 1 })
+            val maximumCases = visible.maxOfOrNull { if (it.corpusSha256 == null) 0 else it.retainedCases.size } ?: 0
+            val casePages = pages(maximumCases, CASE_PAGE_SIZE)
+            if (selection.casePageNumber > casePages)
+                throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.OUT_OF_RANGE)
+            return RepairRecordedHistoryPage(snapshot, selection, pageSize, total, first, end, runFirst, runEnd, casePages)
+        }
+    }
+}
+
+internal fun recordedRepairHistoryPage(result: RepairHistoryReadResult, selection: RepairRecordedHistorySelection,
+    pageSize: Int): RepairRecordedHistoryPage? {
+    val snapshot = result.snapshot
+    if (result.status != RepairHistoryReadStatus.RECORDED || snapshot == null) {
+        if (!selection.isDefault) throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.UNAVAILABLE)
+        return null
+    }
+    return RepairRecordedHistoryPage.select(snapshot, selection, pageSize)
 }
 
 internal enum class RepairRecordedQualification { RECORDED_METADATA_ONLY }
@@ -92,6 +202,7 @@ internal class RepairRecordedAttempt internal constructor(
     val failureKind: RepairRecordedFailureKind,
     val before: RepairRecordedEvidence?,
     val after: RepairRecordedEvidence?,
+    val corpusSha256: String? = null,
 ) {
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
 }
@@ -135,9 +246,12 @@ internal class RepairHistoryIdentityReferences internal constructor(private val 
         return RepairRecordedIdentity(reference, !public)
     }
 
-    fun case(value: String): RepairRecordedIdentity {
+    fun case(value: String): RepairRecordedIdentity = case(value, corpusSha256)
+
+    fun case(value: String, boundCorpusSha256: String): RepairRecordedIdentity {
+        require(CORPUS_DIGEST.matches(boundCorpusSha256)) { "Recorded case corpus is invalid." }
         val bytes = value.toByteArray(Charsets.UTF_8)
-        val prefix = "decompengine.repair.public-case.v1\n$corpusSha256\n${bytes.size}:".toByteArray(Charsets.UTF_8)
+        val prefix = "decompengine.repair.public-case.v1\n$boundCorpusSha256\n${bytes.size}:".toByteArray(Charsets.UTF_8)
         val reference = "case_" + sha256(prefix + bytes)
         register(reference, value)
         return RepairRecordedIdentity(reference, true)
@@ -160,6 +274,7 @@ internal class RepairHistoryIdentityReferences internal constructor(private val 
     }
 
     private companion object {
+        val CORPUS_DIGEST = Regex("[0-9a-f]{64}")
         val PUBLIC_RECORDED_ID = Regex("(?:root_[0-9a-f]{24}|revision_[0-9]{8}_[0-9a-f]{16}|run_[0-9]{8})")
     }
 }

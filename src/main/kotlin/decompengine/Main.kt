@@ -59,13 +59,13 @@ fun main(args: Array<String>) {
 }
 
 private fun runRecordedRepairHistory(args: List<String>) {
-    val root = if (args.size == 1 && args.single().isNotBlank() && !args.single().startsWith("-"))
-        runCatching { Path.of(args.single()) }.getOrNull() else null
-    if (root == null) {
-        System.err.println("usage: llm_bin_patch repair-history <project-dir>")
+    val options = runCatching { parseRecordedRepairHistoryArguments(args) }.getOrNull()
+    if (options == null) {
+        System.err.println("usage: llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]")
         kotlin.system.exitProcess(2)
     }
-    val presentation = presentRecordedRepairHistory(decompengine.repair.readProjectRecordedRepairHistory(root))
+    val presentation = presentRecordedRepairHistory(
+        decompengine.repair.readProjectRecordedRepairHistory(options.project), options.selection)
     presentation.lines.forEach(::println)
     if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
 }
@@ -602,7 +602,7 @@ private fun printHelp() {
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
-          llm_bin_patch repair-history <project-dir>
+          llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>

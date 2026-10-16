@@ -55,23 +55,48 @@ internal fun safeRepairEvidenceTarget(
 
 internal const val MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS = 100
 internal fun visibleRecordedRepairAttempts(snapshot: RepairHistorySnapshot): List<RepairRecordedAttempt> =
-    snapshot.attempts.takeLast(MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS) + listOfNotNull(snapshot.pending)
+    RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS).attempts
+
+internal data class RecordedRepairHistoryQuery(val runId: String?, val selection: RepairRecordedHistorySelection)
+internal fun parseRecordedRepairHistoryQuery(raw: String?): RecordedRepairHistoryQuery {
+    if (raw == null) return RecordedRepairHistoryQuery(null, RepairRecordedHistorySelection())
+    require(raw.isNotEmpty() && raw.length <= 512) { "Recorded history query is invalid." }
+    val values = linkedMapOf<String, String>()
+    for (part in raw.split('&')) {
+        val pair = part.split('=', limit = 2)
+        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph") &&
+            values.put(pair[0], pair[1]) == null) { "Recorded history query is invalid." }
+    }
+    val run = values["runId"]
+    require(run == null || run.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Recorded history query is invalid." }
+    return RecordedRepairHistoryQuery(run, parseRecordedRepairSelection(
+        values["historyPage"], values["historyCasesPage"], values["historyGraph"]))
+}
 
 internal data class RecordedRepairHistoryView(
     val recorded: RepairHistoryReadResult,
     val targets: Map<RepairRecordedArtifactReference, String> = emptyMap(),
     val evidenceStates: Map<RepairRecordedArtifactReference, RepairEvidenceArtifactState> = emptyMap(),
     val receiptStates: Map<RepairRecordedIdentity, RepairEvidenceArtifactState> = emptyMap(),
+    val page: RepairRecordedHistoryPage? = null,
+    val runId: String? = null,
 )
 
 internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =
-    buildSet {
-        visibleRecordedRepairAttempts(snapshot).forEach { attempt ->
+    recordedRepairArtifactReferences(snapshot, RepairRecordedHistoryPage.select(snapshot,
+        RepairRecordedHistorySelection(), MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS))
+
+internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot,
+    page: RepairRecordedHistoryPage): Set<RepairRecordedArtifactReference> {
+    require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }
+    return buildSet {
+        page.attempts.forEach { attempt ->
             attempt.before?.artifact?.let(::add)
             attempt.after?.artifact?.let(::add)
             attempt.invocation?.artifact?.let(::add)
         }
     }
+}
 
 /** Fixed selected report namespace only; canonical H/G/binding/blobs are never evidence reads. */
 internal fun recordedRepairLogicalArtifactPath(target: String, reports: WebReportContext): String? {
