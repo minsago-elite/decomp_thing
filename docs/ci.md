@@ -66,6 +66,13 @@ It also rejects changes to checked frontend or contract inputs produced by those
 commands. CI restores npm's package-download cache keyed to the lockfile, while
 each job still installs clean `node_modules` and builds the current bundle. No
 generated bundle or `node_modules` tree is restored.
+Its existing deliberate contract-drift fixtures retain four
+`expected-web-api-rejection` records in `api-drift-tests.txt`: changed generated
+types, changed generated schema, changed source schema and an unsupported schema
+keyword. Each records exit 1 without a signal, a bounded rejection diagnostic
+with the fixture root redacted, and unchanged hashes for all four fixture inputs.
+The authored bad inputs are expected refusals within the passing test; this
+receipt supplies no clean/cache-hit or broader integration qualification.
 Gradle jobs restore the shared master dependency cache on pull requests; only
 master writes new Gradle cache entries, avoiding one large cache per pull request.
 
