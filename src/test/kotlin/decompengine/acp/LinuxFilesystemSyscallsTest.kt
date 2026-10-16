@@ -425,6 +425,41 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `owned direct statx binds the real ABI and preserves immediate errno and successful observations`() {
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "statx-direct-").normalize()
+        try {
+            LinuxFilesystemSyscalls.requireSupported(path)
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+                    assertEquals(LinuxFilesystemSyscalls.identity(directory.fd), scratch.identity(directory.fd))
+                    assertTrue(com.sun.jna.Native.registered(LinuxOwnedStatxDirect::class.java),
+                        "required native lane must exercise the direct binding, not silently qualify its proxy fallback")
+                    com.sun.jna.Memory(256).use { statistics ->
+                        val emptyPath = byteArrayOf(0)
+                        statistics.clear()
+                        com.sun.jna.Native.setLastError(123)
+                        val failed = LinuxOwnedStatxDirect.statx(-1, emptyPath, 0x1100, 0x17ff, statistics)
+                        val error = com.sun.jna.Native.getLastError()
+                        assertEquals(-1, failed)
+                        assertEquals(9, error)
+                        statistics.clear()
+                        com.sun.jna.Native.setLastError(117)
+                        val succeeded = LinuxOwnedStatxDirect.statx(directory.fd, emptyPath, 0x1100, 0x17ff, statistics)
+                        assertEquals(0, succeeded) // A stale errno must not become a LastErrorException on success.
+                        assertEquals(0x111f, statistics.getInt(0) and 0x111f)
+                        assertEquals(directory.identity.mountId, statistics.getLong(0x90))
+                    }
+                    assertEquals(directory.identity, scratch.identity(directory.fd))
+                }
+                assertEquals(directory.identity, LinuxFilesystemSyscalls.identity(directory.fd))
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
     private fun writeStatxIdentity(buffer: com.sun.jna.Memory, inode: Long) {
         buffer.setInt(0, 0x111f)
         buffer.setInt(0x10, 2)

@@ -195,6 +195,15 @@ private inline fun <T> measuredCopyOperation(
  */
 internal object LinuxFilesystemSyscalls {
     private val libc: LibC by lazy { Native.load(Platform.C_LIBRARY_NAME, LibC::class.java) }
+    // Register one call site against the existing proxy's library, never an identity/approval cache.
+    private val ownedStatxDirectReady: Boolean by lazy {
+        try {
+            Native.register(LinuxOwnedStatxDirect::class.java, Native.getNativeLibrary(libc))
+            true
+        } catch (_: Throwable) {
+            false // Keep the original proxy/backend/fallback behavior if optional registration is unavailable.
+        }
+    }
 
     fun requireSupported(path: Path) {
         val operatingSystem = System.getProperty("os.name", "")
@@ -1072,7 +1081,10 @@ internal object LinuxFilesystemSyscalls {
                     statistics.clear() // Reset all 256 bytes even after an interrupted syscall.
                     emptyPath[0] = 0 // A fresh explicit empty pathname on every attempt; never NULL.
                     if (query == null) {
-                        libc.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                        val proxy = libc // Preserve the original first library-load failure before optional registration.
+                        if (ownedStatxDirectReady) LinuxOwnedStatxDirect.statx(fd, emptyPath,
+                            AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                        else proxy.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
                             STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
                     } else query(statistics)
                 }
