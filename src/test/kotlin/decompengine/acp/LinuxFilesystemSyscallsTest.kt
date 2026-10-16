@@ -460,6 +460,138 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `owned statx bulk decoding matches native field decoding with one reusable snapshot per scope`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+            val memory = BulkStatxMemory(scratch)
+            replaceStatxMemory(scratch, memory)
+            val retained = mutableListOf<LinuxFileIdentity>()
+            val modes = listOf(0x81a0, 0x41ed, 0xa1ff, 0, 0x61a0)
+            val majors = listOf(0, 8, -1, 0x12345678, Int.MIN_VALUE)
+            val minors = listOf(0, 1, -1, Int.MIN_VALUE, Int.MAX_VALUE)
+            modes.forEachIndexed { index, mode ->
+                var expected: LinuxFileIdentity? = null
+                val priorPrimitiveReads = memory.primitiveReads
+                val observed = scriptedStatx(scratch, query = { buffer ->
+                    writeStatxIdentity(buffer, if (index == 4) -1L else 100L + index)
+                    buffer.setInt(0x10, listOf(0, 1, -1, Int.MIN_VALUE, Int.MAX_VALUE)[index])
+                    buffer.setInt(0x14, Int.MIN_VALUE + index)
+                    buffer.setInt(0x18, Int.MAX_VALUE - index)
+                    buffer.setShort(0x1c, mode.toShort())
+                    buffer.setInt(0x88, majors[index]); buffer.setInt(0x8c, minors[index])
+                    buffer.setLong(0x90, if (index == 4) Long.MAX_VALUE else 1L + index)
+                    expected = genericStatxDecode(buffer)
+                    0L
+                })
+                assertEquals(expected, observed)
+                assertEquals(9, memory.primitiveReads - priorPrimitiveReads,
+                    "only the unmodified generic reference performs individual native field reads")
+                assertEquals(index + 1, memory.bulkReads)
+                retained.add(observed)
+            }
+            assertEquals(100L, retained.first().key.inode)
+            assertTrue(retained.zipWithNext().all { (first, second) -> first !== second })
+            LinuxFilesystemSyscalls.StatxIdentityScratch().use { other ->
+                val otherMemory = BulkStatxMemory(other)
+                replaceStatxMemory(other, otherMemory)
+                scriptedStatx(other, query = { buffer -> writeStatxIdentity(buffer, 55); 0L })
+                assertTrue(requireNotNull(memory.destination) !== requireNotNull(otherMemory.destination))
+            }
+            assertEquals(100L, retained.first().key.inode)
+            scratch.close(); scratch.close()
+            assertEquals(1, memory.closes)
+        }
+    }
+
+    @Test
+    fun `owned statx bulk copy follows successful queries and preserves retry fallback failure and closed refusal`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+            val memory = BulkStatxMemory(scratch)
+            replaceStatxMemory(scratch, memory)
+            val first = scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 61); 0L })
+            requireNotNull(memory.destination).fill(0x55)
+            var attempts = 0
+            val retried = scriptedStatx(scratch, query = { buffer ->
+                assertEquals(1, memory.bulkReads, "interrupted attempts cannot publish a copied result")
+                attempts++
+                writeStatxIdentity(buffer, 61L + attempts)
+                if (attempts == 1) { com.sun.jna.Native.setLastError(4); -1L } else 0L
+            })
+            assertEquals(2, attempts)
+            assertEquals(63L, retried.key.inode)
+            assertEquals(61L, first.key.inode)
+            assertEquals(2, memory.bulkReads)
+            val fallback = first.copy(key = LinuxFileKey(7, 99))
+            var fallbacks = 0
+            for (errno in listOf(1, 38, 95)) {
+                assertEquals(fallback, scriptedStatx(scratch, query = { buffer ->
+                    writeStatxIdentity(buffer, 64); com.sun.jna.Native.setLastError(errno); -1L
+                }, fallback = { fallbacks++; fallback }))
+                assertEquals(2, memory.bulkReads)
+            }
+            assertEquals(fallback, scriptedStatx(scratch,
+                query = { throw UnsatisfiedLinkError("authored unavailable backend") },
+                fallback = { fallbacks++; fallback }))
+            assertEquals(2, memory.bulkReads)
+            for (errno in listOf(5, 9, 13)) {
+                val failed = assertFailsWith<LinuxSyscallException> {
+                    scriptedStatx(scratch, query = { com.sun.jna.Native.setLastError(errno); -1L },
+                        fallback = { error("genuine errno cannot fall back") })
+                }
+                assertEquals(errno, failed.errno)
+                assertEquals(2, memory.bulkReads)
+            }
+            assertEquals(fallback, scriptedStatx(scratch, query = { buffer -> buffer.setInt(0, 0x11f); 0L },
+                fallback = { fallbacks++; fallback }))
+            assertEquals(5, fallbacks)
+            assertEquals(3, memory.bulkReads)
+            val copyFailure = IOException("authored bulk copy failure after data delivery")
+            memory.copyFailure = copyFailure
+            assertTrue(assertFailsWith<IOException> {
+                scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 65); 0L },
+                    fallback = { error("copy failure cannot become backend fallback") })
+            } === copyFailure)
+            assertEquals(4, memory.bulkReads)
+            memory.copyFailure = null
+            val next = scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 66); 0L })
+            assertEquals(66L, next.key.inode)
+            assertEquals(61L, first.key.inode)
+            assertEquals(5, memory.bulkReads)
+            assertEquals(0, memory.primitiveReads)
+            scratch.close(); scratch.close()
+            var closedQueries = 0
+            assertFailsWith<IllegalStateException> { scriptedStatx(scratch, query = { closedQueries++; 0L }) }
+            assertEquals(0, closedQueries)
+            assertEquals(5, memory.bulkReads)
+            assertEquals(1, memory.closes)
+        }
+    }
+
+    private fun genericStatxDecode(memory: com.sun.jna.Memory): LinuxFileIdentity? = try {
+        LinuxFilesystemSyscalls::class.java.getDeclaredMethod("decodeDescriptorStatxIdentity", com.sun.jna.Memory::class.java)
+            .apply { isAccessible = true }.invoke(LinuxFilesystemSyscalls, memory) as LinuxFileIdentity?
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+    private class BulkStatxMemory(private val owner: Any) : com.sun.jna.Memory(256) {
+        var bulkReads = 0
+        var primitiveReads = 0
+        var closes = 0
+        var destination: ByteArray? = null
+        var copyFailure: IOException? = null
+        override fun read(offset: Long, buffer: ByteArray, index: Int, length: Int) {
+            assertTrue(Thread.holdsLock(owner))
+            assertEquals(0L, offset); assertEquals(0, index); assertEquals(256, length)
+            destination?.let { assertTrue(it === buffer) } ?: run { destination = buffer }
+            bulkReads++
+            super.read(offset, buffer, index, length)
+            copyFailure?.let { throw it }
+        }
+        override fun getInt(offset: Long): Int { primitiveReads++; return super.getInt(offset) }
+        override fun getLong(offset: Long): Long { primitiveReads++; return super.getLong(offset) }
+        override fun getShort(offset: Long): Short { primitiveReads++; return super.getShort(offset) }
+        override fun close() { closes++; super.close() }
+    }
+
     private fun writeStatxIdentity(buffer: com.sun.jna.Memory, inode: Long) {
         buffer.setInt(0, 0x111f)
         buffer.setInt(0x10, 2)
