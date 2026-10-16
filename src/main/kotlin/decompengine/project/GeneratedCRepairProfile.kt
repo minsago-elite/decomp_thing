@@ -76,8 +76,30 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         budget: RepairResourceBudget,
     ): Boolean = sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)
 
-    override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
-        val sourcePaths = discoverSourcePaths(projectRoot, budget)
+    override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout =
+        resolveLayout(projectRoot, budget, discoverSourcePaths(projectRoot, budget), null)
+
+    override fun resolveForRecovery(
+        projectRoot: Path,
+        budget: RepairResourceBudget,
+        sourcePaths: List<String>,
+        editablePaths: List<String>,
+        readSource: (String) -> ByteArray,
+    ): RepairIndexLayout {
+        require(sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)) {
+            "generated C recovery source view is not authorized"
+        }
+        return resolveLayout(projectRoot, budget, sourcePaths, readSource).also {
+            require(it.editablePaths == editablePaths)
+        }
+    }
+
+    private fun resolveLayout(
+        projectRoot: Path,
+        budget: RepairResourceBudget,
+        sourcePaths: List<String>,
+        readSource: ((String) -> ByteArray)?,
+    ): RepairIndexLayout {
         val editable = sourcePaths.filterTo(TreeSet()) {
             sourcePolicy.isEditable(it)
         }
@@ -138,7 +160,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             entities = entities,
             sharedContextPaths = shared,
             sharedInvalidationPaths = shared.filter { it in editable },
-            pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget),
+            pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget, readSource),
             fallbackModuleIdsByPath = fallbackModules,
             behaviorRootModuleIds = fallbackModules
                 .filterKeys { it.endsWith(".c") }
@@ -740,11 +762,14 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         root: Path,
         sourcePaths: Set<String>,
         budget: RepairResourceBudget,
+        readSource: ((String) -> ByteArray)? = null,
     ): Map<String, List<String>> {
         val result = TreeMap<String, List<String>>()
         var count = 0L
         sourcePaths.filter { it.endsWith(".c") || it.endsWith(".h") }.sorted().forEach { relative ->
-            val bytes = readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes
+            val bytes = readSource?.invoke(relative)
+                ?: readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes
+            require(bytes.size.toLong() <= budget.maximumSourceFileBytes)
             validateSourceContent(relative, bytes)
             val text = decodeGeneratedCText(bytes, relative)
             val dependencies = INCLUDE_DIRECTIVE.findAll(text).mapNotNull { match ->
