@@ -85,7 +85,7 @@ class FullTreeFunctionTruthSqliteV3Test {
     @Test
     fun `truth v3 final staging recheck rejects rewriting an earlier shard`() =
         inControlTemporaryDirectory { root ->
-            val fixture = createBoundaryTruthFixture(root)
+            val fixture = createBoundaryTruthFixture(root, verifyShardOrder = true)
             val generated = fixture.generated
             val generatedBytes = v3TreeBytes(generated.root)
             val staging = copyTree(generated.root, root.resolve("staging"))
@@ -482,10 +482,15 @@ class FullTreeFunctionTruthSqliteV3Test {
 
     private data class BoundaryTruthFixture(val generated: FullTreeFunctionTruthV3Generation, val scratch: Path)
 
-    private fun createBoundaryTruthFixture(root: Path): BoundaryTruthFixture {
+    private fun createBoundaryTruthFixture(root: Path, verifyShardOrder: Boolean = false): BoundaryTruthFixture {
         // Production publishers share the small authenticated control fixture; no compiler or golden substitution.
         val fixture = createFunctionTruthFixture(root.resolve("inputs"))
         val limits = tightScratchLimits()
+        val shardVisits = ArrayList<Pair<String, String>>()
+        val traversal = if (verifyShardOrder) FullTreeSourceIdentityTraversal(onShardVisit = { phase, shard ->
+            check(shardVisits.size < 128) { "boundary fixture shard trace exceeds its fixed bound" }
+            shardVisits += phase to shard
+        }) else FullTreeSourceIdentityTraversal.CANONICAL
         val observationRoot = root.resolve("observations-v2")
         val observation = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
             richArtifact = fixture.rich,
@@ -495,6 +500,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             outputRoot = observationRoot,
             maximumWorkers = 2,
             limits = limits.observationV2,
+            traversal = traversal,
         )
         val generated = FullTreeFunctionTruthSqliteV3.generateAndPublish(
             richArtifact = fixture.rich,
@@ -507,9 +513,102 @@ class FullTreeFunctionTruthSqliteV3Test {
             scratchParent = fixture.scratch,
             outputRoot = root.resolve("truth-v3"),
             limits = limits,
+            traversal = traversal,
         )
+        if (verifyShardOrder) {
+            assertMultiShardTraversalParity(fixture, observationRoot, observation, generated, root, limits, shardVisits)
+        }
         assertDirectoryEmpty(fixture.scratch)
         return BoundaryTruthFixture(generated, fixture.scratch)
+    }
+
+    private fun assertMultiShardTraversalParity(
+        fixture: FunctionTruthFixture,
+        observationRoot: Path,
+        observation: FullTreeFunctionObservationV2RunPublication,
+        generated: FullTreeFunctionTruthV3Generation,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+        forwardVisits: List<Pair<String, String>>,
+    ) {
+        val shardIds = observation.binding.outputs.map { it.shardId }
+        assertEquals(2, shardIds.size, "the control must really process two authenticated shards")
+        assertEquals(2, observation.maximumWorkers, "both runs use the same admitted worker bound")
+        assertTrue(generated.counts.sourceEntities > 0L, "the multi-shard control must include a real source census")
+        assertEquals(2, generated.index.controlArray("shards").size)
+        val inputHashes = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex)
+            .associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(observationRoot)
+        val truthBytes = v3TreeBytes(generated.root)
+        val reverseVisits = ArrayList<Pair<String, String>>()
+        val reverseTraversal = FullTreeSourceIdentityTraversal(reverseShards = true, onShardVisit = { phase, shard ->
+            check(reverseVisits.size < 128) { "boundary fixture shard trace exceeds its fixed bound" }
+            reverseVisits += phase to shard
+        })
+        val reverseObservation = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+            richArtifact = fixture.rich,
+            inventoryPath = fixture.inventoryPath,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = root.resolve("observations-v2-reverse-shards"),
+            maximumWorkers = 2,
+            limits = limits.observationV2,
+            traversal = reverseTraversal,
+        )
+        assertEquals(observation.maximumWorkers, reverseObservation.maximumWorkers)
+        assertEquals(observation.outputs, reverseObservation.outputs)
+        assertEquals(observation.reconciliation, reverseObservation.reconciliation)
+        assertEquals(observation.binding.indexArtifactSha256, reverseObservation.binding.indexArtifactSha256)
+        assertEquals(observationBytes, v3TreeBytes(reverseObservation.binding.root), "complete same-bound V2 tree")
+        val reverseTruth = FullTreeFunctionTruthSqliteV3.generateAndPublish(
+            richArtifact = fixture.rich,
+            strippedArtifact = fixture.stripped,
+            inventoryPath = fixture.inventoryPath,
+            elfFunctionIndex = fixture.elfIndex,
+            observationV2Root = observationRoot,
+            expectedObservationV2IndexArtifactSha256 = observation.binding.indexArtifactSha256,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = root.resolve("truth-v3-reverse-shards"),
+            limits = limits,
+            traversal = reverseTraversal,
+        )
+        assertEquals(generated.counts, reverseTruth.counts)
+        assertEquals(generated.indexArtifactSha256, reverseTruth.indexArtifactSha256)
+        assertEquals(truthBytes, v3TreeBytes(reverseTruth.root), "complete same-bound V3 tree")
+        val validated = FullTreeFunctionTruthSqliteV3.loadAndValidate(
+            candidateRoot = generated.root,
+            richArtifact = fixture.rich,
+            strippedArtifact = fixture.stripped,
+            inventoryPath = fixture.inventoryPath,
+            elfFunctionIndex = fixture.elfIndex,
+            observationV2Root = observationRoot,
+            expectedObservationV2IndexArtifactSha256 = observation.binding.indexArtifactSha256,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            limits = limits,
+            traversal = reverseTraversal,
+        )
+        assertTrue(validated.rawInputsRederived && validated.candidateBytesMatchedAtValidationBoundary)
+        assertEquals(generated.indexArtifactSha256, validated.indexArtifactSha256)
+        fun assertVisits(visits: List<Pair<String, String>>, expectedOrder: List<String>, v2Passes: Int, v3Passes: Int) {
+            assertEquals(setOf("v2-source", "v2-reconcile", "v2-output", "v3-project"), visits.map { it.first }.toSet())
+            listOf("v2-source", "v2-reconcile", "v2-output", "v3-project").forEach { phase ->
+                val passes = if (phase == "v3-project") v3Passes else v2Passes
+                assertEquals(List(passes) { expectedOrder }.flatten(), visits.filter { it.first == phase }.map { it.second },
+                    "$phase must observe every actual processing pass in the requested shard order")
+            }
+        }
+        // Observation publication plus the two raw passes in V3 generation; validation adds two more.
+        assertVisits(forwardVisits, shardIds, v2Passes = 3, v3Passes = 1)
+        assertVisits(reverseVisits, shardIds.asReversed(), v2Passes = 5, v3Passes = 2)
+        assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
+        assertEquals(observationBytes, v3TreeBytes(observationRoot))
+        assertEquals(truthBytes, v3TreeBytes(generated.root))
+        assertDirectoryEmpty(fixture.scratch)
+        println("truth-v3-shard-order shards=${shardIds.size} workers=${observation.maximumWorkers} " +
+            "sourceEntities=${generated.counts.sourceEntities} forwardV2Passes=3 reverseV2Passes=5 " +
+            "forwardV3Passes=1 reverseV3Passes=2 v2BytesEqual=true v3BytesEqual=true inputsUnchanged=true scratchEmpty=true")
     }
 
     private fun boundaryProjection(
