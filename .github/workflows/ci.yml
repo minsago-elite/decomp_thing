@@ -141,6 +141,9 @@ jobs:
           node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify JVM web contracts and distribution contents
+        env:
+          DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
+          DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
           ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \

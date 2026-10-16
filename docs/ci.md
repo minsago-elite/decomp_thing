@@ -120,6 +120,10 @@ session exchange/reload/logout, exact binary metadata, focused live updates,
 The application process has no Node/npm on PATH and starts from an unrelated
 directory. Session/proxy journeys preserve empty job storage; metadata, live and
 scale journeys use authored inert job fixtures and start no workflow execution.
+The JVM web-contract step uses those same pinned Chrome/Node paths to require the
+existing real-browser session-expiry, private-read refusal and fresh operator-link
+exchange test. Its injected monotonic clock advances the session age without a
+wall-clock wait; ordinary hosts without Chrome retain the opt-in test behavior.
 
 `scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
 x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
