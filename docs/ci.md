@@ -108,9 +108,11 @@ pushes to master or tags. It builds the archives from the current checkout, runs
 contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
 permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
 Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
-session exchange/reload/logout, and the explicit Vite proxy against the same ZIP.
+session exchange/reload/logout, exact binary metadata, focused live updates,
+10,000-job paging and the explicit Vite proxy against the same ZIP.
 The application process has no Node/npm on PATH and starts from an unrelated
-directory; these preview journeys create no jobs or workflow execution.
+directory. Session/proxy journeys preserve empty job storage; metadata, live and
+scale journeys use authored inert job fixtures and start no workflow execution.
 
 `scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
 x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
@@ -151,7 +153,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Lane | Scheduling and responsibility | Source |
 | --- | --- | --- |
 | Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
-| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
+| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
 | Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
