@@ -757,6 +757,138 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `owned mount poll bulk reset reuses complete bytes and preserves raw observations`() {
+        val handle = scriptedMountHandle(-106)
+        val memory = BulkMountPollMemory()
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(handle).use { scratch ->
+            replaceMountPollMemory(scratch, memory)
+            var calls = 0
+            for ((result, events) in listOf(1 to 0x8002, 0 to 8, 1 to 0)) {
+                val observation = scriptedMountPoll(scratch) { buffer ->
+                    calls++
+                    assertEquals(calls, memory.writes)
+                    assertEquals(-106, buffer.getInt(0))
+                    assertEquals(10, buffer.getShort(4).toInt())
+                    assertEquals(0, buffer.getShort(6).toInt())
+                    buffer.setShort(6, events.toShort())
+                    result
+                }
+                assertEquals((result.toLong() shl 32) or events.toLong(), observation)
+                assertEquals(result > 0 && events and 10 != 0,
+                    LinuxFilesystemSyscalls.mountMetadataPollChanged(observation))
+            }
+            assertEquals(3, calls)
+        }
+        assertEquals(1, memory.closes)
+        assertEquals(-106, handle.whileOpen { it })
+    }
+
+    @Test
+    fun `owned mount poll bulk reset stays outside EINTR retries and refreshes the next query`() {
+        val memory = BulkMountPollMemory()
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedMountHandle(-107)).use { scratch ->
+            replaceMountPollMemory(scratch, memory)
+            var attempts = 0
+            val observation = scriptedMountPoll(scratch) { buffer ->
+                attempts++
+                assertEquals(1, memory.writes)
+                if (attempts == 1) {
+                    assertEquals(0, buffer.getShort(6).toInt())
+                    buffer.setShort(6, 0x8002.toShort())
+                    com.sun.jna.Native.setLastError(4)
+                    -1
+                } else {
+                    assertEquals(0x8002, buffer.getShort(6).toInt() and 0xffff)
+                    1
+                }
+            }
+            assertEquals(2, attempts)
+            assertEquals((1L shl 32) or 0x8002L, observation)
+            assertEquals(0L, scriptedMountPoll(scratch) { buffer ->
+                assertEquals(2, memory.writes)
+                assertEquals(0, buffer.getShort(6).toInt())
+                0
+            })
+        }
+    }
+
+    @Test
+    fun `owned mount poll bulk copy failure preserves primary without a fabricated syscall observation`() {
+        val handle = scriptedMountHandle(-108)
+        val memory = BulkMountPollMemory()
+        val primary = IOException("authored pollfd copy failure")
+        val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+        replaceMountPollMemory(scratch, memory)
+        var queries = 0
+        try {
+            memory.copyFailure = primary
+            val caught = assertFailsWith<IOException> {
+                scriptedMountPoll(scratch) { queries++; 0 }
+            }
+            assertTrue(caught === primary)
+            assertTrue(caught.suppressed.isEmpty())
+            assertNull(scratch.claimFailureObservation(caught))
+            assertEquals(0, queries)
+            memory.copyFailure = null
+            assertEquals(0L, scriptedMountPoll(scratch) { queries++; 0 })
+            assertEquals(1, queries)
+        } finally {
+            scratch.close(); scratch.close()
+        }
+        assertEquals(1, memory.closes)
+        assertEquals(-108, handle.whileOpen { it })
+    }
+
+    @Test
+    fun `owned mount poll direct ABI preserves raw return immediate errno and stale errno success`() {
+        withLinuxDirectory("mount-poll-direct-") { _, directory ->
+            LinuxFilesystemSyscalls.MountMetadataPollScratch(directory).use { scratch ->
+                val owned = scratch.poll()
+                assertTrue(com.sun.jna.Native.registered(LinuxOwnedMountPollDirect::class.java),
+                    "required native lane must exercise the direct binding, not silently qualify its proxy fallback")
+                assertEquals(LinuxFilesystemSyscalls.mountMetadataChanged(directory),
+                    LinuxFilesystemSyscalls.mountMetadataPollChanged(owned))
+                val count = com.sun.jna.NativeLong(1)
+                com.sun.jna.Native.setLastError(123)
+                val failed = LinuxOwnedMountPollDirect.poll(com.sun.jna.Pointer.NULL, count, 0)
+                val error = com.sun.jna.Native.getLastError()
+                assertEquals(-1, failed)
+                assertEquals(14, error) // EFAULT: nfds=1 with a null pollfd pointer.
+                com.sun.jna.Memory(8).use { buffer ->
+                    buffer.setInt(0, -1) // Linux ignores negative descriptors, clearing their revents.
+                    buffer.setShort(4, 10)
+                    buffer.setShort(6, 0x7fff)
+                    com.sun.jna.Native.setLastError(117)
+                    assertEquals(0, LinuxOwnedMountPollDirect.poll(buffer, count, 0))
+                    assertEquals(0, buffer.getShort(6).toInt())
+                }
+                assertEquals(owned, scratch.poll())
+            }
+            assertEquals(directory.identity, LinuxFilesystemSyscalls.identity(directory.fd))
+        }
+    }
+
+    private class BulkMountPollMemory : com.sun.jna.Memory(8) {
+        var writes = 0
+        var closes = 0
+        var copyFailure: IOException? = null
+        private var input: ByteArray? = null
+
+        override fun write(offset: Long, bytes: ByteArray, index: Int, length: Int) {
+            assertEquals(0L, offset)
+            assertEquals(0, index)
+            assertEquals(8, length)
+            assertEquals(8, bytes.size)
+            if (input == null) input = bytes else assertTrue(input === bytes)
+            writes++
+            copyFailure?.let { throw it }
+            super.write(offset, bytes, index, length)
+        }
+
+        override fun close() { closes++; super.close() }
+    }
+
     private fun scriptedMountHandle(fd: Int) = LinuxDescriptor(fd,
         LinuxFileIdentity(LinuxFileKey(0, 0), 0, 0, 0, 1, 1, false, false, false))
 

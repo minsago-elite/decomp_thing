@@ -206,6 +206,14 @@ internal object LinuxFilesystemSyscalls {
             false // Keep the original proxy/backend/fallback behavior if optional registration is unavailable.
         }
     }
+    private val ownedMountPollDirectReady: Boolean by lazy {
+        try {
+            Native.register(LinuxOwnedMountPollDirect::class.java, Native.getNativeLibrary(libc))
+            true
+        } catch (_: Throwable) {
+            false // Optional dispatch optimization; preserve the original poll backend on failure.
+        }
+    }
 
     fun requireSupported(path: Path) {
         val operatingSystem = System.getProperty("os.name", "")
@@ -326,6 +334,8 @@ internal object LinuxFilesystemSyscalls {
         private var failureError = 0
         private var failureHasEvents = false
         private val descriptorCount = NativeLong(1)
+        private val encodedPollfd = ByteArray(POLLFD_BYTES)
+        private val pollfdFields = ByteBuffer.wrap(encodedPollfd).order(ByteOrder.nativeOrder())
         // Allocate this callback once, not at each protected checkpoint.
         private val pollAction: (Int) -> Long = { descriptor -> pollDescriptor(descriptor, null) }
         // Allocate native storage last: no subsequent callback/object initialization can fail.
@@ -348,12 +358,17 @@ internal object LinuxFilesystemSyscalls {
         }
 
         private fun pollDescriptor(descriptor: Int, query: ((Memory) -> Int)?): Long {
-            // These original field writes reset all eight bytes, including prior revents.
-            polled.setInt(0, descriptor)
-            polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
-            polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+            // Reset the same complete pollfd once before the original EINTR loop, in one JNI write.
+            pollfdFields.putInt(0, descriptor)
+            pollfdFields.putShort(Int.SIZE_BYTES, (POLLPRI or POLLERR).toShort())
+            pollfdFields.putShort(Int.SIZE_BYTES + Short.SIZE_BYTES, 0)
+            polled.write(0, encodedPollfd, 0, encodedPollfd.size)
             while (true) {
-                val result = if (query == null) libc.poll(polled, descriptorCount, 0) else query(polled)
+                val result = if (query == null) {
+                    val backend = libc // Preserve original libc loading failure before optional registration.
+                    if (ownedMountPollDirectReady) LinuxOwnedMountPollDirect.poll(polled, descriptorCount, 0)
+                    else backend.poll(polled, descriptorCount, 0)
+                } else query(polled)
                 // Capture errno before any other native memory/cleanup operation can alter it.
                 val error = if (result < 0) Native.getLastError() else 0
                 if (result >= 0) {
