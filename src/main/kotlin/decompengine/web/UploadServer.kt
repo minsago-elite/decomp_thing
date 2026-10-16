@@ -296,9 +296,10 @@ class UploadServer(
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
-            fun cleanup(action: () -> Unit) {
-                try { action() } catch (problem: Throwable) {
+            fun cleanup(action: () -> Unit): Boolean {
+                return try { action(); true } catch (problem: Throwable) {
                     if (problem !== failure) failure.addSuppressed(problem)
+                    false
                 }
             }
             // HttpServer.stop alone does not release an unstarted bound listener. No application
@@ -309,8 +310,8 @@ class UploadServer(
             cleanup { requestDeadlines.shutdownNow() }
             cleanup { streamResources.shutdown() }
             cleanup { access.close() }
-            cleanup { jobs.close() }
-            cleanup { ownership.close() }
+            // Outer ownership must remain retained if service cleanup cannot confirm quiescence.
+            if (cleanup { jobs.close() }) cleanup { ownership.close() }
             throw failure
         }
         server.executor = requestExecutor
