@@ -14,10 +14,12 @@ function record(root, index) {
 }
 
 async function publish(root, job, input) {
-  const directory = join(root, job.id);
+  // A live listing must never observe a half-written fixture job.
+  const directory = join(root, '.live-job-' + job.id);
   await fs.mkdir(directory, { mode: 0o700 });
   await fs.writeFile(join(directory, 'input.elf'), input, { flag: 'wx', mode: 0o600 });
   await fs.writeFile(join(directory, 'job.json'), JSON.stringify(job), { flag: 'wx', mode: 0o600 });
+  await fs.rename(directory, join(root, job.id));
 }
 
 export async function seedLive(root) {
