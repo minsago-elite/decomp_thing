@@ -294,50 +294,94 @@ owner's job status. Already-claimed work still requires its caller's cancellatio
 SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
 
-Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
-A second cooperating server fails before changing job status. Startup recovery scans at most 4,096
-store entries and reads at most 64 MiB of metadata, with the existing 256 KiB per-record limit.
-It finishes inspection before changing any recovery status and publishes from the inspected records,
-without rereading their metadata outside that budget. Inspection freezes each proposed replacement,
-including its timestamp, and validates it with the metadata encoder before admitting any status write.
-A legacy record that fits on disk but cannot encode its recovery replacement therefore rejects the
-entire inspection. Publication re-encodes the same validated record without retaining a second full
-set of metadata bytes. A valid job-name candidate with unreadable,
-invalid or unknown-status metadata, or an exhausted budget, fails startup with a fixed incomplete-scan
-message. No recovery status changes during a failed scan. Unknown names and private stages remain
-retained; their entries count toward the scan limit. Once status writes begin, a later write failure may
-leave some records reconciled and does not imply rollback. These are work/byte bounds, not deadlines
-for stalled filesystem calls or fencing of concurrent direct writers.
-Failed startup and explicit stop-before-start also close the bound HTTP listener. Shutdown closes
-request admission before starting the JDK dispatcher needed to release an unstarted bound listener.
-Failed startup marks stopping while still holding the lifecycle lock, then releases that lock before
-running dispatcher cleanup, so a queued request cannot deadlock cleanup and another start cannot
-slip into the failure interval. A duplicate start rejection leaves an already-running server intact.
-No admitted handler can mutate the store during failed-start cleanup. Same-JVM owners are tracked by canonical store
-path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
-The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
-scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
-lifetime includes upload publication and error handling. A handler that outlives stop causes an explicit
-incomplete-stop error and retains ownership. Its `finally` path releases ownership when all work is idle,
-including after an exception. Other incomplete in-process shutdowns retain ownership until a later successful stop
-or JVM exit. The in-process timeout regression holds a worker beyond the grace period, verifies a new server
-is still refused, then releases the worker and retries stop before verifying a fresh server can start.
-Executor cancellation is requested once; later stop attempts wait for termination without interrupting
-workers again while they persist final status.
-This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
-older servers, external subprocesses, lock-file replacement, or network filesystems.
-`WebRequestLifetimeTest` holds the production request-admission wrapper across a final store write and an
-exception, verifies competing ownership is refused and late requests are not admitted, then verifies handoff.
-This is deterministic handler-lifetime evidence, supplemented by the existing HTTP route tests; it does not
-qualify stalled kernel I/O or abrupt host failure.
-`WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
-a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
-then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
-This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
-The abrupt-death case forcibly terminates the child JVM after two active jobs and one queued job are
-persisted. It verifies no worker completion markers appear, then starts a replacement server and checks
-that all three jobs become interrupted failures without replay. This exercises OS lock release on process
-death and recovery from complete persisted records; it is not interruption during a filesystem write.
+### Job-store ownership and initialization
+
+The supported web-store path uses the default filesystem provider on Linux. The
+native descriptor adapter admits `amd64`, `x86_64` and `aarch64` and requires its
+Linux descriptor/rename operations to be available. Store and ancestor directories,
+stable lock files and reserved upload names are application-controlled. The local
+filesystem must support exclusive JVM file locks, directory force and the required
+atomic moves. Locking or publication failure is a refusal; there is no non-atomic
+fallback. Network filesystems, concurrent namespace replacement and arbitrary
+noncooperating writers are outside this contract. These prerequisites describe
+admission, not qualification of every filesystem or power-loss durability.
+
+| Writer or operation | Required participation |
+| --- | --- |
+| `UploadServer` and its `WebJobService` uploads, lifecycle changes and maintenance | Hold the web root owner through initialization, admitted requests and owned work. The service acquires the workflow root owner before recovery or publication and retains it until quiescence. |
+| `WorkflowAttemptStore` state, acceptance and pin mutations | Hold its exclusive root lease and lifetime transactions. A closed store cannot authorize another write. An independently opened store conflicts with an active service owner. |
+| Low-level `JobStore.createFromUpload`, `updateStatus`, `recoverInterruptedJobs`, and report-directory creation | The caller must already own the root, directly through `WorkflowAttemptStore` or through the service's tracked lifetime. Per-instance `@Synchronized` methods do not establish cross-instance or cross-process ownership. Bypassing that participation is unsupported. |
+| Workflow/report callbacks and their progress writers | Finish writes inside their owned operation lifetime. An untracked background writer or subprocess cannot inherit a right to mutate storage after the callback returns. External process recovery remains separately unqualified. |
+| `UploadStagingRecovery` | Run before request/work admission under root ownership. Reclaim only the private versioned stage namespace after complete inspection; retain unknown data and published jobs. Reads never invoke this cleanup. |
+
+A web server acquires a nonblocking exclusive `.web-owner.lock` before binding its
+listener. The workflow store also retains `.workflow-owner.lock`; the two files
+serve distinct ownership layers. Same-JVM web owners use the canonical existing
+store path to reject contenders before opening another lock channel (see the
+[JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
+A missing root initially has in-process web exclusion only; creating it upgrades
+to the cross-JVM lock before application work. Neither lock file is deleted or
+replaced as a stale-lock cleanup operation. A pathname, PID or leftover lock file
+alone never proves that another writer is absent. Provisioning/durability of
+symlink aliases and hostile path replacement remain outside the directory
+confirmation contract; canonical lock identity does not establish namespace fencing.
+
+Under its acquired workflow lease, shared-service initialization confirms the
+store and every canonical ancestor before upload-stage cleanup or workflow
+recovery. This covers the streamed publisher as well as the legacy upload path.
+Failure retains prior job/input bytes and any newly created empty directories,
+releases the failed admission's lease, and reports fixed
+`STORE_DURABILITY_UNAVAILABLE` without provider exceptions or paths. A later
+explicit attempt reconfirms the full chain. The streamed-upload tests require
+ownership before confirmation, no stage/body consumption on refusal, complete
+ancestor confirmation on retry and byte-identical prior evidence. Their bounded
+fixture receipt records the runtime, filesystem provider and observed filesystem
+types; source edits alone do not qualify a host or filesystem.
+
+Current server initialization then reconciles private upload stages and calls
+`WorkflowAttemptStore.recoverAll`. Malformed individual legacy/workflow records
+remain unavailable for inspection; they do not authorize guessed repairs or
+analysis replay. Unknown/unsafe upload staging and store-wide recovery refusals
+fail initialization. Legacy active statuses are projected as interrupted using
+workflow recovery state while the original `job.json` remains unchanged.
+
+The separate low-level `JobStore.recoverInterruptedJobs` legacy API retains its
+4,096-entry, 64 MiB aggregate metadata and 256 KiB per-record bounds. It completes
+inspection and encodes proposed replacements before changing statuses. Invalid
+records, exhausted bounds or unencodable replacement data refuse the scan without
+status writes; a later publication failure may leave already reconciled records.
+Those legacy scan semantics are not the current server startup path and do not
+supply a deadline for stalled native I/O or fencing of direct concurrent writers.
+
+Failed binding releases the acquired web owner. Failed storage initialization
+closes admission before starting the unconfigured JDK dispatcher only to release
+its bound listener; no application context is installed yet. Independent cleanup
+steps preserve the original failure and retain distinct secondary failures. Outer
+ownership is retained if service close cannot confirm completion. Failed `start`
+unwinds its lifecycle lock before dispatcher cleanup; queued requests cannot
+force cleanup to wait on that same lock. Duplicate start refusal leaves a running
+server intact. Stop-before-start and interrupted start preserve original metadata
+and refuse later admissions.
+
+Stop releases ownership only after owned workers, scheduled operations and admitted
+HTTP handlers finish. Upload publication and error handling remain inside the
+handler lifetime. A timed-out handler causes an explicit incomplete-stop result
+and retains ownership until its final exit; other incomplete cleanup requires a
+successful retry or JVM exit. Cancellation is requested once. A late old-owner
+cleanup retry must leave a replacement owner's lease and bytes intact, and old
+requests remain refused after handoff.
+
+`WebRecoveryAdmissionTest` covers queued requests, duplicate start, stop-before-start,
+initialization refusal, interrupted start, stop/admission races and listener bind
+failure. Its seven scenarios must be actual discovered JUnit methods; four formerly
+nested local functions supplied no executed coverage. `WebRequestLifetimeTest`
+retains a final admitted-handler write and exception across a failed stop, then
+checks replacement ownership, refused old writes and late cleanup retry.
+`WebShutdownTest` covers competing benign JVMs, propagated/swallowed interruption,
+the grace-period timeout and abrupt JVM death. These controls do not establish
+orphaned external-process cleanup, stalled-kernel-I/O deadlines, power loss, ACP
+session recovery or release qualification. Complete current Actions results and
+supported configuration evidence remain required.
 
 Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
