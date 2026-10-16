@@ -12,6 +12,8 @@ import { DEFAULT_FILTERS, jobFilters, filterSearch } from '../src/jobs/query';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, settings: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async importOriginal => ({ ...await importOriginal<typeof ClientModule>(), createApiClient: () => transport }));
+// Recovery has its own transport/lifecycle scenarios in dashboard-recovery.test.tsx.
+vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number): Job { return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `program-${index}.elf` }; }
 function page(items: Job[], nextCursor: string | null = null) { return { data: { items, page: { nextCursor, limit: 50, snapshotVersion: 'snapshot_1' } } }; }

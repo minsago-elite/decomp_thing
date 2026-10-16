@@ -11,6 +11,17 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('projects recovery data without private additive fields and rejects fabricated completeness in responses', () => {
+    const original = decodeResponse(fixture('recovery-retained'), 'recovery');
+    const projected = decodeResponse(JSON.stringify({ ...original, privateRoot: '/PRIVATE', data: {
+      ...original.data, privateName: 'PRIVATE-credential', contents: 'PRIVATE-content',
+    } }), 'recovery');
+    expect(projected).toEqual(original);
+    expect(JSON.stringify(projected)).not.toContain('PRIVATE');
+    for (const name of ['invalid-recovery-complete', 'invalid-recovery-byte-bound', 'invalid-recovery-candidate-bound']) {
+      expect(() => decodeResponse(fixture(name), 'recovery')).toThrow(ApiClientError);
+    }
+  });
   it('has no schema/type drift', () => {
     const generator = resolve(process.cwd(), '../scripts/generate-web-api.mjs');
     expect(execFileSync(process.execPath, [generator, '--check'], { encoding: 'utf8' })).toContain('verified');

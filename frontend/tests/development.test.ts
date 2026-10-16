@@ -87,6 +87,8 @@ describe('shared-schema deterministic fixtures', () => {
     const fixture = JSON.parse(generated) as { scenarios: { name: string }[]; routes: Record<string, { data: { items: { sizeBytes: string }[] } }> };
     expect(fixture.scenarios.map((scenario) => scenario.name)).toEqual(['running', 'failed', 'interrupted', 'unsupported', 'partial']);
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items[0]?.sizeBytes).toBe('9007199254740993');
+    expect(JSON.parse(generated).routes['/nested/api/v1/recovery']).toMatchObject({ kind: 'recovery',
+      data: { displayOnly: true, inventoryComplete: true, retainedUploadStages: 0, retainedMetadataFiles: 0 } });
     await mkdir(fileURLToPath(new URL('../../build/', import.meta.url)), { recursive: true });
     const directory = await mkdtemp(fileURLToPath(new URL('../../build/fixture-schema-', import.meta.url)));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

@@ -204,6 +204,13 @@ class WebJobService(
         if (closed) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopped.")
     }
 
+    /** Bounded display-only inspection; never acquires ownership, replays work or removes files. */
+    @Synchronized
+    fun recoveryInventory(): decompengine.jobs.JobRecoveryInventory {
+        requireInitializedRead()
+        return store.recoveryInventory()
+    }
+
     @Synchronized
     fun inspect(jobId: String): WebJobInspection {
         requireInitializedRead()

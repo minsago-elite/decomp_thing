@@ -1,0 +1,15 @@
+{
+  "apiVersion": 1,
+  "kind": "recovery",
+  "requestId": "request_empty_1",
+  "data": {
+    "schemaVersion": 1,
+    "displayOnly": true,
+    "scannedEntries": 4096,
+    "retainedUploadStages": 65,
+    "retainedMetadataFiles": 64,
+    "observedBytes": "67108864",
+    "uninspectedEntries": 0,
+    "inventoryComplete": true
+  }
+}

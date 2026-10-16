@@ -43,7 +43,38 @@ stages. An operator must reconcile publication identity and retained evidence be
 removing historical files. New versioned stages retain the bounded cleanup protocol
 above; published jobs and their receipts are unchanged.
 
-## Qualification
+## Versioned API and SPA recovery summary
+
+Authenticated `GET /api/v1/recovery` (under the configured deployment prefix)
+returns the same bounded inventory through the initialized shared job service.
+`HEAD` returns the same private response headers without a body. The endpoint
+requires JSON negotiation, rejects query parameters and mutations, and uses the
+ordinary no-store security and request-correlation headers.
+
+The closed `recovery` contract reports schema version 1, `displayOnly: true`,
+scanned-entry counts, retained upload-stage and metadata-temporary-file counts,
+observed bytes as a decimal string, uninspected entries and `inventoryComplete`.
+Inspection stops at 4,096 entries, 128 combined candidates or 64 MiB of observed
+bytes. A partial inspection is a lower bound even when its counted candidates
+are zero. File names, host paths, contents and raw exceptions are excluded.
+This inventory is separate from the larger startup cleanup budget above.
+
+The SPA dashboard reads one independent snapshot on entry and each explicit
+**Refresh jobs** action. Live job-list refreshes and page navigation do not
+start additional recovery scans. Obsolete reads are aborted and late responses
+are ignored. A denied or failed read clears earlier counts and reports unknown
+recovery state. Complete zero-candidate snapshots need no recovery notice;
+retained or incomplete snapshots explain that evidence must be reviewed before
+cleanup. Reads never recover or delete files, replay analysis, or change accepted
+source-revision authority. Existing corrupt-job and cleanup-failure diagnostics
+retain their fixed public classifications.
+
+Shared producer/client fixtures cover exact limits, incomplete and empty
+inventories, contradictory completeness and over-budget data. API and dashboard
+scenarios cover private access, negotiation, preserved eligible staging and
+metadata bytes, independent refresh, cancellation and unavailable state.
+
+## Retained qualification evidence
 
 Separate JVM publishers are forcibly terminated during input writing, after binary
 sync, after metadata sync, immediately before rename and immediately after rename.

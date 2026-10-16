@@ -9,6 +9,8 @@ import { Dashboard } from '../src/jobs/Dashboard';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, settings: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async importOriginal => ({ ...await importOriginal<typeof ClientModule>(), createApiClient: () => transport }));
+// Keep these assertions scoped to job-list scheduling; real recovery integration is tested separately.
+vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number, values: Partial<Job> = {}): Job {
   return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `live-${index}.elf`, ...values };

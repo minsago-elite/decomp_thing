@@ -51,6 +51,12 @@ and abort/cancel pending reads at the deadline. Redirects and arbitrary origins 
 The client does not persist session material, generate mutation intent, or infer endpoint
 capabilities from its available schema types.
 
+The `recovery` response carries a bounded display-only recovery-file inventory from
+private `GET /recovery`. Counts and observed bytes do not authorize cleanup or source
+acceptance. The decoder rejects contradictory completeness and combined candidate or
+byte-budget overruns. The dashboard owns its independent entry/manual-refresh read,
+aborts obsolete requests and treats missing or failed inspection as unknown state.
+
 The [shared path helpers](../app/paths.ts) implement the frontend URL portion of
 [#154](https://github.com/minsago-elite/decomp_thing/issues/154). `appPath` and `apiPath` normalize
 the configured prefix, capped at the contract's 256 characters. `apiPath(basePath, route, query)`
