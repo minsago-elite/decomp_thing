@@ -70,6 +70,32 @@ class GccOracleSourceFetchTest(unittest.TestCase):
         return fetch_artifact(destination,self.specification,'fixture signature',opener=opener,
                               monotonic=lambda:now[0],sleeper=lambda delay:now.__setitem__(0,now[0]+delay),**kwargs)
 
+    def test_total_delivery_before_teardown_mask_is_fatal_for_success_and_existing_failure(self):
+        Clock = FETCHER["FetchClock"]
+        module = FETCHER["signal"]
+        class AuthoredFatalExit(BaseException):
+            pass
+        for failure in (None, VerificationError("authored existing failure")):
+            with self.subTest(existing_failure=failure is not None):
+                now = [0.0]
+                clock = Clock(lambda: now[0])
+                clock.__enter__()
+                self.fatal_exit.reset_mock()
+                self.fatal_exit.side_effect = AuthoredFatalExit("authored exit124")
+                timer_calls = len(self.setitimer.call_args_list)
+                def deliver_before_block(how, signals):
+                    self.assertEqual(module.SIG_BLOCK, how)
+                    self.assertEqual({module.SIGALRM}, signals)
+                    now[0] = 120.0
+                    clock._expired(module.SIGALRM, None)
+                    return set()
+                with mock.patch.object(module, "pthread_sigmask", side_effect=deliver_before_block):
+                    with self.assertRaises(AuthoredFatalExit):
+                        clock.__exit__(None if failure is None else type(failure), failure, None)
+                self.fatal_exit.assert_called_once_with(124)
+                self.assertFalse(clock.closing, "total delivery must be adjudicated before closing is published")
+                self.assertEqual(timer_calls, len(self.setitimer.call_args_list), "fatal delivery must not disarm the owned guard")
+
     def test_slow_progress_read1_times_out_attempt_and_shortens_socket_timeout(self):
         now=[0.0];responses=[]
         class SlowResponse(FakeResponse):

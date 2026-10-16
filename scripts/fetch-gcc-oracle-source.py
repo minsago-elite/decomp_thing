@@ -184,8 +184,8 @@ class FetchClock:
         return self
 
     def __exit__(self, kind, failure, traceback):
-        self.closing = True
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGALRM})
+        self.closing = True
         try:
             signal.setitimer(signal.ITIMER_REAL,0)
             # Standard signals coalesce; consume any owned pending alarm while blocked,
