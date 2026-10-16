@@ -70,6 +70,49 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
+    fun `session preference failure context retains only the existing closed mount witness`() {
+        val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
+            stackTrace = arrayOf(StackTraceElement("decompengine.acp.PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 123))
+            addSuppressed(contextMountWitness())
+            addSuppressed(java.io.IOException("PRIVATE-suppressed"))
+        }
+        val failure = AgentExecutionException(decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION,
+            "PRIVATE-failure", details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+        val context = sessionPreferencePhaseFailureContext("known-case", failure, null)
+        assertTrue("phase=missing;kind=CONFIGURATION;cleanup=missing" in context, context)
+        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
+        assertFalse("PRIVATE" in context || "/" in context, context)
+        assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+    }
+
+    @Test
+    fun `session preference failure context bounds cycles frame prefixes and suppressed witness inspection`() {
+        val first = java.io.IOException("PRIVATE-first")
+        val second = IllegalStateException("PRIVATE-second")
+        first.initCause(second); second.initCause(first)
+        first.stackTrace = (List(64) { StackTraceElement("PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 1) } +
+            StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "checkpoint", "LinuxBubblewrapBoundary.kt", 4321)).toTypedArray()
+        first.addSuppressed(Throwable("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA"))
+        first.addSuppressed(Throwable("PRIVATE-suppressed"))
+        first.addSuppressed(contextMountWitness()) // Beyond the fixed two-suppression inspection bound.
+        val failure = AgentExecutionException(decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), first)
+        val context = sessionPreferencePhaseFailureContext("known-case", failure, null)
+        assertFalse("PRIVATE" in context || "mount-event-v1" in context || "4321" in context, context)
+        assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+        assertTrue(Regex(";cause\\[").findAll(context).count() <= 8)
+    }
+
+    private fun contextMountWitness(): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null) as Throwable
+    }
+
+    @Test
     fun `reused cleanup latch is inert across two receipts and never accumulates timing records`() {
         val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
         val cleanup = AcpCleanupProofFailure("authored retained cleanup failure")
@@ -508,7 +551,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(88, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(90, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -2360,22 +2403,30 @@ class AcpAgentHarnessTest {
             ),
         )
 
-    // Failure-only context: fixed labels and line numbers, never throwable messages or raw frames.
-    // getStackTrace still snapshots the whole array; only inspected/rendered entries are bounded here.
+    // Failure-only context: fixed labels/sites and an existing closed scalar mount witness.
+    // Stack/suppressed accessors snapshot arrays; inspected entries and rendered output are bounded.
     private fun sessionPreferencePhaseFailureContext(
         label: String,
         failure: AgentExecutionException,
-        invocation: AcpInvocationEvidenceSnapshot,
+        invocation: AcpInvocationEvidenceSnapshot?,
     ): String = buildString {
         append(label)
-        append(" [phase=").append(invocation.phaseReached.name)
+        append(" [phase=").append(invocation?.phaseReached?.name ?: "missing")
         append(";kind=").append(failure.failure.kind.name)
-        append(";cleanup=").append(invocation.cleanupDisposition.name)
-        var current: Throwable? = failure
-        var depth = 0
+        append(";cleanup=").append(invocation?.cleanupDisposition?.name ?: "missing")
+        val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+            "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+            "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val pending = java.util.ArrayDeque<Throwable>()
+        val seen = ArrayList<Throwable>(8)
+        pending.add(failure)
+        failure.receipt?.failureCause?.let { pending.add(it) }
         var emitted = 0
-        while (current != null && depth < 8) {
-            val observed = current ?: break
+        while (pending.isNotEmpty() && seen.size < 8) {
+            val observed = pending.removeFirst()
+            if (seen.any { it === observed }) continue
+            val depth = seen.size
+            seen.add(observed)
             val category = when (observed) {
                 is java.io.IOException -> "IOException"
                 is java.util.concurrent.CancellationException -> "CancellationException"
@@ -2409,11 +2460,16 @@ class AcpAgentHarnessTest {
                     }
                 }
             }
-            depth++
-            current = if (depth < 8) observed.cause else null
+            if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
+                observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
+                    append(";witness=").append(it)
+                }
+            }
+            observed.cause?.let { if (pending.size < 16) pending.add(it) }
+            observed.suppressed.take(2).forEach { if (pending.size < 16) pending.add(it) }
         }
         append(']')
-    }
+    }.take(4096)
 
     private fun fixture(
         idleMillis: Long = 1_000,
