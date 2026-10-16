@@ -606,11 +606,13 @@ class BoundedProgramModelAcquisitionProcessTest {
     fun `frame failures reject digest truncation trailing bytes output overflow and nonzero exit`() {
         val modes = listOf("bad-magic", "oversize", "bad-digest", "trailing", "truncated", "bad-footer", "nonzero", "diagnostic-overflow")
         for (mode in modes) fixture { f ->
-            assertFailsWith<IllegalArgumentException>(mode) {
+            val refusal = assertFailsWith<IllegalArgumentException>(mode) {
                 f.reader(mode).read(f.model, f.root, MAX_BYTES, RESIDENT_BYTES, deadline(3_000))
             }
             f.assertChildAbsent()
-            f.assertReleased()
+            f.assertReleased("mode=$mode; refusal=" + throwables(refusal).joinToString(" | ") {
+                it.javaClass.simpleName + ": " + it.message.orEmpty().take(512)
+            })
             f.assertPriorEvidence()
         }
     }
@@ -767,8 +769,15 @@ class BoundedProgramModelAcquisitionProcessTest {
             }
         }
 
-        fun assertReleased() = awaitCondition(3_000, "actual launch, process, capture and control ownership was not released") {
-            ownership.retainedInvocations() == 0 && capture.activeCount == 0 && control.activeCount == 0 && launches.activeCount == 0
+        fun assertReleased(context: String = "") {
+            try {
+                awaitCondition(3_000, "actual launch, process, capture and control ownership was not released") {
+                    ownership.retainedInvocations() == 0 && capture.activeCount == 0 && control.activeCount == 0 && launches.activeCount == 0
+                }
+            } catch (failure: AssertionError) {
+                throw AssertionError("${failure.message}; $context; retained=${ownership.retainedInvocations()}; " +
+                    "active capture=${capture.activeCount}, control=${control.activeCount}, launch=${launches.activeCount}", failure)
+            }
         }
         fun assertPriorEvidence() {
             assertContentEquals(PRIOR_MODEL, Files.readAllBytes(model))

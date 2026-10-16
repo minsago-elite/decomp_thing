@@ -21,6 +21,8 @@ import decompengine.repair.ModuleRevisionAttempt
 import decompengine.repair.ModuleRevisionGraphTest
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.ModuleRevisionGraph
+import decompengine.repair.open
+import decompengine.repair.openForTesting
 import decompengine.repair.DeclarativeRepairIndexProfile
 import decompengine.repair.RepairIndexLayout
 import decompengine.repair.RepairModuleEvidence

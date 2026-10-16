@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.JobStore
+import decompengine.repair.open
 import decompengine.jobs.WorkflowAcceptanceReference
 import decompengine.jobs.WorkflowAttemptStore
 import decompengine.jobs.WorkflowCandidate
