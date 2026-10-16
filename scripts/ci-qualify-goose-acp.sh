@@ -107,7 +107,11 @@ javac \
   -d "$support_classes" \
   scripts/support/AcpCompatibilityJson.java \
   scripts/support/AcpCompatibilityProvisioner.java \
-  scripts/support/AcpCompatibilityPreflight.java
+  scripts/support/AcpCompatibilityPreflight.java \
+  scripts/support/AcpCompatibilityPreflightEvidenceControls.java
+
+java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityPreflightEvidenceControls \
+  >"$result_directory/diagnostic-controls.json"
 
 config_file="$result_directory/config.json"
 java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityProvisioner \
@@ -130,6 +134,6 @@ java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityPreflight \
 
 (
   cd "$result_directory"
-  sha256sum target.properties config.json evidence.json >ARTIFACTS.sha256
+  sha256sum target.properties diagnostic-controls.json config.json evidence.json >ARTIFACTS.sha256
 )
 echo "ACP compatibility evidence: $result_directory"

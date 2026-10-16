@@ -70,6 +70,91 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
     @Test
+    fun `session preference failure context retains only the existing closed mount witness`() {
+        val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
+            stackTrace = arrayOf(StackTraceElement("decompengine.acp.PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 123))
+            addSuppressed(contextMountWitness())
+            addSuppressed(java.io.IOException("PRIVATE-suppressed"))
+        }
+        val failure = AgentExecutionException(decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION,
+            "PRIVATE-failure", details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+        val context = sessionPreferencePhaseFailureContext("known-case", failure, null)
+        assertTrue("phase=missing;kind=CONFIGURATION;cleanup=missing" in context, context)
+        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
+        assertFalse("PRIVATE" in context || "/" in context, context)
+        assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+    }
+
+    @Test
+    fun `session preference failure context bounds cycles frame prefixes and suppressed witness inspection`() {
+        val first = java.io.IOException("PRIVATE-first")
+        val second = IllegalStateException("PRIVATE-second")
+        first.initCause(second); second.initCause(first)
+        first.stackTrace = (List(64) { StackTraceElement("PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 1) } +
+            StackTraceElement("decompengine.acp.RuntimePrivateControlScope", "checkpoint", "LinuxBubblewrapBoundary.kt", 4321)).toTypedArray()
+        first.addSuppressed(Throwable("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA"))
+        first.addSuppressed(Throwable("PRIVATE-suppressed"))
+        first.addSuppressed(contextMountWitness()) // Beyond the fixed two-suppression inspection bound.
+        val failure = AgentExecutionException(decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), first)
+        val context = sessionPreferencePhaseFailureContext("known-case", failure, null)
+        assertFalse("PRIVATE" in context || "mount-event-v1" in context || "4321" in context, context)
+        assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+        assertTrue(Regex(";cause\\[").findAll(context).count() <= 8)
+    }
+
+    private fun contextMountWitness(): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null) as Throwable
+    }
+
+    @Test
+    fun `reused cleanup latch is inert across two receipts and never accumulates timing records`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        val cleanup = AcpCleanupProofFailure("authored retained cleanup failure")
+        val facts = decompengine.agent.AgentFailure(AgentFailureKind.INTERNAL, "authored unresolved cleanup")
+        val stored = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("mappedPrelaunchFailure", decompengine.agent.AgentFailure::class.java,
+                Throwable::class.java, RuntimeCopyStatistics.Prefix::class.java)
+            .apply { isAccessible = true }.invoke(null, facts, cleanup, prefix) as AgentExecutionException
+        val originalSuppressed = stored.suppressed.toList()
+        assertEquals(1, originalSuppressed.size)
+        val root = Path.of(".").toAbsolutePath().normalize()
+        val harness = AcpAgentHarness(AcpProcessConfiguration(
+            executable = root.resolve("build/inert-never-launched-acp"), sandboxBoundary = null,
+        )) // No live harness/fixture/Python/user-runtime/gate-helper discovery.
+        @Suppress("UNCHECKED_CAST")
+        val latch = AcpAgentHarness::class.java.getDeclaredField("unresolvedCleanupFailure")
+            .apply { isAccessible = true }.get(harness) as java.util.concurrent.atomic.AtomicReference<AgentExecutionException?>
+        latch.set(stored)
+        var callbacks = 0
+        val request = AgentExecutionRequest(
+            objective = "inert retained cleanup refusal", workspaceRoots = listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(emptyList()),
+            cancellation = AgentCancellation { callbacks++; error("scheduler/cancellation must not be reached") },
+        )
+        repeat(2) {
+            val receipt = harness.executeReceipt(request) { callbacks++; error("event/model callback must not be reached") }
+            assertIs<AgentExecutionOutcome.Failed>(receipt.outcome)
+            assertTrue(receipt.failureCause === stored)
+            assertTrue((receipt.outcome as AgentExecutionOutcome.Failed).failure === facts)
+            val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertEquals(AcpExecutionLifecyclePhase.REQUEST_BOUND, evidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, evidence.cleanupDisposition)
+            assertNull(evidence.diagnostics)
+            assertNull(evidence.sandboxEvidence)
+            assertTrue(latch.get() === stored)
+            assertEquals(originalSuppressed, stored.suppressed.toList())
+        }
+        assertEquals(0, callbacks)
+        assertTrue(stored.cause === cleanup)
+    }
+
+    @Test
     fun `stdout owner retains accounted EOF without a second read after teardown`() {
         val bytes = "trailing output already accounted".toByteArray()
         val input = object : java.io.InputStream() {
@@ -466,7 +551,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(81, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(90, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -697,7 +782,16 @@ class AcpAgentHarnessTest {
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
-            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, case.label)
+            val phaseContext = if (invocation.phaseReached == AcpExecutionLifecyclePhase.SESSION_CREATED) {
+                case.label
+            } else {
+                try {
+                    sessionPreferencePhaseFailureContext(case.label, failure, invocation)
+                } catch (_: Throwable) {
+                    case.label // Diagnostic construction cannot replace the original phase check.
+                }
+            }
+            assertEquals(AcpExecutionLifecyclePhase.SESSION_CREATED, invocation.phaseReached, phaseContext)
             assertNull(invocation.wirePromptSha256, case.label)
             assertFalse(failure.stackTraceToString().contains(case.secretCanary), case.label)
             assertFalse(invocation.toString().contains(case.secretCanary), case.label)
@@ -2309,6 +2403,74 @@ class AcpAgentHarnessTest {
             ),
         )
 
+    // Failure-only context: fixed labels/sites and an existing closed scalar mount witness.
+    // Stack/suppressed accessors snapshot arrays; inspected entries and rendered output are bounded.
+    private fun sessionPreferencePhaseFailureContext(
+        label: String,
+        failure: AgentExecutionException,
+        invocation: AcpInvocationEvidenceSnapshot?,
+    ): String = buildString {
+        append(label)
+        append(" [phase=").append(invocation?.phaseReached?.name ?: "missing")
+        append(";kind=").append(failure.failure.kind.name)
+        append(";cleanup=").append(invocation?.cleanupDisposition?.name ?: "missing")
+        val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+            "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+            "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val pending = java.util.ArrayDeque<Throwable>()
+        val seen = ArrayList<Throwable>(8)
+        pending.add(failure)
+        failure.receipt?.failureCause?.let { pending.add(it) }
+        var emitted = 0
+        while (pending.isNotEmpty() && seen.size < 8) {
+            val observed = pending.removeFirst()
+            if (seen.any { it === observed }) continue
+            val depth = seen.size
+            seen.add(observed)
+            val category = when (observed) {
+                is java.io.IOException -> "IOException"
+                is java.util.concurrent.CancellationException -> "CancellationException"
+                is IllegalArgumentException -> "IllegalArgumentException"
+                is IllegalStateException -> "IllegalStateException"
+                is SecurityException -> "SecurityException"
+                is java.util.concurrent.TimeoutException -> "TimeoutException"
+                is InterruptedException -> "InterruptedException"
+                is ExecutionException -> "ExecutionException"
+                is AssertionError -> "AssertionError"
+                is Error -> "Error"
+                is RuntimeException -> "RuntimeException"
+                is Exception -> "Exception"
+                else -> "Throwable"
+            }
+            append(";cause[").append(depth).append("]=").append(category)
+            if (emitted < 64) {
+                val frames = observed.stackTrace
+                var index = 0
+                while (index < minOf(frames.size, 64) && emitted < 64) {
+                    val frame = frames[index++]
+                    if (frame.className.startsWith("decompengine.")) {
+                        val component = when (frame.fileName) {
+                            "AcpAgentHarness.kt" -> "Harness"
+                            "LinuxBubblewrapBoundary.kt" -> "Boundary"
+                            "LinuxFilesystemSyscalls.kt" -> "Syscalls"
+                            else -> "Other"
+                        }
+                        append(',').append(component).append(':').append(frame.lineNumber)
+                        emitted++
+                    }
+                }
+            }
+            if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
+                observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
+                    append(";witness=").append(it)
+                }
+            }
+            observed.cause?.let { if (pending.size < 16) pending.add(it) }
+            observed.suppressed.take(2).forEach { if (pending.size < 16) pending.add(it) }
+        }
+        append(']')
+    }.take(4096)
+
     private fun fixture(
         idleMillis: Long = 1_000,
         includeReadyPath: Boolean = false,
@@ -2680,46 +2842,6 @@ class AcpAgentHarnessTest {
         return failure
     }
 
-    /** Existing receipt metadata only: no process queries, exception text, stderr or request content. */
-    private fun cleanupFailureDiagnostic(
-        invocation: AcpInvocationEvidenceSnapshot,
-        failure: AgentExecutionException,
-    ): String {
-        val diagnostics = invocation.diagnostics
-        val output = invocation.sandboxEvidence?.outerProcessOutput
-        val allowedCauseTypes = setOf(
-            "decompengine.agent.AgentExecutionException", "decompengine.acp.AcpCleanupProofFailure",
-            "decompengine.acp.AcpOutputLimitFailure", "decompengine.acp.AcpPhaseTimeout",
-            "decompengine.acp.AcpEofFailure", "decompengine.acp.AcpProcessExitedFailure",
-            "java.io.IOException", "java.lang.IllegalStateException", "java.lang.InterruptedException",
-            "java.util.concurrent.TimeoutException", "java.util.concurrent.ExecutionException",
-        )
-        val seen = ArrayList<Throwable>(6)
-        val causeTypes = ArrayList<String>(6)
-        var cause: Throwable? = failure
-        while (cause != null && seen.size < 6 && seen.none { it === cause }) {
-            val current = requireNotNull(cause)
-            seen += current
-            causeTypes += current.javaClass.name.takeIf { it in allowedCauseTypes } ?: "other"
-            cause = current.cause
-        }
-        return ("cleanupDiagnostic phase=${invocation.phaseReached} cleanup=${invocation.cleanupDisposition} " +
-            "failureKind=${failure.failure.kind} failedOutcome=${failure.receipt?.outcome is AgentExecutionOutcome.Failed} " +
-            "audits=${invocation.completeness} negotiated=${invocation.negotiatedAgent != null} " +
-            "wirePromptPresent=${invocation.wirePromptSha256 != null} sandbox=${invocation.sandboxEvidence != null} " +
-            "completeEvidence=${invocation.completeExecutionEvidence != null} diagnostics=${diagnostics != null} " +
-            "exitCode=${diagnostics?.exitCode} forcedTermination=${diagnostics?.forcedTermination} " +
-            "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
-            "remainingPidCount=${diagnostics?.remainingProcessIds?.size} " +
-            "remainingPidsFirst8=${diagnostics?.remainingProcessIds?.take(8)} " +
-            "sandboxCleanupVerified=${diagnostics?.sandboxCleanupVerified} " +
-            "producedBytes=${diagnostics?.producedOutputBytes} producedLimit=${diagnostics?.producedOutputLimitBytes} " +
-            "outputLimitExceeded=${diagnostics?.outputLimitExceeded} stderrTruncated=${diagnostics?.stderrTruncated} " +
-            "outerObserved=${output?.observedBytes} outerLimit=${output?.maximumBytes} outerExceeded=${output?.limitExceeded} " +
-            "stdoutEof=unknown stderrEof=unknown shutdownBudget=unknown " +
-            "causeClasses=$causeTypes causeTailUnknown=${cause != null} suppressedCauses=unknown").take(4096)
-    }
-
     private fun assertCleanTermination(
         harness: AcpAgentHarness,
         context: String = "execution",
@@ -2731,14 +2853,7 @@ class AcpAgentHarnessTest {
         val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
         if (failure != null) {
             assertNotNull(invocation, "$context invocation evidence")
-            val cleanupContext = if (invocation.cleanupDisposition != AcpExecutionCleanupDisposition.VERIFIED) {
-                try {
-                    "$context " + cleanupFailureDiagnostic(invocation, failure)
-                } catch (_: Throwable) {
-                    "diagnostic-unavailable"
-                }
-            } else context
-            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, cleanupContext)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, context)
             assertNull(invocation.completeExecutionEvidence, "$context failed outcome archive evidence")
         }
         val diagnostics = assertNotNull(invocation?.diagnostics ?: harness.latestDiagnostics(), context)
