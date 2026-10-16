@@ -32,7 +32,7 @@ fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = empty
     renderDashboardDocument(jobs, diagnostics, recovery).body
 
 internal fun renderDashboardDocument(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
-    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)):
+    recovery: JobRecoveryInventory? = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)):
     WebApplicationDocument = pageDocument(
     title = "Binary workbench",
     body = """
@@ -201,7 +201,14 @@ internal fun renderDashboardDocument(jobs: List<Job>, diagnostics: List<WebJobDi
     """.trimIndent(),
 )
 
-private fun renderRecoveryInventory(inventory: JobRecoveryInventory): String {
+/** A null inventory means inspection was paused for an active upload, never an empty result. */
+private fun renderRecoveryInventory(inventory: JobRecoveryInventory?): String {
+    if (inventory == null) return """
+        <section class="recovery-note" aria-labelledby="recovery-title">
+          <h3 id="recovery-title">Recovery inspection paused</h3>
+          <p>An upload is in progress. Refresh after uploads finish to inspect recovery files.</p>
+        </section>
+    """.trimIndent()
     if (inventory.inventoryComplete && inventory.retainedUploadStages == 0 && inventory.retainedMetadataFiles == 0) return ""
     val qualifier = if (inventory.inventoryComplete) "Observed" else "At least"
     val coverage = if (inventory.inventoryComplete) {

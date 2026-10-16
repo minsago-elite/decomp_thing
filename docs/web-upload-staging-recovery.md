@@ -57,6 +57,11 @@ inventory scan share the service monitor, so live upload stages cannot be presen
 as retained recovery files. The dashboard clears earlier counts, shows a paused
 inspection notice, and waits for **Refresh jobs** after uploads finish.
 
+Legacy HTML and `GET /api/recovery` use the same shared-service guard. The JSON read
+returns the fixed busy classification; the HTML keeps job rows visible with a paused
+notice and no retained-file counts. A fresh read after publication inspects storage
+normally. Neither surface inventories live upload stages as retained recovery files.
+
 The closed `recovery` contract reports schema version 1, `displayOnly: true`,
 scanned-entry counts, retained upload-stage and metadata-temporary-file counts,
 observed bytes as a decimal string, uninspected entries and `inventoryComplete`.
