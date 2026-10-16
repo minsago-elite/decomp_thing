@@ -70,8 +70,7 @@ import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
-    @Test
-    fun `fixture manifest acquisition bounds fresh mount-event retries and preserves other failures`() {
+    private fun assertFixtureManifestAcquisitionBounds() {
         val events = List(3) { java.io.IOException("host mounts changed during runtime manifest") }
         var attempts = 0
         val digest = "a".repeat(64)
@@ -103,6 +102,7 @@ class AcpAgentHarnessTest {
             assertSame(other, failure)
             assertEquals(1, attempts, "other failures propagate immediately")
         }
+        println("acp-fixture-manifest-acquisition transientAttempts=3 persistentAttempts=3 otherFailures=immediate")
     }
 
     @Test
@@ -1642,6 +1642,7 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `literal physical newline inside a JSON string fails closed and cleans containment`() {
+        assertFixtureManifestAcquisitionBounds()
         val fixture = fixture(genericContract = true, wallMillis = 2_000)
         val harness = harness(
             "physical-newline-in-string",
@@ -2768,7 +2769,7 @@ class AcpAgentHarnessTest {
         expectedScopeInspectorSha256 = sha256(SYSTEMCTL),
         expectedEnvironmentFdOpenerSha256 = sha256(BASH),
         expectedSandboxGateHelperSha256 = sha256(GATE_HELPER),
-        expectedSandboxGateHelperManifestSha256 = calculateAcpRuntimeManifestSha256(GATE_HELPER),
+        expectedSandboxGateHelperManifestSha256 = acquireFixtureRuntimeManifest { calculateAcpRuntimeManifestSha256(GATE_HELPER) },
     )
 
     private fun requireLiveSandboxHost() {
