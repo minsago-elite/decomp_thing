@@ -37,6 +37,7 @@ import decompengine.presentRecordedRepairHistory
 import decompengine.produceRejectedRecordedTraceHistory
 import decompengine.producePagedRecordedTraceHistory
 import decompengine.repair.RepairRecordedHistorySelection
+import decompengine.repair.RepairRunStatus
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
