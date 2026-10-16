@@ -51,6 +51,12 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await ready(tab, `document.body.innerText.includes('Upload was not confirmed.')`, 'lost upload response explanation');
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   assert.equal(ids.length, 1, 'First admission must publish exactly one job');
+  // Snapshot durable publication before reload/retry can open the job route.
+  const publishedFiles = await fs.readdir(join(data, ids[0]));
+  assert.deepEqual(publishedFiles.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
+  const retainedFiles = new Map(await Promise.all(publishedFiles.map(async name => [name, await fs.readFile(join(data, ids[0], name))])));
+  assert.ok(tab.requests.every(request => !/^\/nested\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(new URL(request.url).pathname)),
+    'The file baseline must precede every job metadata view');
   assert.equal(await evaluate(tab, 'sessionStorage.length'), 1);
   cdp.on('Page.javascriptDialogOpening', () => {
     void cdp.call('Page.handleJavaScriptDialog', { accept: true }, tab.sessionId);
@@ -72,7 +78,6 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
-  const retainedFiles = new Map(await Promise.all(files.map(async name => [name, await fs.readFile(join(data, ids[0], name))])));
   const metadata = await evaluate(tab, `(async () => {
     const response = await fetch('/nested/api/v1/jobs/${ids[0]}');
     if (response.status !== 200) throw new Error('Expected the real job metadata response');
