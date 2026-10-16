@@ -210,6 +210,10 @@ val snapshotCapsuleAuditDataTest = tasks.register<JavaExec>("snapshotCapsuleAudi
         environment("TMPDIR", temporaryDir.absolutePath)
     }
 }
+// Refuse isolated data-fixture failures before expensive Kotlin compilation in the same graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(snapshotCapsuleAuditDataTest) }
+}
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
