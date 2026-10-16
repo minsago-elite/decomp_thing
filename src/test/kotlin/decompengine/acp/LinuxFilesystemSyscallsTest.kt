@@ -328,6 +328,103 @@ class LinuxFilesystemSyscallsTest {
         }
     }
 
+    @Test
+    fun `owned statx pathname and statistics reset across interrupted retries without shared scope state`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
+            LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->
+                val field = first.javaClass.getDeclaredField("emptyPath").apply { isAccessible = true }
+                val firstPath = field.get(first) as ByteArray
+                val secondPath = field.get(second) as ByteArray
+                assertTrue(firstPath !== secondPath)
+                assertContentEquals(byteArrayOf(0), firstPath)
+                assertContentEquals(byteArrayOf(0), secondPath)
+                firstPath[0] = 65
+                secondPath[0] = 66
+                var calls = 0
+                val observed = scriptedStatx(first, query = { buffer ->
+                    assertTrue(Thread.holdsLock(first))
+                    assertTrue(firstPath === field.get(first))
+                    assertContentEquals(byteArrayOf(0), firstPath)
+                    assertContentEquals(ByteArray(256), buffer.getByteArray(0, 256))
+                    assertEquals(66.toByte(), secondPath.single())
+                    calls++
+                    if (calls == 1) {
+                        writeStatxIdentity(buffer, 70)
+                        buffer.setByte(255, 0x7f)
+                        firstPath[0] = 67
+                        com.sun.jna.Native.setLastError(4)
+                        -1L
+                    } else {
+                        writeStatxIdentity(buffer, 71)
+                        0L
+                    }
+                })
+                assertEquals(2, calls)
+                assertEquals(71L, observed.key.inode)
+                firstPath[0] = 68
+                val other = scriptedStatx(second, query = { buffer ->
+                    assertContentEquals(byteArrayOf(0), secondPath)
+                    assertEquals(68.toByte(), firstPath.single())
+                    writeStatxIdentity(buffer, 72)
+                    0L
+                })
+                assertEquals(72L, other.key.inode)
+                assertEquals(71L, observed.key.inode)
+                first.close()
+                var closedCalls = 0
+                assertFailsWith<IllegalStateException> {
+                    scriptedStatx(first, query = { closedCalls++; 0L })
+                }
+                assertEquals(0, closedCalls)
+                assertEquals(68.toByte(), firstPath.single()) // Closed admission refuses before touching storage.
+            }
+        }
+    }
+
+    @Test
+    fun `owned statx byte pathname observes actual unlinked and replacement descriptors without retaining identity`() {
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "statx-byte-path-").normalize()
+        try {
+            LinuxFilesystemSyscalls.requireSupported(path)
+            Files.writeString(path.resolve("record"), "first")
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "record")!!.use { original ->
+                    val scratch = LinuxFilesystemSyscalls.StatxIdentityScratch()
+                    try {
+                        assertEquals(LinuxFilesystemSyscalls.identity(directory.fd), scratch.identity(directory.fd))
+                        assertEquals(original.identity, scratch.identity(original.fd))
+                        Files.delete(path.resolve("record"))
+                        Files.writeString(path.resolve("record"), "replacement")
+                        val unlinked = LinuxFilesystemSyscalls.identity(original.fd)
+                        assertEquals(0, unlinked.linkCount)
+                        assertEquals(unlinked, scratch.identity(original.fd))
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "record")!!.use { replacement ->
+                            assertTrue(original.identity.key != replacement.identity.key)
+                            assertEquals(replacement.identity, scratch.identity(replacement.fd))
+                            assertEquals(unlinked, scratch.identity(original.fd))
+                        }
+                        val expectedFailure = assertFailsWith<IOException> { LinuxFilesystemSyscalls.identity(-1) }
+                        val actualFailure = assertFailsWith<IOException> { scratch.identity(-1) }
+                        assertEquals(expectedFailure::class, actualFailure::class)
+                        if (expectedFailure is LinuxSyscallException) {
+                            assertEquals(expectedFailure.errno, (actualFailure as LinuxSyscallException).errno)
+                        } else {
+                            assertEquals(expectedFailure.message, actualFailure.message)
+                        }
+                    } finally {
+                        scratch.close()
+                    }
+                    // Scratch owns no borrowed descriptor; both native query paths still observe it after close.
+                    assertEquals(0, LinuxFilesystemSyscalls.identity(original.fd).linkCount)
+                    assertFailsWith<IllegalStateException> { scratch.identity(original.fd) }
+                }
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
     private fun writeStatxIdentity(buffer: com.sun.jna.Memory, inode: Long) {
         buffer.setInt(0, 0x111f)
         buffer.setInt(0x10, 2)

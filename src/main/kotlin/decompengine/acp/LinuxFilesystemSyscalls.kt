@@ -1049,6 +1049,8 @@ internal object LinuxFilesystemSyscalls {
     /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
     class StatxIdentityScratch : AutoCloseable {
         private var closed = false
+        // Explicit NUL storage avoids per-call JNA NativeString allocation; allocate before native ownership.
+        private val emptyPath = byteArrayOf(0)
         private val statistics = Memory(STATX_BYTES)
 
         @Synchronized
@@ -1065,11 +1067,12 @@ internal object LinuxFilesystemSyscalls {
         }
 
         private fun queryIdentity(fd: Int, query: ((Memory) -> Long)?, fallback: (() -> LinuxFileIdentity)?): LinuxFileIdentity {
-            statistics.clear() // Reset all 256 bytes before each observation, never reuse an identity.
             val observed = descriptorStatxQueryOrNull {
                 retryOnInterrupted("inspect pinned descriptor identity") {
+                    statistics.clear() // Reset all 256 bytes even after an interrupted syscall.
+                    emptyPath[0] = 0 // A fresh explicit empty pathname on every attempt; never NULL.
                     if (query == null) {
-                        libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                        libc.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
                             STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
                     } else query(statistics)
                 }
@@ -1357,6 +1360,7 @@ internal object LinuxFilesystemSyscalls {
         fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
         fun fstatvfs(fd: Int, statistics: LinuxStatVfs): Int
         fun statx(fd: Int, path: String, flags: Int, mask: Int, statistics: Pointer): Int
+        fun statx(fd: Int, path: ByteArray, flags: Int, mask: Int, statistics: Pointer): Int
     }
 
     /** Linux/glibc 64-bit `struct statvfs`; older spare[6] layouts have the same size/alignment. */
