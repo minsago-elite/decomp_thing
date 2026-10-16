@@ -191,7 +191,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, live]
+        include:
+          - shard: core
+            test-shard: core-main
+          - shard: oracle
+            test-shard: core-oracle
+          - shard: live
+            test-shard: live
     steps:
       - uses: actions/checkout@v7
         with:
@@ -233,6 +239,9 @@ jobs:
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
+      - name: Check CI partition routing with an inert Gradle fixture
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-ci-partitions.py
       - name: Verify real Angr qualification selection and pin controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-angr-qualification-selection.py
@@ -294,7 +303,7 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
-          DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
       - name: Retain Kotlin partition reports
         run: |
@@ -366,7 +375,7 @@ jobs:
     needs: kotlin-suite
     if: ${{ !cancelled() }}
     steps:
-      - name: Require both Kotlin test partitions
+      - name: Require all Kotlin test partitions
         env:
           SHARD_RESULT: ${{ needs.kotlin-suite.result }}
         run: test "$SHARD_RESULT" = success

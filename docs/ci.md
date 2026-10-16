@@ -20,7 +20,35 @@ this does not raise its production/fixture RSS cap.
 
 `DECOMP_CI_TEST_SHARD=core` selects tests excluding the `ci-live` tag and retains
 these isolated checks. `live` selects only that tag; the full default selects
-both. Hosted workflows additionally prepare fixtures and run credential-free
+both. These existing entry points retain their full selections.
+
+Hosted CI splits ordinary core tests into `core-main` (the complement of
+`decompengine.oracle.*`) and `core-oracle` (that namespace recursively), each
+excluding `ci-live`. Gradle's [test-name filters](https://docs.gradle.org/current/javadoc/org/gradle/api/tasks/testing/TestFilter.html)
+select a package recursively and its complement; new classes enter their group
+automatically. Both selections fail if no tests match. The existing `kotlin-core`
+job runs `core-main`; `kotlin-oracle` runs `core-oracle`. `kotlin-live` retains its
+tag selection and preflights. The `kotlin` aggregate requires all three jobs.
+
+`core-oracle` owns the isolated GCC planning class, the three isolated V3 boundary
+methods and the 115 synthetic class-data controls. The class-data gate still runs
+before expensive Kotlin compilation in its owning task graph. The isolated
+workers keep their existing heaps, RSS bounds and fresh execution. `core-main`
+retains real Angr selection/qualification and the quota-backed repair snapshot
+follow-up. All three jobs retain their existing hosted runtime, sandbox, quota,
+scratch provisioning and unconditional cleanup. Each uploads its own
+`kotlin-core`, `kotlin-oracle` or `kotlin-live` test-report artifact.
+
+`scripts/test-ci-partitions.py` exercises the actual shell entry point with an
+inert Gradle argument recorder, including full/legacy/live selections, each new
+partition and refusal before invocation for unsupported values. Before accepting
+the split, compare the complete current XML execution union against the qualified
+original inventory, preserving explicit skips and isolated executions. In
+particular, the quota snapshot method's full-suite skip and separately required
+pass are distinct executions. Job/step durations and total runner time describe
+different costs; the historical elapsed observations alone establish no speedup.
+
+Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.
 
@@ -112,7 +140,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | --- | --- | --- |
 | Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
 | Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
-| Kotlin core / live / aggregate | Normal; core and tagged live tests run separately with required hosted fixtures. Live also runs the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires both partitions to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
+| Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
 | GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
