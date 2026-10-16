@@ -1553,7 +1553,7 @@ class SourceTreeTest {
     @Test
     fun `schema three checkpoints retain input identity and resume without dispatch`() {
         val input = oneModuleModel().copy(schemaVersion = 3, globals = emptyList())
-        val project = createTempDirectory("schema-three-checkpoint-")
+        val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "schema-three-checkpoint-")
         var calls = 0
         val reconstructor = validReconstructor { calls++ }
         SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
@@ -1571,7 +1571,7 @@ class SourceTreeTest {
 
     @Test
     fun `model four checkpoint binds nullable evidence and refuses omission-only stale reuse`() {
-        val project = createTempDirectory("schema-four-checkpoint-")
+        val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "schema-four-checkpoint-")
         val base = oneModuleModel().copy(schemaVersion = 4,
             functions = oneModuleModel().functions.map { it.copy(referencedGlobals = setOf("g")) },
             globals = listOf(RecoveredGlobal("g", "authored", 0x2000UL, "int")))

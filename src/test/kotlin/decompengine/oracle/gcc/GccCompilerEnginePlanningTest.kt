@@ -44,7 +44,7 @@ class GccCompilerEnginePlanningTest {
 
     @Test
     fun `bundled planning rejects generic model four null evidence before publication`() {
-        val temporary = createTempDirectory("gcc-engine-null-evidence-").toAbsolutePath().normalize()
+        val temporary = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "gcc-engine-null-evidence-").toAbsolutePath().normalize()
         val bytes = "authored nullable evidence fixture".toByteArray()
         val input = temporary.resolve("input").also { it.writeBytes(bytes) }
         val output = temporary.resolve("output")
@@ -62,7 +62,7 @@ class GccCompilerEnginePlanningTest {
 
     @Test
     fun `bundled planning rejects valid historical model three evidence one at generation gate`() {
-        val temporary = createTempDirectory("gcc-engine-historical-evidence-").toAbsolutePath().normalize()
+        val temporary = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "gcc-engine-historical-evidence-").toAbsolutePath().normalize()
         val bytes = "authored historical evidence fixture".toByteArray()
         val input = temporary.resolve("input").also { it.writeBytes(bytes) }
         val output = temporary.resolve("output")

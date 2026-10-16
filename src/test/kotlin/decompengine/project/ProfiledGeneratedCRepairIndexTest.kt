@@ -6,6 +6,7 @@ import decompengine.repair.ModuleRepairIndex
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairResourceBudget
+import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readText
@@ -46,7 +47,7 @@ class ProfiledGeneratedCRepairIndexTest {
             ReferencedDataByteOrigin(0x1000UL, 0x2000UL, 0, "pcode_direct_read"), "available",
             listOf(ReferencedDataByteSegment(0, 8, "available", "000000000000e03f", null)))
         for (version in 1..3) {
-            val project = createTempDirectory("repair-model-migration-")
+            val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "repair-model-migration-")
             val byteEvidence = if (version == 3) ReferencedDataByteEvidence(windows = listOf(window)) else null
             val model = RecoveredProgramModel(schemaVersion = version, inputSha256 = "a".repeat(64),
                 functions = listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
@@ -90,7 +91,7 @@ class ProfiledGeneratedCRepairIndexTest {
         val cases = listOf(null, ReferencedDataByteEvidence(2, listOf(window)),
             ReferencedDataByteEvidence(2, emptyList(), collectionOmissions = listOf("reference_work_limit")))
         for (evidence in cases) {
-            val project = createTempDirectory("repair-model-four-")
+            val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "repair-model-four-")
             val model = RecoveredProgramModel(4, "a".repeat(64),
                 listOf(RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)", referencedGlobals = setOf("g"))),
                 listOf(RecoveredGlobal("g", "authored", 0x2000UL, "undefined1", "00h", byteEvidence = evidence)))
