@@ -1615,6 +1615,44 @@ private fun configureOracleTestRuntime(testTask: Test) {
     )
 }
 
+// This task is a required real-tool lane when selected, with no optional no-op or cached credit.
+tasks.register<Test>("realAngrQualification") {
+    group = "verification"
+    description = "Requires real Angr discovery on the authored argv/stdin fixture"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching("decompengine.exploration.AutomaticExplorationTest.real angr symbolically discovers branching argv and stdin when configured")
+        isFailOnNoMatchingTests = true
+    }
+    val python = providers.environmentVariable("ANGR_PYTHON").orElse("")
+    val evidenceRoot = layout.buildDirectory.dir("angr-qualification").get().asFile
+    val temporaryRoot = evidenceRoot.resolve("tmp")
+    environment = mapOf(
+        "ANGR_PYTHON" to python.get(),
+        "PATH" to "/usr/bin:/bin",
+        "LANG" to "C.UTF-8",
+        "LC_ALL" to "C.UTF-8",
+        "TMPDIR" to temporaryRoot.absolutePath,
+        "PYTHONDONTWRITEBYTECODE" to "1",
+        "PYTHONNOUSERSITE" to "1",
+    )
+    systemProperty("java.io.tmpdir", temporaryRoot.absolutePath)
+    systemProperty("decompengine.angr.evidenceRoot", evidenceRoot.absolutePath)
+    maxHeapSize = "512m"
+    maxParallelForks = 1
+    timeout.set(Duration.ofMinutes(3))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("Real Angr qualification requires fresh discovery") { false }
+    doFirst {
+        require(python.get().isNotBlank() && File(python.get()).isAbsolute && File(python.get()).canExecute()) {
+            "realAngrQualification requires an executable absolute ANGR_PYTHON"
+        }
+        Files.createDirectories(temporaryRoot.toPath())
+    }
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"

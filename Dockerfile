@@ -20,15 +20,17 @@ RUN apt-get update \
 
 # pip connection retries do not retry a failed streaming download. Keep completed
 # downloads outside the image and bound retries of the complete installation.
+COPY requirements/angr-compatibility.txt /workspace/requirements/angr-compatibility.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     timeout --signal=KILL 15m sh -ec ' \
         for attempt in 1 2 3; do \
             if python3 -m pip install --no-input --disable-pip-version-check \
-                --timeout 60 --retries 5 "$1"; then exit 0; fi; \
+                --timeout 60 --retries 5 --constraint /workspace/requirements/angr-compatibility.txt "$1"; then exit 0; fi; \
             if [ "$attempt" -lt 3 ]; then sleep 5; fi; \
         done; \
         exit 1 \
     ' -- "angr==${ANGR_VERSION}"
+RUN python3 -c 'import angr, sys; assert angr.__version__ == sys.argv[1]; print("angr import:", angr.__version__)' "$ANGR_VERSION"
 
 FROM toolchain AS build
 
