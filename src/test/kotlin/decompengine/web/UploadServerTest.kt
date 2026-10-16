@@ -2328,11 +2328,14 @@ class UploadServerTest {
             repeat(9_999) { index ->
                 val ordinal = 90_000_000 + index
                 Files.createFile(revisions.resolve("revision_${ordinal}_0123456789abcdef.acp-receipt.json"))
+                Files.createFile(project.resolve("reports/iteration_$ordinal.validation.json"))
+                Files.createFile(project.resolve("reports/iteration_$ordinal.diff.json"))
             }
-            val snapshot = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val recorded = readProjectRecordedRepairHistory(project)
+            assertNotNull(recorded.snapshot)
             val context = WebReportContext(reports)
             val target = "reports/source-tree/reports/repair-revisions/${receipt.fileName}"
-            val listed = listLegacyArtifactSummaries(context, snapshot)
+            val listed = listLegacyArtifactSummaries(context, recorded)
             assertTrue(listed.any { it.relativePath == target && it.displayName == "Repair evidence" })
             assertTrue(listed.any { it.relativePath == "reports/ordinary-summary.json" })
             assertEquals(1, listed.count { "/repair-revisions/" in it.relativePath })
@@ -2343,6 +2346,7 @@ class UploadServerTest {
                 assertEquals(200, response.status)
                 assertTrue("ACP receipt is complete; repair acceptance was not established." in body, body)
                 assertTrue("/jobs/$id/artifacts/reports/ordinary-summary.json" in body, body)
+                assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
                 assertFalse("Artifact listing is unavailable" in body || "PRIVATE-" in body || "revision_90000000" in body, body)
             }
             assertEquals(0, executions)
@@ -2353,13 +2357,13 @@ class UploadServerTest {
             val displacedReceipt = project.resolve("PRIVATE-displaced-receipt.json")
             Files.move(receipt, displacedReceipt)
             Files.createSymbolicLink(receipt, displacedReceipt)
-            assertFalse(listLegacyArtifactSummaries(context, snapshot).any { it.relativePath == target })
+            assertFalse(listLegacyArtifactSummaries(context, recorded).any { it.relativePath == target })
             Files.delete(receipt)
             Files.move(displacedReceipt, receipt)
             val displacedDirectory = project.resolve("PRIVATE-displaced-revisions")
             Files.move(revisions, displacedDirectory)
             Files.createSymbolicLink(revisions, displacedDirectory)
-            val linkedDirectory = listLegacyArtifactSummaries(context, snapshot)
+            val linkedDirectory = listLegacyArtifactSummaries(context, recorded)
             assertFalse(linkedDirectory.any { "/repair-revisions/" in it.relativePath })
             assertTrue(linkedDirectory.any { it.relativePath == "reports/ordinary-summary.json" })
             assertEquals(0, executions)

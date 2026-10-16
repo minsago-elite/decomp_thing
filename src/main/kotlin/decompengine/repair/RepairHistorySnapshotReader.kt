@@ -9,19 +9,51 @@ import java.nio.file.FileSystems
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 
-/** Closed, private-data-free result. RECORDED is metadata-only, not a freshness/execution permit. */
+/** Closed presentation status; private capture supplies selected IO hints, never execution authority. */
 internal enum class RepairHistoryReadStatus { RECORDED, NOT_RECORDED, UNAVAILABLE }
 internal class RepairHistoryReadResult private constructor(
     val status: RepairHistoryReadStatus,
     val snapshot: RepairHistorySnapshot?,
     val projection: RepairHistoryProjectionDiagnostic = RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED),
+    private val artifactCapture: RepairHistoryArtifactCapture? = null,
 ) {
+    internal fun selectedArtifactPaths(page: RepairRecordedHistoryPage): List<String> {
+        require(status == RepairHistoryReadStatus.RECORDED && page.snapshot === snapshot) {
+            "Recorded history page does not match its capture."
+        }
+        return artifactCapture?.selectedPaths(page).orEmpty()
+    }
+
     companion object {
         internal fun recorded(snapshot: RepairHistorySnapshot, projection: RepairHistoryProjectionDiagnostic =
-            RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED)) =
-            RepairHistoryReadResult(RepairHistoryReadStatus.RECORDED, snapshot, projection)
+            RepairHistoryProjectionDiagnostic(RepairHistoryProjectionStatus.NOT_INSPECTED),
+            artifactCapture: RepairHistoryArtifactCapture? = null): RepairHistoryReadResult {
+            require(artifactCapture == null || artifactCapture.snapshot === snapshot)
+            return RepairHistoryReadResult(RepairHistoryReadStatus.RECORDED, snapshot, projection, artifactCapture)
+        }
         internal fun absent() = RepairHistoryReadResult(RepairHistoryReadStatus.NOT_RECORDED, null)
         internal fun unavailable() = RepairHistoryReadResult(RepairHistoryReadStatus.UNAVAILABLE, null)
+    }
+}
+
+/** Private paths stay outside RepairHistorySnapshot; the reader publishes this only after continuity.
+ * These are correlation hints, not namespace, download or execution authority.
+ */
+internal class RepairHistoryArtifactCapture internal constructor(
+    val snapshot: RepairHistorySnapshot,
+    paths: Map<RepairRecordedArtifactReference, String>,
+) {
+    private val paths = paths.toMap()
+
+    internal fun selectedPaths(page: RepairRecordedHistoryPage): List<String> {
+        require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }
+        val selected = linkedSetOf<RepairRecordedArtifactReference>()
+        page.attempts.forEach { attempt ->
+            attempt.before?.artifact?.let(selected::add)
+            attempt.after?.artifact?.let(selected::add)
+            attempt.invocation?.artifact?.let(selected::add)
+        }
+        return selected.mapNotNull(paths::get)
     }
 }
 
@@ -154,7 +186,7 @@ private class HistoryCaptureSession(
         requireRecordedRepairHistoryBinding(graph.bytes, binding.bytes, budget)
         var declarationNames: List<String>? = null
         val consumed = ArrayList<HistoryConsumedInput>()
-        val snapshot = recordedRepairHistorySnapshot(graph.bytes, binding.bytes, budget) { consume ->
+        val artifactCapture = recordedRepairHistoryCapture(graph.bytes, binding.bytes, budget) { consume ->
             require(declarationNames == null)
             val names = names(budget)
             declarationNames = names
@@ -186,7 +218,7 @@ private class HistoryCaptureSession(
         val bindingAgain = requireNotNull(capture("recovery-binding.json", binding.bytes.size.toLong()))
         requireSame(binding, bindingAgain)
         check()
-        return RepairHistoryReadResult.recorded(snapshot, projection)
+        return RepairHistoryReadResult.recorded(artifactCapture.snapshot, projection, artifactCapture)
     }
 
     private fun inspectHistory(reports: LinuxDescriptor, graphBytes: ByteArray, budget: RepairResourceBudget): RepairHistoryProjectionDiagnostic {

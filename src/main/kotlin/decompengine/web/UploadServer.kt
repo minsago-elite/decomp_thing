@@ -792,7 +792,7 @@ class UploadServer(
         // The fixed reader already captured diagnostic H once. Never reread it as display input.
         val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
         val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
-        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, page?.snapshot, page) }.getOrNull()
+        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, recorded, page) }.getOrNull()
         val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
             repairEvidenceArtifactStates(jobId, reports, history, it)
         } }

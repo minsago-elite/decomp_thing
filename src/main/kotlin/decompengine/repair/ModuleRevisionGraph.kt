@@ -5007,7 +5007,16 @@ internal fun recordedRepairHistorySnapshot(
     recoveryBindingPayload: ByteArray,
     requestedBudget: RepairResourceBudget,
     scanDeclaredGraphs: (consume: (String, ByteArray) -> Unit) -> Unit,
-): RepairHistorySnapshot = try {
+): RepairHistorySnapshot = recordedRepairHistoryCapture(graphPayload, recoveryBindingPayload,
+    requestedBudget, scanDeclaredGraphs).snapshot
+
+/** Same pure admission; private report hints remain outside the presentation snapshot. */
+internal fun recordedRepairHistoryCapture(
+    graphPayload: ByteArray,
+    recoveryBindingPayload: ByteArray,
+    requestedBudget: RepairResourceBudget,
+    scanDeclaredGraphs: (consume: (String, ByteArray) -> Unit) -> Unit,
+): RepairHistoryArtifactCapture = try {
     require(graphPayload.isNotEmpty() && graphPayload.size.toLong() <= revisionGraphReadLimit(requestedBudget))
     require(recoveryBindingPayload.isNotEmpty() &&
         recoveryBindingPayload.size.toLong() <= requestedBudget.maximumGraphBytes)
@@ -5035,7 +5044,7 @@ internal fun recordedRepairHistorySnapshot(
     val rootPaths = validateRecordedGraphHeader(state, binding)
     validateRecordedGraphBody(state, rootPaths)
     validateRecordedAgentAssociations(state)
-    recordedHistoryView(state, sha256(graphBytes), canonical.nullNodeWire)
+    recordedHistoryCapture(state, sha256(graphBytes), canonical.nullNodeWire)
 } catch (_: Throwable) {
     // Never retain a private parser message, source path, cause or suppressed exception.
     throw RepairHistorySnapshotRefusal()
@@ -5268,20 +5277,22 @@ private fun historyIteration(value: JsonElement, version: Int, budget: RepairRes
         if (version >= 3) historyNullableString(row.getValue("runId")) else null)
 }
 
-private fun recordedHistoryView(
+private fun recordedHistoryCapture(
     state: RevisionGraphState,
     graphSha256: String,
     wire: NullRollbackNodeWire,
-): RepairHistorySnapshot {
+): RepairHistoryArtifactCapture {
     val identities = RepairHistoryIdentityReferences(state.regressionCorpusSha256)
+    val artifactPaths = LinkedHashMap<RepairRecordedArtifactReference, String>()
+    fun artifact(path: String) = identities.artifact(path).also { artifactPaths[it] = path }
     fun identity(value: String?) = value?.let(identities::revision)
     fun invocation(value: RepairAgentInvocationBinding?) = value?.let {
         RepairRecordedInvocation(it.receiptSha256, it.requestSha256, it.resultChangesSha256, it.assessmentStatus,
-            identities.artifact(it.receiptPath), it.receiptSchemaVersion, recordedRepairTerminal(it.terminalOutcome),
+            artifact(it.receiptPath), it.receiptSchemaVersion, recordedRepairTerminal(it.terminalOutcome),
             recordedRepairTerminalSha256(it.terminalOutcome), it.receiptReleaseComplete)
     }
     fun evidence(kind: String?, path: String?) = if (kind == null && path == null) null else
-        RepairRecordedEvidence(recordedRepairEvidenceKind(kind), path?.let(identities::artifact))
+        RepairRecordedEvidence(recordedRepairEvidenceKind(kind), path?.let(::artifact))
     fun failureKind(value: String?) = when (value) {
         "compile" -> RepairRecordedFailureKind.COMPILE
         "behavior" -> RepairRecordedFailureKind.BEHAVIOR
@@ -5326,10 +5337,11 @@ private fun recordedHistoryView(
             it.attemptedCount, it.startedEpochMillis, it.deadlineEpochMillis, identity(it.rollbackFailureAttemptId),
             it.rollbackResolution)
     }
-    return RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
+    val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
         state.retainedRegressionInputs.map { identities.case(it.id) })
+    return RepairHistoryArtifactCapture(snapshot, artifactPaths)
 }
 
 private fun validateGraphBeforeRecovery(

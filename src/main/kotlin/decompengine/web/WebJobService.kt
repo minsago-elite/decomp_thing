@@ -310,12 +310,12 @@ class WebJobService(
 
     @Synchronized
     internal fun listArtifactSummaries(jobId: String, runId: String?,
-        recordedRepair: decompengine.repair.RepairHistorySnapshot?): List<WebArtifactSummary> =
+        recordedRepair: decompengine.repair.RepairHistoryReadResult?): List<WebArtifactSummary> =
         listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair)
 
     @Synchronized
     internal fun listArtifactSummaries(jobId: String, runId: String?,
-        recordedRepair: decompengine.repair.RepairHistorySnapshot?,
+        recordedRepair: decompengine.repair.RepairHistoryReadResult?,
         page: decompengine.repair.RepairRecordedHistoryPage?): List<WebArtifactSummary> =
         listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair, page)
 
