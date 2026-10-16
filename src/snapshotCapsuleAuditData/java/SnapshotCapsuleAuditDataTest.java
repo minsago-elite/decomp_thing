@@ -250,12 +250,12 @@ public final class SnapshotCapsuleAuditDataTest implements Opcodes {
             var work=new SnapshotCapsuleAudit.Work();var layout=new SnapshotCapsuleAudit.MethodLayout(m,work);
             if(work.visits<15||layout.instructions.size()!=1)throw new AssertionError("three charged raw passes and label table");
         });
-        no("foreign label refuses via charged identity lookup",()->{
-            var m=new MethodNode();m.instructions.add(new JumpInsnNode(GOTO,new LabelNode()));
+        noAt("foreign label refuses via charged identity lookup","unbound label",()->{
+            var m=new MethodNode();m.tryCatchBlocks=new ArrayList<>();m.instructions.add(new JumpInsnNode(GOTO,new LabelNode()));
             SnapshotCapsuleAudit.graph(m,-1,new SnapshotCapsuleAudit.Work());
         });
-        no("null label is never an empty-slot match",()->{
-            var m=new MethodNode();m.instructions.add(new JumpInsnNode(GOTO,null));
+        noAt("null label is never an empty-slot match","null label",()->{
+            var m=new MethodNode();m.tryCatchBlocks=new ArrayList<>();m.instructions.add(new JumpInsnNode(GOTO,null));
             SnapshotCapsuleAudit.graph(m,-1,new SnapshotCapsuleAudit.Work());
         });
         no("exhausted layout budget refuses before first raw advance",()->{
