@@ -12,6 +12,21 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class RepairHistoryPresentationTest {
+    @Test fun `legacy rollback and accepted identifiers cannot disclose noncanonical private values in CLI or HTML`() {
+        val privateRun = run.copy(status = RepairRunStatus.ROLLBACK_FAILED,
+            acceptedHeadId = "revision_PRIVATE_head", rollbackFailureAttemptId = "revision_PRIVATE_secret",
+            rollbackResolution = RepairRollbackState.RESTORED_AFTER_FAILURE, schemaVersion = 2)
+        val payload = Json.parseToJsonElement(renderRepairHistoryProjection(emptyList(), emptyList(),
+            MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(privateRun))).jsonObject
+        val html = renderRepairHistory(job, payload = payload)
+        val cli = presentRepairOutcome(RepairRunOutcome(emptyList(), null, privateRun)).lines.joinToString("\n")
+        for (surface in listOf(html, cli)) {
+            assertFalse("PRIVATE" in surface, surface)
+            assertTrue("rollback attempt: unavailable (restored-after-failure)" in surface, surface)
+        }
+        assertTrue("accepted revision: unavailable" in cli, cli)
+    }
+
     private val job = Job("fixture", "fixture", "complete", "now", sizeBytes = 0, binaryPath = Path.of("fixture"),
         metadata = ElfMetadata("ELF64", "little", 1u, "fixture", "executable", "fixture", 0uL, 0u, 0u, 0u, 0u))
     private val run = RepairRunState("run_00000001", RepairRunStatus.REJECTED, "baseline", "revision_00000001_aaaaaaaaaaaaaaaa",
@@ -114,6 +129,23 @@ class RepairHistoryPresentationTest {
         }
     }
 
+    @Test fun `pending and resolved rollback failures are run level and shared by CLI and web`() {
+        for (resolution in listOf(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, RepairRollbackState.RESTORED_AFTER_FAILURE)) {
+            val failed = run.copy(status = RepairRunStatus.ROLLBACK_FAILED,
+                rollbackFailureAttemptId = "revision_00000002_bbbbbbbbbbbbbbbb", rollbackResolution = resolution)
+            val payload = Json.parseToJsonElement(renderRepairHistoryProjection(emptyList(), emptyList(),
+                MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(failed))).jsonObject
+            val label = requireNotNull(repairRollbackRunLabel(failed))
+            val html = renderRepairHistory(job, payload = payload)
+            assertTrue(html.contains("Repair run: rollback-failed"), html)
+            assertTrue(html.contains(label), html)
+            val shown = presentRepairOutcome(RepairRunOutcome(emptyList(), null, failed))
+            assertEquals(1, shown.exitCode)
+            assertTrue(shown.lines.contains(label))
+            assertFalse(html.contains("history-item")) // No invented finalized iteration for a pending failure.
+        }
+    }
+
     @Test fun `legacy success alone is unverified and revision identities are escaped`() {
         val payload = Json.parseToJsonElement("""{"iterations":[{"index":9,
             "failureKind":"behavior","prompt":"","summary":"","succeeded":true,
@@ -140,7 +172,8 @@ class RepairHistoryPresentationTest {
         val html = renderRepairHistory(job, payload = payload, authorizedArtifacts = artifacts,
             artifactStates = mapOf("reports/before.diff.json" to RepairEvidenceArtifactState.CORRUPT))
 
-        assertTrue(html.contains("Rollback: Completed; the rejected candidate did not advance the source head."), html)
+        assertTrue(html.contains("Rollback: Unverified; this history does not record restoration completion or failure."), html)
+        assertFalse(html.contains("Rollback: Completed;"), html)
         assertTrue(html.contains("Test-only evidence; release completeness is not established."), html)
         assertTrue(html.contains("Retained evidence is corrupt."), html)
         assertTrue(html.contains("Evidence artifact is unavailable."), html)

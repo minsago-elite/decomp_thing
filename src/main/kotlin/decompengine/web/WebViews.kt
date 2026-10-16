@@ -4,6 +4,12 @@ import decompengine.repair.historyText
 import decompengine.repair.repairAttemptLabel
 import decompengine.repair.repairRunLabel
 import decompengine.repair.validateRepairHistoryProjection
+import decompengine.repair.RepairRecordedHistoryPage
+import decompengine.repair.RepairRecordedHistorySelection
+import decompengine.repair.RepairRecordedReceiptCheck
+import decompengine.repair.recordedRepairSummary
+import decompengine.repair.recordedRepairEvidenceLabel
+import decompengine.repair.recordedRepairAssuranceLabel
 
 import decompengine.jobs.Job
 import decompengine.jobs.JobRecoveryInventory
@@ -232,7 +238,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
     artifacts: List<WebArtifactSummary>? = null,
     repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null,
-    repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null): WebApplicationDocument {
+    repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null,
+    recordedRepairHistory: RecordedRepairHistoryView? = null): WebApplicationDocument {
     requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
@@ -342,7 +349,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${runCatching { renderRepairHistory(job, reports, repairHistory, artifacts, repairEvidenceArtifactStates, repairReceiptBindingStates) }
+            ${runCatching { recordedRepairHistory?.let { renderRecordedRepairHistory(job, it) }
+                ?: renderRepairHistory(job, reports, repairHistory, artifacts, repairEvidenceArtifactStates, repairReceiptBindingStates) }
                 .getOrElse { renderRepairHistory(job, reports, null, artifacts, null) }}
             ${renderArtifacts(job, artifacts)}
           </main>
@@ -542,6 +550,112 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
     """.trimIndent()
 }
 
+/** Canonical captured metadata only. Arbitrary history/peer text is never a presentation input. */
+internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryView): String {
+    val snapshot = view.recorded.snapshot?.takeIf { view.recorded.status == decompengine.repair.RepairHistoryReadStatus.RECORDED }
+    if (snapshot == null) return if (view.recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED)
+        "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No canonical repair history is recorded.</p></section>"
+    else "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or corrupt.</p></section>"
+    val page = view.page ?: RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(),
+        MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
+    require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }
+    fun evidence(label: String, value: decompengine.repair.RepairRecordedEvidence?): String {
+        if (value == null) return "<p class=\"evidence-line\"><b>$label:</b> Not recorded.</p>"
+        val kind = recordedRepairEvidenceLabel(value.kind)
+        val reference = value.artifact
+        val target = reference?.let(view.targets::get)
+        val detail = when {
+            reference == null -> "Evidence artifact was not retained."
+            view.evidenceStates[reference] == RepairEvidenceArtifactState.CORRUPT -> "Retained evidence is corrupt."
+            target == null || view.evidenceStates[reference] != RepairEvidenceArtifactState.AVAILABLE -> "Retained evidence is unavailable."
+            else -> "<a href=\"${artifactHref(job, target)}\">Open retained evidence</a>"
+        }
+        val identity = reference?.let { " · Recorded reference: <code>${it.value.escapeHtml()}</code>" }.orEmpty()
+        return "<p class=\"evidence-line\"><b>$label:</b> $kind evidence · $detail$identity</p>"
+    }
+    fun assurance(attempt: decompengine.repair.RepairRecordedAttempt): String = recordedRepairAssuranceLabel(attempt,
+        when (view.receiptStates[attempt.identity]) {
+            RepairEvidenceArtifactState.AVAILABLE -> RepairRecordedReceiptCheck.VERIFIED
+            RepairEvidenceArtifactState.CORRUPT -> RepairRecordedReceiptCheck.CORRUPT
+            else -> RepairRecordedReceiptCheck.UNAVAILABLE
+        })
+    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null): String {
+        val parameters = buildList {
+            view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            add("historyPage=$historyPage")
+            add("historyCasesPage=$casePage")
+            add("historyGraph=${snapshot.graphSha256}")
+            evidenceAttempt?.let { add("historyEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+        }.joinToString("&")
+        val target = "/jobs/${job.id}?$parameters"
+        return "<a href=\"${target.escapeHtml()}\">$label</a>"
+    }
+    val visible = page.attempts
+    val items = visible.joinToString("") { attempt ->
+        val index = attempt.iterationIndex ?: attempt.ordinal
+        val outcome = decompengine.repair.recordedRepairAttemptLabel(attempt)
+        val references = page.caseReferences(attempt)
+        val cases = if (attempt.corpusSha256 == null) "<p>Retained case references are unavailable; the recorded corpus is missing.</p>"
+            else "<p>Retained case corpus: <code>${attempt.corpusSha256.escapeHtml()}</code></p>" +
+                if (references.isEmpty()) "<p>No retained case references are on this page.</p>"
+                else references.joinToString("", "<ul class=\"repair-case-references\">", "</ul>") {
+                    "<li><code>${it.value.escapeHtml()}</code></li>" }
+        val omittedCases = attempt.retainedCases.size - references.size
+        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null) {
+            if (page.selection.evidenceAttempt == attempt.identity.value)
+                "<p>Inspecting this iteration's evidence. " + link("Show page evidence", page.selection.pageNumber,
+                    page.selection.casePageNumber) + "</p>"
+            else "<p>" + link("Inspect evidence for this iteration", page.selection.pageNumber,
+                page.selection.casePageNumber, attempt.identity.value) + "</p>"
+        } else ""
+        """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
+          <div class="history-title"><strong>${recordedRepairSummary(attempt).escapeHtml()}</strong>${statusPill(outcome)}</div>
+          <p>Attempt revision: <code>${attempt.identity.value.escapeHtml()}</code></p>
+          <p>Recorded run: <code>${(attempt.run?.value ?: "none").escapeHtml()}</code></p>
+          <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
+          <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
+          $inspectEvidence${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
+          <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
+          $cases${if (omittedCases > 0) "<p>$omittedCases case references omitted from this page.</p>" else ""}
+        </div></article>""".trimIndent()
+    }
+    val runs = page.runs.joinToString("") { run ->
+        val failure = run.rollbackFailureAttempt?.let { attempt ->
+            "<br>Rollback failure attempt: <code>${attempt.value.escapeHtml()}</code> · " +
+                requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-').escapeHtml()
+        }.orEmpty()
+        "<p class=\"repair-run\">Repair run: ${repairRunLabel(run.status.name.lowercase()).escapeHtml()} · " +
+            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure</p>"
+    }
+    val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
+        if (snapshot.pending?.rollback?.failureCode != null) 1 else 0
+    val navigation = buildList {
+        if (page.selection.pageNumber > 1) add(link("Newer history", page.selection.pageNumber - 1, 1))
+        if (page.selection.pageNumber < page.totalPages) add(link("Older history", page.selection.pageNumber + 1, 1))
+        if (page.selection.casePageNumber > 1) add(link("Previous case references", page.selection.pageNumber, page.selection.casePageNumber - 1, page.selection.evidenceAttempt))
+        if (page.selection.casePageNumber < page.casePages) add(link("More case references", page.selection.pageNumber, page.selection.casePageNumber + 1, page.selection.evidenceAttempt))
+    }.joinToString(" · ")
+    return """<section class="panel history-panel"><h2>Repair History</h2>
+      <p>Recorded repair metadata; current source and execution have not been revalidated.</p>
+      <p>Recorded graph: <code>${snapshot.graphSha256.escapeHtml()}</code></p>
+      <p>History page ${page.selection.pageNumber} of ${page.totalPages}; case reference page ${page.selection.casePageNumber} of ${page.casePages} (at most 20 per attempt).</p>
+      <p>Published revision: <code>${snapshot.publishedHead.value.escapeHtml()}</code><br>
+      Provisional revision: <code>${(snapshot.provisionalHead?.value ?: "none").escapeHtml()}</code><br>
+      Fully accepted revision: <code>${(snapshot.fullyAcceptedHead?.value ?: "none").escapeHtml()}</code></p>
+      <p>History projection: ${view.recorded.projection.status.name.lowercase().replace('_', '-').escapeHtml()}</p>
+      <p>Recorded restoration failure records retained: $failures</p>
+      ${if (page.earlierRuns > 0) "<p>${page.earlierRuns} earlier recorded runs omitted from this page.</p>" else ""}
+      ${if (page.newerRuns > 0) "<p>${page.newerRuns} newer recorded runs omitted from this page.</p>" else ""}
+      $runs${if (page.earlierAttempts > 0) "<p>${page.earlierAttempts} earlier recorded attempts omitted from this page.</p>" else ""}
+      ${if (page.newerAttempts > 0) "<p>${page.newerAttempts} newer recorded attempts omitted from this page.</p>" else ""}
+      ${if (visible.isEmpty()) "<p>" + (if (snapshot.attempts.isEmpty() && snapshot.pending == null)
+          "No repair attempts are recorded." else "No repair attempts are on this page.") + "</p>"
+          else "<div class=\"history-list\">$items</div>"}
+      ${if (navigation.isNotEmpty()) "<nav aria-label=\"Recorded repair history pages\">$navigation</nav>" else ""}
+      <p class="history-privacy-note">Prompts, source contents, diagnostics, and peer text are withheld. Retained evidence links use the job’s checked artifact access.</p>
+    </section>""".trimIndent()
+}
+
 fun renderRepairHistory(
     job: Job,
     reportContext: WebReportContext? = null,
@@ -562,8 +676,12 @@ fun renderRepairHistory(
         val attempted = run.historyCount("attemptedCount")
         val maximum = run.historyCount("maximumAttempts")
         val accepted = safeRevisionIdentity(run.historyText("acceptedHeadId"))
+        val rollback = decompengine.repair.repairRollbackRunLabel(
+            decompengine.repair.parseRepairRunState(run.toString()))?.let {
+            "<br>${it.escapeHtml()}"
+        }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${label.escapeHtml()} · $attempted/$maximum attempts" +
-            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code></p>"
+            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code>$rollback</p>"
     }
     if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.joinToString("") { iteration ->
@@ -640,7 +758,8 @@ private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): St
     historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
 
 private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
-    "rejected" -> "Completed; the rejected candidate did not advance the source head."
+    // Rejection alone carries no canonical restoration state.
+    "rejected" -> "Unverified; this history does not record restoration completion or failure."
     "fully_accepted" -> if (repairAttemptLabel(iteration) == "accepted") {
         "Not required; the candidate was accepted."
     } else "Unverified; the accepted disposition lacks a complete canonical assessment."
@@ -905,6 +1024,7 @@ h1 em { color: var(--acid); font-style: normal; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }
 footer { display: flex; justify-content: space-between; padding-block: 32px; margin-top: 60px; border-top: 1px solid var(--line); color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.history-panel code { overflow-wrap: anywhere; word-break: break-word; }.history-item > div { min-width: 0; }.history-item .history-title { flex-wrap: wrap; gap: 8px; }
 @media (max-width: 820px) { .dashboard-grid, .job-grid { grid-template-columns: 1fr; }.hero { padding-top: 58px; }.job-header { align-items: flex-start; flex-direction: column; }.job-actions { align-items: flex-start; flex-direction: column; }.metric-grid { grid-template-columns: 1fr 1fr; }.artifact-list { grid-template-columns: 1fr; }.build-label { display: none; } }
 @media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); }.upload-panel, .queue-panel, .overview-panel, .workflow-panel, .evidence-panel, .history-panel, .artifacts-panel, .source-tree-panel { padding: 19px; }.metric-grid, .metadata-grid { grid-template-columns: 1fr; }.datum:nth-child(odd) { padding-right: 0; }h1 { font-size: 3rem; }.job-row .status-pill { display: none; }.source-heading { align-items: flex-start; flex-direction: column; } }
 """.trimIndent()
