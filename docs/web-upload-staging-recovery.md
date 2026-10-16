@@ -51,6 +51,12 @@ returns the same bounded inventory through the initialized shared job service.
 requires JSON negotiation, rejects query parameters and mutations, and uses the
 ordinary no-store security and request-correlation headers.
 
+While multipart uploads are active, the shared service refuses inspection with
+`503 RECOVERY_INSPECTION_BUSY` before scanning storage. Upload admission and the
+inventory scan share the service monitor, so live upload stages cannot be presented
+as retained recovery files. The dashboard clears earlier counts, shows a paused
+inspection notice, and waits for **Refresh jobs** after uploads finish.
+
 The closed `recovery` contract reports schema version 1, `displayOnly: true`,
 scanned-entry counts, retained upload-stage and metadata-temporary-file counts,
 observed bytes as a decimal string, uninspected entries and `inventoryComplete`.

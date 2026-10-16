@@ -95,6 +95,30 @@ it('clears a previous recovery snapshot when refreshed access is denied', async 
   expect(screen.queryByText(/Observed 1 upload stages/)).toBeNull();
 });
 
+it('pauses recovery inspection during uploads and waits for explicit refresh after they settle', async () => {
+  let busy = false;
+  transport.get.mockImplementation(kind => kind === 'jobs' ? Promise.resolve(jobs()) : busy
+    ? Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'RECOVERY_INSPECTION_BUSY' }))
+    : Promise.resolve({ data: retained }));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText(/Observed 1 upload stages/)).toBeTruthy();
+  busy = true; fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const paused = await screen.findByRole('region', { name: 'Recovery inspection paused' });
+  expect(within(paused).getByText(/An upload is in progress/)).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Retained recovery files' })).toBeNull();
+  expect(screen.queryByText(/Observed 1 upload stages/)).toBeNull();
+  expect(screen.queryByText(/Preserve these files/)).toBeNull();
+  expect(screen.getByText('recovery-example.elf')).toBeTruthy();
+  expect(calls('recovery')).toHaveLength(2);
+  busy = false; await flush();
+  expect(screen.getByRole('region', { name: 'Recovery inspection paused' })).toBeTruthy();
+  expect(calls('recovery')).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText(/Observed 1 upload stages/)).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Recovery inspection paused' })).toBeNull();
+  expect(calls('recovery')).toHaveLength(3);
+});
+
 it('keeps quarantined job errors visible even when the separate recovery-file inventory is empty', async () => {
   transport.get.mockImplementation(kind => kind === 'jobs'
     ? Promise.reject(new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }))

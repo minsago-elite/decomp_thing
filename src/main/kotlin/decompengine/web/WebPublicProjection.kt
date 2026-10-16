@@ -170,7 +170,7 @@ private fun publicVersionedJob(fields: JsonObject): JsonObject {
  */
 internal fun publicWebDiagnosticCode(code: String): String = when (code) {
     "JOB_NOT_FOUND", "RUN_NOT_FOUND", "LEGACY_INTERRUPTED", "LEGACY_RECOVERY_REQUIRED",
-    "PUBLICATION_PENDING", "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED",
+    "PUBLICATION_PENDING", "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED", "RECOVERY_INSPECTION_BUSY",
     "CORRUPT_LEGACY_JOB", "CORRUPT_WORKFLOW_STATE", "INVALID_STORAGE_ENTRY",
     "JOB_RECORD_UNAVAILABLE", "STORE_LIMIT", "LISTING_UNAVAILABLE", "PERSISTENCE_FAILED",
     "SERVICE_NOT_INITIALIZED", "SERVICE_STOPPED", "PROGRESS_UNAVAILABLE",
@@ -187,6 +187,7 @@ internal fun publicWebDiagnosticMessage(code: String): String = when (publicWebD
     "LEGACY_INTERRUPTED" -> "Historical legacy work was interrupted; its workflow identity is unknown."
     "LEGACY_RECOVERY_REQUIRED" -> "The historical operation has no workflow identity. Run startup recovery before requesting new work."
     "PUBLICATION_PENDING" -> "Completed candidate output awaits canonical publication review; it is not accepted evidence."
+    "RECOVERY_INSPECTION_BUSY" -> "Recovery inspection is paused while uploads are in progress. Refresh after uploads finish."
     "RECOVERY_REQUIRED", "UPLOAD_STAGING_RECOVERY_REQUIRED" ->
         "Storage recovery is required. Preserve the job and reopen storage before retrying."
     "CORRUPT_LEGACY_JOB", "CORRUPT_WORKFLOW_STATE", "INVALID_STORAGE_ENTRY", "JOB_RECORD_UNAVAILABLE" ->

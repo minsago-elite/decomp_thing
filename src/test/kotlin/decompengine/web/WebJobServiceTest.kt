@@ -20,6 +20,59 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class WebJobServiceTest {
+    @Test
+    fun `recovery inspection excludes a live multipart stage and resumes after publication`() = withStore { store, root ->
+        val boundary = "recovery-overlap"
+        val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"active.elf\"\r\n\r\n".toByteArray() +
+            elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val callers = Executors.newSingleThreadExecutor()
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            val input = object : java.io.FilterInputStream(body.inputStream()) {
+                private fun waitForRelease() {
+                    entered.countDown()
+                    check(release.await(10, TimeUnit.SECONDS))
+                }
+                override fun read(): Int { waitForRelease(); return super.read() }
+                override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                    waitForRelease()
+                    return super.read(bytes, offset, length)
+                }
+            }
+            try {
+                val uploaded = callers.submit<decompengine.jobs.Job> {
+                    input.use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+                }
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                val stage = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.toList().single() }
+                val before = Files.readAllBytes(stage.resolve("input.elf"))
+                assertEquals(1, store.recoveryInventory().retainedUploadStages)
+                val failure = assertFailsWith<WebJobServiceException> { service.recoveryInventory() }
+                assertEquals("RECOVERY_INSPECTION_BUSY", failure.code)
+                assertEquals(failure.code, publicWebDiagnosticCode(failure.code))
+                assertEquals("Recovery inspection is paused while uploads are in progress. Refresh after uploads finish.",
+                    publicWebDiagnosticMessage(failure.code))
+                kotlin.test.assertContentEquals(before, Files.readAllBytes(stage.resolve("input.elf")))
+                assertTrue(Files.isDirectory(stage))
+                release.countDown()
+                val job = uploaded.get(10, TimeUnit.SECONDS)
+                assertEquals(job.id, service.get(job.id).id)
+                assertFalse(Files.exists(stage))
+                val settled = service.recoveryInventory()
+                assertTrue(settled.inventoryComplete)
+                assertEquals(0, settled.retainedUploadStages)
+                assertEquals(0, settled.retainedMetadataFiles)
+                assertEquals(0L, settled.observedBytes)
+            } finally {
+                release.countDown()
+                callers.shutdownNow()
+                assertTrue(callers.awaitTermination(10, TimeUnit.SECONDS))
+            }
+        }
+    }
+
     @Test fun `scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics`() = withStore { _, root ->
         val absent = root.resolve("absent")
         WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
@@ -269,7 +322,8 @@ class WebJobServiceTest {
     }
 
     private fun withStore(block: (JobStore, Path) -> Unit) {
-        val root = createTempDirectory("web-job-service-")
+        val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-job-service").toAbsolutePath())
+        val root = createTempDirectory(temporaryRoot, "web-job-service-")
         try {
             block(JobStore(root), root)
         } finally {

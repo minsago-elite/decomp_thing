@@ -53,7 +53,9 @@ capabilities from its available schema types.
 
 The `recovery` response carries a bounded display-only recovery-file inventory from
 private `GET /recovery`. Counts and observed bytes do not authorize cleanup or source
-acceptance. The decoder rejects contradictory completeness and combined candidate or
+acceptance. Active multipart uploads return `503 RECOVERY_INSPECTION_BUSY`; the
+dashboard clears prior counts and pauses inspection until an explicit refresh.
+The decoder rejects contradictory completeness and combined candidate or
 byte-budget overruns. The dashboard owns its independent entry/manual-refresh read,
 aborts obsolete requests and treats missing or failed inspection as unknown state.
 

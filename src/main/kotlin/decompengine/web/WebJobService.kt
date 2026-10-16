@@ -208,6 +208,10 @@ class WebJobService(
     @Synchronized
     fun recoveryInventory(): decompengine.jobs.JobRecoveryInventory {
         requireInitializedRead()
+        // Multipart writers release this monitor while their staging directories are live.
+        // Keep upload admission excluded throughout the scan when there are no active writers.
+        if (uploads.isNotEmpty()) throw WebJobServiceException("RECOVERY_INSPECTION_BUSY",
+            "Recovery inspection is paused while uploads are in progress. Refresh after uploads finish.")
         return store.recoveryInventory()
     }
 
