@@ -101,23 +101,8 @@ public final class AcpCompatibilityPreflight {
                 document.put("process", processEvidence(completedResult));
                 document.put("sandbox", sandboxEvidence(completedResult));
                 document.put("stableDescriptor", completedResult.getStableDescriptor());
-            } else if (failure instanceof AgentExecutionException execution && execution.getReceipt() != null &&
-                execution.getReceipt().getProviderEvidence() instanceof AcpInvocationEvidenceSnapshot invocation &&
-                invocation.getDiagnostics() != null) {
-                var diagnostics = invocation.getDiagnostics();
-                document.put("process", object(
-                    "exitCode", diagnostics.getExitCode(),
-                    "forcedTermination", diagnostics.getForcedTermination(),
-                    "remainingProcessIds", diagnostics.getRemainingProcessIds(),
-                    "containment", diagnostics.getContainment(),
-                    "networkIsolated", diagnostics.getNetworkIsolated(),
-                    "cleanupVerified", diagnostics.getSandboxCleanupVerified(),
-                    "outputLimitExceeded", diagnostics.getOutputLimitExceeded()
-                ));
-                document.put("invocation", object(
-                    "phaseReached", invocation.getPhaseReached().name(),
-                    "cleanupDisposition", invocation.getCleanupDisposition().name()
-                ));
+            } else {
+                appendFailureInvocationEvidence(document, failure);
             }
             document.put("failure", object(
                 "type", failure.getClass().getName(),
@@ -128,6 +113,30 @@ public final class AcpCompatibilityPreflight {
                 throw exception;
             }
             throw new RuntimeException("ACP compatibility preflight failed", failure);
+        }
+    }
+
+    /** Partial invocation facts survive even when process diagnostics were never captured. */
+    static void appendFailureInvocationEvidence(Map<String, Object> document, Throwable failure) {
+        if (!(failure instanceof AgentExecutionException execution) || execution.getReceipt() == null ||
+            !(execution.getReceipt().getProviderEvidence() instanceof AcpInvocationEvidenceSnapshot invocation)) {
+            return;
+        }
+        document.put("invocation", object(
+            "phaseReached", invocation.getPhaseReached().name(),
+            "cleanupDisposition", invocation.getCleanupDisposition().name()
+        ));
+        var diagnostics = invocation.getDiagnostics();
+        if (diagnostics != null) {
+            document.put("process", object(
+                "exitCode", diagnostics.getExitCode(),
+                "forcedTermination", diagnostics.getForcedTermination(),
+                "remainingProcessIds", diagnostics.getRemainingProcessIds(),
+                "containment", diagnostics.getContainment(),
+                "networkIsolated", diagnostics.getNetworkIsolated(),
+                "cleanupVerified", diagnostics.getSandboxCleanupVerified(),
+                "outputLimitExceeded", diagnostics.getOutputLimitExceeded()
+            ));
         }
     }
 

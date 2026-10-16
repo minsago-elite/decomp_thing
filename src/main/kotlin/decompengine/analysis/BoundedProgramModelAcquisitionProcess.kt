@@ -371,7 +371,7 @@ internal class ModelAcquisitionOwner(
                     stdinClosed.set(true)
                     retainedStdin.set(null)
                 } catch (caught: Throwable) { controllerFailure(caught) }
-                while (handles.values.any { it.isAlive }) {
+                while (child.isAlive || handles.values.any { it.isAlive }) {
                     if (remainingUntil(cleanupCutoff()) == 0L) markUnconfirmed(
                         GhidraAnalysisException("program-model acquisition process absence remains unproved"))
                     TimeUnit.NANOSECONDS.sleep(POLL_NANOS)

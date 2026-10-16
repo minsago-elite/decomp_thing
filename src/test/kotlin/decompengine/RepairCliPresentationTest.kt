@@ -59,7 +59,9 @@ class RepairCliPresentationTest {
     }
 
     private fun outcome(status: RepairRunStatus, report: BehaviorComparisonReport?) = RepairRunOutcome(emptyList(), report,
-        RepairRunState("run_00000001", status, "baseline", "earlier-accepted-head", null, "a".repeat(64), 2, 2, 1, 2))
+        RepairRunState("run_00000001", status, "baseline", "earlier-accepted-head", null, "a".repeat(64), 2, 2, 1, 2,
+            rollbackFailureAttemptId = if (status == RepairRunStatus.ROLLBACK_FAILED) "revision_fixture" else null,
+            rollbackResolution = if (status == RepairRunStatus.ROLLBACK_FAILED) RepairRollbackState.RESTORE_FAILED_UNRESOLVED else null))
 
     private fun report(matched: Boolean = true) = BehaviorComparisonReport("fixture", Path.of("reference"), Path.of("candidate"),
         listOf(BehaviorCaseResult(ProcessInput("case"),

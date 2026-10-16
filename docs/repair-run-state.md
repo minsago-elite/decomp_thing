@@ -1,6 +1,6 @@
 # Repair run state and migration
 
-Repair graph schema 3 separates the source installed in the canonical project from the candidate being edited. `headId` identifies installed source; a newly imported root has no validation authority. `fullyAcceptedHeadId` is nullable and is populated only after source-bound build and complete retained-behavior validation. `provisionalHeadId` points into a separate, content-addressed attempt lineage. Provisional bytes are read into the captured agent workspace and the registered validation snapshot; they are not installed in the canonical project.
+Repair graph schema 4 adds durable restoration outcomes while preserving schema-1/2/3 reads. `headId` identifies installed source; a newly imported root has no validation authority. `fullyAcceptedHeadId` is nullable and is populated only after source-bound build and complete retained-behavior validation. `provisionalHeadId` points into a separate, content-addressed attempt lineage. Provisional bytes are read into the captured agent workspace and the registered validation snapshot; they are not installed in the canonical project.
 
 Each new attempt names its exact parent revision, the complete retained input corpus digest, its run, and invocation-bound ACP evidence. The request includes an explicit `repair-attempt-authority` context distinguishing its provisional parent from canonical and fully accepted source. The graph lock spans the run, including validation and publication.
 
@@ -11,6 +11,14 @@ The loop accepts a candidate only after the registered validator returns success
 Provisional progress is intentionally conservative: compilation may advance to compiled behavior assessment, or an already compiled candidate may make additional retained cases pass without regressing any previously passing case. Merely changing compiler diagnostics is not an improvement. Rejected attempts remain diagnostic history and cannot seed the next request. A compile-only compatibility call can record a `compile_valid` terminal run with a provisional revision, but leaves canonical source unchanged and reports `succeeded=false` and `releaseComplete=false`.
 
 Promotion composes the full provisional lineage against canonical source. It durably records the exact installation/rollback deltas before writing files, revalidates the complete dependency/profile/source index, checks cancellation again at the commit boundary, and publishes the accepted head and successful terminal run together. The source manifest attributes every composed change to that final acceptance revision, including edits made in earlier provisional attempts. Restart rolls an incomplete installation back to its recognized canonical preimages before rebuilding the index.
+
+## Durable restoration outcomes
+
+Every source-restoration exchange is guarded by a versioned rollback record in the canonical graph. It binds the attempt and run, exact target revision, expected full source-tree digest, and whether source installation started. `RESTORE_IN_PROGRESS` is atomically synced before restoration begins. Detached promotion targets the pre-promotion published head, even when the attempt's parent is provisional.
+
+After restoration, the graph reads and hashes the complete source set before it can finalize a rejected node. `RESTORED_VERIFIED` records a verified restoration; `NOT_REQUIRED_VERIFIED` is reserved for attempts where the durable record proves no source exchange started and the exact target still matches. A detached staged candidate may have candidate changes while meeting this condition because staging does not install it in the project. `RESTORE_FAILED_UNRESOLVED` is written only after its allowlisted stage/code record commits. That record contains the expected digest and an observed digest only when the entire source tree was measured. If publishing the failure record fails, the write-ahead `RESTORE_IN_PROGRESS` remains the recovery authority. A later successful recovery after a durable failure records `RESTORED_AFTER_FAILURE`. Failure details never include exception messages, stack traces, prompts, source text, or uncontrolled paths.
+
+Persisted schema-1/2/3 pending attempts are upgraded to schema 4 before pre-index restoration. Their previous outcome is treated as unknown and recovery-required; when a candidate exists, whether source installation began is also unknown, so recovery cannot claim `NOT_REQUIRED_VERIFIED`. Generic validation failure or an old accepted label is not used to invent a rollback result. The exact schema-1/2 graph and compatibility-history bytes remain preserved before migration, and existing accepted/provisional identities and proofs are retained.
 
 ## Durable outcomes and compatibility
 
@@ -28,7 +36,7 @@ The new contract does not claim that retained cases prove equivalence for all in
 
 ## Verification
 
-The archive consumer requires schema-3 graph and history documents, matching durable run projections, a fully accepted final run, and a proof for the current canonical source and retained corpus. It reconstructs provisional-parent changes independently and attributes the composed source delta to the acceptance revision. Only provisional contributions incorporated into an accepted revision enter accepted ACP lineage. Abandoned attempts remain historical evidence. Preserved legacy documents are admitted by their exact filename/content commitment without acquiring validation authority.
+The archive consumer requires schema-3 or schema-4 graph documents and schema-3 history, matching durable run projections, a fully accepted final run, and a proof for the current canonical source and retained corpus. It reconstructs provisional-parent changes independently and attributes the composed source delta to the acceptance revision. Only provisional contributions incorporated into an accepted revision enter accepted ACP lineage. Abandoned attempts remain historical evidence. Preserved legacy documents are admitted by their exact filename/content commitment without acquiring validation authority.
 
 For each revision proof and the final accepted proof, the consumer requires one matching archived `.validation.json` receipt. It recomputes source-manifest, runtime-configuration, corpus and sandbox-field commitments; checks executable identities, distinct source/output quota mounts, scope identities and cleanup; and compares the retained reference/candidate exit, stdout and stderr observations itself. The reference observations must match the durable run commitment. Missing cases, omitted scopes, stale snapshots, changed reference observations, unsupported assurance and a forged `matches` flag cannot supply full acceptance.
 
@@ -37,3 +45,34 @@ Archive tests use synthetic receipt documents to exercise serialization, cross-b
 `RepairRunSemanticsTest` exercises compile failure to provisional behavior progress to success, multiple provisional improvements followed by exhaustion, retained-regression rejection, cancellation after validation, resource exhaustion, compile-only behavior, missing cases, changed reference identity, pending recovery, interrupted canonical publication, verified provisional restart, exact legacy-byte preservation, full baseline assessment, projection failure, and composed manifest attribution. It reopens a retained provisional chain in a separate JVM. Its deterministic validator is explicitly `TEST_ONLY_HOST_PROCESS`; these tests verify control flow and persistence, not production containment.
 
 Run the semantic suite alongside `ModuleRevisionGraphTest`, `RepairStateStoreTest`, `TraceGuidedRepairTest`, `SecureRepairSessionProjectionTest` and `SecureRepairRuntimeSurfaceTest`. Record the command, commit, environment prerequisites, counts and skips with the checkpoint; a skipped required containment lane is not a release pass.
+
+## Derived rollback-failure run state
+
+Run schema 2 adds `rollback_failed`, `rollbackFailureAttemptId`, and `rollbackResolution`.
+The latter two fields are a derived index of the exact attempt's rollback record, not independent
+restoration authority. A source-restoration failure publishes the pending
+`restore_failed_unresolved` record and its owning run's terminal status/link in one canonical graph
+write. Both live rollback and pre-index startup recovery use the same transition. A failed graph
+publication leaves the prior committed state authoritative; a throwable, suppressed exception,
+generic pending attempt, or validation failure cannot manufacture this outcome. Standalone attempts
+without a run retain their rollback record without inventing a run.
+
+The failed run retains its attempt count and accepted/provisional identities. Its pending attempt
+is not fabricated as a finalized iteration. On verified recovery, finalizing that same attempt as
+rejected and changing its rollback record to `restored_after_failure` updates the run's derived
+resolution in the same graph publication. The historical run remains `rollback_failed`.
+Canonical graph validation and the independent archive reader reject missing/cross-paired attempt,
+run, record, or resolution links. Release still requires a fully accepted final run and complete
+source-bound validation; a historical rollback-failure record grants no acceptance authority.
+
+Schema-1 run reads preserve schema-1 serialization and do not infer historical failure from old
+records or generic statuses. A new actually committed restoration failure may upgrade its owning
+run to schema 2. Outer graph schema 4 and history schema 3 remain unchanged. Before source
+mutation, reservation charges both derived fields and failure/recovery projections under the
+existing graph/projection limits. CLI and web share fixed rollback labels and show pending failure
+at run level; optional progress events remain non-authoritative projections.
+
+This is a focused source capability. Its new controls are authored but not executed at this source
+checkpoint; compilation, independent review, restart and release qualification remain verification
+gates. It does not establish all repair terminal outcomes, aggregate budget accounting, or complete
+operator-workflow acceptance.

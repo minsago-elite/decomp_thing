@@ -203,6 +203,30 @@ Trace-guided repair iterates over compile and behavior failures while retaining 
 llm_bin_patch repair ./original ./generated-project --max-iterations 5 --explore
 ```
 
+Inspect durable repair history after reconnecting without starting another repair:
+
+```bash
+llm_bin_patch repair-history ./generated-project
+```
+
+This read-only command distinguishes published, provisional and fully accepted
+recorded revisions, restoration failure/recovery and unavailable history. It
+withholds prompts, source bodies and peer text. Each page contains at most 20
+finalized attempts and runs, plus a pending attempt on the latest page. Older and
+newer navigation prints the options to reuse with the same project directory:
+
+```bash
+llm_bin_patch repair-history ./generated-project --page 2 --graph <recorded-graph-sha256>
+llm_bin_patch repair-history ./generated-project --case-page 2 --graph <recorded-graph-sha256>
+```
+
+Continued pages require the graph identity printed by the first read and refuse a
+changed history. Case pages expose at most 20 public references per attempt, bound
+to that attempt's retained corpus; private case IDs, arguments and stdin stay
+withheld. The default legacy web history provides equivalent bounded navigation
+and checked evidence links. Recorded metadata does not revalidate current source
+or execution, and the CLI does not independently read or verify receipt contents.
+
 With `--explore`, all automatically generated L4 inputs become persisted L3 regression cases and are re-run after every repair attempt.
 
 Automatic exploration combines bounded symbolic argv/stdin execution, static string hints, and mutations. It writes generated cases, observed output signatures, exploration diagnostics, and an evidence-bounded confidence score to `exploration.json`:
