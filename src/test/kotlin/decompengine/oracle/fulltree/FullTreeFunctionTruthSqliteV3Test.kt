@@ -1024,6 +1024,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertEquals(first.outputBytes, validated.outputBytes)
 
             assertPublicInlineSiteConflationRejected(first, fixture, root, limits)
+            assertPublicTypedTupleAndOriginMutationsRejected(first, fixture, root, limits)
 
             val forged = copyTree(first.root, root.resolve("truth-v3-forged"))
             mutateAndRehashSourceIdentity(forged)
@@ -1438,6 +1439,104 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
         assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
         assertDirectoryEmpty(fixture.scratch)
+    }
+
+    private fun assertPublicTypedTupleAndOriginMutationsRejected(
+        baseline: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+    ) {
+        val rows = allSourceRows(baseline.root).map { FullTreeSourceEntityFact.fromCanonicalJson(it) }
+        val templates = rows.filter {
+            it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.semanticAnchorCandidateId != null
+        }
+        val (intInstance, longInstance) = templates.asSequence().flatMap { a -> templates.asSequence().map { a to it } }
+            .firstOrNull { (a, b) ->
+                val left = requireNotNull(a.semanticAnchorFields)
+                val right = requireNotNull(b.semanticAnchorFields)
+                val leftArguments = left.templateActualArguments.toString()
+                val rightArguments = right.templateActualArguments.toString()
+                a.semanticAnchorCandidateId != b.semanticAnchorCandidateId &&
+                    left.sourceName?.substringBefore('<') == right.sourceName?.substringBefore('<') &&
+                    left.sourcePath == right.sourcePath && left.lexicalContext == right.lexicalContext &&
+                    left.templateActualArguments?.size == right.templateActualArguments?.size &&
+                    leftArguments.contains("int") && !leftArguments.contains("long") && rightArguments.contains("long")
+            } ?: error("compiler fixture must contain distinct complete int/long instances of the same template")
+        // Candidate capture is bounded by raw-derived output bytes. Copy the smaller complete
+        // tuple so the public refusal tests rederivation rather than an enlarged input tree.
+        val (larger, smaller) = listOf(intInstance, longInstance).sortedByDescending {
+            OracleJson.canonicalBytes(requireNotNull(it.semanticAnchorFields).canonicalJson()).size
+        }.let { it[0] to it[1] }
+        val conflated = larger.copy(
+            semanticAnchorFields = smaller.semanticAnchorFields,
+            semanticAnchorCandidateId = smaller.semanticAnchorCandidateId,
+        )
+        assertEquals(larger.physicalDie, conflated.physicalDie)
+        assertEquals(larger.linkedEmittedRva, conflated.linkedEmittedRva)
+
+        val origin = rows.firstOrNull { row ->
+            row.kind == FullTreeSourceEntityKind.INLINE_INSTANCE && row.edges.any {
+                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN && it.target != null
+            }
+        } ?: error("compiler fixture must contain a resolved inline origin")
+        val edge = origin.edges.first { it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN && it.target != null }
+        val oldTarget = requireNotNull(edge.target)
+        val replacement = rows.map { it.physicalDie }.firstOrNull { target ->
+            target != oldTarget && target != origin.physicalDie && target.locator().length == oldTarget.locator().length &&
+                origin.edges.none { it.target == target }
+        } ?: error("compiler fixture must contain a different same-width physical origin target")
+        val repointed = origin.copy(edges = origin.edges.map { if (it == edge) it.copy(target = replacement) else it })
+        assertEquals(edge.rawReference, repointed.edges[origin.edges.indexOf(edge)].rawReference)
+        assertEquals(origin.semanticAnchorFields?.canonicalJson(), repointed.semanticAnchorFields?.canonicalJson())
+
+        val inputs = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex).associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(fixture.observationV2Root)
+        val baselineBytes = v3TreeBytes(baseline.root)
+        listOf(
+            Triple("typed-template-tuple", larger, conflated),
+            Triple("inline-origin-target", origin, repointed),
+        ).forEachIndexed { ordinal, (name, original, forged) ->
+            assertEquals(original.sourceEntityId, forged.sourceEntityId)
+            assertTrue(original.canonicalJson() != forged.canonicalJson())
+            assertEquals(forged.canonicalJson(), FullTreeSourceEntityFact.fromCanonicalJson(forged.canonicalJson()).canonicalJson())
+            val candidate = copyTree(baseline.root, root.resolve("truth-v3-public-mutation-$ordinal"))
+            mutateAndRehashSourceRow(candidate, original.sourceEntityId) { forged.canonicalJson() }
+            val candidateBytes = v3TreeBytes(candidate)
+            val candidateTotal = candidateBytes.values.sumOf { it.size.toLong() }
+            assertTrue(candidateTotal <= baseline.outputBytes, "$name must fit the raw-derived candidate byte allowance")
+            val index = parseControlObject(candidate.resolve("index.json"))
+            assertEquals(baseline.index.controlObject("counts"), index.controlObject("counts"))
+            assertEquals(index.controlString("indexSha256"), OracleArtifacts.sha256(
+                OracleJson.canonicalBytes(JsonObject(index.filterKeys { it != "indexSha256" })),
+            ))
+            index.controlArray("shards").controlObjects("shards").forEach { record ->
+                val path = candidate.resolve(record.controlString("path"))
+                assertEquals(record.controlLong("bytes"), Files.size(path))
+                assertEquals(record.controlString("sha256"), fixtureSha256(path))
+            }
+            val rejection = assertFailsWith<FullTreeFunctionTruthV3Exception>(name) {
+                FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                    candidateRoot = candidate,
+                    richArtifact = fixture.rich,
+                    strippedArtifact = fixture.stripped,
+                    inventoryPath = fixture.inventoryPath,
+                    elfFunctionIndex = fixture.elfIndex,
+                    observationV2Root = fixture.observationV2Root,
+                    expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                    scope = fixture.scope,
+                    scratchParent = fixture.scratch,
+                    limits = limits,
+                )
+            }
+            assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", rejection.message)
+            assertEquals(candidateBytes, v3TreeBytes(candidate))
+            assertEquals(baselineBytes, v3TreeBytes(baseline.root))
+            assertEquals(inputs, inputs.keys.associateWith(::fixtureSha256))
+            assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
+            assertDirectoryEmpty(fixture.scratch)
+            println("truth-v3-public-mutation case=$name rows=${rows.size} bytes=$candidateTotal rejected=raw-rederivation inputsUnchanged=true scratchEmpty=true")
+        }
     }
 
     private fun assertPublicEntityBoundEnforcement(
