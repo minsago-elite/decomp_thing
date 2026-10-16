@@ -1518,6 +1518,11 @@ class LinuxBubblewrapBoundaryTest {
         val parent = Files.createDirectory(base.resolve("controls"))
         val workspace = Files.createDirectory(base.resolve("workspace"))
         fun openDescriptorCount() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+        fun descriptorTargets(): Map<String, String> = Files.list(Path.of("/proc/self/fd")).use { entries ->
+            entries.map { path -> path.fileName.toString() to
+                runCatching { Files.readSymbolicLink(path).toString() }.getOrDefault("unavailable")
+            }.toList().toMap()
+        }
         val identityType = LinuxFilesystemSyscalls::class.java
         val legacyIdentity = identityType.getDeclaredMethod("descriptorProcIdentity", Int::class.javaPrimitiveType)
         val statxIdentity = identityType.getDeclaredMethod("descriptorStatxIdentity", Int::class.javaPrimitiveType)
@@ -1527,6 +1532,20 @@ class LinuxBubblewrapBoundaryTest {
             val legacy = invokePrivate(LinuxFilesystemSyscalls, legacyIdentity, fd)
             val native = invokePrivate(LinuxFilesystemSyscalls, statxIdentity, fd)
             assertEquals(legacy, LinuxFilesystemSyscalls.identity(fd))
+            val beforeOwnedTargets = descriptorTargets()
+            val beforeOwnedInitialization = openDescriptorCount()
+            val repeatedQueryBaseline = LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+                // Initialize the actual owned/native call site before counting lease-owned descriptors.
+                assertEquals(legacy, scratch.identity(fd))
+                val baseline = openDescriptorCount()
+                repeat(3) { assertEquals(legacy, scratch.identity(fd)) }
+                baseline
+            }
+            assertEquals(repeatedQueryBaseline, openDescriptorCount(),
+                "repeated owned queries and scratch close retain no additional descriptors")
+            val initializedTargets = descriptorTargets().filter { (fd, target) -> beforeOwnedTargets[fd] != target }
+                .entries.take(16).joinToString { (fd, target) -> "$fd:${target.take(256)}" }
+            println("private-control-bind-probe: ownedIdentityInitializationDelta=${repeatedQueryBaseline - beforeOwnedInitialization} newTargets=[$initializedTargets]")
             if (native != null) {
                 assertEquals(legacy, native)
                 nativeStatxCases++
