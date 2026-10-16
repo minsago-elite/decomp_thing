@@ -38,6 +38,11 @@ retains real Angr selection/qualification and the quota-backed repair snapshot
 follow-up. All three jobs retain their existing hosted runtime, sandbox, quota,
 scratch provisioning and unconditional cleanup. Each uploads its own
 `kotlin-core`, `kotlin-oracle` or `kotlin-live` test-report artifact.
+The quota follow-up receives `core-main` in its nested test invocation, keeping
+the selected repair fixture while its host-side preparation remains unchanged.
+This prevents that follow-up from starting the isolated GCC/class-data gates
+again. Nonowning or unknown CI selectors refuse before preparation; legacy
+combined and local invocations keep their original selection.
 
 `scripts/test-ci-partitions.py` exercises the actual shell entry point with an
 inert Gradle argument recorder, including full/legacy/live selections, each new

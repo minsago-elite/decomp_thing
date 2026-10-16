@@ -26,6 +26,23 @@ class CiPartitionRoutingTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "scripts").mkdir()
         (self.root / "scripts/ci.sh").write_bytes((REPOSITORY / "scripts/ci.sh").read_bytes())
+        (self.root / "scripts/test-repair-validation-snapshot.sh").write_bytes(
+            (REPOSITORY / "scripts/test-repair-validation-snapshot.sh").read_bytes()
+        )
+        (self.root / "build").mkdir()
+        (self.root / "bin").mkdir()
+        # Exercise the real nested shell routing, with no namespaces, mounts or Gradle execution.
+        unshare = self.root / "bin/unshare"
+        unshare.write_text(
+            '#!/usr/bin/env bash\n[[ "$1" == "-Ur" && "$2" == "-m" ]] || exit 97\n'
+            'shift 2\nexec "$@"\n',
+            encoding="utf-8",
+        )
+        unshare.chmod(0o700)
+        for name in ["mount", "umount"]:
+            command = self.root / "bin" / name
+            command.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            command.chmod(0o700)
         gradle = self.root / "gradlew"
         gradle.write_text(
             "#!/usr/bin/env python3\n"
@@ -64,6 +81,29 @@ class CiPartitionRoutingTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual([expected], invocations)
 
+    def invoke_repair(self, selector):
+        environment = os.environ.copy()
+        environment.pop("DECOMP_CI_TEST_SHARD", None)
+        environment.pop("DECOMP_TEST_FRONTEND_NODE_HOME", None)
+        if selector is not None:
+            environment["DECOMP_CI_TEST_SHARD"] = selector
+        environment["GRADLE_USER_HOME"] = str(self.root / "gradle-user-home")
+        environment["PATH"] = str(self.root / "bin") + os.pathsep + environment["PATH"]
+        capture = self.root / "arguments.jsonl"
+        if capture.exists():
+            capture.unlink()
+        result = subprocess.run(
+            ["bash", str(self.root / "scripts/test-repair-validation-snapshot.sh"), "--ci-verify-installed-analysis-io"],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        invocations = [json.loads(line) for line in capture.read_text().splitlines()] if capture.exists() else []
+        return result, invocations
+
     def test_full_and_unset_entry_points_keep_all_isolated_checks(self):
         for selector in [None, "", "full"]:
             with self.subTest(selector=selector):
@@ -87,6 +127,29 @@ class CiPartitionRoutingTest(unittest.TestCase):
                 result, invocations = self.invoke(selector)
                 self.assertEqual(2, result.returncode)
                 self.assertIn("unsupported DECOMP_CI_TEST_SHARD", result.stderr)
+                self.assertEqual([], invocations)
+
+    def assert_repair_selection(self, selector, extra):
+        result, invocations = self.invoke_repair(selector)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([
+            [":verifyAnalysisIoHelperInstalled", ":testClasses", ":installDist", ":stageOracleNativeLibraries", "--no-daemon"],
+            ["cleanTest", "test", "--tests", "decompengine.project.GeneratedCValidationSnapshotFixtureTest",
+             "-x", ":buildLlvmBehaviorHelper", "-x", ":buildAnalysisIoHelper", "--no-daemon", *extra],
+        ], invocations)
+
+    def test_quota_followup_keeps_main_partition_and_host_preparation(self):
+        self.assert_repair_selection("core-main", ["-PciTestShard=core-main"])
+
+    def test_legacy_quota_followup_keeps_its_original_selection(self):
+        self.assert_repair_selection(None, [])
+
+    def test_quota_followup_refuses_nonowning_or_unknown_ci_partitions_before_gradle(self):
+        for selector in ["core-oracle", "live", "bad"]:
+            with self.subTest(selector=selector):
+                result, invocations = self.invoke_repair(selector)
+                self.assertEqual(2, result.returncode)
+                self.assertIn("unsupported repair snapshot CI partition", result.stderr)
                 self.assertEqual([], invocations)
 
 

@@ -311,6 +311,8 @@ jobs:
           mv build/reports/tests/test build/reports/tests/full-suite
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
+        env:
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
       - name: Require third-party ACP initialize qualification
         if: always() && matrix.shard == 'live'
