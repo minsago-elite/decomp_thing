@@ -579,6 +579,17 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             RepairEvidenceArtifactState.CORRUPT -> RepairRecordedReceiptCheck.CORRUPT
             else -> RepairRecordedReceiptCheck.UNAVAILABLE
         })
+    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null): String {
+        val parameters = buildList {
+            view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            add("historyPage=$historyPage")
+            add("historyCasesPage=$casePage")
+            add("historyGraph=${snapshot.graphSha256}")
+            evidenceAttempt?.let { add("historyEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+        }.joinToString("&")
+        val target = "/jobs/${job.id}?$parameters"
+        return "<a href=\"${target.escapeHtml()}\">$label</a>"
+    }
     val visible = page.attempts
     val items = visible.joinToString("") { attempt ->
         val index = attempt.iterationIndex ?: attempt.ordinal
@@ -590,13 +601,20 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
                 else references.joinToString("", "<ul class=\"repair-case-references\">", "</ul>") {
                     "<li><code>${it.value.escapeHtml()}</code></li>" }
         val omittedCases = attempt.retainedCases.size - references.size
+        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null) {
+            if (page.selection.evidenceAttempt == attempt.identity.value)
+                "<p>Inspecting this iteration's evidence. " + link("Show page evidence", page.selection.pageNumber,
+                    page.selection.casePageNumber) + "</p>"
+            else "<p>" + link("Inspect evidence for this iteration", page.selection.pageNumber,
+                page.selection.casePageNumber, attempt.identity.value) + "</p>"
+        } else ""
         """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
           <div class="history-title"><strong>${recordedRepairSummary(attempt).escapeHtml()}</strong>${statusPill(outcome)}</div>
           <p>Attempt revision: <code>${attempt.identity.value.escapeHtml()}</code></p>
           <p>Recorded run: <code>${(attempt.run?.value ?: "none").escapeHtml()}</code></p>
           <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
           <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
-          ${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
+          $inspectEvidence${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
           <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
           $cases${if (omittedCases > 0) "<p>$omittedCases case references omitted from this page.</p>" else ""}
         </div></article>""".trimIndent()
@@ -611,21 +629,11 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
     }
     val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
         if (snapshot.pending?.rollback?.failureCode != null) 1 else 0
-    fun link(label: String, historyPage: Int, casePage: Int): String {
-        val parameters = buildList {
-            view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
-            add("historyPage=$historyPage")
-            add("historyCasesPage=$casePage")
-            add("historyGraph=${snapshot.graphSha256}")
-        }.joinToString("&")
-        val target = "/jobs/${job.id}?$parameters"
-        return "<a href=\"${target.escapeHtml()}\">$label</a>"
-    }
     val navigation = buildList {
         if (page.selection.pageNumber > 1) add(link("Newer history", page.selection.pageNumber - 1, 1))
         if (page.selection.pageNumber < page.totalPages) add(link("Older history", page.selection.pageNumber + 1, 1))
-        if (page.selection.casePageNumber > 1) add(link("Previous case references", page.selection.pageNumber, page.selection.casePageNumber - 1))
-        if (page.selection.casePageNumber < page.casePages) add(link("More case references", page.selection.pageNumber, page.selection.casePageNumber + 1))
+        if (page.selection.casePageNumber > 1) add(link("Previous case references", page.selection.pageNumber, page.selection.casePageNumber - 1, page.selection.evidenceAttempt))
+        if (page.selection.casePageNumber < page.casePages) add(link("More case references", page.selection.pageNumber, page.selection.casePageNumber + 1, page.selection.evidenceAttempt))
     }.joinToString(" · ")
     return """<section class="panel history-panel"><h2>Repair History</h2>
       <p>Recorded repair metadata; current source and execution have not been revalidated.</p>

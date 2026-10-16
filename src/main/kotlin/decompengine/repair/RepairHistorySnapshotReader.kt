@@ -48,7 +48,7 @@ internal class RepairHistoryArtifactCapture internal constructor(
     internal fun selectedPaths(page: RepairRecordedHistoryPage): List<String> {
         require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }
         val selected = linkedSetOf<RepairRecordedArtifactReference>()
-        page.attempts.forEach { attempt ->
+        page.evidenceAttempts.forEach { attempt ->
             attempt.before?.artifact?.let(selected::add)
             attempt.after?.artifact?.let(selected::add)
             attempt.invocation?.artifact?.let(selected::add)

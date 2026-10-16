@@ -45,6 +45,10 @@ class RepairHistorySnapshotTest {
             assertEquals(listOf(2, 3, 4), latest.attempts.map { it.iterationIndex })
             assertEquals(listOf(1), older.attempts.map { it.iterationIndex })
             assertTrue(older.attempts.none { it.kind == RepairRecordedAttemptKind.PENDING })
+            val pendingEvidence = RepairRecordedHistoryPage.select(snapshot,
+                RepairRecordedHistorySelection(expectedGraphSha256 = snapshot.graphSha256, evidenceAttempt = pending.id), 2)
+            assertEquals(listOf(pending.id), pendingEvidence.evidenceAttempts.map { it.identity.value })
+            assertEquals(RepairRecordedAttemptKind.PENDING, pendingEvidence.evidenceAttempts.single().kind)
             assertEquals(snapshot.attempts.map { it.identity }, (older.attempts +
                 latest.attempts.filter { it.kind == RepairRecordedAttemptKind.FINALIZED }).map { it.identity })
             val secondCases = RepairRecordedHistoryPage.select(snapshot,
@@ -611,6 +615,49 @@ class RepairHistorySnapshotTest {
     private class PromotionFailure : IllegalStateException("authored promotion failure")
     private class PromotionRollbackFailure : IllegalStateException("authored promotion rollback refusal")
     private class RestoreFailure : IllegalStateException("authored restoration refusal")
+    @Test
+    fun evidenceFocusKeepsMetadataRowsAndRequiresItsCapturedGraphAndVisibleAttempt() {
+        val root = root()
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            graph.enableRunContract()
+            repeat(3) { index ->
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata(graph, index + 1))
+                graph.installCandidate(attempt, mapOf("code.c" to "candidate-$index".toByteArray()))
+                graph.reject(attempt)
+            }
+            val snapshot = view(capture(root))
+            val latest = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), 2)
+            val target = latest.attempts.last()
+            val selection = RepairRecordedHistorySelection(expectedGraphSha256 = snapshot.graphSha256,
+                evidenceAttempt = target.identity.value)
+            val focused = RepairRecordedHistoryPage.select(snapshot, selection, 2)
+            assertEquals(latest.attempts, focused.attempts)
+            assertEquals(latest.runs, focused.runs)
+            assertEquals(latest.attempts, latest.evidenceAttempts)
+            assertEquals(listOf(target), focused.evidenceAttempts)
+            assertEquals(selection, parseRecordedRepairSelection(null, null, snapshot.graphSha256, target.identity.value))
+            assertFailsWith<IllegalArgumentException> { RepairRecordedHistorySelection(evidenceAttempt = target.identity.value) }
+            for (invalid in listOf("", "../PRIVATE", "%31", "a".repeat(129))) {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    RepairRecordedHistorySelection(expectedGraphSha256 = snapshot.graphSha256, evidenceAttempt = invalid)
+                }
+                assertFalse("PRIVATE" in failure.message.orEmpty())
+            }
+            val foreign = assertFailsWith<RepairRecordedSelectionFailure> {
+                RepairRecordedHistoryPage.select(snapshot, selection.copy(evidenceAttempt = snapshot.attempts.first().identity.value), 2)
+            }
+            assertEquals(RepairRecordedSelectionProblem.OUT_OF_RANGE, foreign.problem)
+            val stale = assertFailsWith<RepairRecordedSelectionFailure> {
+                RepairRecordedHistoryPage.select(snapshot, selection.copy(expectedGraphSha256 = "0".repeat(64)), 2)
+            }
+            assertEquals(RepairRecordedSelectionProblem.CHANGED, stale.problem)
+            val absent = assertFailsWith<RepairRecordedSelectionFailure> {
+                recordedRepairHistoryPage(RepairHistoryReadResult.absent(), selection, 100)
+            }
+            assertEquals(RepairRecordedSelectionProblem.UNAVAILABLE, absent.problem)
+        }
+    }
+
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)

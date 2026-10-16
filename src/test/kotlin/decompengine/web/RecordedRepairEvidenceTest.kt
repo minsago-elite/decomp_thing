@@ -14,6 +14,13 @@ class RecordedRepairEvidenceTest {
         val parsed = parseRecordedRepairHistoryQuery("runId=run_selected&historyPage=2&historyCasesPage=2&historyGraph=$graph")
         assertEquals("run_selected", parsed.runId)
         assertEquals(RepairRecordedHistorySelection(2, 2, graph), parsed.selection)
+        val focusedQuery = parseRecordedRepairHistoryQuery("historyGraph=$graph&historyEvidence=revision_00000001_0123456789abcdef")
+        assertEquals("revision_00000001_0123456789abcdef", focusedQuery.selection.evidenceAttempt)
+        for (query in listOf("historyEvidence=one", "historyGraph=$graph&historyEvidence=",
+            "historyGraph=$graph&historyEvidence=%31", "historyGraph=$graph&historyEvidence=../PRIVATE",
+            "historyGraph=$graph&historyEvidence=one&historyEvidence=one")) {
+            assertFailsWith<IllegalArgumentException>(query) { parseRecordedRepairHistoryQuery(query) }
+        }
         for (query in listOf("", "historyPage=2", "historyCasesPage=2", "historyPage=1&historyPage=1",
             "runId=one&runId=two", "historyGraph=PRIVATE", "unknown=1", "historyPage=01",
             "historyPage=2147483648", "historyPage=%31", "runId=../private", "historyPage=")) {
@@ -133,6 +140,12 @@ class RecordedRepairEvidenceTest {
         val older = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(2, 1, snapshot.graphSha256), 1)
         assertEquals(listOf("reports/nested/current.validation.json"), recorded.selectedArtifactPaths(latest))
         assertEquals(listOf("reports/after.json"), recorded.selectedArtifactPaths(older))
+        val focused = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(
+            expectedGraphSha256 = snapshot.graphSha256, evidenceAttempt = older.attempts.single().identity.value), 100)
+        assertEquals(2, focused.attempts.size)
+        assertEquals(listOf("reports/after.json"), recorded.selectedArtifactPaths(focused))
+        assertEquals(setOf(requireNotNull(older.attempts.single().after?.artifact)),
+            recordedRepairArtifactReferences(snapshot, focused))
         val context = WebReportContext(reports)
         val selected = listLegacyArtifactSummaries(context, recorded, latest)
         assertEquals(listOf("reports/source-tree/reports/nested/current.validation.json"), selected.map { it.relativePath })

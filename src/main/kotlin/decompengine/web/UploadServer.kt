@@ -840,7 +840,7 @@ class UploadServer(
             if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
                 RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
         }
-        val receipts = selected.attempts.filter { it.invocation != null }.associate { attempt ->
+        val receipts = selected.evidenceAttempts.filter { it.invocation != null }.associate { attempt ->
             val invocation = requireNotNull(attempt.invocation)
             val target = targets[invocation.artifact]
             val bytes = if (target == null || attempt.identity.rawIdentityWithheld) null else readOnce(target).getOrNull()

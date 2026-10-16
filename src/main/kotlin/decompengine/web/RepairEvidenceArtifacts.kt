@@ -64,13 +64,13 @@ internal fun parseRecordedRepairHistoryQuery(raw: String?): RecordedRepairHistor
     val values = linkedMapOf<String, String>()
     for (part in raw.split('&')) {
         val pair = part.split('=', limit = 2)
-        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph") &&
+        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph", "historyEvidence") &&
             values.put(pair[0], pair[1]) == null) { "Recorded history query is invalid." }
     }
     val run = values["runId"]
     require(run == null || run.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Recorded history query is invalid." }
     return RecordedRepairHistoryQuery(run, parseRecordedRepairSelection(
-        values["historyPage"], values["historyCasesPage"], values["historyGraph"]))
+        values["historyPage"], values["historyCasesPage"], values["historyGraph"], values["historyEvidence"]))
 }
 
 internal data class RecordedRepairHistoryView(
@@ -90,7 +90,7 @@ internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot,
     page: RepairRecordedHistoryPage): Set<RepairRecordedArtifactReference> {
     require(page.snapshot === snapshot) { "Recorded history page does not match its capture." }
     return buildSet {
-        page.attempts.forEach { attempt ->
+        page.evidenceAttempts.forEach { attempt ->
             attempt.before?.artifact?.let(::add)
             attempt.after?.artifact?.let(::add)
             attempt.invocation?.artifact?.let(::add)

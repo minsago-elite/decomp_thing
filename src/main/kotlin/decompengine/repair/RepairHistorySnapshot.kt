@@ -29,23 +29,30 @@ internal data class RepairRecordedHistorySelection(
     val pageNumber: Int = 1,
     val casePageNumber: Int = 1,
     val expectedGraphSha256: String? = null,
+    val evidenceAttempt: String? = null,
 ) {
     init {
         require(pageNumber > 0 && casePageNumber > 0) { "Recorded history page is invalid." }
         require(expectedGraphSha256 == null || GRAPH_DIGEST.matches(expectedGraphSha256)) {
             "Recorded history graph identity is invalid."
         }
-        require((pageNumber == 1 && casePageNumber == 1) || expectedGraphSha256 != null) {
+        require(evidenceAttempt == null || ATTEMPT_REFERENCE.matches(evidenceAttempt)) {
+            "Recorded evidence selection is invalid."
+        }
+        require((pageNumber == 1 && casePageNumber == 1 && evidenceAttempt == null) || expectedGraphSha256 != null) {
             "Continued history selection requires the recorded graph identity."
         }
     }
 
-    val isDefault: Boolean get() = pageNumber == 1 && casePageNumber == 1 && expectedGraphSha256 == null
+    val isDefault: Boolean get() = pageNumber == 1 && casePageNumber == 1 && expectedGraphSha256 == null && evidenceAttempt == null
 
-    private companion object { val GRAPH_DIGEST = Regex("[0-9a-f]{64}") }
+    private companion object {
+        val GRAPH_DIGEST = Regex("[0-9a-f]{64}")
+        val ATTEMPT_REFERENCE = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+    }
 }
 
-internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: String?): RepairRecordedHistorySelection {
+internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: String?, evidence: String? = null): RepairRecordedHistorySelection {
     fun number(value: String?): Int {
         if (value == null) return 1
         require(value.isNotEmpty() && value.length <= 10 && value[0] in '1'..'9' && value.all { it in '0'..'9' }) {
@@ -53,7 +60,7 @@ internal fun parseRecordedRepairSelection(page: String?, cases: String?, graph: 
         }
         return requireNotNull(value.toIntOrNull()) { "Recorded history page is invalid." }
     }
-    return RepairRecordedHistorySelection(number(page), number(cases), graph)
+    return RepairRecordedHistorySelection(number(page), number(cases), graph, evidence)
 }
 
 internal enum class RepairRecordedSelectionProblem { UNAVAILABLE, CHANGED, OUT_OF_RANGE }
@@ -81,6 +88,11 @@ internal class RepairRecordedHistoryPage private constructor(
         snapshot.attempts.subList(attemptStart, attemptEnd) +
             listOfNotNull(snapshot.pending.takeIf { selection.pageNumber == 1 }))
     val runs: List<RepairRecordedRun> = immutableRecordedList(snapshot.runs.subList(runStart, runEnd))
+    val evidenceAttempts: List<RepairRecordedAttempt> = selection.evidenceAttempt?.let { reference ->
+        val attempt = attempts.singleOrNull { it.identity.value == reference }
+            ?: throw RepairRecordedSelectionFailure(RepairRecordedSelectionProblem.OUT_OF_RANGE)
+        immutableRecordedList(listOf(attempt))
+    } ?: attempts
     val earlierAttempts: Int get() = attemptStart
     val newerAttempts: Int get() = snapshot.attempts.size - attemptEnd
     val earlierRuns: Int get() = runStart

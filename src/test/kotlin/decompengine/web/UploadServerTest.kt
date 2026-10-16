@@ -1578,6 +1578,10 @@ class UploadServerTest {
             assertTrue("Compile repair — rejected" in valid, valid)
             assertTrue("ACP receipt is complete; repair acceptance was not established." in valid, valid)
             assertFalse("Release-complete ACP receipt was verified" in valid, valid)
+            val captured = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val focus = "historyGraph=${captured.graphSha256}&historyEvidence=${captured.attempts.single().identity.value}"
+            val focused = request(server, "GET", "/jobs/$id?$focus").body.decodeToString()
+            assertTrue("ACP receipt is complete; repair acceptance was not established." in focused, focused)
             val receipt = Files.list(project.resolve("reports/repair-revisions")).use { files ->
                 files.filter { it.fileName.toString().endsWith(".acp-receipt.json") }.toList().single()
             }
@@ -1585,6 +1589,9 @@ class UploadServerTest {
             val corrupt = request(server, "GET", "/jobs/$id").body.decodeToString()
             assertTrue("Compile repair — rejected" in corrupt, corrupt)
             assertTrue("ACP receipt is corrupt; release completeness is not established." in corrupt, corrupt)
+            val focusedCorrupt = request(server, "GET", "/jobs/$id?$focus").body.decodeToString()
+            assertTrue("ACP receipt is corrupt; release completeness is not established." in focusedCorrupt, focusedCorrupt)
+            assertFalse("PRIVATE" in focusedCorrupt || "ACP receipt is complete;" in focusedCorrupt, focusedCorrupt)
             assertFalse("PRIVATE-" in corrupt, corrupt)
         }
     }
@@ -2366,6 +2373,60 @@ class UploadServerTest {
             val linkedDirectory = listLegacyArtifactSummaries(context, recorded)
             assertFalse(linkedDirectory.any { "/repair-revisions/" in it.relativePath })
             assertTrue(linkedDirectory.any { it.relativePath == "reports/ordinary-summary.json" })
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `every iteration can inspect retained evidence after the full page read allowance is consumed`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++; error("No analyzer expected") },
+            JobReconstructor { _, _ -> executions++; error("No reconstruction expected") }) { server, dataDir ->
+            val id = uploadedJobId(server)
+            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+            project.resolve("code.c").writeText("PRIVATE-original")
+            val reports = project.resolve("reports").createDirectories()
+            var lastAttempt = ""
+            ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
+                graph.enableRunContract()
+                val corpus = graph.retainedRegressionCorpus()
+                // Host graph writes:70iterations/140small reports, not70agent or validator invocations.
+                for (index in 1..70) {
+                    reports.resolve("before-$index.validation.json").writeText("{}")
+                    reports.resolve("after-$index.validation.json").writeText("{}")
+                    val metadata = RevisionRepairMetadata(index, "compile", "PRIVATE-prompt", "PRIVATE-summary",
+                        corpus.inputs.map { it.id }, RepairEvidence("compile", "PRIVATE-before",
+                            "reports/before-$index.validation.json"), corpus.sha256,
+                        publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                    val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+                    graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-candidate-$index".toByteArray()))
+                    graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after-$index.validation.json"))
+                    lastAttempt = attempt.id
+                }
+            }
+            val snapshot = assertNotNull(readProjectRecordedRepairHistory(project).snapshot)
+            val before = recordedProjectBytes(project)
+            val beforeLink = "/jobs/$id/artifacts/reports/source-tree/reports/before-70.validation.json\">Open retained evidence"
+            val afterLink = "/jobs/$id/artifacts/reports/source-tree/reports/after-70.validation.json\">Open retained evidence"
+            val overview = request(server, "GET", "/jobs/$id").body.decodeToString()
+            assertFalse(afterLink in overview, overview) //140unique files exceed the unchanged128call allowance.
+            assertTrue("Inspect evidence for this iteration" in overview, overview)
+            val query = "historyGraph=${snapshot.graphSha256}&historyEvidence=$lastAttempt"
+            val selected = request(server, "GET", "/jobs/$id?$query")
+            val body = selected.body.decodeToString()
+            assertEquals(200, selected.status)
+            assertTrue(beforeLink in body && afterLink in body, body)
+            assertEquals(70, Regex("class=\"history-item\"").findAll(body).count())
+            assertTrue("Inspecting this iteration's evidence." in body && "Show page evidence" in body, body)
+            assertTrue("Test-only evidence; release completeness is not established." in body, body)
+            assertFalse("PRIVATE" in body || "code.c" in body, body)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyEvidence=$lastAttempt").status)
+            assertEquals(400, request(server, "GET", "/jobs/$id?$query&historyEvidence=$lastAttempt").status)
+            assertEquals(400, request(server, "GET", "/jobs/$id?historyGraph=${snapshot.graphSha256}&historyEvidence=foreign").status)
+            assertEquals(409, request(server, "GET", "/jobs/$id?historyGraph=${"0".repeat(64)}&historyEvidence=$lastAttempt").status)
+            val after = recordedProjectBytes(project)
+            assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
             assertEquals(0, executions)
         }
     }
