@@ -37,7 +37,9 @@ The packaged `--mode live` journey uses the real JVM/API and production browser
 timers with two authored inert jobs. The test atomically changes one job's state
 and publishes one new inert job. It checks the focused link and row order after
 each real background read, explicit refresh, the pause control, unchanged input
-bytes and only the intended fixture record changes. It sends no mutation
+bytes and only the intended fixture record changes. The running JVM's existing
+cooperative owner lock stays in place with unchanged identity and metadata; the
+test never reads, rewrites or removes that lock. It sends no mutation
 request or workflow start. The test does not certify polling performance,
 storage-quota concurrency, full WCAG compliance or production scale.
 

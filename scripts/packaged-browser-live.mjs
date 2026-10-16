@@ -38,6 +38,11 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   const initial = fixture.jobs.slice().reverse().map(job => '/nested/jobs/' + job.id);
   await ready(tab, `document.visibilityState === 'visible' && (${rows}).length === 2`, 'visible live dashboard');
   assert.deepEqual(await evaluate(tab, rows), initial);
+  // The running JVM owns this cooperative lock. Inspect metadata only and keep
+  // the original lock file in place throughout the authored fixture updates.
+  const ownerLock = join(fixture.root, '.web-owner.lock');
+  const initialOwner = await fs.lstat(ownerLock);
+  assert.ok(initialOwner.isFile() && !initialOwner.isSymbolicLink());
   const heldPath = '/nested/jobs/' + fixture.jobs[0].id;
   assert.equal(await evaluate(tab, `(() => {
     const link = document.querySelector('ul[aria-label="Uploaded jobs"] a[href="${heldPath}"]');
@@ -72,7 +77,11 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Resume live updates' && button.getAttribute('aria-pressed') === 'true')`), true);
 
   const finalJobs = [changed, fixture.jobs[1], added];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), finalJobs.map(job => job.id).sort());
+  assert.deepEqual((await fs.readdir(fixture.root)).sort(), ['.web-owner.lock', ...finalJobs.map(job => job.id)].sort());
+  const finalOwner = await fs.lstat(ownerLock);
+  assert.ok(finalOwner.isFile() && !finalOwner.isSymbolicLink());
+  for (const field of ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs']) assert.equal(finalOwner[field], initialOwner[field],
+    'Live dashboard checks changed the running JVM owner lock: ' + field);
   for (const job of finalJobs) {
     const directory = join(fixture.root, job.id);
     assert.deepEqual((await fs.readdir(directory)).sort(), ['input.elf', 'job.json']);
@@ -86,5 +95,6 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
     stateUpdatePreservesRowAndFocus: true, newJobDeferredWithoutReorder: true,
     explicitRefreshAppliesCompleteSnapshot: true, pauseControlOperable: true,
     fixtureMutations: ['one atomic authored job status update', 'one authored inert job publication'],
-    applicationStorageWrites: 0, mutationRequests: 0, executionStarted: false };
+    existingOwnerLockPreserved: true, jobStorageUnchangedExceptFixtureEdits: true,
+    mutationRequests: 0, executionStarted: false };
 }
