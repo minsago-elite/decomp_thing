@@ -91,7 +91,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.equal(metadata.job.binary.entryPoint, '0xffffffffffffffff');
   assert.equal(metadata.facts['Entry address'], '0xffffffffffffffff');
   assert.deepEqual(['Format', 'Machine', 'Endianness', 'Object type', 'OS ABI'].map(key => metadata.facts[key]),
-    ['ELF64', 'x86-64', 'little', 'EXEC', 'System V']);
+    ['ELF64', 'x86-64', 'little', 'executable', 'System V']);
   assert.equal(metadata.facts.Size, '64 bytes');
   assert.equal(metadata.facts['Workflow state'], 'Uploaded');
   assert.equal(metadata.facts['Accepted revision'], 'No accepted revision recorded');
