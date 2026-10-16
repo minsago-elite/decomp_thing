@@ -41,6 +41,178 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `mount event witness retains original phase and sticky refusal never queries again`() {
+        for (phase in listOf("CHECKPOINT", "CONTROL_ADMISSION", "REFRESH")) {
+            LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-203)).use { scratch ->
+                val check = newMountEventCheck(scratch)
+                var calls = 0
+                val unchanged = scriptedManifestMountPoll(scratch) { buffer ->
+                    calls++; buffer.setShort(6, 8); 0
+                }
+                admitMountObservation(check, unchanged, phase)
+                assertEquals(null, mountCheckField(check, "firstEventPhase"))
+                assertEquals(null, mountCheckField(check, "firstEventDiagnostic"))
+                val changed = scriptedManifestMountPoll(scratch) { buffer ->
+                    calls++; buffer.setShort(6, 0x800a.toShort()); Int.MAX_VALUE
+                }
+                val first = assertFailsWith<IOException> { admitMountObservation(check, changed, phase) }
+                assertEquals("host mounts changed during runtime manifest", first.message)
+                val diagnostic = mountDiagnostic(first)
+                val message = requireNotNull(diagnostic.message)
+                assertTrue(message.contains("phase=$phase "))
+                assertTrue(message.contains("generation=" +
+                    if (phase == "REFRESH") "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED"))
+                assertTrue(message.endsWith("outcome=EVENT rc=2147483647 revents=32778 errno=NA"))
+                scratch.close() // Any additional poll would now throw, not reproduce the event.
+                val sticky = assertFailsWith<IOException> { requireMountEventUnchanged(check, "REFRESH") }
+                assertEquals(first.message, sticky.message)
+                assertTrue(mountDiagnostic(sticky) === diagnostic)
+                assertEquals(2, calls)
+                assertTrue(mountCheckField(check, "firstEventDiagnostic") === diagnostic)
+            }
+        }
+    }
+
+    @Test
+    fun `mount query diagnostics preserve primary cleanup and nonsticky unavailable facts`() {
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-204)).use { scratch ->
+            val check = newMountEventCheck(scratch)
+            var calls = 0
+            for (events in listOf(16, 32, 65535)) {
+                val failure = assertFailsWith<IOException> {
+                    scriptedManifestMountPoll(scratch) { buffer -> calls++; buffer.setShort(6, events.toShort()); 1 }
+                }
+                assertTrue(failure.suppressed.isEmpty())
+                attachMountPollFailure(check, failure, "CONTROL_ADMISSION")
+                attachMountPollFailure(check, failure, "CHECKPOINT") // Retain one witness per primary.
+                assertEquals(1, failure.suppressed.size)
+                assertTrue(requireNotNull(mountDiagnostic(failure).message).endsWith(
+                    "outcome=INVALID_DESCRIPTOR rc=1 revents=$events errno=NA"))
+                assertTrue(requireNotNull(mountDiagnostic(failure).message).contains("phase=CONTROL_ADMISSION "))
+                val cleanup = AcpCleanupProofFailure("authored later cleanup failure")
+                failure.addSuppressed(cleanup)
+                assertTrue(failure.suppressed[1] === cleanup)
+                attachMountPollFailure(check, failure, "REFRESH") // Consumed before cleanup was added.
+                assertEquals(2, failure.suppressed.size)
+                assertEquals("mountinfo event descriptor is invalid", failure.message)
+                admitMountObservation(check, 0L, "CHECKPOINT") // Query refusal must not latch an event.
+            }
+            val syscall = assertFailsWith<LinuxSyscallException> {
+                scriptedManifestMountPoll(scratch) { calls++; com.sun.jna.Native.setLastError(Int.MIN_VALUE); Int.MIN_VALUE }
+            }
+            attachMountPollFailure(check, syscall, "CHECKPOINT")
+            assertEquals(Int.MIN_VALUE, syscall.errno)
+            assertTrue(requireNotNull(mountDiagnostic(syscall).message).endsWith(
+                "outcome=SYSCALL_ERROR rc=-2147483648 revents=NA errno=-2147483648"))
+            val cause = IOException("authored private cause text")
+            val primary = IOException("authored private query text", cause)
+            val observed = try {
+                scriptedManifestMountPoll(scratch) { calls++; throw primary }
+                error("query failure unexpectedly returned")
+            } catch (failure: Throwable) {
+                attachMountPollFailure(check, failure, "REFRESH")
+                failure
+            }
+            assertTrue(observed === primary)
+            assertTrue(observed.cause === cause)
+            assertTrue(observed.suppressed.isEmpty()) // Unowned failure: unavailable, omitted.
+            assertEquals(null, mountCheckField(check, "firstEventPhase"))
+            assertEquals(null, mountCheckField(check, "firstEventDiagnostic"))
+            scratch.close()
+            val closed = assertFailsWith<IllegalStateException> { requireMountEventUnchanged(check, "CHECKPOINT") }
+            assertEquals("mount event poll scratch is closed", closed.message)
+            assertTrue(closed.suppressed.isEmpty()) // No fresh-owned poll token; preserve unchanged.
+            assertEquals(5, calls)
+        }
+    }
+
+    @Test
+    fun `mount diagnostics are bounded stackless best effort and never cleanup authority`() {
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedManifestPollHandle(-205)).use { scratch ->
+            val check = newMountEventCheck(scratch)
+            val failure = assertFailsWith<IOException> { admitMountObservation(check, (1L shl 32) or 10L, "REFRESH") }
+            val diagnostic = mountDiagnostic(failure)
+            val text = requireNotNull(diagnostic.message)
+            assertTrue(text.length <= 512 && text.all { it.code in 32..126 })
+            assertEquals(null, diagnostic.cause)
+            assertTrue(diagnostic.stackTrace.isEmpty())
+            diagnostic.addSuppressed(IOException("not retained"))
+            assertTrue(diagnostic.suppressed.isEmpty())
+            assertFalse(AcpCleanupProofFailure::class.java.isInstance(diagnostic))
+            val disabled = MountDiagnosticSuppressionDisabled()
+            attachMountPollFailure(check, disabled, "CHECKPOINT")
+            assertTrue(disabled.suppressed.isEmpty())
+            assertEquals("authored suppression disabled", disabled.message)
+            val crowded = IOException("authored crowded primary")
+            val cleanups = List(9) { IOException("authored cleanup $it") }
+            cleanups.forEach(crowded::addSuppressed)
+            val owned = assertFailsWith<IOException> {
+                scriptedManifestMountPoll(scratch) { buffer -> buffer.setShort(6, 32); 1 }
+            }
+            attachMountPollFailure(check, crowded, "CHECKPOINT")
+            assertEquals(cleanups, crowded.suppressed.toList()) // Diagnostic omission never replaces facts.
+            assertTrue(owned.suppressed.isEmpty()) // Foreign identity did not claim the owned token.
+            attachMountPollFailure(check, owned, "CHECKPOINT")
+            assertEquals(1, owned.suppressed.size)
+            assertTrue(requireNotNull(mountDiagnostic(owned).message).endsWith(
+                "outcome=INVALID_DESCRIPTOR rc=1 revents=32 errno=NA"))
+            attachMountPollFailure(check, crowded, "REFRESH")
+            assertEquals(cleanups, crowded.suppressed.toList())
+            val containsCleanup = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+                .getDeclaredMethod("containsCleanupProofFailure", Throwable::class.java)
+            assertEquals(false, invokePrivate(null, containsCleanup, failure))
+            val cleanup = AcpCleanupProofFailure("authored later cleanup")
+            failure.addSuppressed(cleanup)
+            assertTrue(failure.suppressed[0] === diagnostic && failure.suppressed[1] === cleanup)
+            assertEquals(true, invokePrivate(null, containsCleanup, failure))
+            // Fault only diagnostic metadata after the real event latch; refusal must survive.
+            check.javaClass.getDeclaredField("firstEventDiagnostic").apply { isAccessible = true }.set(check, null)
+            check.javaClass.getDeclaredField("firstEventPhase").apply { isAccessible = true }.set(check, null)
+            val lostDiagnostic = assertFailsWith<IOException> { requireMountEventUnchanged(check, "CHECKPOINT") }
+            assertEquals("host mounts changed during runtime manifest", lostDiagnostic.message)
+            assertTrue(lostDiagnostic.suppressed.isEmpty())
+        }
+    }
+
+    private class MountDiagnosticSuppressionDisabled : Throwable("authored suppression disabled", null, false, false)
+
+    private fun newMountEventCheck(scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch): Any =
+        Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventCheck")
+            .getDeclaredConstructor(LinuxFilesystemSyscalls.MountMetadataPollScratch::class.java)
+            .apply { isAccessible = true }.newInstance(scratch)
+
+    private fun mountEventPhase(name: String): Any =
+        Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase").enumConstants
+            .single { (it as Enum<*>).name == name }
+
+    private fun admitMountObservation(check: Any, observation: Long, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation", java.lang.Long.TYPE, value.javaClass), observation, value)
+    }
+
+    private fun requireMountEventUnchanged(check: Any, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("requireUnchanged", value.javaClass), value)
+    }
+
+    private fun attachMountPollFailure(check: Any, failure: Throwable, phase: String) {
+        val value = mountEventPhase(phase)
+        invokePrivate(check, check.javaClass.getDeclaredMethod("attachPollFailure", Throwable::class.java, value.javaClass), failure, value)
+    }
+
+    private fun mountCheckField(check: Any, name: String): Any? =
+        check.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(check)
+
+    private fun mountDiagnostic(failure: Throwable): Throwable = failure.suppressed.single {
+        it.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic"
+    }
+
+    private fun scriptedManifestMountPoll(
+        scratch: LinuxFilesystemSyscalls.MountMetadataPollScratch,
+        query: (com.sun.jna.Memory) -> Int,
+    ): Long = invokePrivate(scratch, scratch.javaClass.getDeclaredMethod("pollWith", Function1::class.java), query) as Long
+
+    @Test
     fun `manifest statx scratch owns failed construction and transfers only admitted storage`() {
         for (primary in listOf<Throwable>(IOException("scripted initial checkpoint failure"), AssertionError("scripted constructor failure"))) {
             var owned: LinuxFilesystemSyscalls.StatxIdentityScratch? = null

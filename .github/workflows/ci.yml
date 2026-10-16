@@ -243,10 +243,12 @@ jobs:
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Qualify pinned credential-free third-party ACP initialize
+        id: goose-initialize
         if: matrix.shard == 'live'
+        continue-on-error: true
         run: scripts/ci-qualify-goose-acp.sh
       - name: Qualify pinned credential-free codex-acp authentication boundary
-        if: matrix.shard == 'live'
+        if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
         run: scripts/ci-qualify-codex-acp.sh
       - name: Run JVM and Kotlin checks
         env:
@@ -261,6 +263,11 @@ jobs:
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
         run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
+      - name: Require third-party ACP initialize qualification
+        if: always() && matrix.shard == 'live'
+        env:
+          GOOSE_INITIALIZE_OUTCOME: ${{ steps.goose-initialize.outcome }}
+        run: test "$GOOSE_INITIALIZE_OUTCOME" = success
       - name: Release root-owned application-bundled Ghidra
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
