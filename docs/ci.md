@@ -52,6 +52,13 @@ original inventory, preserving explicit skips and isolated executions. In
 particular, the quota snapshot method's full-suite skip and separately required
 pass are distinct executions. Job/step durations and total runner time describe
 different costs; the historical elapsed observations alone establish no speedup.
+The aggregate also downloads only the three standard Kotlin test-report artifacts
+into separate named directories. Its Python XML check requires nonempty reports,
+correct oracle/complement ownership, no failed cases and no test identity shared
+across partitions. Within one partition, the quota fixture's skip/pass pair stays
+distinct. `kotlin-partition-inventory` retains counts and input hashes; routing and
+report-placement regression controls run in the core job. This placement check
+complements the complete original-inventory comparison above.
 
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through

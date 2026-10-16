@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Exercise the actual CI entry point with an inert argument-recording Gradle fixture."""
+"""Exercise CI routing and verify placement of retained JUnit partition reports."""
 
+import argparse
+from collections import Counter
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -16,6 +22,68 @@ ISOLATED = [
     "v3BoundaryPublicationIsolated",
     "v3BoundaryCensusIsolated",
 ]
+
+
+def check_partition_reports(root):
+    owners = {}
+    partitions = {}
+    inputs = []
+    for role in ["core", "oracle", "live"]:
+        directory = root / f"kotlin-{role}-test-reports"
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"missing or linked {role} report directory")
+        outcomes = Counter()
+        identities = set()
+        for path in sorted(directory.rglob("*.xml")):
+            if path.is_symlink():
+                raise ValueError(f"linked JUnit report: {path.name}")
+            raw = path.read_bytes()
+            try:
+                suite = ET.fromstring(raw)
+            except ET.ParseError as failure:
+                raise ValueError(f"malformed {role} JUnit report: {path.name}") from failure
+            inputs.append({"partition": role, "path": str(path.relative_to(root)),
+                           "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+            for case in suite.iter("testcase"):
+                classname, name = case.get("classname"), case.get("name")
+                if not classname or not name:
+                    raise ValueError(f"missing JUnit test identity in {role}: {path.name}")
+                oracle = classname.startswith("decompengine.oracle.")
+                if role == "core" and oracle:
+                    raise ValueError(f"core contains oracle test: {classname}.{name}")
+                if role == "oracle" and not oracle:
+                    raise ValueError(f"oracle contains non-oracle test: {classname}.{name}")
+                identity = (classname, name)
+                if identity in owners and owners[identity] != role:
+                    raise ValueError(f"test reported by more than one partition: {classname}.{name}")
+                owners[identity] = role
+                identities.add(identity)
+                if case.find("failure") is not None or case.find("error") is not None:
+                    raise ValueError(f"failed JUnit test in {role}: {classname}.{name}")
+                outcomes["SKIP" if case.find("skipped") is not None else "PASS"] += 1
+        if not sum(outcomes.values()):
+            raise ValueError(f"no JUnit test cases in {role}")
+        partitions[role] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
+                            "SKIP": outcomes["SKIP"], "uniqueClassMethodPairs": len(identities)}
+    return {"schemaVersion": 1, "status": "passed", "partitions": partitions,
+            "executions": sum(p["executions"] for p in partitions.values()),
+            "uniqueClassMethodPairs": len(owners), "crossPartitionDuplicates": 0, "inputs": inputs,
+            "scope": "JUnit partition placement; full original-inventory comparison remains separate"}
+
+
+def report_command(arguments):
+    parser = argparse.ArgumentParser(description="Check the three standard CI JUnit report artifacts")
+    parser.add_argument("--check-reports", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    options = parser.parse_args(arguments)
+    try:
+        report = check_partition_reports(options.check_reports)
+    except (ValueError, OSError) as failure:
+        report = {"schemaVersion": 1, "status": "failed", "reason": str(failure)}
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    options.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report))
+    return 0 if report["status"] == "passed" else 1
 
 
 class CiPartitionRoutingTest(unittest.TestCase):
@@ -153,5 +221,89 @@ class CiPartitionRoutingTest(unittest.TestCase):
                 self.assertEqual([], invocations)
 
 
+class CiPartitionReportTest(unittest.TestCase):
+    def setUp(self):
+        build = REPOSITORY / "build"
+        build.mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="ci-report-placement-", dir=build)
+        self.root = Path(self.temporary.name)
+        self.index = 0
+        self.core = self.write("core", "decompengine.project.ExampleTest", "ordinary")
+        self.oracle = self.write("oracle", "decompengine.oracle.ExampleTest", "oracle")
+        self.live = self.write("live", "decompengine.acp.LiveTest", "live")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, role, classname, name, outcome="PASS"):
+        self.index += 1
+        path = self.root / f"kotlin-{role}-test-reports/test-results/test/TEST-{self.index}.xml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        suite = ET.Element("testsuite")
+        case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+        if outcome != "PASS":
+            ET.SubElement(case, {"SKIP": "skipped", "FAIL": "failure", "ERROR": "error"}[outcome])
+        ET.ElementTree(suite).write(path, encoding="utf-8")
+        return path
+
+    def test_valid_placement_preserves_same_partition_skip_and_followup_executions(self):
+        self.write("core", "decompengine.project.SnapshotTest", "quota", "SKIP")
+        self.write("core", "decompengine.project.SnapshotTest", "quota")
+        report = check_partition_reports(self.root)
+        self.assertEqual(5, report["executions"])
+        self.assertEqual(4, report["uniqueClassMethodPairs"])
+        self.assertEqual(1, report["partitions"]["core"]["SKIP"])
+
+    def test_oracle_check_leaking_into_core_is_refused(self):
+        self.write("core", "decompengine.oracle.gcc.GccCompilerEnginePlanningTest", "isolated")
+        with self.assertRaisesRegex(ValueError, "core contains oracle"):
+            check_partition_reports(self.root)
+
+    def test_nonoracle_check_leaking_into_oracle_is_refused(self):
+        self.write("oracle", "decompengine.project.ExampleTest", "wrong partition")
+        with self.assertRaisesRegex(ValueError, "oracle contains non-oracle"):
+            check_partition_reports(self.root)
+
+    def test_duplicate_across_live_and_core_is_refused(self):
+        self.write("live", "decompengine.project.ExampleTest", "ordinary")
+        with self.assertRaisesRegex(ValueError, "more than one partition"):
+            check_partition_reports(self.root)
+
+    def test_missing_partition_artifact_is_refused(self):
+        shutil.rmtree(self.root / "kotlin-oracle-test-reports")
+        with self.assertRaisesRegex(ValueError, "missing or linked oracle"):
+            check_partition_reports(self.root)
+
+    def test_empty_partition_is_refused(self):
+        self.oracle.write_text("<testsuite/>", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no JUnit test cases in oracle"):
+            check_partition_reports(self.root)
+
+    def test_malformed_report_is_refused(self):
+        self.core.write_text("<testsuite", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "malformed core JUnit"):
+            check_partition_reports(self.root)
+
+    def test_missing_test_identity_is_refused(self):
+        self.core.write_text('<testsuite><testcase name="anonymous"/></testsuite>', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "missing JUnit test identity"):
+            check_partition_reports(self.root)
+
+    def test_failed_or_errored_case_is_refused(self):
+        for outcome in ["FAIL", "ERROR"]:
+            with self.subTest(outcome=outcome):
+                path = self.write("core", "decompengine.project.ExampleTest", outcome, outcome)
+                with self.assertRaisesRegex(ValueError, "failed JUnit test"):
+                    check_partition_reports(self.root)
+                path.unlink()
+
+    def test_linked_report_is_refused(self):
+        self.core.with_name("linked.xml").symlink_to(self.core)
+        with self.assertRaisesRegex(ValueError, "linked JUnit report"):
+            check_partition_reports(self.root)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-reports":
+        sys.exit(report_command(sys.argv[1:]))
     unittest.main()
