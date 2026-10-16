@@ -235,7 +235,14 @@ class UploadServer(
     }
     // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
     private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
-    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    private val server = try {
+        HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    } catch (failure: Throwable) {
+        try { ownership.close() } catch (cleanup: Throwable) {
+            if (cleanup !== failure) failure.addSuppressed(cleanup)
+        }
+        throw failure
+    }
     private val store = JobStore(dataDir)
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
@@ -287,13 +294,23 @@ class UploadServer(
         try {
             jobs.initializeExistingStorage()
         } catch (failure: Throwable) {
-            server.stop(0)
-            requestExecutor.shutdownNow()
-            requestDeadlines.shutdownNow()
-            streamResources.shutdown()
-            access.close()
-            jobs.close()
-            ownership.close()
+            stopRequested.set(true)
+            stopping = true
+            fun cleanup(action: () -> Unit) {
+                try { action() } catch (problem: Throwable) {
+                    if (problem !== failure) failure.addSuppressed(problem)
+                }
+            }
+            // HttpServer.stop alone does not release an unstarted bound listener. No application
+            // context is installed yet; close admission before starting its dispatcher for teardown.
+            cleanup { server.start() }
+            cleanup { server.stop(0) }
+            cleanup { requestExecutor.shutdownNow() }
+            cleanup { requestDeadlines.shutdownNow() }
+            cleanup { streamResources.shutdown() }
+            cleanup { access.close() }
+            cleanup { jobs.close() }
+            cleanup { ownership.close() }
             throw failure
         }
         server.executor = requestExecutor
