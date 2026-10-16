@@ -9,7 +9,7 @@ function record(root, index) {
   const at = new Date(Date.parse('2026-01-01T00:00:00Z') + index * 1000).toISOString();
   return { id, filename: `live-dashboard-${index}.elf`, status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(root, id, 'input.elf'),
-    metadata: { format: 'ELF64', endianness: 'little', elf_version: 1, os_abi: 'System V', object_type: 'EXEC',
+    metadata: { format: 'ELF64', endianness: 'little', elf_version: 1, os_abi: 'System V', object_type: 'executable',
       machine: 'x86-64', entry_point: 0, elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
 }
 
