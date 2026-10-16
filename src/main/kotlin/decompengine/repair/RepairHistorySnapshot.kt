@@ -17,7 +17,7 @@ internal class RepairHistorySnapshot internal constructor(
     val pending: RepairRecordedAttempt?,
     retainedCases: List<RepairRecordedIdentity>,
 ) {
-    val viewSchemaVersion: Int get() = 1
+    val viewSchemaVersion: Int get() = 2
     val qualification: RepairRecordedQualification get() = RepairRecordedQualification.RECORDED_METADATA_ONLY
     val runs: List<RepairRecordedRun> = immutableRecordedList(runs)
     val attempts: List<RepairRecordedAttempt> = immutableRecordedList(attempts)
@@ -28,6 +28,21 @@ internal enum class RepairRecordedQualification { RECORDED_METADATA_ONLY }
 internal enum class RepairRecordedGraphWire { COMPACT, EXPLICIT_NULL }
 internal enum class RepairRecordedAttemptKind { FINALIZED, PENDING }
 internal enum class RepairRecordedReceiptStatus { NOT_READ }
+internal enum class RepairRecordedFailureKind { COMPILE, BEHAVIOR, OTHER }
+internal enum class RepairRecordedEvidenceKind {
+    BUILD, BEHAVIOR, REGRESSION, RECOVERY, VALIDATION, NO_CHANGE, REFUSED, CANCELLED,
+    LIMIT_EXHAUSTED, PROCESS_CRASHED, VALIDATION_FAILED, OTHER,
+}
+internal enum class RepairRecordedTerminal {
+    COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, PROCESS_CRASHED, OTHER,
+}
+
+/** Correlation only; the consumer must separately authorize and validate any matching artifact. */
+internal data class RepairRecordedArtifactReference internal constructor(val value: String)
+internal data class RepairRecordedEvidence internal constructor(
+    val kind: RepairRecordedEvidenceKind,
+    val artifact: RepairRecordedArtifactReference?,
+)
 
 /** An opaque identity is a checked reference, not a mathematically lossless encoding. */
 internal data class RepairRecordedIdentity internal constructor(val value: String, val rawIdentityWithheld: Boolean)
@@ -52,6 +67,11 @@ internal data class RepairRecordedInvocation internal constructor(
     val requestSha256: String,
     val resultChangesSha256: String,
     val assessment: RepairAgentAssessmentStatus,
+    val artifact: RepairRecordedArtifactReference,
+    val receiptSchemaVersion: Int,
+    val terminal: RepairRecordedTerminal,
+    val terminalSha256: String,
+    val receiptReleaseComplete: Boolean,
 ) {
     val receiptStatus: RepairRecordedReceiptStatus get() = RepairRecordedReceiptStatus.NOT_READ
 }
@@ -68,6 +88,10 @@ internal class RepairRecordedAttempt internal constructor(
     val rollback: RepairRecordedRollback?,
     val invocation: RepairRecordedInvocation?,
     retainedCases: List<RepairRecordedIdentity>,
+    val iterationIndex: Int?,
+    val failureKind: RepairRecordedFailureKind,
+    val before: RepairRecordedEvidence?,
+    val after: RepairRecordedEvidence?,
 ) {
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
 }
@@ -119,6 +143,12 @@ internal class RepairHistoryIdentityReferences internal constructor(private val 
         return RepairRecordedIdentity(reference, true)
     }
 
+    fun artifact(value: String): RepairRecordedArtifactReference {
+        val reference = recordedRepairArtifactReference(corpusSha256, value)
+        register(reference.value, value)
+        return reference
+    }
+
     private fun referenceDigest(domain: String, value: String): String {
         val bytes = value.toByteArray(Charsets.UTF_8)
         return sha256((domain + "\n" + bytes.size + ":").toByteArray(Charsets.UTF_8) + bytes)
@@ -132,6 +162,44 @@ internal class RepairHistoryIdentityReferences internal constructor(private val 
     private companion object {
         val PUBLIC_RECORDED_ID = Regex("(?:root_[0-9a-f]{24}|revision_[0-9]{8}_[0-9a-f]{16}|run_[0-9]{8})")
     }
+}
+
+/** Length framing and the captured corpus bind this opaque reference without retaining its path. */
+internal fun recordedRepairArtifactReference(corpusSha256: String, value: String): RepairRecordedArtifactReference {
+    val bytes = value.toByteArray(Charsets.UTF_8)
+    val prefix = "decompengine.repair.public-artifact.v1\n$corpusSha256\n${bytes.size}:".toByteArray(Charsets.UTF_8)
+    return RepairRecordedArtifactReference("artifact_" + sha256(prefix + bytes))
+}
+
+/** Unknown valid terminal strings can contain private text; retain only a domain-bound digest. */
+internal fun recordedRepairTerminalSha256(value: String): String {
+    val bytes = value.toByteArray(Charsets.UTF_8)
+    return sha256(("decompengine.repair.public-terminal.v1\n${bytes.size}:").toByteArray(Charsets.UTF_8) + bytes)
+}
+
+internal fun recordedRepairTerminal(value: String): RepairRecordedTerminal = when (value) {
+    "returned-completed" -> RepairRecordedTerminal.COMPLETED
+    "returned-no-changes" -> RepairRecordedTerminal.NO_CHANGES
+    "returned-refused" -> RepairRecordedTerminal.REFUSED
+    "returned-cancelled", "failed-cancelled" -> RepairRecordedTerminal.CANCELLED
+    "returned-limit-exhausted", "failed-resource-exhausted", "failed-timeout" -> RepairRecordedTerminal.LIMIT_EXHAUSTED
+    "failed-process-crash" -> RepairRecordedTerminal.PROCESS_CRASHED
+    else -> RepairRecordedTerminal.OTHER
+}
+
+internal fun recordedRepairEvidenceKind(value: String?): RepairRecordedEvidenceKind = when (value) {
+    "compile", "compile-valid" -> RepairRecordedEvidenceKind.BUILD
+    "behavior", "valid" -> RepairRecordedEvidenceKind.BEHAVIOR
+    "retained-regression" -> RepairRecordedEvidenceKind.REGRESSION
+    "crash-recovery" -> RepairRecordedEvidenceKind.RECOVERY
+    "no-validated-improvement" -> RepairRecordedEvidenceKind.VALIDATION
+    "agent-no-change", "agent-stop-no-changes" -> RepairRecordedEvidenceKind.NO_CHANGE
+    "agent-stop-refused" -> RepairRecordedEvidenceKind.REFUSED
+    "agent-stop-cancelled", "agent-failure-cancelled" -> RepairRecordedEvidenceKind.CANCELLED
+    "agent-stop-limit-exhausted", "agent-failure-resource-exhausted", "agent-failure-timeout" -> RepairRecordedEvidenceKind.LIMIT_EXHAUSTED
+    "agent-failure-process-crash" -> RepairRecordedEvidenceKind.PROCESS_CRASHED
+    "assessment-error", "validation-error" -> RepairRecordedEvidenceKind.VALIDATION_FAILED
+    else -> RepairRecordedEvidenceKind.OTHER
 }
 
 /** Correlation of a captured derived projection only; never canonical or execution authority. */

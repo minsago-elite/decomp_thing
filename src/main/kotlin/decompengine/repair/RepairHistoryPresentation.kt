@@ -80,3 +80,50 @@ internal fun JsonObject.historyText(name: String): String? = (this[name] as? Jso
 internal fun repairRollbackRunLabel(run: RepairRunState): String? = run.rollbackFailureAttemptId?.let {
     "rollback attempt: $it (${requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-')})"
 }
+
+/** Shared fixed labels over captured canonical metadata; receipt verification is separate. */
+internal fun recordedRepairAttemptLabel(attempt: RepairRecordedAttempt): String {
+    if (attempt.kind == RepairRecordedAttemptKind.PENDING) return "pending"
+    when (attempt.invocation?.terminal) {
+        RepairRecordedTerminal.NO_CHANGES -> return "no-change"
+        RepairRecordedTerminal.REFUSED -> return "refused"
+        RepairRecordedTerminal.CANCELLED -> return "cancelled"
+        RepairRecordedTerminal.LIMIT_EXHAUSTED -> return "limit-exhausted"
+        RepairRecordedTerminal.PROCESS_CRASHED -> return "process-crashed"
+        else -> Unit
+    }
+    when (attempt.after?.kind) {
+        RepairRecordedEvidenceKind.NO_CHANGE -> return "no-change"
+        RepairRecordedEvidenceKind.REFUSED -> return "refused"
+        RepairRecordedEvidenceKind.CANCELLED -> return "cancelled"
+        RepairRecordedEvidenceKind.LIMIT_EXHAUSTED -> return "limit-exhausted"
+        RepairRecordedEvidenceKind.PROCESS_CRASHED -> return "process-crashed"
+        RepairRecordedEvidenceKind.VALIDATION_FAILED -> return "validation-failed"
+        else -> Unit
+    }
+    return when (attempt.status) {
+        ModuleRevisionStatus.REJECTED -> "rejected"
+        ModuleRevisionStatus.PROVISIONAL -> "provisional"
+        ModuleRevisionStatus.ACCEPTED -> when {
+            attempt.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE && attempt.invocation == null -> "accepted"
+            attempt.publicationMode == RepairPublicationMode.ACP_RELEASE &&
+                attempt.invocation?.assessment == RepairAgentAssessmentStatus.ACCEPTED &&
+                attempt.invocation.terminal == RepairRecordedTerminal.COMPLETED &&
+                attempt.invocation.receiptReleaseComplete -> "accepted"
+            else -> "unverified"
+        }
+        else -> "unverified"
+    }
+}
+
+internal fun recordedRepairRollbackLabel(rollback: RepairRecordedRollback?): String = when {
+    rollback == null -> "Unverified; restoration completion or failure is not recorded."
+    rollback.legacyPendingStateUnknown -> "Unverified; the legacy restoration state is unknown."
+    else -> when (rollback.state) {
+        RepairRollbackState.RESTORE_IN_PROGRESS -> "Recorded restoration is in progress."
+        RepairRollbackState.RESTORE_FAILED_UNRESOLVED -> "Recorded restoration failed and remains unresolved."
+        RepairRollbackState.RESTORED_VERIFIED -> "Recorded restoration completed and was verified."
+        RepairRollbackState.RESTORED_AFTER_FAILURE -> "Recorded restoration completed after failure; the earlier failure is retained."
+        RepairRollbackState.NOT_REQUIRED_VERIFIED -> "Recorded restoration was not required; candidate source installation did not begin."
+    }
+}

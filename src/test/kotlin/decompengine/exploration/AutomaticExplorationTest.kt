@@ -2,6 +2,7 @@ package decompengine.exploration
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import decompengine.validation.ProcessInput
@@ -89,6 +90,16 @@ class AutomaticExplorationTest {
     }
 
     @Test
+    fun `mutation deduplication preserves no arguments and one empty argument`() {
+        val seed = CandidateInput("empty_arg", CandidateSource.SEED, args = listOf(""), stdin = "\n".toByteArray())
+        val expanded = MutationExpander().expand(listOf(seed, seed.copy(id = "same_content")))
+
+        assertTrue(expanded.any { it.args.isEmpty() && it.stdin.isEmpty() })
+        assertTrue(expanded.any { it.args == listOf("") && it.stdin.isEmpty() })
+        assertEquals(1, expanded.count { it.args == listOf("") && it.stdin.isEmpty() })
+    }
+
+    @Test
     fun `generated tests increase path and output coverage`() {
         val tempDir = createTempDirectory("exploration-coverage-")
         val binary = compileBranchingProgram(tempDir)
@@ -158,6 +169,25 @@ class AutomaticExplorationTest {
         assertTrue(json.contains("\"newOutputSignatures\""))
         assertTrue(json.contains("\"observations\""))
         assertTrue(json.contains("\"argvStates\": 2"))
+    }
+
+    @Test
+    fun `exploration report round trips all non NUL JSON control characters in arguments`() {
+        val tempParent = java.nio.file.Path.of("build", "test-work", "exploration-json-controls").createDirectories()
+        val tempDir = java.nio.file.Files.createTempDirectory(tempParent, "case-")
+        val binary = compileBranchingProgram(tempDir)
+        val argument = (1..31).map { it.toChar() }.joinToString("")
+        val seed = CandidateInput("controls", CandidateSource.SEED, args = listOf(argument))
+        val noSymbolicCandidates = object : AngrExplorer {
+            override fun generate(binaryPath: java.nio.file.Path): List<CandidateInput> = emptyList()
+        }
+        val report = AutomaticExplorer(angrExplorer = noSymbolicCandidates, maxCandidates = 1)
+            .explore(binary, listOf(seed), tempDir.resolve("reports"))
+
+        val candidate = Json.parseToJsonElement(report.reportPath.readText()).jsonObject
+            .getValue("candidates").jsonArray.single().jsonObject
+        assertEquals(seed.id, candidate.getValue("id").jsonPrimitive.content)
+        assertEquals(argument, candidate.getValue("args").jsonArray.single().jsonPrimitive.content)
     }
 
     private class FakeAngrExplorer : AngrExplorer {

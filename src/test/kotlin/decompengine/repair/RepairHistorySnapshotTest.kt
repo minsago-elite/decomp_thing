@@ -42,6 +42,7 @@ class RepairHistorySnapshotTest {
             graph.enableRunContract()
             val attempt = graph.beginAttempt(listOf("code.c"))
             assertEquals(attempt.id, view(capture(root)).pending?.identity?.value)
+            assertEquals("pending", recordedRepairAttemptLabel(requireNotNull(view(capture(root)).pending)))
             assertNull(view(capture(root)).pending?.rollback)
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
             val rejected = graph.reject(attempt, RepairEvidence("rejected", "PRIVATE-peer"))
@@ -205,6 +206,7 @@ class RepairHistorySnapshotTest {
             graph.recordProvisional(first, RepairEvidence("behavior", "PRIVATE-peer"), proof(graph, first))
             val provisional = view(capture(root))
             assertEquals(first.id, provisional.provisionalHead?.value)
+            assertEquals("provisional", recordedRepairAttemptLabel(provisional.attempts.last()))
             assertNull(provisional.fullyAcceptedHead)
             assertNotEquals(provisional.publishedHead, provisional.provisionalHead)
             val second = graph.beginAttempt(listOf("code.c"), metadata(graph, 2))
@@ -217,6 +219,7 @@ class RepairHistorySnapshotTest {
             assertEquals(RepairRunStatus.FULLY_ACCEPTED, accepted.runs.single().status)
             assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, accepted.qualification)
             assertEquals(RepairPublicationMode.TEST_ONLY_NON_RELEASE, accepted.attempts.last().publicationMode)
+            assertEquals("accepted", recordedRepairAttemptLabel(accepted.attempts.last()))
         }
     }
 
@@ -232,6 +235,7 @@ class RepairHistorySnapshotTest {
         assertEquals(2, snapshot.graphSchemaVersion)
         assertNull(snapshot.fullyAcceptedHead)
         assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, snapshot.attempts.single().status)
+        assertEquals("unverified", recordedRepairAttemptLabel(snapshot.attempts.single()))
         assertEquals(snapshot.publishedHead, snapshot.attempts.single().identity)
         assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, snapshot.qualification)
     }
@@ -267,6 +271,50 @@ class RepairHistorySnapshotTest {
     }
 
     @Test
+    fun publicArtifactAndTerminalReferencesWithholdPrivateStringsAndBindTheCapturedCorpus() {
+        val root = root()
+        val beforePath = "reports/PRIVATE-before.json"
+        val afterPath = "reports/PRIVATE-after.json"
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            startRun(graph)
+            val metadata = metadata(graph).copy(before = RepairEvidence("compile", "PRIVATE-diagnostic", beforePath))
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata)
+            graph.installCandidate(attempt, mapOf("code.c" to "PRIVATE-source".toByteArray()))
+            graph.reject(attempt, RepairEvidence("private-evidence-kind-canary", "PRIVATE-peer", afterPath))
+        }
+        val bound = bindNode(capture(root), "rejected")
+        val privateTerminal = "failed-private-terminal-canary"
+        val captured = reseal(bound) { json -> editLastMetadata(json) { metadata ->
+            val invocation = metadata.getValue("agentInvocation").jsonObject
+            JsonObject(metadata + ("agentInvocation" to JsonObject(invocation + mapOf(
+                "terminalOutcome" to JsonPrimitive(privateTerminal), "receiptReleaseComplete" to JsonPrimitive(false),
+            ))))
+        } }
+        val snapshot = view(captured)
+        val attempt = snapshot.attempts.single()
+        assertEquals(2, snapshot.viewSchemaVersion)
+        assertEquals(1, attempt.iterationIndex)
+        assertEquals(RepairRecordedFailureKind.COMPILE, attempt.failureKind)
+        assertEquals(RepairRecordedEvidenceKind.BUILD, attempt.before?.kind)
+        assertEquals(RepairRecordedEvidenceKind.OTHER, attempt.after?.kind)
+        val expected = recordedRepairArtifactReference(snapshot.corpusSha256, beforePath)
+        assertEquals(expected, attempt.before?.artifact)
+        assertNotEquals(expected, attempt.after?.artifact)
+        assertNotEquals(expected, recordedRepairArtifactReference("0".repeat(64), beforePath))
+        assertNotEquals(expected, recordedRepairArtifactReference(snapshot.corpusSha256, beforePath + "x"))
+        val invocation = requireNotNull(attempt.invocation)
+        assertEquals(RepairRecordedTerminal.OTHER, invocation.terminal)
+        assertEquals(recordedRepairTerminalSha256(privateTerminal), invocation.terminalSha256)
+        assertEquals(RepairRecordedReceiptStatus.NOT_READ, invocation.receiptStatus)
+        assertEquals("rejected", recordedRepairAttemptLabel(attempt))
+        assertEquals(recordedRepairArtifactReference(snapshot.corpusSha256,
+            "reports/repair-revisions/${attempt.identity.value}.acp-receipt.json"), invocation.artifact)
+        val surface = publicSurface(snapshot)
+        for (private in listOf("PRIVATE-", privateTerminal, "private-evidence-kind-canary", "code.c", "reports/", "bounded private prompt"))
+            assertFalse(private in surface, surface)
+    }
+
+    @Test
     fun opaqueReferenceCollisionRefusesWithoutLeakingPrivateValues() {
         val table = RepairHistoryIdentityReferences("a".repeat(64))
         assertTrue(table.revision("revision_PRIVATE_legacy").rawIdentityWithheld)
@@ -278,6 +326,26 @@ class RepairHistorySnapshotTest {
         assertIs<IllegalArgumentException>(failure)
         assertEquals("Recorded identity reference collision.", failure.message)
         assertFalse(failure.message.orEmpty().contains("PRIVATE-"))
+    }
+
+    @Test
+    fun recordedRollbackLabelsDistinguishAllStatesAndNeverCompleteUnknownLegacyRestoration() {
+        val restored = requireNotNull(view(restored()).attempts.last().rollback)
+        val labels = RepairRollbackState.entries.associateWith { state ->
+            recordedRepairRollbackLabel(restored.copy(state = state))
+        }
+        assertEquals(RepairRollbackState.entries.size, labels.values.toSet().size)
+        assertTrue(labels.getValue(RepairRollbackState.RESTORE_IN_PROGRESS).contains("in progress"))
+        assertTrue(labels.getValue(RepairRollbackState.RESTORE_FAILED_UNRESOLVED).contains("failed and remains unresolved"))
+        assertTrue(labels.getValue(RepairRollbackState.RESTORED_VERIFIED).contains("completed and was verified"))
+        assertTrue(labels.getValue(RepairRollbackState.RESTORED_AFTER_FAILURE).contains("earlier failure is retained"))
+        assertTrue(labels.getValue(RepairRollbackState.NOT_REQUIRED_VERIFIED).contains("did not begin"))
+        for (state in RepairRollbackState.entries) {
+            val label = recordedRepairRollbackLabel(restored.copy(state = state, legacyPendingStateUnknown = true))
+            assertTrue(label.startsWith("Unverified;"))
+            assertFalse("completed" in label)
+        }
+        assertTrue(recordedRepairRollbackLabel(null).startsWith("Unverified;"))
     }
 
     @Test
