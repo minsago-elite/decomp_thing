@@ -1,0 +1,2 @@
+# Match the existing production Docker pin; resolved dependencies are retained in CI.
+angr==9.2.213

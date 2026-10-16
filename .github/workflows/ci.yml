@@ -190,6 +190,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          fetch-depth: 2
+      - name: Select relevant real Angr qualification
+        id: angr-changes
+        if: matrix.shard == 'core'
+        run: |
+          if git diff --quiet HEAD^ HEAD -- \
+            .github/workflows/ci.yml build.gradle.kts requirements/angr-qualification.txt \
+            scripts/ci-qualify-angr.sh src/main/kotlin/decompengine/exploration \
+            src/test/kotlin/decompengine/exploration; then
+            echo 'required=false' >> "$GITHUB_OUTPUT"
+          else
+            diff_status=$?
+            test "$diff_status" -eq 1
+            echo 'required=true' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -248,6 +263,24 @@ jobs:
       - name: Qualify pinned credential-free codex-acp authentication boundary
         if: matrix.shard == 'live'
         run: scripts/ci-qualify-codex-acp.sh
+      - name: Install real Angr qualification prerequisite
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        run: sudo apt-get install -y --no-install-recommends python3-venv
+      - name: Require real Angr argv and stdin discovery
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        timeout-minutes: 8
+        run: bash scripts/ci-qualify-angr.sh
+      - name: Retain real Angr fixture and tool evidence
+        uses: actions/upload-artifact@v7
+        if: always() && matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        with:
+          name: real-angr-qualification
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/angr-qualification
+            build/test-results/realAngrQualification
+            build/reports/tests/realAngrQualification
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
