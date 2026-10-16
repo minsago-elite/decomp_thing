@@ -1245,38 +1245,46 @@ class UploadServerTest {
 
     @Test
     fun `actual canonical rejected history survives reconnect and empty H without private payload or writes`() {
-        withServer { server, dataDir ->
-            val id = uploadedJobId(server)
-            val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
-            produceRecordedRepairHistory(project)
-            val before = recordedProjectBytes(project)
-            repeat(2) {
-                val response = request(server, "GET", "/jobs/$id")
-                val body = response.body.decodeToString()
-                assertEquals(200, response.status)
-                assertTrue("Compile repair — rejected" in body, body)
-                assertTrue("Recorded restoration completed and was verified." in body, body)
-                assertTrue("Fully accepted revision: <code>none</code>" in body, body)
-                assertTrue("Test-only evidence; release completeness is not established." in body, body)
-                assertTrue("Before:</b> Build validation evidence · Retained evidence is corrupt." in body, body)
-                assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
-                for (private in listOf("PRIVATE-", "code.c", "<script>private", "bounded failure")) assertFalse(private in body, body)
-            }
-            val after = recordedProjectBytes(project)
-            assertEquals(before.keys, after.keys)
-            before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
-            val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
-            assertTrue("repair iteration 1: rejected" in cli, cli)
-            assertTrue("Recorded restoration completed and was verified." in cli, cli)
+        for (detached in listOf(false, true)) {
+            withServer { server, dataDir ->
+                val id = uploadedJobId(server)
+                val project = dataDir.resolve("$id/reports/source-tree").createDirectories()
+                produceRecordedRepairHistory(project, detached = detached)
+                val before = recordedProjectBytes(project)
+                val expectedRollback = if (detached)
+                    "Recorded restoration was not required; candidate source installation did not begin."
+                else "Recorded restoration completed and was verified."
+                repeat(2) {
+                    val response = request(server, "GET", "/jobs/$id")
+                    val body = response.body.decodeToString()
+                    assertEquals(200, response.status)
+                    assertTrue("Compile repair — rejected" in body, body)
+                    assertTrue(expectedRollback in body, body)
+                    assertFalse((if (detached) "Recorded restoration completed and was verified."
+                        else "Recorded restoration was not required;") in body, body)
+                    assertTrue("Fully accepted revision: <code>none</code>" in body, body)
+                    assertTrue("Test-only evidence; release completeness is not established." in body, body)
+                    assertTrue("Before:</b> Build validation evidence · Retained evidence is corrupt." in body, body)
+                    assertTrue("/jobs/$id/artifacts/reports/source-tree/reports/after.json\">Open retained evidence" in body, body)
+                    for (private in listOf("PRIVATE-", "code.c", "<script>private", "bounded failure")) assertFalse(private in body, body)
+                }
+                val after = recordedProjectBytes(project)
+                assertEquals(before.keys, after.keys)
+                before.forEach { (name, bytes) -> assertContentEquals(bytes, after.getValue(name), name) }
+                val cli = presentRecordedRepairHistory(readProjectRecordedRepairHistory(project)).lines.joinToString("\n")
+                assertTrue("repair iteration 1: rejected" in cli, cli)
+                assertTrue(expectedRollback in cli, cli)
 
-            project.resolve("reports/repair_history.json").writeText("")
-            val emptyH = request(server, "GET", "/jobs/$id").body.decodeToString()
-            assertTrue("Compile repair — rejected" in emptyH, emptyH)
-            assertTrue("History projection: empty" in emptyH, emptyH)
-            project.resolve("reports/repair-revisions/graph.json").writeText("")
-            val invalidGraph = request(server, "GET", "/jobs/$id").body.decodeToString()
-            assertTrue("Repair history is unavailable or corrupt." in invalidGraph, invalidGraph)
-            assertFalse("Recorded restoration completed" in invalidGraph, invalidGraph)
+                project.resolve("reports/repair_history.json").writeText("")
+                val emptyH = request(server, "GET", "/jobs/$id").body.decodeToString()
+                assertTrue("Compile repair — rejected" in emptyH, emptyH)
+                assertTrue("History projection: empty" in emptyH, emptyH)
+                project.resolve("reports/repair-revisions/graph.json").writeText("")
+                val invalidGraph = request(server, "GET", "/jobs/$id").body.decodeToString()
+                assertTrue("Repair history is unavailable or corrupt." in invalidGraph, invalidGraph)
+                assertFalse("Recorded restoration completed" in invalidGraph, invalidGraph)
+                assertFalse(expectedRollback in invalidGraph, invalidGraph)
+            }
         }
     }
 
@@ -2072,7 +2080,7 @@ class UploadServerTest {
         listOf("code.c"), listOf("code.c"), modules = listOf(RepairModuleEvidence("PRIVATE-module", listOf("code.c")))))
 
     /** Producer and authored receipt data only; no agent process or runtime is qualified here. */
-    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false) {
+    private fun produceRecordedRepairHistory(project: Path, receipt: Boolean = false, detached: Boolean = true) {
         val original = "PRIVATE-original-source".toByteArray()
         val candidate = "PRIVATE-candidate-source".toByteArray()
         Files.write(project.resolve("code.c"), original)
@@ -2082,18 +2090,27 @@ class UploadServerTest {
         ModuleRevisionGraph.open(project, recordedRepairProfile()).use { graph ->
             graph.enableRunContract()
             graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-argv"), "PRIVATE-stdin".toByteArray())))
-            graph.beginRun(2, 60_000)
-            graph.bindOriginalBinary(sha256("reference".toByteArray()))
-            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            if (detached) {
+                graph.beginRun(2, 60_000)
+                graph.bindOriginalBinary(sha256("reference".toByteArray()))
+                graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            }
             val corpus = graph.retainedRegressionCorpus()
             val metadata = RevisionRepairMetadata(1, "compile", if (receipt) "bounded failure" else "<script>private PRIVATE-prompt</script>",
                 "PRIVATE-summary", corpus.inputs.map { it.id }, RepairEvidence("compile", "PRIVATE-before", "reports/before.json"),
                 corpus.sha256, publicationMode = if (receipt) RepairPublicationMode.ACP_RELEASE else RepairPublicationMode.TEST_ONLY_NON_RELEASE)
             val attempt = graph.beginAttempt(listOf("code.c"), metadata)
             graph.installCandidate(attempt, mapOf("code.c" to candidate))
+            assertContentEquals(if (detached) original else candidate, project.resolve("code.c").readBytes())
             if (receipt) graph.persistAndBindAgentInvocation(attempt,
                 ModuleRevisionGraphTest().completeAcpReceiptDocument(project, attempt, "code.c", original, candidate))
-            graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after.json"))
+            val rejected = graph.reject(attempt, RepairEvidence("valid", "PRIVATE-after", "reports/after.json"))
+            val rollback = assertNotNull(rejected.rollbackRecord)
+            assertEquals(if (detached) RepairRollbackState.NOT_REQUIRED_VERIFIED else RepairRollbackState.RESTORED_VERIFIED,
+                rollback.state)
+            assertEquals(!detached, rollback.candidateSourceInstallStarted)
+            assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
+            assertContentEquals(original, project.resolve("code.c").readBytes())
         }
     }
 
