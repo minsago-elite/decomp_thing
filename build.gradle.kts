@@ -8,6 +8,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.Properties
 import java.util.zip.ZipFile
@@ -1570,7 +1571,7 @@ tasks.register<Test>("realAngrQualification") {
     systemProperty("decompengine.angr.evidenceRoot", evidenceRoot.absolutePath)
     maxHeapSize = "512m"
     maxParallelForks = 1
-    timeout.set(java.time.Duration.ofMinutes(3))
+    timeout.set(Duration.ofMinutes(3))
     outputs.upToDateWhen { false }
     outputs.cacheIf("Real Angr qualification requires fresh discovery") { false }
     doFirst {
