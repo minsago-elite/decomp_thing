@@ -9,6 +9,70 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `snapshot size planning preserves exact maximal suffix across Unicode gaps and counter boundaries`(): Unit {
+        val fixtures = listOf(
+            List(31) { it.toLong() },
+            List(31) { it.toLong() * 3 },
+            List(31) { 7L + it.toLong() * 3 },
+            List(31) { Long.MAX_VALUE - 100 + it.toLong() * 2 },
+            emptyList<Long>(),
+            listOf(1L),
+        )
+        fixtures.forEachIndexed { fixture, sequences ->
+            val next = listOf(31L, 94L, 101L, Long.MAX_VALUE - 1, 2L, 2L)[fixture]
+            val initialHistory = listOf(0L, 0L, 7L, Long.MAX_VALUE - 100, 2L, 1L)[fixture]
+            val queueLoss = next - initialHistory - sequences.size
+            val records = sequences.mapIndexed { index, sequence -> buildJsonObject {
+                put("sequence", sequence); put("runId", "fixture"); put("workflow", "repair")
+                put("time", "2026-10-18T00:00:00Z"); put("kind", "message")
+                put("text", when {
+                    fixture == 2 && index == 30 -> "界\n\"\\😀".repeat(512)
+                    index % 4 == 0 -> "界\n\"\\😀".repeat(128)
+                    else -> "plain-$index".repeat(index % 5 + 1)
+                })
+            } }
+            // Independent brute-force encoding is the previous eviction rule's byte oracle.
+            fun candidate(removed: Int): JsonObject {
+                val kept = records.drop(removed)
+                var cursor = 0L
+                val ranges = buildJsonArray {
+                    for (record in kept) {
+                        val sequence = record.getValue("sequence").jsonPrimitive.long
+                        if (cursor < sequence) add(buildJsonObject {
+                            put("startInclusive", cursor.toString()); put("endExclusive", sequence.toString())
+                        })
+                        cursor = sequence + 1
+                    }
+                    if (cursor < next) add(buildJsonObject {
+                        put("startInclusive", cursor.toString()); put("endExclusive", next.toString())
+                    })
+                }
+                return buildJsonObject {
+                    put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", next)
+                    put("queueDropped", queueLoss); put("historyDropped", initialHistory + removed)
+                    put("truncated", queueLoss > 0 || initialHistory + removed > 0)
+                    put("events", JsonArray(kept)); put("omittedSequenceRanges", ranges)
+                }
+            }
+            val original = candidate(0)
+            val originalBytes = original.toString().toByteArray(Charsets.UTF_8).size
+            val budgets = (listOf(4096, 6144, 8192, 65_536, originalBytes - 1, originalBytes))
+                .filter { it in 4096..AgentProgressJournal.MAXIMUM_READ_BYTES }.distinct()
+            budgets.forEach { budget ->
+                val expected = (0..records.size).first {
+                    candidate(it).toString().toByteArray(Charsets.UTF_8).size <= budget
+                }
+                assertEquals(expected, AgentProgressJournal.prefixEvictionsToFit(original, budget), "fixture=$fixture budget=$budget")
+                val retained = candidate(expected)
+                val encoded = retained.toString().toByteArray(Charsets.UTF_8)
+                assertTrue(encoded.size <= budget)
+                assertEquals(retained, AgentProgressJournal.decode(encoded))
+                if (expected > 0) assertTrue(candidate(expected - 1).toString().toByteArray(Charsets.UTF_8).size > budget)
+            }
+        }
+    }
+
+    @Test
     fun `saturated queue retains the last terminal phase and exact loss through the CLI projection`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-terminal").toAbsolutePath())
         val terminals = listOf(AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED)

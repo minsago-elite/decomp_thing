@@ -306,9 +306,12 @@ class AgentProgressJournal private constructor(
                 // this coherent cut is encoded, trimmed and published without their monitor.
                 beforeSnapshotEncode?.invoke()
                 var sizeDropped = 0L
-                var snapshotBytes = snapshot(boundary, sizeDropped).toString().toByteArray(Charsets.UTF_8)
-                while (snapshotBytes.size > maximumSnapshotBytes && retained.isNotEmpty()) {
-                    retained.removeFirst(); sizeDropped++
+                val untrimmed = snapshot(boundary, sizeDropped)
+                var snapshotBytes = untrimmed.toString().toByteArray(Charsets.UTF_8)
+                if (snapshotBytes.size > maximumSnapshotBytes) {
+                    val removed = prefixEvictionsToFit(untrimmed, maximumSnapshotBytes)
+                    repeat(removed) { retained.removeFirst() }
+                    sizeDropped = removed.toLong()
                     snapshotBytes = snapshot(boundary, sizeDropped).toString().toByteArray(Charsets.UTF_8)
                 }
                 check(snapshotBytes.size <= maximumSnapshotBytes) { "progress snapshot exceeds its limit" }
@@ -467,15 +470,62 @@ class AgentProgressJournal private constructor(
             return result
         }
 
+        /** Coherent writer snapshots only; retain the exact first fitting suffix in linear work. */
+        internal fun prefixEvictionsToFit(snapshot: JsonObject, maximumBytes: Int): Int {
+            require(maximumBytes in 4096..MAXIMUM_READ_BYTES)
+            val events = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+            require(events.size <= 1024)
+            val next = snapshot.getValue("nextSequence").jsonPrimitive.long
+            val queueLoss = snapshot.getValue("queueDropped").jsonPrimitive.long
+            val historyLoss = snapshot.getValue("historyDropped").jsonPrimitive.long
+            val sequences = events.map { it.getValue("sequence").jsonPrimitive.long }
+            val eventBytes = LongArray(events.size + 1)
+            val rangeBytes = LongArray(events.size + 1)
+            val rangeCounts = IntArray(events.size + 1)
+            fun gapBytes(start: Long, end: Long): Long =
+                omissionRange(start, end).toString().toByteArray(Charsets.UTF_8).size.toLong()
+            // Each record and each following gap is encoded once, rather than per eviction.
+            for (index in events.indices.reversed()) {
+                eventBytes[index] = eventBytes[index + 1] +
+                    events[index].toString().toByteArray(Charsets.UTF_8).size
+                val start = sequences[index] + 1
+                val end = sequences.getOrNull(index + 1) ?: next
+                val hasGap = start < end
+                rangeBytes[index] = rangeBytes[index + 1] + if (hasGap) gapBytes(start, end) else 0L
+                rangeCounts[index] = rangeCounts[index + 1] + if (hasGap) 1 else 0
+            }
+            val empty = JsonArray(emptyList())
+            val metadata = snapshot.filterKeys { it != "events" && it != "omittedSequenceRanges" }
+            for (removed in 0..events.size) {
+                val prefixEnd = sequences.getOrNull(removed) ?: next
+                val hasPrefix = prefixEnd > 0
+                val gaps = rangeCounts[removed] + if (hasPrefix) 1 else 0
+                val frame = JsonObject(metadata + mapOf(
+                    "historyDropped" to JsonPrimitive(historyLoss + removed),
+                    "truncated" to JsonPrimitive(queueLoss > 0 || historyLoss + removed > 0),
+                    "events" to empty,
+                    "omittedSequenceRanges" to empty,
+                ))
+                val frameBytes = frame.toString().toByteArray(Charsets.UTF_8).size.toLong()
+                val encodedBytes = frameBytes + eventBytes[removed] +
+                    (events.size - removed - 1).coerceAtLeast(0) + rangeBytes[removed] +
+                    (if (hasPrefix) gapBytes(0, prefixEnd) else 0L) + (gaps - 1).coerceAtLeast(0)
+                if (encodedBytes <= maximumBytes) return removed
+            }
+            error("progress snapshot exceeds its limit")
+        }
+
+        private fun omissionRange(start: Long, end: Long): JsonObject = buildJsonObject {
+            put("startInclusive", start.toString())
+            put("endExclusive", end.toString())
+        }
+
         // The complement of at most 1024 retained sequences has at most 1025 ranges.
         // Decimal strings preserve exact 64-bit boundaries in browser JSON consumers.
         private fun omissionRanges(events: List<JsonObject>, next: Long): JsonArray = buildJsonArray {
             var cursor = 0L
             fun gap(endExclusive: Long) {
-                if (cursor < endExclusive) add(buildJsonObject {
-                    put("startInclusive", cursor.toString())
-                    put("endExclusive", endExclusive.toString())
-                })
+                if (cursor < endExclusive) add(omissionRange(cursor, endExclusive))
             }
             events.forEach { event ->
                 val retainedSequence = event.getValue("sequence").jsonPrimitive.long
