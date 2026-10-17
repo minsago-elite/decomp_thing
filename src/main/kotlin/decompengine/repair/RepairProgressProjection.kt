@@ -2,13 +2,14 @@ package decompengine.repair
 
 import decompengine.agent.*
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.ProgressWarnings
 import java.nio.file.Path
 
 /** Optional operator projection. Neither persistence nor observer failure changes repair authority. */
 internal class RepairProgressProjection(
     reportsDirectory: Path,
     private val onUnavailable: () -> Unit = {
-        System.err.println("Repair progress is unavailable; durable repair state remains authoritative.")
+        ProgressWarnings.repairUnavailable()
     },
 ) : AutoCloseable {
     private var warned = false
