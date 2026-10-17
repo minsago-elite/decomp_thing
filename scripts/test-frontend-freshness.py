@@ -14,7 +14,7 @@ spec.loader.exec_module(f)
 
 
 class MemoryFiles:
-    def __init__(self,ledger): self.ledger=ledger; self.data={}; self.removed=[]
+    def __init__(self,ledger): self.ledger=ledger; self.data={}; self.modes={}; self.removed=[]
     def path(self,path): return Path(path)
     def read(self,path,maximum=16*1024**2):
         self.ledger.check(); data=self.data[str(path)]
@@ -27,16 +27,21 @@ class MemoryFiles:
     def write(self,path,data,evidence=False):
         self.ledger.check(cleanup=evidence)
         if evidence:self.ledger.evidence(len(data))
-        self.data[str(path)]=data
-    def inventory(self,path,limits=f.OUTPUT,*,partitioned_ui=False,dist_assets=False):
+        self.data[str(path)]=data; self.modes.setdefault(str(path),0o644)
+    def write_input(self,path,data,mode):
+        self.write(path,data); self.modes[str(path)]=mode
+    def inventory(self,path,limits=f.OUTPUT,*,partitioned_ui=False,dist_assets=False,input_sources=None):
         prefix=str(path)+'/'
-        rows={name[len(prefix):]:{'bytes':len(data),'sha256':f.sha(data)} for name,data in sorted(self.data.items()) if name.startswith(prefix)}
+        rows={name[len(prefix):]:{'bytes':len(data),'sha256':f.sha(data)} for name,data in sorted(self.data.items()) if name.startswith(prefix) and (input_sources is None or not any(name[len(prefix):].startswith(root+'/') for root in f.SOURCE_OUTPUTS))}
+        if input_sources is not None:
+            for name,row in rows.items():row['mode']=self.modes.get(prefix+name,0o644)
         if dist_assets and len(rows)>2048:raise f.Refusal('dist asset file bound')
         return f.check_ui_partition(rows) if partitioned_ui else rows
     def remove(self,path):
         self.ledger.check(); prefix=str(path); self.removed.append(prefix)
         for name in list(self.data):
-            if name==prefix or name.startswith(prefix+'/'):del self.data[name]
+            if name==prefix or name.startswith(prefix+'/'):
+                del self.data[name];self.modes.pop(name,None)
 
 
 def build_output(mode):
@@ -67,7 +72,6 @@ class ProducedFixture:
         sentinel=any(str(self.fixture/part/'assets/freshness-obsolete.svg') in self.fs.data for part in ('build/frontend/dist','build/generated/frontend-resources/decompengine/web/ui'))
         self.observations.append((mode,sentinel))
         if mode not in ('unchanged','drift') and not (self.defect=='missing-source-input' and mode=='fresh'):self.produce(mode)
-        if self.defect=='fresh-prep' and mode=='warm':self.fs.write(self.fixture/'frontend/src/app/mark.svg',b'no SVG anchor')
         if self.defect=='late' and mode=='cold':self.fs.ledger.clock.now=406
         result=build_output(mode)
         if self.defect=='missing-source-input' and mode=='fresh':result['output']=result['output'].replace(b':frontendBuild\n',b':frontendBuild UP-TO-DATE\n')
@@ -109,6 +113,7 @@ class FreshnessControls(unittest.TestCase):
         originals={'frontend/src/app/mark.svg':b'<svg/>','frontend/src/app/App.tsx':b"import mark from './mark.svg';",
                    'frontend/src/api/generated.ts':b'authored types','frontend/src/api/generated-schema.ts':b'authored schema',
                    'contracts/web/v1/contract.schema.json':b'{"definitions":{}}'}
+        if defect=='fresh-prep':originals['frontend/src/app/mark.svg']=b'no SVG anchor'
         for name,data in originals.items():files.write(source/name,data);files.write(fixture/name,data)
         baseline=[str(source/'build/frontend/dist'),str(source/'build/frontend/asset-manifest.json'),
                   str(source/'build/generated/frontend-resources/decompengine/web/ui')]
@@ -120,9 +125,106 @@ class FreshnessControls(unittest.TestCase):
         tools={}
         for name,data in (('/repo/node/bin/npm',f.NPM_LINK.encode('ascii')),('/repo/node/lib/node_modules/npm/bin/npm-cli.js',b'// authored inert npm entry')):
             files.write(name,data);tools[name]={'bytes':len(data),'sha256':f.sha(data)}
-        manifest={'tools':tools,'gradle':'/repo/cache/bin/gradle','gradleHome':'/repo/cache','nodeHome':'/repo/node','javaHome':'/repo/java','packagedBaseline':baseline}
+        manifest={'sources':{name:{'bytes':len(data),'sha256':f.sha(data),'mode':0o644} for name,data in originals.items()},'tools':tools,'gradle':'/repo/cache/bin/gradle','gradleHome':'/repo/cache','nodeHome':'/repo/node','javaHome':'/repo/java','packagedBaseline':baseline}
         runner=ProducedFixture(files,fixture,defect)
         return f.Freshness(source,work,manifest,ledger,files,runner),runner,files,clock
+
+    def test_original_generated_checkout_comparison_remains_required(self):
+        diagnostic,runner,files,_=self.harness(); original=diagnostic.runner
+        def run(argv,cwd,env):
+            result=original(argv,cwd,env)
+            if argv[-1]=='--check' and sum(a[-1]=='--check' for a,_ in runner.calls)==3:
+                files.write(diagnostic.source/'frontend/src/api/generated.ts',b'authored original-checkout mutation')
+            return result
+        diagnostic.runner=run
+        with self.assertRaises(f.Refusal):diagnostic.run()
+        self.assertEqual(3,sum(argv[-1]=='--check' for argv,_ in runner.calls))
+
+    def test_every_gradle_phase_revalidates_all_copied_inputs(self):
+        phases=('cold','unchanged','warm','fresh','stale','drift')
+        for target in phases:
+            with self.subTest(phase=target):
+                diagnostic,runner,files,_=self.harness(); original=diagnostic.runner
+                def run(argv,cwd,env):
+                    result=original(argv,cwd,env)
+                    if argv[-1]!='--check' and sum(a[-1]!='--check' for a,_ in runner.calls)==phases.index(target)+1:
+                        files.write(diagnostic.fixture/'contracts/web/v1/contract.schema.json',b'{"definitions":{"unreviewed":{"type":"string"}}}')
+                    return result
+                diagnostic.runner=run
+                with self.assertRaises(f.Refusal):diagnostic.run()
+                self.assertEqual(phases.index(target)+1,sum(a[-1]!='--check' for a,_ in runner.calls))
+
+    def test_every_api_check_rejects_mutation_of_another_copied_input(self):
+        for index in range(3):
+            with self.subTest(check=index):
+                diagnostic,runner,files,_=self.harness(); original=diagnostic.runner
+                def run(argv,cwd,env):
+                    result=original(argv,cwd,env)
+                    if argv[-1]=='--check' and sum(a[-1]=='--check' for a,_ in runner.calls)==index+1:
+                        name='contracts/web/v1/contract.schema.json' if index<2 else 'frontend/src/app/App.tsx'
+                        changed=b'{"definitions":{"unreviewed":{"type":"string"}}}' if index<2 else b"import mark from './unreviewed.svg';"
+                        files.write(diagnostic.fixture/name,changed)
+                    return result
+                diagnostic.runner=run
+                with self.assertRaises(f.Refusal):diagnostic.run()
+                self.assertEqual(index+1,sum(a[-1]=='--check' for a,_ in runner.calls))
+
+    def test_source_mutation_between_stale_snapshot_and_drift_cannot_become_original(self):
+        diagnostic,runner,files,_=self.harness(); original=diagnostic.snapshot
+        def snapshot():
+            result=original()
+            if diagnostic.active=='stale':files.write(diagnostic.fixture/'contracts/web/v1/contract.schema.json',b'{"definitions":{"late":{"type":"string"}}}')
+            return result
+        diagnostic.snapshot=snapshot
+        with self.assertRaises(f.Refusal):diagnostic.run()
+        self.assertFalse(any(argv[-1]=='--check' for argv,_ in runner.calls))
+
+    def test_source_namespace_modes_and_manifest_alias_cannot_change_after_capture(self):
+        for defect in ('extra','missing','mode','manifest-alias'):
+            with self.subTest(defect=defect):
+                diagnostic,runner,files,_=self.harness(); path=diagnostic.fixture/'contracts/web/v1/contract.schema.json'; original=diagnostic.runner
+                def run(argv,cwd,env):
+                    result=original(argv,cwd,env)
+                    if len(runner.calls)==1:
+                        if defect=='extra':files.write(diagnostic.fixture/'buildSrc/unreviewed.gradle.kts',b'authored unexpected code')
+                        elif defect=='missing':files.remove(path)
+                        elif defect=='mode':files.modes[str(path)]=0o755
+                        else:
+                            changed=b'{"definitions":{"aliased":{"type":"string"}}}';files.write(path,changed)
+                            diagnostic.manifest['sources']['contracts/web/v1/contract.schema.json'].update(bytes=len(changed),sha256=f.sha(changed))
+                    return result
+                diagnostic.runner=run
+                with self.assertRaises(f.Refusal):diagnostic.run()
+                self.assertEqual(1,len(runner.calls))
+
+    def test_owned_fresh_edits_preserve_pins_and_originals_without_extra_commands(self):
+        diagnostic,runner,files,_=self.harness(); initial=f.canonical(diagnostic.manifest['sources']); result=diagnostic.run()
+        self.assertEqual(initial,f.canonical(diagnostic.manifest['sources']))
+        self.assertNotIn('frontend/src/app/mark.svg',diagnostic._inputs)
+        fresh=diagnostic._inputs['frontend/src/app/freshness-mark.svg'];self.assertEqual(0o644,fresh['mode'])
+        for name in ('frontend/src/api/generated.ts','frontend/src/api/generated-schema.ts','contracts/web/v1/contract.schema.json'):
+            self.assertEqual(diagnostic.manifest['sources'][name],diagnostic._inputs[name])
+        self.assertEqual(f.sha(f.canonical(diagnostic._inputs)),result['copiedInputSha256'])
+        self.assertEqual(3,len(result['phases']['drift']['apiSourceChecks']))
+        self.assertEqual(9,len(runner.calls));self.assertFalse(result['fullIssue651Accepted'])
+
+    def test_input_inventory_refuses_unexpected_size_or_mode_before_payload(self):
+        pin={'bytes':1,'sha256':f.sha(b'x'),'mode':0o644}
+        for defect in ('unexpected','size','mode'):
+            with self.subTest(defect=defect):
+                files=f.Files.__new__(f.Files);files.ledger=f.Ledger(Clock());files.repository=Path('/repo')
+                class Items:
+                    closed=False;done=False
+                    def __enter__(self):return self
+                    def __exit__(self,*args):self.closed=True
+                    def __next__(self):
+                        if self.done:raise StopIteration
+                        self.done=True
+                        return SimpleNamespace(path='/repo/fixture/'+('unexpected' if defect=='unexpected' else 'input'),stat=lambda **_:SimpleNamespace(st_mode=f.stat.S_IFREG|(0o755 if defect=='mode' else 0o644),st_size=2 if defect=='size' else 1))
+                items=Items()
+                with patch.object(files,'path',side_effect=lambda p:Path(p)),patch.object(files,'read') as read,patch.object(f.os,'scandir',return_value=items):
+                    with self.assertRaises(f.Refusal):files.inventory('/repo/fixture',f.SOURCE,input_sources={'input':pin})
+                read.assert_not_called();self.assertTrue(items.closed)
 
     def test_complete_authored_producer_reaches_all_controls_and_stage_only_result(self):
         diagnostic,runner,files,_=self.harness(); result=diagnostic.run()

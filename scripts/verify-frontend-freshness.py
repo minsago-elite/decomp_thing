@@ -30,6 +30,7 @@ FIXED = ('build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle
          'contracts/web/v1/contract.schema.json')
 SOURCE = (8192, 16*1024**2, 128*1024**2, 32)
 OUTPUT = (8192, 16*1024**2, 64*1024**2, 16)
+SOURCE_OUTPUTS = ('build', '.gradle', 'frontend/node_modules')
 NPM_LINK = '../lib/node_modules/npm/bin/npm-cli.js'
 GROUP_ENTRIES = 256  # All entries/advances, including the EOF observation.
 GROUP_STAT_BYTES = 4096
@@ -45,6 +46,24 @@ def canonical(value):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def source_view(rows):
+    """Private expected input state, derived from admitted pins and explicit owned edits only."""
+    if type(rows) is not dict or not 0<len(rows)<=SOURCE[0]: raise Refusal('source input count')
+    copied={}; total=0
+    for name,row in rows.items():
+        if type(name) is not str or not name or len(name.encode())>512 or Path(name).is_absolute() or '..' in Path(name).parts or Path(name).as_posix()!=name:
+            raise Refusal('source input path')
+        if type(row) is not dict or set(row)!={'bytes','sha256','mode'}: raise Refusal('source input pin fields')
+        if type(row['bytes']) is not int or not 0<=row['bytes']<=SOURCE[1] or type(row['mode']) is not int or not 0<=row['mode']<=0o777:
+            raise Refusal('source input size or mode')
+        if type(row['sha256']) is not str or len(row['sha256'])!=64 or any(c not in '0123456789abcdef' for c in row['sha256']):
+            raise Refusal('source input digest')
+        total+=row['bytes']
+        if total>SOURCE[2]: raise Refusal('source input aggregate')
+        copied[name]=dict(row)
+    return copied
 
 
 def closed_json(data):
@@ -164,9 +183,15 @@ class Files:
                 self.ledger.check(cleanup=evidence); stream.write(data[i:i+65536])
         self.ledger.check(cleanup=evidence)
 
-    def inventory(self, root, limits=OUTPUT, budget=None, *, partitioned_ui=False, dist_assets=False):
+    def write_input(self, path, data, mode):
+        self.write(path,data)
+        self.path(path).chmod(mode)
+        self.ledger.check()
+
+    def inventory(self, root, limits=OUTPUT, budget=None, *, partitioned_ui=False, dist_assets=False, input_sources=None):
         root=self.path(root); budget={'entries':0,'bytes':0} if budget is None else budget; rows={}
         if partitioned_ui and dist_assets: raise Refusal('distinct UI/dist inventory policies required')
+        if input_sources is not None and (partitioned_ui or dist_assets): raise Refusal('distinct source inventory policy required')
         ui=UiBudget() if partitioned_ui else None
         regular_files=0
         def walk(directory, depth):
@@ -183,16 +208,27 @@ class Files:
                     p=Path(item.path); relative=p.relative_to(root).as_posix()
                     if len(relative.encode())>512: raise Refusal('inventory path bound')
                     metadata=item.stat(follow_symlinks=False); self.ledger.check()
-                    if stat.S_ISDIR(metadata.st_mode): walk(p,depth+1)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        if input_sources is None or relative not in SOURCE_OUTPUTS: walk(p,depth+1)
                     elif stat.S_ISREG(metadata.st_mode):
+                        if input_sources is not None:
+                            if relative not in input_sources: raise Refusal('unexpected copied input')
+                            pin=input_sources[relative]
+                            if metadata.st_size!=pin['bytes'] or stat.S_IMODE(metadata.st_mode)!=pin['mode']:
+                                raise Refusal('copied input metadata changed')
                         regular_files+=1
                         if dist_assets and regular_files>2048: raise Refusal('dist asset file bound')
                         if metadata.st_size > limits[1] or metadata.st_size < 0: raise Refusal('inventory file bound')
                         budget['bytes'] += metadata.st_size
                         if budget['bytes'] > limits[2]: raise Refusal('inventory aggregate bound')
                         if ui is not None: ui.admit(relative,metadata.st_size)
-                        read_limit=metadata.st_size if ui is not None else limits[1]
+                        read_limit=metadata.st_size if ui is not None or input_sources is not None else limits[1]
                         data=self.read(p,read_limit); rows[relative]={'bytes':len(data),'sha256':sha(data)}
+                        if input_sources is not None:
+                            named=p.stat(follow_symlinks=False); self.ledger.check()
+                            fields=('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns')
+                            if any(getattr(metadata,k)!=getattr(named,k) for k in fields): raise Refusal('copied input changed during inventory')
+                            rows[relative]['mode']=stat.S_IMODE(metadata.st_mode)
                     else: raise Refusal('inventory special file')
         walk(root,0); return dict(sorted(rows.items()))
 
@@ -524,7 +560,40 @@ class Freshness:
         self.fixture=self.work/'fixture'; self.evidence=self.work/'evidence'
         self.manifest=manifest; self.ledger=ledger; self.fs=files; self.runner=runner
         self.active=None
+        self._inputs=source_view(manifest.get('sources'))
         self.phases={name:{'status':'NOT_RUN'} for name in ('cold','unchanged','warm','fresh','stale','drift')}
+
+    def require_inputs(self):
+        observed=self.fs.inventory(self.fixture,SOURCE,input_sources=self._inputs)
+        if observed!=self._inputs: raise Refusal('copied source changed')
+
+    def read_input(self, name):
+        pin=self._inputs[name]; data=self.fs.read(self.fixture/name,pin['bytes'])
+        if len(data)!=pin['bytes'] or sha(data)!=pin['sha256']: raise Refusal('copied source changed before edit')
+        return data
+
+    def replace_input(self, name, data):
+        self.read_input(name)
+        mode=self._inputs[name]['mode']
+        view=source_view({**self._inputs,name:{'bytes':len(data),'sha256':sha(data),'mode':mode}})
+        self.fs.write_input(self.fixture/name,data,mode)
+        self._inputs=view
+
+    def rename_input(self, old, name, data):
+        self.read_input(old)
+        if name in self._inputs: raise Refusal('fresh input already admitted')
+        mode=self._inputs[old]['mode']; view={k:v for k,v in self._inputs.items() if k!=old}
+        view=source_view({**view,name:{'bytes':len(data),'sha256':sha(data),'mode':mode}})
+        self.fs.write_input(self.fixture/name,data,mode)
+        self.fs.remove(self.fixture/old)
+        self._inputs=view
+
+    def run_checked(self, argv, env):
+        self.require_inputs()
+        result=self.runner(argv,self.fixture,env)
+        if result.get('intervened') is not False or result.get('reaped') is not True: raise Refusal('uncertain command')
+        self.require_inputs()
+        return result
 
     def enter(self, mode):
         if self.active!=mode:
@@ -589,30 +658,34 @@ class Freshness:
     def build(self, mode):
         self.enter(mode)
         pins=npm_inputs(self.manifest,self.fs)
-        argv,env=self.command(mode); result=self.runner(argv,self.fixture,env)
+        argv,env=self.command(mode); result=self.run_checked(argv,env)
         if npm_inputs(self.manifest,self.fs)!=pins: raise Refusal('npm inputs changed across command')
         self.ledger.check(); actual=require_outcomes(result,mode)
-        self.phases[mode]={'status':'BUILD_COMPLETED','taskOutcomes':actual,'npmInputPins':pins,'elapsedSeconds':self.ledger.clock()-self.ledger.start}
+        self.phases[mode]={'status':'BUILD_COMPLETED','taskOutcomes':actual,'npmInputPins':pins,'copiedInputSha256':sha(canonical(self._inputs)),'elapsedSeconds':self.ledger.clock()-self.ledger.start}
         self.fs.write(self.evidence/(mode+'-outcomes.json'),canonical(self.phases[mode]),evidence=True)
 
     def drift(self):
         self.enter('drift')
         targets=('frontend/src/api/generated.ts','frontend/src/api/generated-schema.ts','contracts/web/v1/contract.schema.json')
+        checks=[]
         for i,name in enumerate(targets):
-            path=self.fixture/name; original=self.fs.read(path)
+            self.require_inputs()
+            original=self.read_input(name)
             if i<2: changed=original+b'\n// authored freshness drift\n'
             else:
                 value=closed_json(original); value['definitions']['freshnessDriftProbe']={'type':'string','enum':['authored']}; changed=canonical(value)
-            self.fs.write(path,changed)
+            self.replace_input(name,changed)
             argv,env=self.command('drift')
-            checked=self.runner([str(Path(self.manifest['nodeHome'])/'bin/node'),str(self.fixture/'scripts/generate-web-api.mjs'),'--check'],self.fixture,env)
+            checked=self.run_checked([str(Path(self.manifest['nodeHome'])/'bin/node'),str(self.fixture/'scripts/generate-web-api.mjs'),'--check'],env)
             self.ledger.check()
             if checked['code']!=1 or b'Generated contract drift:' not in checked['output'] or checked['intervened'] or not checked['reaped']:
                 raise Refusal('missing intended API drift refusal')
-            if self.fs.read(path)!=changed: raise Refusal('check silently rewrote drift')
+            if self.read_input(name)!=changed: raise Refusal('check silently rewrote drift')
+            checks.append({'path':name,'copiedInputSha256':sha(canonical(self._inputs))})
             if i==0: self.build('drift')
-            self.fs.write(path,original)
-        self.phases['drift']['status']='PASSED'
+            self.replace_input(name,original)
+        self.require_inputs()
+        self.phases['drift'].update(status='PASSED',apiSourceChecks=checks,restoredCopiedInputSha256=sha(canonical(self._inputs)))
 
     def run(self):
         baseline=self.baseline()
@@ -626,13 +699,13 @@ class Freshness:
         if warm!=cold: raise Refusal('offline warm bytes differ')
         self.phases['warm']['status']='PASSED'
         self.enter('fresh')
-        old=self.fixture/'frontend/src/app/mark.svg'; data=self.fs.read(old)
-        self.fs.write(old.with_name('freshness-mark.svg'),data.replace(b'<svg',b'<svg data-freshness="changed"',1))
+        self.require_inputs()
+        data=self.read_input('frontend/src/app/mark.svg')
         if b'<svg' not in data: raise Refusal('expected SVG anchor absent')
-        self.fs.remove(old)
-        app=self.fixture/'frontend/src/app/App.tsx'; original=self.fs.read(app)
+        self.rename_input('frontend/src/app/mark.svg','frontend/src/app/freshness-mark.svg',data.replace(b'<svg',b'<svg data-freshness="changed"',1))
+        original=self.read_input('frontend/src/app/App.tsx')
         if original.count(b"'./mark.svg'")!=1: raise Refusal('asset import anchor differs')
-        self.fs.write(app,original.replace(b"'./mark.svg'",b"'./freshness-mark.svg'"))
+        self.replace_input('frontend/src/app/App.tsx',original.replace(b"'./mark.svg'",b"'./freshness-mark.svg'"))
         self.build('fresh'); fresh=self.snapshot()
         old_assets={n for n in warm['dist'] if n.endswith('.svg') and n.startswith('assets/mark-')}
         new_assets={n for n in fresh['dist'] if n.endswith('.svg') and n.startswith('assets/freshness-mark-')}
@@ -651,12 +724,13 @@ class Freshness:
         self.phases['stale']['status']='PASSED'
         self.fs.write(self.evidence/'stale.json',canonical(stale),evidence=True)
         self.drift()
+        self.require_inputs()
         for n in ('frontend/src/api/generated.ts','frontend/src/api/generated-schema.ts'):
             if self.fs.read(self.fixture/n)!=self.fs.read(self.source/n): raise Refusal('generated API changed')
         if self.baseline()!=baseline: raise Refusal('packaged baseline changed')
         npm_inputs(self.manifest,self.fs)
         self.ledger.check()
-        return {'status':'PASSED_STAGE_ONLY','phases':self.phases,'packagedBaseline':baseline,
+        return {'status':'PASSED_STAGE_ONLY','phases':self.phases,'packagedBaseline':baseline,'copiedInputSha256':sha(canonical(self._inputs)),
                 'fullIssue651Accepted':False,'descendantAbsenceProven':False,'coldGradleQualified':False}
 
 
