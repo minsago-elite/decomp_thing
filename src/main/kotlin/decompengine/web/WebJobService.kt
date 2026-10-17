@@ -210,6 +210,17 @@ class WebJobService(
         if (closed) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopped.")
     }
 
+    /** Bounded display-only inspection; never acquires ownership, replays work or removes files. */
+    @Synchronized
+    fun recoveryInventory(): decompengine.jobs.JobRecoveryInventory {
+        requireInitializedRead()
+        // Multipart writers release this monitor while their staging directories are live.
+        // Keep upload admission excluded throughout the scan when there are no active writers.
+        if (uploads.isNotEmpty()) throw WebJobServiceException("RECOVERY_INSPECTION_BUSY",
+            "Recovery inspection is paused while uploads are in progress. Refresh after uploads finish.")
+        return store.recoveryInventory()
+    }
+
     @Synchronized
     fun inspect(jobId: String): WebJobInspection {
         requireInitializedRead()

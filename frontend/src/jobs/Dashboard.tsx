@@ -6,6 +6,7 @@ import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters } from './query';
 import type { JobFilters } from './query';
 import { JobSummary } from './JobSummary';
+import { RecoverySummary } from './RecoverySummary';
 
 function currentFilters() {
   try { return { filters: jobFilters(location.search), valid: true }; }
@@ -176,6 +177,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     : data ? 'Loading jobs… Previously loaded rows remain below.' : 'Loading jobs…';
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">Uploaded jobs</h2>
+    <RecoverySummary client={client} refresh={refresh} />
     <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
       <label>Filename search<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
       <label>Workflow state<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>

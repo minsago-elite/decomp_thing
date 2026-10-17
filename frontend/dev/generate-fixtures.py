@@ -92,6 +92,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     page = source("jobs-page")
     page["data"]["items"] = jobs
     record(api + "/jobs", page)
+    record(api + "/recovery", source("recovery-empty"))
     download = "SIMULATED_DEVELOPMENT_DATA\nThis synthetic attachment is not execution evidence.\n"
     artifact = source("artifact")
     artifact["data"].update(artifactId="fixture_attachment", displayName="SIMULATED-evidence.txt",

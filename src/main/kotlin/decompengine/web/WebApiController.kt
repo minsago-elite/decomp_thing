@@ -42,7 +42,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events|/progress-pin)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events|/progress-pin)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -57,6 +57,12 @@ internal class WebApiController(
         try {
             when {
                 resource == "session" -> sessions.handle(exchange)
+                resource == "recovery" -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoWebApiQuery(exchange)
+                    requireJsonAccept(exchange)
+                    sendWebApiResponse(exchange, 200, "recovery", jobs.recoveryInventory().toJson())
+                }
                 resource == "jobs" && exchange.requestMethod == "POST" -> {
                     val mutation = jobMutations.authorizeUpload(exchange)
                     requireNoWebApiQuery(exchange)
