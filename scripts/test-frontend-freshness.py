@@ -409,6 +409,125 @@ class FreshnessControls(unittest.TestCase):
         ledger=f.Ledger(Clock());ledger.evidence(16*1024**2)
         with self.assertRaises(f.Refusal):ledger.evidence(1)
 
+    def cancellation_runner_vector(self, when, number, *, repeat=False):
+        clock=Clock();ledger=f.Ledger(clock);files=MemoryFiles(ledger);events=[]
+        state={'waited':False,'closed':False,'registered':True}
+        primary=OSError('authored launch failure')
+        class Stream:
+            def fileno(self):return 42
+            def close(self):state['closed']=True
+        class Child:
+            pid=123;stdout=Stream()
+            def wait(self,timeout):
+                self_test.assertFalse(state['waited']);state['waited']=True
+                events.append(('wait',timeout));return 0
+        self_test=self
+        def launch(*args,**kwargs):
+            events.append(('launch',dict(kwargs)))
+            if when in ('launch','launch-error'):ledger.cancel(number,None)
+            if when=='launch-error':raise primary
+            return Child()
+        class Selector:
+            def __init__(self):
+                if when=='after-owned':ledger.cancel(number,None)
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def register(self,*args):pass
+            def get_map(self):return {1:True} if state['registered'] else {}
+            def select(self,timeout):return [(SimpleNamespace(fileobj=Child.stdout),None)]
+            def unregister(self,*args):state['registered']=False
+        def observe(kind,pid,flags):
+            self.assertFalse(state['waited']);events.append(('observe',pid))
+            return SimpleNamespace(si_pid=123,si_code=f.os.CLD_EXITED)
+        def send(pid,value):
+            self.assertEqual(123,pid);events.append(('signal',value))
+            if value:
+                self.assertFalse(state['waited'])
+                if repeat:ledger.cancel(f.signal.SIGINT,None)
+            else:raise ProcessLookupError('authored absent group')
+        runner=f.Runner(ledger,files,Path('/repo/evidence'));result=error=None
+        if when=='before':ledger.cancel(number,None)
+        with ExitStack() as stack:
+            for obj,name,kwargs in ((f.signal,'getsignal',{'return_value':f.signal.SIG_DFL}),(f.subprocess,'Popen',{'side_effect':launch}),(f.selectors,'DefaultSelector',{'side_effect':Selector}),(f.os,'set_blocking',{}),(f.os,'read',{'return_value':b''}),(f.os,'waitid',{'side_effect':observe}),(f.os,'killpg',{'side_effect':send}),(runner,'group_members',{'return_value':()})):
+                stack.enter_context(patch.object(obj,name,**kwargs))
+            try:result=runner(['NOT_EXECUTED'],Path('/repo/work'),{})
+            except BaseException as caught:error=caught
+        return result,error,state,events,files,runner,ledger,primary
+
+    def test_cancellation_during_launch_owns_and_reaps_before_failure(self):
+        for number in (f.signal.SIGTERM,f.signal.SIGINT):
+            with self.subTest(number=number):
+                result,error,state,events,files,runner,ledger,_=self.cancellation_runner_vector('launch',number)
+                self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+                self.assertRegex(str(error),'ordinary cancellation');self.assertTrue(runner.uncertain)
+                self.assertTrue(state['waited']);self.assertTrue(state['closed'])
+                self.assertEqual([f.signal.SIGTERM,0],[v for k,v in events if k=='signal'])
+                facts=f.closed_json(files.data['/repo/evidence/command-01.json'])
+                self.assertTrue(facts['launcherCreated']);self.assertTrue(facts['rootReaped'])
+                self.assertTrue(facts['intervened']);self.assertFalse(facts['descendantAbsenceProven'])
+                launch=next(v for k,v in events if k=='launch')
+                self.assertEqual({'cwd':Path('/repo/work'),'env':{},'stdout':f.subprocess.PIPE,'stderr':f.subprocess.STDOUT,'start_new_session':True},launch)
+                self.assertEqual(number,ledger.cancellation);self.assertEqual(420,ledger.end)
+
+    def test_cancellation_after_ownership_uses_same_cleanup_path(self):
+        for number in (f.signal.SIGTERM,f.signal.SIGINT):
+            with self.subTest(number=number):
+                result,error,state,events,files,runner,_,_=self.cancellation_runner_vector('after-owned',number)
+                self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+                self.assertTrue(state['waited']);self.assertTrue(state['closed']);self.assertTrue(runner.uncertain)
+                self.assertEqual([f.signal.SIGTERM,0],[v for k,v in events if k=='signal'])
+                self.assertTrue(f.closed_json(files.data['/repo/evidence/command-01.json'])['rootReaped'])
+
+    def test_cancellation_before_launch_creates_no_child_or_signal(self):
+        result,error,state,events,files,runner,_,_=self.cancellation_runner_vector('before',f.signal.SIGTERM)
+        self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+        self.assertEqual([],events);self.assertFalse(state['waited']);self.assertFalse(state['closed'])
+        self.assertEqual({},files.data);self.assertFalse(runner.uncertain)
+
+    def test_launch_error_is_not_masked_by_recorded_cancellation(self):
+        result,error,state,events,files,runner,_,primary=self.cancellation_runner_vector('launch-error',f.signal.SIGTERM)
+        self.assertIsNone(result);self.assertIs(primary,error);self.assertTrue(runner.uncertain)
+        self.assertFalse(state['waited']);self.assertFalse(state['closed'])
+        self.assertEqual(['launch'],[k for k,_ in events])
+        facts=f.closed_json(files.data['/repo/evidence/command-01.json'])
+        self.assertFalse(facts['launcherCreated']);self.assertFalse(facts['rootReaped'])
+        self.assertTrue(facts['intervened']);self.assertFalse(facts['descendantAbsenceProven'])
+
+    def test_repeated_cancellation_during_cleanup_still_reaps_owned_child(self):
+        result,error,state,events,files,runner,ledger,_=self.cancellation_runner_vector('launch',f.signal.SIGTERM,repeat=True)
+        self.assertIsNone(result);self.assertIsInstance(error,f.Refusal)
+        self.assertTrue(state['waited']);self.assertTrue(state['closed']);self.assertTrue(runner.uncertain)
+        self.assertEqual(f.signal.SIGTERM,ledger.cancellation)
+        self.assertEqual([f.signal.SIGTERM,0],[v for k,v in events if k=='signal'])
+        self.assertTrue(f.closed_json(files.data['/repo/evidence/command-01.json'])['rootReaped'])
+
+    def test_cancellation_does_not_extend_work_end_or_cleanup_reserve(self):
+        clock=Clock();ledger=f.Ledger(clock);ledger.cancel(f.signal.SIGTERM,None)
+        with self.assertRaisesRegex(f.Refusal,'ordinary cancellation'):ledger.check()
+        self.assertEqual(420,ledger.check(cleanup=True));clock.now=405
+        self.assertEqual(15,ledger.check(cleanup=True));clock.now=420
+        with self.assertRaisesRegex(f.Refusal,'original absolute work end'):ledger.check(cleanup=True)
+        self.assertEqual(420,ledger.end)
+
+    def test_main_records_both_signals_and_restores_handlers_on_failure(self):
+        for number in (f.signal.SIGTERM,f.signal.SIGINT):
+            with self.subTest(number=number):
+                ledger=f.Ledger(Clock());files=MemoryFiles(ledger)
+                files.data['/repo/manifest.json']=b'{}'
+                previous={f.signal.SIGTERM:object(),f.signal.SIGINT:object()};installed={};changes=[]
+                def set_handler(value,handler):installed[value]=handler;changes.append((value,handler))
+                def prepare(*args):
+                    self.assertEqual({f.signal.SIGTERM,f.signal.SIGINT},set(installed))
+                    for handler in installed.values():self.assertEqual(ledger.cancel,handler)
+                    installed[number](number,None);ledger.check()
+                with patch.object(f,'Ledger',return_value=ledger),patch.object(f,'Files',return_value=files),patch.object(f,'prepare',side_effect=prepare),patch.object(f,'Runner') as runner,patch.object(f.signal,'getsignal',side_effect=previous.__getitem__),patch.object(f.signal,'signal',side_effect=set_handler),patch.object(Path,'exists',return_value=False),patch.object(Path,'is_dir',return_value=True):
+                    code=f.main(['--repository','/repo','--source','/repo/source','--work','/repo/work','--provisioned-manifest','/repo/manifest.json'])
+                self.assertEqual(1,code);runner.assert_not_called();self.assertEqual(previous,installed)
+                self.assertEqual(4,len(changes));self.assertEqual(number,ledger.cancellation)
+                result=f.closed_json(files.data['/repo/work/evidence/result.json'])
+                self.assertEqual('FAILED_OR_UNKNOWN',result['status']);self.assertIn('ordinary cancellation',result['reason'])
+                self.assertTrue(result['fixtureRetained']);self.assertFalse(result['fullIssue651Accepted'])
+
     def test_actual_runner_late_zero_and_leftovers_fail_without_post_reap_signal(self):
         for defect in ('success','late-zero','leftover','timeout'):
             with self.subTest(defect=defect):

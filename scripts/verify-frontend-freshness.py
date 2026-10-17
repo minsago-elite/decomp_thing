@@ -83,8 +83,14 @@ class Ledger:
         self.start = clock()
         self.end = self.start + 420
         self.log_bytes = self.evidence_bytes = 0
+        self.cancellation = None
+
+    def cancel(self, number, _frame):
+        # A signal must never unwind Popen before its returned child is owned.
+        if self.cancellation is None: self.cancellation = number
 
     def check(self, cleanup=False):
+        if self.cancellation is not None and not cleanup: raise Refusal('ordinary cancellation requested')
         remaining = self.end - self.clock() - (0 if cleanup else 15)
         if remaining <= 0: raise Refusal('original absolute work end reached')
         return remaining
@@ -451,6 +457,7 @@ class Runner:
             if signal.getsignal(signal.SIGCHLD)!=signal.SIG_DFL: raise Refusal('SIGCHLD ownership prerequisite')
             child=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
             held=True; facts['launcherCreated']=True
+            self.ledger.check()  # Deliver recorded cancellation only after ownership.
             with selectors.DefaultSelector() as selector:
                 os.set_blocking(child.stdout.fileno(),False); selector.register(child.stdout,selectors.EVENT_READ)
                 while selector.get_map():
@@ -806,28 +813,30 @@ def main(argv=None):
     parser.add_argument('--work',required=True); parser.add_argument('--provisioned-manifest',required=True)
     args=parser.parse_args(argv); ledger=Ledger(); files=Files(args.repository,ledger)
     work=files.path(args.work); diagnostic=None; was_absent=not work.exists()
-    previous_term=signal.getsignal(signal.SIGTERM)
-    def cancelled(_number,_frame): raise Refusal('ordinary cancellation requested')
-    signal.signal(signal.SIGTERM,cancelled)
+    previous={number:signal.getsignal(number) for number in (signal.SIGTERM,signal.SIGINT)}
     try:
-        manifest=closed_json(files.read(args.provisioned_manifest,4*1024**2))
-        prepare(args.source,work,manifest,files)
-        runner=Runner(ledger,files,work/'evidence')
-        diagnostic=Freshness(args.source,work,manifest,ledger,files,runner)
-        result=diagnostic.run(); code=0
-    except BaseException as error:
-        result=(diagnostic.failure(error) if diagnostic is not None else
-                {'status':'FAILED_OR_UNKNOWN','reason':type(error).__name__+':'+str(error)[:500],
-                 'phases':{},'fixtureRetained':True,'fullIssue651Accepted':False})
-        code=1
-    try:
-        if was_absent and work.is_dir(): files.write(work/'evidence/result.json',canonical(result),evidence=True)
-    except BaseException:
-        # Missing late evidence stays unknown; never mask an existing primary failure.
-        if code==0: raise
+        # Record only; ordinary ledger checkpoints deliver cancellation. Cleanup
+        # uses the same original end and can complete despite repeated signals.
+        for number in previous: signal.signal(number,ledger.cancel)
+        try:
+            manifest=closed_json(files.read(args.provisioned_manifest,4*1024**2))
+            prepare(args.source,work,manifest,files)
+            runner=Runner(ledger,files,work/'evidence')
+            diagnostic=Freshness(args.source,work,manifest,ledger,files,runner)
+            result=diagnostic.run(); ledger.check(); code=0
+        except BaseException as error:
+            result=(diagnostic.failure(error) if diagnostic is not None else
+                    {'status':'FAILED_OR_UNKNOWN','reason':type(error).__name__+':'+str(error)[:500],
+                     'phases':{},'fixtureRetained':True,'fullIssue651Accepted':False})
+            code=1
+        try:
+            if was_absent and work.is_dir(): files.write(work/'evidence/result.json',canonical(result),evidence=True)
+        except BaseException:
+            # Missing late evidence stays unknown; never mask an existing primary failure.
+            if code==0: raise
+        return code
     finally:
-        signal.signal(signal.SIGTERM,previous_term)
-    return code
+        for number,handler in previous.items(): signal.signal(number,handler)
 
 
 if __name__=='__main__':
