@@ -39,6 +39,10 @@ Group headers require zero flags/address and retain their raw offset, size and a
 Section alignment follows [the general ELF header rule](https://gabi.xinuos.com/elf/03-sheader.html#section-header-table-entry):
 zero/one express no alignment constraint, and larger values must be powers of two. Four-byte
 group words use `sh_entsize=4`; valid section alignments such as eight remain observable.
+The relocatable reader also validates active section address alignment, disjoint nonempty
+file-backed extents, absent program-table offsets, symbol-table local/nonlocal partitions,
+and string-table boundary NUL bytes. Empty and `SHT_NOBITS` sections own no file bytes;
+empty string tables remain valid when all referenced names are zero.
 
 The existing file, header, symbol, string and parse-work bounds still apply. Separate defaults
 bound groups to 16,384, memberships to 131,072 and unique signature-name bytes to 8 MiB.

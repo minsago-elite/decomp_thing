@@ -680,7 +680,39 @@ private class ElfReader(
             )
             sections += readSection(offset, headers.sectionEntrySize, headers.elfClass, headers.byteOrder, index)
         }
+        if (headers.elfType == "ET_REL") validateRelocatableSections(sections)
         return attachSectionNames(sections, headers.nameIndex)
+    }
+
+    private fun validateRelocatableSections(sections: List<FunctionElfSection>) {
+        val fileSections = ArrayList<FunctionElfSection>()
+        sections.forEach { section ->
+            step("relocatable section structure")
+            if (section.type == SHT_NULL) return@forEach
+            val alignment = section.alignment
+            if (alignment > 1UL && ((alignment and (alignment - 1UL)) != 0UL || section.address % alignment != 0UL)) {
+                fail("ELF relocatable section has invalid address alignment")
+            }
+            if (section.type == SHT_STRTAB && section.size != 0UL) {
+                if (section.flags and SHF_COMPRESSED != 0UL) fail("ELF relocatable string table is compressed")
+                val last = checkedAdd(section.offset, longValue(section.size - 1UL, "string-table boundary"), "string-table boundary")
+                if (window.byte(section.offset) != 0 || window.byte(last) != 0) {
+                    fail("ELF relocatable string table lacks boundary NUL bytes")
+                }
+            }
+            // NOBITS has a conceptual offset only; empty sections own no file bytes.
+            if (section.type != SHT_NOBITS && section.size != 0UL) fileSections += section
+        }
+        fileSections.sortWith { first, second ->
+            step("relocatable section ordering")
+            first.offset.compareTo(second.offset)
+        }
+        var end = 0L
+        fileSections.forEach { section ->
+            step("relocatable section extents")
+            if (section.offset < end) fail("ELF relocatable file-backed sections overlap")
+            end = checkedAdd(section.offset, longValue(section.size, "section size"), "section extent")
+        }
     }
 
     private fun symbolName(symbol: ParsedElfSymbol, subject: String): String =
@@ -719,6 +751,9 @@ private class ElfReader(
             }
             val count = longValue(section.size / section.entrySize, "symbol count")
             if (count < 1L) fail("symbol table ${section.name} has no STN_UNDEF entry")
+            if (headers.elfType == "ET_REL" && section.info.toLong() !in 1L..count) {
+                fail("relocatable symbol table ${section.name} has an invalid local-symbol boundary")
+            }
             if (window.bytes(section.offset, minimumSymbolEntry).any { it != 0.toByte() }) {
                 fail("symbol table ${section.name} has a nonzero STN_UNDEF entry")
             }
@@ -772,6 +807,9 @@ private class ElfReader(
                     other = symbol[13].toInt() and 0xff
                     info = symbol[12].toInt() and 0xff
                     rawSectionIndex = u16(symbol, 14, byteOrder)
+                }
+                if (headers.elfType == "ET_REL" && ((info ushr 4 == 0) != (symbolIndex < section.info.toLong()))) {
+                    fail("relocatable symbol table ${section.name} disagrees with its local-symbol boundary")
                 }
                 val extendedWord = extended?.let { companion ->
                     u32At(
@@ -905,6 +943,8 @@ private class ElfReader(
                 checkedMultiply(programCount.toLong(), programEntrySize.toLong(), "program table"),
                 "ELF program table",
             )
+        } else if (programOffset != 0L) {
+            fail("ELF absent program table has a nonzero offset")
         }
 
         return ParsedElfHeaders(
