@@ -44,6 +44,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     bootstrap["data"]["basePath"] = base_path
     bootstrap["data"]["applicationBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
     bootstrap["data"]["uiBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
+    bootstrap["data"]["serverInstanceId"] = "SIMULATED_DEVELOPMENT_INSTANCE"
     record(api + "/bootstrap", bootstrap)
     for name, state, description in [
         ("running", "running", "Simulated active attempt; no native process is running."),

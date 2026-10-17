@@ -23,6 +23,8 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    // The build hash is stable across restarts; this identity belongs to one listener lifetime.
+    private val serverInstanceId = UUID.randomUUID().toString()
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
@@ -51,6 +53,9 @@ internal class WebApiController(
                 access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested API route is unavailable."))
             } catch (failure: WebAccessDenied) {
                 access.sendDenied(exchange, failure)
+            } catch (_: Exception) {
+                if (exchange.responseCode != -1) exchange.close()
+                else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
             }
             return true
         }
@@ -236,6 +241,7 @@ internal class WebApiController(
         put("apiVersions", JsonArray(listOf(JsonPrimitive(1))))
         put("applicationBuildId", applicationBuildId)
         put("uiBuildId", assets.manifest.buildId)
+        put("serverInstanceId", serverInstanceId)
         put("basePath", assets.basePath)
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())

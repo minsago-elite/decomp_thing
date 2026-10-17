@@ -695,8 +695,15 @@ class UploadServer(
                 renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
-            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.", requestDiagnosticOutput) {
-                renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
+            if (exchange.responseCode != -1) {
+                exchange.close()
+            } else if (exchange.requestURI.rawPath in setOf("/api/v1/session", "/api/v1/session/csrf")) {
+                // These compatibility routes produce v1 envelopes even in legacy presentation mode.
+                access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
+            } else {
+                legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.", requestDiagnosticOutput) {
+                    renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
+                }
             }
         }
     }

@@ -149,6 +149,70 @@ class WebNegotiationMatrixTest {
         } finally { listener.stop(0); access.close() }
     }
 
+    @Test
+    fun `unexpected production controller exceptions stay typed private and recoverable in both modes`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/web-internal-failures").toAbsolutePath())
+        for (mode in listOf(WebUiMode.SPA, WebUiMode.LEGACY)) {
+            val root = createTempDirectory(parent, "${mode.name.lowercase()}-")
+            val id = JobStore(root).createFromUpload("fixture.elf", elfFixture()).id
+            val record = Files.readAllBytes(root.resolve(id).resolve("job.json"))
+            val failClock = java.util.concurrent.atomic.AtomicBoolean(false)
+            val faultCalls = java.util.concurrent.atomic.AtomicInteger(0)
+            val privateMessage = "PRIVATE_CONTROLLER_CLOCK_CANARY /private/fixture TOKEN=synthetic"
+            fun failWhenRequested() {
+                if (failClock.get()) {
+                    faultCalls.incrementAndGet()
+                    throw IllegalStateException(privateMessage)
+                }
+            }
+            val clock = object : WebAccessClock {
+                override fun instant(): java.time.Instant { failWhenRequested(); return SystemWebAccessClock.instant() }
+                override fun nanoTime(): Long { failWhenRequested(); return SystemWebAccessClock.nanoTime() }
+            }
+            var workflows = 0
+            val base = if (mode == WebUiMode.SPA) "/workbench/" else "/"
+            val server = UploadServer("127.0.0.1", 0, root,
+                JobAnalyzer { _, _ -> workflows++ }, JobReconstructor { _, _ -> workflows++ },
+                uiMode = mode, basePath = base, sensitiveValues = emptyList(), webAccessClock = clock)
+            try {
+                server.start()
+                val headers = session(server, base) + mapOf("Accept" to "application/json")
+                val jobPath = if (mode == WebUiMode.SPA) "${base}api/v1/jobs/$id" else "/api/jobs/$id"
+                val cases = mutableListOf(Case("known job", "GET", jobPath, "application/json", 200))
+                if (mode == WebUiMode.SPA) {
+                    cases += Case("unknown v1 route", "GET", "${base}api/v1/not-a-capability", "application/json", 404)
+                    cases += Case("unknown major", "GET", "${base}api/v2/jobs", "application/json", 404)
+                } else {
+                    cases += Case("versioned compatibility CSRF", "GET", "/api/v1/session/csrf", "application/json", 200)
+                }
+                cases += Case("versioned session exchange", "POST", "${base}api/v1/session", "application/json", 200)
+                for (case in cases) {
+                    // Session exchanges always receive a fresh one-shot token; an ambiguous mutation is never replayed.
+                    val baselineBody = if (case.method == "POST") "{\"token\":\"${server.issueBrowserBootstrap().token}\"}" else null
+                    assertEquals(case.status, request(server, case.method, case.path, headers, baselineBody).statusCode(), "${mode.name}/${case.name}")
+                    val failureBody = if (case.method == "POST") "{\"token\":\"${server.issueBrowserBootstrap().token}\"}" else null
+                    val beforeFaults = faultCalls.get()
+                    failClock.set(true)
+                    val response = try { request(server, case.method, case.path, headers, failureBody) } finally { failClock.set(false) }
+                    assertTrue(faultCalls.get() > beforeFaults, "${mode.name}/${case.name}: actual dispatcher must reach the injected unexpected exception")
+                    assertEquals(500, response.statusCode(), "${mode.name}/${case.name}")
+                    val versioned = mode == WebUiMode.SPA || case.path.startsWith("/api/v1/session")
+                    assertError(response, "INTERNAL_ERROR", versioned = versioned, label = "${mode.name}/${case.name}")
+                    val error = Json.parseToJsonElement(response.body()).jsonObject.getValue("error").jsonObject
+                    assertEquals(if (versioned) "The request could not be completed." else "The operation failed.",
+                        error.getValue("message").jsonPrimitive.content, "${mode.name}/${case.name}")
+                    assertFalse(response.body().contains("PRIVATE_CONTROLLER_CLOCK_CANARY"), case.name)
+                    assertFalse(response.body().contains("/private/fixture") || response.body().contains("TOKEN="), case.name)
+                    assertFalse(response.body().contains("IllegalStateException"), case.name)
+                    // Reconcile through a read, rather than retrying the failed session mutation.
+                    assertEquals(200, request(server, "GET", jobPath, headers).statusCode(), "${mode.name}/${case.name}: same-session recovery")
+                    assertContentEquals(record, Files.readAllBytes(root.resolve(id).resolve("job.json")), case.name)
+                    assertEquals(0, workflows, case.name)
+                }
+            } finally { failClock.set(false); server.stop(); root.toFile().deleteRecursively() }
+        }
+    }
+
     private data class Case(val name: String, val method: String, val path: String, val accept: String,
                             val status: Int, val code: String? = null, val allow: String? = null)
 
