@@ -9,6 +9,9 @@ internal class BestEffortProgressJournal(
     workflow: String,
     sensitiveValues: Collection<String> = emptyList(),
     onPhase: (AgentWorkflowPhase) -> Unit = {},
+    private val onUnavailable: () -> Unit = {
+        System.err.println("Progress reporting is unavailable; workflow results remain authoritative.")
+    },
 ) : AgentWorkflowProgress, AutoCloseable {
     private var failed = false
     private var journal: AgentProgressJournal? = null
@@ -25,7 +28,7 @@ internal class BestEffortProgressJournal(
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             if (!failed) {
                 failed = true
-                System.err.println("Progress reporting is unavailable; workflow results remain authoritative.")
+                onUnavailable()
             }
         }
     }

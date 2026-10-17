@@ -5,6 +5,9 @@ import decompengine.jobs.AgentProgressJournal
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.PrintStream
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -88,6 +91,88 @@ class RepairCliProgressTest {
             observer.close()
             output.close()
         }
+    }
+
+    @Test
+    fun `reconstruction cursor bounds phases and rejects unrelated or private observations`() {
+        fun phase(sequence: Long, name: String) = JsonObject(event(sequence, name).toMutableMap().apply {
+            put("workflow", JsonPrimitive("reconstruction"))
+            put("kind", JsonPrimitive("workflow_phase"))
+        })
+        val cursor = RepairCliProgressCursor(null, CliProgressWorkflow.RECONSTRUCTION)
+        val records = (0L..49).map { phase(it, "build_validating") } + listOf(
+            event(50, "accepted"),
+            JsonObject(phase(51, "accepted").toMutableMap().apply { put("kind", JsonPrimitive("workflow_run_state")) }),
+            phase(52, "private arbitrary phase"),
+            JsonObject(phase(53, "completed").toMutableMap().apply { put("kind", JsonPrimitive("task_output")) }),
+        )
+        val lines = cursor.advance(snapshot(54, records))
+        assertEquals(33, lines.size)
+        assertEquals("reconstruction progress omitted 18 older phase update(s)", lines.first())
+        assertTrue(lines.drop(1).all { it == "reconstruction: build validating" })
+        assertFalse(lines.joinToString().contains("private"))
+        assertTrue(cursor.advance(snapshot(54, records)).isEmpty())
+        val restarted = cursor.advance(snapshot(1, listOf(phase(0, "analyzing"))))
+        assertTrue(restarted.first().contains("history restarted"))
+        assertEquals("reconstruction: analyzing", restarted.last())
+        val retained = RepairCliProgressCursor(snapshot(54, records), CliProgressWorkflow.RECONSTRUCTION)
+        assertEquals(listOf("reconstruction: completed"), retained.advance(snapshot(55, listOf(phase(54, "completed")))))
+    }
+
+    @Test
+    fun `reconstruction journal production and close survive a blocked console`() {
+        assertReconstructionConsoleBackpressure(unavailable = false)
+    }
+
+    @Test
+    fun `reconstruction unavailable warning preserves workflow failure with a blocked console`() {
+        assertReconstructionConsoleBackpressure(unavailable = true)
+    }
+
+    private fun assertReconstructionConsoleBackpressure(unavailable: Boolean) {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp")), "reconstruction-console-")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val published = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val sentinel = IllegalStateException("workflow sentinel")
+        val output = PrintStream(object : OutputStream() {
+            override fun write(value: Int) {
+                entered.countDown()
+                while (release.count > 0) try { release.await() } catch (_: InterruptedException) { /* Noninterruptible console. */ }
+            }
+        })
+        val owner = if (unavailable) AgentProgressJournal(root, "reconstruction") else null
+        val producer = Thread {
+            try {
+                withReconstructionCliProgress(root, output = output) { progress ->
+                    progress.phase(AgentWorkflowPhase.ANALYZING)
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    if (!unavailable) repeat(1000) { progress.phase(AgentWorkflowPhase.BUILD_VALIDATING) }
+                    published.countDown()
+                    if (unavailable) throw sentinel
+                }
+            } catch (caught: Throwable) {
+                failure.set(caught)
+            } finally {
+                finished.countDown()
+            }
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "console observer did not reach the blocked output")
+            assertTrue(published.await(5, TimeUnit.SECONDS), "blocked output stalled workflow progress")
+            assertTrue(finished.await(7, TimeUnit.SECONDS), "blocked output stalled progress close")
+            if (unavailable) assertSame(sentinel, failure.get()) else assertNull(failure.get())
+            owner?.phase(AgentWorkflowPhase.COMPLETED)
+        } finally {
+            release.countDown()
+            producer.join(5000)
+            owner?.close()
+            output.close()
+        }
+        assertNotNull(AgentProgressJournal.read(root))
+        AgentProgressJournal(root, "reconstruction").use { it.phase(AgentWorkflowPhase.COMPLETED) }
     }
 
     private fun event(sequence: Long, phase: String) = buildJsonObject {
