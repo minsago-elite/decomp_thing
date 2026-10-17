@@ -125,9 +125,12 @@ for name in ("symbols-a", "stripped-a"):
     assert (root / name / "source-tree.zip").is_file()
 PY
 
-extract_root="$validation_root/extracted"
-mkdir -p "$extract_root"
-unzip -q "$validation_root/output/stripped-a/source-tree.zip" -d "$extract_root"
-(cd "$extract_root" && sha256sum --check ARCHIVE_MANIFEST.sha256 && make -j2)
+for name in symbols-a stripped-a; do
+  extract_root="$validation_root/extracted/$name"
+  mkdir -p "$extract_root"
+  echo "Verify and rebuild extracted archival fixture: $name"
+  unzip -q "$validation_root/output/$name/source-tree.zip" -d "$extract_root"
+  (cd "$extract_root" && sha256sum --check ARCHIVE_MANIFEST.sha256 && make -j2)
+done
 
 echo "Real Ghidra archival validation passed"

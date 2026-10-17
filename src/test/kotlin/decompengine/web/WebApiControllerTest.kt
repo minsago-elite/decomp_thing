@@ -393,6 +393,17 @@ class WebApiControllerTest {
             assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs", "POST", "{}", mapOf(
                 "Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
             )), 405, "METHOD_NOT_ALLOWED")
+            // Hidden controls do not authorize a direct start or a different harness.
+            for (workflow in listOf("explore", "reconstruct", "build", "validate", "repair")) {
+                for (harness in listOf("\"harness_acp\"", "\"harness_builtin\"", "null")) {
+                    val start = """{"workflow":"$workflow","inputRevisionId":null,"harnessCapabilityId":$harness,"limits":{"wallClockMs":"60000","idleMs":"15000","maxOutputBytes":"1048576","maxToolCalls":"16"}}"""
+                    assertError(request(server, "/workbench/api/v1/jobs/${job.id}/runs", "POST", start, mapOf(
+                        "Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
+                    )), 405, "METHOD_NOT_ALLOWED")
+                    assertEquals(before, Files.readString(record), "$workflow/$harness changed durable state")
+                    assertFalse(executed, "$workflow/$harness executed an adapter")
+                }
+            }
             assertEquals(before, Files.readString(record))
             assertFalse(executed)
         } finally { server.stop(); root.toFile().deleteRecursively() }

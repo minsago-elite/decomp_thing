@@ -48,6 +48,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
       </dl>
       <p>Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.</p>
       <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.</p>
+      <p>Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.</p>
       <a href={appPath(basePath, '/runtime')}>View reported workflow availability</a>
     </>}
   </>;

@@ -3874,4 +3874,40 @@ class FullTreeFunctionObservationCleanupDiagnosticTest {
             assertTrue("foreign.scope" !in diagnostic && "/foreign" !in diagnostic)
         }
     }
+
+    @Test
+    fun `cleanup selection diagnostics retain missing errno shape without raw failure text`() {
+        val marker = "PRIVATE-selection-text\n/private/credential-path"
+        fun failure(message: String, cause: Throwable? = null) =
+            FullTreeFunctionObservationIsolationException(message, cause)
+        val prefix = "cgroupSelectionFailure="
+        val metadata = describeObservationCleanupTarget(
+            mapOf("LoadState" to "not-found", "ActiveState" to "deactivating"), marker, marker, marker,
+        )
+        val cases = listOf(
+            failure("cannot reselect the descriptor-pinned isolated cgroup",
+                decompengine.acp.LinuxSyscallException(marker, decompengine.acp.LinuxFilesystemSyscalls.ENOENT)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=true; cgroupSelectionMissingErrno=true",
+            failure("cannot reselect the descriptor-pinned isolated cgroup",
+                decompengine.acp.LinuxSyscallException(marker, decompengine.acp.LinuxFilesystemSyscalls.ENOENT + 1)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=true; cgroupSelectionMissingErrno=false",
+            failure("cannot reselect the descriptor-pinned isolated cgroup", java.io.IOException(marker)) to
+                "${prefix}reselection-failed; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure("descriptor-pinned isolated cgroup changed identity") to
+                "${prefix}retained-identity; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure("isolated cgroup path selected a replacement directory") to
+                "${prefix}path-replacement; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            failure(marker.repeat(2048), decompengine.acp.LinuxSyscallException(marker, 2)) to
+                "${prefix}other; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+            IllegalStateException(marker) to
+                "${prefix}other; cgroupSelectionErrnoPresent=false; cgroupSelectionMissingErrno=false",
+        )
+        for ((cause, expected) in cases) {
+            val diagnostic = describeObservationCgroupSelectionFailure(cause)
+            assertEquals(expected, diagnostic)
+            assertTrue(diagnostic.length <= 192)
+            assertTrue("$metadata; $diagnostic".length <= 768)
+            assertTrue("PRIVATE-selection-text" !in diagnostic && "/private/credential-path" !in diagnostic)
+        }
+    }
 }
