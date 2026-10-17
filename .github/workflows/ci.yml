@@ -96,6 +96,7 @@ jobs:
             build/frontend/bundle-composition.json
 
   web-packaged:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
@@ -217,6 +218,7 @@ jobs:
             build/test-results/test
 
   kotlin-suite:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: kotlin-${{ matrix.shard }}
@@ -457,6 +459,7 @@ jobs:
           path: build/ci-partition-inventory.json
 
   bundled-ghidra:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
@@ -509,6 +512,7 @@ jobs:
             build/test-results/test
 
   archival-ghidra:
+    needs: frontend
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -518,6 +522,7 @@ jobs:
       - run: scripts/validate-archival-docker.sh
 
   clang:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
