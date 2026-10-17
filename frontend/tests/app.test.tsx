@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/app/App';
 import { ViewBoundary } from '../src/shared/ViewBoundary';
 import { createAssetRecovery } from '../src/app/assetRecovery';
@@ -107,6 +107,97 @@ describe('public workbench shell', () => {
     expect(screen.getByRole('heading', { name: 'This page could not be found' })).toBeTruthy();
     expect(document.title).toBe('Page unavailable · Decomp Workbench');
     expect(screen.getByRole('link', { name: 'Return to the workspace' }).getAttribute('href')).toBe('/');
+  });
+});
+
+describe('browser offline notices', () => {
+  let online = true;
+  let originalOnline: PropertyDescriptor | undefined;
+  beforeEach(() => {
+    online = true;
+    originalOnline = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online });
+  });
+  afterEach(() => {
+    if (originalOnline) Object.defineProperty(navigator, 'onLine', originalOnline);
+    else Reflect.deleteProperty(navigator, 'onLine');
+  });
+
+  it('marks offline information without changing focus navigation storage or requests', () => {
+    const fetch = vi.fn(); const reload = vi.fn();
+    const store = vi.spyOn(Storage.prototype, 'setItem');
+    vi.stubGlobal('fetch', fetch);
+    try {
+      render(<App reload={reload} />);
+      expect(screen.queryByRole('status', { name: 'Connection status' })).toBeNull();
+      const navigation = screen.getByRole('link', { name: 'Upload' });
+      navigation.focus();
+      const address = window.location.href;
+      online = false;
+      fireEvent(window, new Event('offline'));
+      const notice = screen.getByRole('status', { name: 'Connection status' });
+      expect(notice.textContent).toContain('Browser reports offline');
+      expect(notice.textContent).toContain('Previously loaded information may be out of date.');
+      expect(notice.textContent).toContain('Server work may continue');
+      expect(document.activeElement).toBe(navigation);
+      expect(window.location.href).toBe(address);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+      expect(store).not.toHaveBeenCalled();
+    } finally { store.mockRestore(); }
+  });
+
+  it('keeps the loaded-information warning after reconnect without automatically refreshing', () => {
+    online = false;
+    const fetch = vi.fn(); const reload = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    render(<App reload={reload} />);
+    expect(screen.getByRole('status', { name: 'Connection status' }).textContent).toContain('Browser reports offline');
+    online = true;
+    fireEvent(window, new Event('online'));
+    const notice = screen.getByRole('status', { name: 'Connection status' });
+    expect(notice.textContent).toContain('Refresh loaded information');
+    expect(notice.textContent).toContain('Previously loaded information may still be out of date.');
+    expect(notice.textContent).not.toContain('Browser reports offline');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('retains a brief offline hint when both browser events share one render', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    render(<App />);
+    fireEvent(window, new Event('online'));
+    expect(screen.queryByRole('status', { name: 'Connection status' })).toBeNull();
+    await act(() => {
+      online = false;
+      window.dispatchEvent(new Event('offline'));
+      online = true;
+      window.dispatchEvent(new Event('online'));
+    });
+    expect(screen.getAllByRole('status', { name: 'Connection status' })).toHaveLength(1);
+    expect(screen.getByRole('status', { name: 'Connection status' }).textContent).toContain('Previously loaded information may still be out of date.');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('removes hint listeners and keeps the warning within its shell instance', () => {
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    try {
+      const first = render(<App />);
+      online = false;
+      fireEvent(window, new Event('offline'));
+      expect(screen.getByRole('status', { name: 'Connection status' })).toBeTruthy();
+      const hints = added.mock.calls.filter(([type]) => type === 'online' || type === 'offline');
+      expect(hints).toHaveLength(2);
+      first.unmount();
+      for (const [type, listener] of hints) expect(removed).toHaveBeenCalledWith(type, listener);
+      online = true;
+      const second = render(<App />);
+      expect(screen.queryByRole('status', { name: 'Connection status' })).toBeNull();
+      expect(fetch).not.toHaveBeenCalled();
+      second.unmount();
+    } finally { added.mockRestore(); removed.mockRestore(); }
   });
 });
 

@@ -7,6 +7,7 @@ import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
 import { PrivateSessionContext } from '../session/PrivateTransport';
 import { SessionStatus } from '../session/SessionStatus';
+import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import type { BrowserSession } from '../session/session';
 import { lazyRoute } from '../shared/LazyRoute';
 import { createAssetRecovery, observeAssetFailures } from './assetRecovery';
@@ -23,6 +24,19 @@ type ShellProps = {
   reload: () => void;
   session: BrowserSession | null;
 };
+
+/** Browser connectivity is a hint; it never establishes freshness or server-work lifetime. */
+function ConnectionNotice() {
+  const availability = useBrowserAvailability();
+  if (!availability.hasBeenOffline) return null;
+  return <aside class="connection-notice notice" role="status" aria-label="Connection status">
+    <h2>{availability.online ? 'Refresh loaded information' : 'Browser reports offline'}</h2>
+    <p>{availability.online
+      ? 'The browser reports a connection again. Previously loaded information may still be out of date. Refresh this view to check its current state.'
+      : 'Previously loaded information may be out of date. Reconnect and refresh this view before relying on its status.'}</p>
+    {!availability.online && <p>Server work may continue while this page is disconnected.</p>}
+  </aside>;
+}
 
 function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Job = useMemo(() => lazyRoute(() => import('../routes/Job'), recovery), [recovery]);
@@ -76,6 +90,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
         <span class="build-label">Early preview</span>
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
+      <ConnectionNotice />
       {session && <SessionStatus session={session} />}
       <div class="app-layout">
         <nav class="app-nav" aria-label="Main navigation">
