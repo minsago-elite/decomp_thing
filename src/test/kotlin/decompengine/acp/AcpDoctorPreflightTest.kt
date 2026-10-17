@@ -119,7 +119,9 @@ class AcpDoctorPreflightTest {
             val temporary = createTempDirectory("doctor-auth-invalid-")
             val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
             val error = assertFailsWith<AgentExecutionException> { harness.preflight() }
-            assertEquals(AgentFailureKind.PROTOCOL, error.failure.kind, mode)
+            assertEquals(AgentFailureKind.PROTOCOL, error.failure.kind,
+                if (error.failure.kind == AgentFailureKind.PROTOCOL) mode else
+                    "$mode: " + runCatching { doctorFailureContext(error) }.getOrDefault("Doctor failure context unavailable"))
             assertEquals("invalidAuthenticationInventory", error.failure.details["reason"], mode)
             assertEquals("ACP agent advertised an invalid authentication inventory", error.failure.message)
             val receipt = assertNotNull(error.receipt)

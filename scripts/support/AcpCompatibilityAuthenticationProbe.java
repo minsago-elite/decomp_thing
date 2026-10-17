@@ -163,6 +163,7 @@ public final class AcpCompatibilityAuthenticationProbe {
                 "codex-acp-0.16.0:stable-v1:initialized:authentication-required:cleanup-verified"
             );
         } catch (Throwable failure) {
+            AcpCompatibilityFailureSummary.report(receipt, failure);
             var document = baseEvidence(
                 "failed",
                 executableManifestSha256,
