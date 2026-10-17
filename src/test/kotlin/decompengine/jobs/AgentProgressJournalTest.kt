@@ -9,6 +9,108 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `snapshot encoding releases producers and publishes one coherent loss boundary`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-encoding").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val encoding = List(2) { java.util.concurrent.CountDownLatch(1) }
+        val releaseEncoding = List(2) { java.util.concurrent.CountDownLatch(1) }
+        val published = List(2) { java.util.concurrent.CountDownLatch(1) }
+        val releasePublication = List(2) { java.util.concurrent.CountDownLatch(1) }
+        val encodingCount = java.util.concurrent.atomic.AtomicInteger()
+        val publicationCount = java.util.concurrent.atomic.AtomicInteger()
+        val producers = mutableListOf<Thread>()
+        val journal = AgentProgressJournal.withSnapshotEncodeHooks(root, "repair", {
+            val cut = encodingCount.getAndIncrement()
+            if (cut < 2) {
+                encoding[cut].countDown()
+                check(releaseEncoding[cut].await(10, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }, {
+            val cut = publicationCount.getAndIncrement()
+            if (cut < 2) {
+                published[cut].countDown()
+                check(releasePublication[cut].await(10, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }, maximumSnapshotBytes = 4096)
+        var secondHistoryLoss = 0L
+        try {
+            for (cut in 0..1) {
+                assertTrue(encoding[cut].await(10, java.util.concurrent.TimeUnit.SECONDS))
+                val done = java.util.concurrent.CountDownLatch(1)
+                val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+                producers += Thread({
+                    try {
+                        repeat(if (cut == 0) 200 else 20) { journal.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+                    } catch (problem: Throwable) { failure.set(problem) }
+                    finally { done.countDown() }
+                }, "progress-producer-control-$cut").apply { isDaemon = true; start() }
+                // Each coherent cut is still held; producer completion cannot depend on release.
+                assertTrue(done.await(2, java.util.concurrent.TimeUnit.SECONDS))
+                assertNull(failure.get())
+                releaseEncoding[cut].countDown()
+                assertTrue(published[cut].await(10, java.util.concurrent.TimeUnit.SECONDS))
+                val snapshot = assertNotNull(AgentProgressJournal.read(root))
+                val sequences = snapshot.getValue("events").jsonArray.map {
+                    it.jsonObject.getValue("sequence").jsonPrimitive.long
+                }
+                val ranges = snapshot.getValue("omittedSequenceRanges").jsonArray.map {
+                    it.jsonObject.getValue("startInclusive").jsonPrimitive.content to
+                        it.jsonObject.getValue("endExclusive").jsonPrimitive.content
+                }
+                if (cut == 0) {
+                    assertEquals(1L, snapshot.getValue("nextSequence").jsonPrimitive.long)
+                    assertEquals(0L, snapshot.getValue("queueDropped").jsonPrimitive.long)
+                    assertEquals(0L, snapshot.getValue("historyDropped").jsonPrimitive.long)
+                    assertEquals(listOf(0L), sequences)
+                    assertTrue(ranges.isEmpty())
+                } else {
+                    assertEquals(201L, snapshot.getValue("nextSequence").jsonPrimitive.long)
+                    assertEquals(72L, snapshot.getValue("queueDropped").jsonPrimitive.long)
+                    secondHistoryLoss = snapshot.getValue("historyDropped").jsonPrimitive.long
+                    assertTrue(secondHistoryLoss in 1L..128L)
+                    assertEquals((secondHistoryLoss..128L).toList(), sequences)
+                    assertEquals(listOf("0" to secondHistoryLoss.toString(), "129" to "201"), ranges)
+                    assertTrue(root.resolve(AgentProgressJournal.FILE_NAME).fileSize() <= 4096)
+                }
+                releasePublication[cut].countDown()
+            }
+            journal.close()
+            val final = assertNotNull(AgentProgressJournal.read(root))
+            assertEquals(221L, final.getValue("nextSequence").jsonPrimitive.long)
+            assertEquals(72L, final.getValue("queueDropped").jsonPrimitive.long)
+            val historyLoss = final.getValue("historyDropped").jsonPrimitive.long
+            assertTrue(historyLoss in secondHistoryLoss..148L)
+            val sequences = final.getValue("events").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.long
+            }
+            val admitted = (0L..128L).toList() + (201L..220L).toList()
+            assertEquals(admitted.drop(historyLoss.toInt()), sequences)
+            val omitted = final.getValue("omittedSequenceRanges").jsonArray.flatMap {
+                val range = it.jsonObject
+                (range.getValue("startInclusive").jsonPrimitive.content.toLong() until
+                    range.getValue("endExclusive").jsonPrimitive.content.toLong()).toList()
+            }
+            assertEquals((0L until 221L).toList(), (omitted + sequences).sorted())
+            assertEquals(72L + historyLoss, omitted.size.toLong())
+            assertTrue(root.resolve(AgentProgressJournal.FILE_NAME).fileSize() <= 4096)
+            AgentProgressJournal(root, "repair").use { }
+            val restarted = assertNotNull(AgentProgressJournal.read(root))
+            assertEquals(222L, restarted.getValue("nextSequence").jsonPrimitive.long)
+            assertEquals(72L, restarted.getValue("queueDropped").jsonPrimitive.long)
+            assertEquals(historyLoss, restarted.getValue("historyDropped").jsonPrimitive.long)
+            assertEquals(sequences + 221L, restarted.getValue("events").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.long
+            })
+        } finally {
+            releaseEncoding.forEach { it.countDown() }
+            releasePublication.forEach { it.countDown() }
+            producers.forEach { it.join(5000) }
+            journal.close()
+            // Keep the bounded repository-local fixture; do not delete under an owned writer.
+        }
+    }
+
+    @Test
     fun `writer retires ownership after a timed out close once publication has stopped`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-late-writer").toAbsolutePath())
         val root = createTempDirectory(parent, "journal-")

@@ -32,6 +32,7 @@ class AgentProgressJournal private constructor(
     private val maximumSnapshotBytes: Int,
     private val onPhase: (AgentWorkflowPhase) -> Unit,
     private val afterSnapshotWrite: (() -> Unit)?,
+    private val beforeSnapshotEncode: (() -> Unit)?,
 ) : AgentWorkflowProgress, AutoCloseable {
     constructor(
         reportsDirectory: Path,
@@ -42,7 +43,7 @@ class AgentProgressJournal private constructor(
         maximumSnapshotBytes: Int = 512 * 1024,
         onPhase: (AgentWorkflowPhase) -> Unit = {},
     ) : this(reportsDirectory, workflow, sensitiveValues, maximumEvents, maximumQueuedEvents,
-        maximumSnapshotBytes, onPhase, null)
+        maximumSnapshotBytes, onPhase, null, null)
 
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
@@ -281,24 +282,29 @@ class AgentProgressJournal private constructor(
     private fun writeLoop() {
         try {
             while (true) {
-                val snapshot = synchronized(monitor) {
+                val boundary = synchronized(monitor) {
                     while (!dirty && !closed) monitor.wait()
                     if (!dirty && closed) return
                     while (queue.isNotEmpty()) retained.add(queue.removeFirst())
                     while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
                     dirty = false
-                    var bytes = snapshot().toString().toByteArray(Charsets.UTF_8)
-                    while (bytes.size > maximumSnapshotBytes && retained.isNotEmpty()) {
-                        retained.removeFirst(); historyDropped++
-                        bytes = snapshot().toString().toByteArray(Charsets.UTF_8)
-                    }
-                    check(bytes.size <= maximumSnapshotBytes) { "progress snapshot exceeds its limit" }
-                    bytes
+                    SnapshotBoundary(sequence, queueDropped, historyDropped)
                 }
+                // Only this writer owns retained. Producers may enqueue the next cut while
+                // this coherent cut is encoded, trimmed and published without their monitor.
+                beforeSnapshotEncode?.invoke()
+                var sizeDropped = 0L
+                var snapshotBytes = snapshot(boundary, sizeDropped).toString().toByteArray(Charsets.UTF_8)
+                while (snapshotBytes.size > maximumSnapshotBytes && retained.isNotEmpty()) {
+                    retained.removeFirst(); sizeDropped++
+                    snapshotBytes = snapshot(boundary, sizeDropped).toString().toByteArray(Charsets.UTF_8)
+                }
+                check(snapshotBytes.size <= maximumSnapshotBytes) { "progress snapshot exceeds its limit" }
+                synchronized(monitor) { historyDropped += sizeDropped }
                 val temporary = Files.createTempFile(reportsDirectory, ".agent-progress-", ".tmp")
                 try {
                     FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                        val buffer = java.nio.ByteBuffer.wrap(snapshot)
+                        val buffer = java.nio.ByteBuffer.wrap(snapshotBytes)
                         while (buffer.hasRemaining()) channel.write(buffer)
                         channel.force(true)
                     }
@@ -318,15 +324,18 @@ class AgentProgressJournal private constructor(
         }
     }
 
-    private fun snapshot(): JsonObject = buildJsonObject {
+    private data class SnapshotBoundary(val nextSequence: Long, val queueDropped: Long, val historyDropped: Long)
+
+    private fun snapshot(boundary: SnapshotBoundary, sizeDropped: Long): JsonObject = buildJsonObject {
+        val historyLoss = boundary.historyDropped + sizeDropped
         put("schemaVersion", 1)
         put("displayOnly", true)
-        put("nextSequence", sequence)
-        put("queueDropped", queueDropped)
-        put("historyDropped", historyDropped)
-        put("truncated", queueDropped > 0 || historyDropped > 0)
+        put("nextSequence", boundary.nextSequence)
+        put("queueDropped", boundary.queueDropped)
+        put("historyDropped", historyLoss)
+        put("truncated", boundary.queueDropped > 0 || historyLoss > 0)
         put("events", JsonArray(retained.toList()))
-        put("omittedSequenceRanges", omissionRanges(retained.toList(), sequence))
+        put("omittedSequenceRanges", omissionRanges(retained.toList(), boundary.nextSequence))
     }
 
     override fun close() {
@@ -345,7 +354,19 @@ class AgentProgressJournal private constructor(
             workflow: String,
             afterSnapshotWrite: () -> Unit,
         ): AgentProgressJournal = AgentProgressJournal(
-            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite,
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null,
+        )
+
+        /** Controlled cut/publication boundaries for producer-isolation qualification. */
+        internal fun withSnapshotEncodeHooks(
+            reportsDirectory: Path,
+            workflow: String,
+            beforeSnapshotEncode: () -> Unit,
+            afterSnapshotWrite: () -> Unit,
+            maximumSnapshotBytes: Int = 512 * 1024,
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, 128, maximumSnapshotBytes, {},
+            afterSnapshotWrite, beforeSnapshotEncode,
         )
 
         const val FILE_NAME = "agent-progress.json"
