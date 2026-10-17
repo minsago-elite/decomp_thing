@@ -60,6 +60,23 @@ distinct. `kotlin-partition-inventory` retains counts and input hashes; routing 
 report-placement regression controls run in the core job. This placement check
 complements the complete original-inventory comparison above.
 
+Core also runs the authored source/XML controls in
+`scripts/test-web-job-recovery-inventory.py` and consumes its already executed
+JUnit reports with `scripts/verify-web-job-recovery.py --reports`. This guard
+requires every literal zero-argument `@Test` scenario in the 19 selected benign
+jobs/web classes, including nested source declarations that Jupiter would fail
+to discover. Missing, duplicate, unexpected, failed, erroneous or skipped cases
+refuse coverage; reported counts must match actual testcase outcomes. Other test
+declaration forms require an explicit extension and are refused by this corpus's
+declaration check. No additional Gradle/JVM test run is started by the guard.
+
+`web-job-recovery-inventory.json` is retained with the core reports. It binds case
+identities/results to XML hashes, declaration source hashes and a Git snapshot;
+the CI checkout/compilation join remains separate evidence. Its
+`fullMatrixQualified` is always false: scenario coverage supplies neither
+per-case runtime/filesystem evidence nor the complete supported recovery matrix,
+power-loss, external-process, provider/model or release qualification.
+
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.
