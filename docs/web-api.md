@@ -451,8 +451,10 @@ Legacy event reads and v1 progress reads now use the same fixed-path service ope
 which validates job/attempt ownership and applies the retained-descriptor artifact reader's
 2 MiB ceiling. Legacy event reads no longer fabricate a zero-event snapshot when the journal
 is missing. Malformed and oversized journals also return `PROGRESS_UNAVAILABLE`; an actual
-persisted, valid zero-event journal still returns 200. This does not add cursor replay or v1
-session authorization to the legacy route, nor add a new event authority.
+persisted, valid zero-event journal still returns 200. Legacy event reads require the shared
+local session policy, including revocation, before this service read; this is the same
+LocalWebAccess boundary used by the versioned controller. The legacy payload still adds no
+cursor replay or new event authority.
 
 Legacy successful event JSON and initial HTML now share a closed metadata projection.
 Raw `text`, plan `entries`, `path` and unknown fields are withheld. Message prose is withheld

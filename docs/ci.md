@@ -144,8 +144,9 @@ results, tool/lock/schema identities and bundle/manifest metadata as
 environment dumps, credentials, private source maps or generated job content.
 
 The **Packaged web contracts and browser** job also runs on pull requests and
-pushes to master or tags. It builds the archives from the current checkout, runs the web/job JVM
-contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
+pushes to master or tags. It builds the archives from the current checkout, runs
+`BrowserSessionExpiryTest` with pinned Chrome/Node, verifies relocated read-only
+ZIP/TAR HTTP serving and Ghidra native
 permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
 Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
 session exchange/reload/logout, exact binary metadata, focused live updates,
@@ -157,6 +158,26 @@ The JVM web-contract step uses those same pinned Chrome/Node paths to require th
 existing real-browser session-expiry, private-read refusal and fresh operator-link
 exchange test. Its injected monotonic clock advances the session age without a
 wall-clock wait; ordinary hosts without Chrome retain the opt-in test behavior.
+
+All ordinary web/job JVM contracts remain in the automatic core namespace
+selection and its required aggregate; the packaged lane no longer repeats those
+hundreds of executions. It retains all methods in `BrowserSessionExpiryTest`,
+including HTTP-clock and process-cleanup controls, because the actual browser
+method is explicitly skipped on ordinary hosts without Chrome. A report gate
+requires that exact browser method once, valid suite/class/method identities,
+matching aggregate counts and no failed, errored or skipped case in its suite. The complete report directory is
+inventoried under 128-entry/eight-level limits and must contain exactly that one
+regular XML input, including nested/case-variant XML. Gradle's regular binary
+result files remain allowed; symlink files/directories and nonregular entries
+refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
+XML bytes/hash. Core runs the report gate's positive and negative controls.
+The focused `packaged-browser-expiry-test-reports` artifact retains the exact
+expiry XML and gate receipt for independent byte/hash checks without restoring
+browser journey payloads. The existing full packaged evidence upload is retained.
+Packaging, archive/helper/closure verification and every packaged browser journey
+keep their existing commands and current-source inputs. This scheduling change
+does not qualify an additional target/resource matrix or establish a measured
+speedup; compare actual job and runner costs after current Actions finish.
 
 `scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
 x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
@@ -197,7 +218,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Lane | Scheduling and responsibility | Source |
 | --- | --- | --- |
 | Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
-| Packaged web contracts and browser | Normal; JVM web/job contracts, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
+| Packaged web contracts and browser | Normal; browser-expiry JVM suite with positive report gate, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
 | Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
@@ -388,6 +409,22 @@ jobs:
 ```
 
 ## CI Artifacts
+
+### Pinned Goose archive acquisition
+
+The live lane rechecks the exact Goose 1.46.0 archive size and SHA-256 on every
+cache read. Its digest-keyed Actions cache retains only archive bytes, with no
+restore prefix or runtime evidence. Missing bytes use the canonical official
+release URL and then its immutable release-asset API endpoint, with one attempt
+per endpoint, HTTPS-only redirects, a 15-second connection bound, 120 seconds per
+transfer and the exact archive byte ceiling. Invalid successful responses and
+invalid/linked cache entries refuse; complete verified bytes publish atomically
+without replacing an existing entry. Acquisition precedes the application build.
+Transport-only controls use inert bytes and a fake curl. The unchanged archive
+layout, provisioning, runtime manifest, credential-free initialize and required
+outcome gate still apply; no agent invocation is retried and no failure is waived.
+The `--fetch-archive` mode only verifies/acquires bytes and performs no extraction
+or runtime execution. This cache is an optimization, not measured speedup evidence.
 
 Useful artifacts to retain:
 

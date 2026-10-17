@@ -140,12 +140,12 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
-      - name: Build archives and verify JVM web contracts and distribution contents
+      - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+          ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -153,6 +153,21 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Require positive real-browser expiry evidence
+        run: >-
+          python3 scripts/test-ci-partitions.py
+          --check-browser-reports build/test-results/test
+          --output build/packaged-web-ci/browser-expiry-tests.json
+      - name: Retain focused browser expiry XML and gate receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-browser-expiry-test-reports
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
+            build/packaged-web-ci/browser-expiry-tests.json
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -257,6 +272,9 @@ jobs:
       - name: Check CI partition routing and report ownership controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-ci-partitions.py
+      - name: Check pinned Goose archive acquisition controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-goose-archive-download.py
       - name: Check recovery scenario coverage controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-web-job-recovery-inventory.py
@@ -285,6 +303,12 @@ jobs:
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
+      - name: Cache verified pinned Goose archive
+        uses: actions/cache@v6
+        if: matrix.shard == 'live'
+        with:
+          path: ${{ github.workspace }}/build/acp-compatibility/download-cache/goose-x86_64-unknown-linux-gnu.tar.bz2
+          key: goose-acp-archive-v1-${{ runner.os }}-${{ runner.arch }}-a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b
       - name: Qualify pinned credential-free third-party ACP initialize
         id: goose-initialize
         if: matrix.shard == 'live'
