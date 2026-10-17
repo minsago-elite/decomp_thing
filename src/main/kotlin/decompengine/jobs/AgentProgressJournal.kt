@@ -545,6 +545,10 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
     private val secrets: List<String>
     init {
+        // Bound supplied work before blank scanning and de-duplication, not only its result.
+        require(values.size <= 4096 && values.sumOf { it.length.toLong() } <= 1024 * 1024) {
+            "progress redaction values exceed the configured limit"
+        }
         val primary = values.filter { it.isNotBlank() }.distinct()
         require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
@@ -564,16 +568,16 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
-        if (value.length > 16_384) return omission("[oversized text omitted]")
+        if (value.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
         var safe = value.replace(removableControls, "")
         // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
         // "[redacted]X"); repeat replacement passes until the output is stable and omit
         // any result that still contains a secret.
         for (pass in 1..REDACTION_PASSES) {
-            val next = redact(safe)
+            val next = redact(safe) ?: return omission("[oversized text omitted]")
             if (next == safe) break
             safe = next
-            if (safe.length > 16_384) return omission("[oversized text omitted]")
+            if (safe.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
         }
         if (safe.length > maximumCharacters) {
             var end = maximumCharacters
@@ -587,20 +591,28 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     // Fixed diagnostic text can itself be a configured secret; no fixed replacement is always safe.
     private fun omission(marker: String): String = if (leaks(marker)) "" else marker
 
-    private fun redact(source: String): String {
+    private fun redact(source: String): String? {
         var safe = source
+        fun replace(pattern: Regex, replacement: String): Boolean {
+            safe = safe.replace(pattern, replacement)
+            return safe.length <= MAXIMUM_REDACTION_CHARACTERS
+        }
         // Consume both Basic scheme and credential before the generic field rule can remove
         // just the scheme and leave an unregistered encoded credential behind. Do this before
         // configured replacements too: a secret can itself match a header or scheme fragment.
-        safe = safe.replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")
-        secrets.forEach { safe = safe.replace(it, "[redacted]") }
-        safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
-        safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
-        safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
+        if (!replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")) return null
+        for (secret in secrets) {
+            safe = safe.replace(secret, "[redacted]")
+            if (safe.length > MAXIMUM_REDACTION_CHARACTERS) return null
+        }
+        if (!replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")) return null
+        if (!replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")) return null
+        if (!replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")) return null
         return safe
     }
 
     private companion object {
         const val REDACTION_PASSES = 8
+        const val MAXIMUM_REDACTION_CHARACTERS = 16_384
     }
 }

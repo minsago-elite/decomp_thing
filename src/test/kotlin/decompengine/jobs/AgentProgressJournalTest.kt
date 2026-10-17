@@ -9,6 +9,44 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `redaction bounds raw configuration and intermediate replacement work`(): Unit {
+        val marker = "[oversized text omitted]"
+        val redactor = ProgressRedactor(listOf("q"))
+        val largeToken = "q".repeat(2000)
+        // A later Bearer/field rule would collapse the expanded token again. Budget the
+        // intermediate result too, rather than allocating through every configured secret.
+        assertEquals(marker, redactor.text("Bearer $largeToken"))
+        assertEquals(marker, redactor.text("api_key=$largeToken"))
+        val exact = "Bearer " + "q".repeat(1637) + "1234567"
+        // 7 prefix + 1637 ten-character replacements + 7 suffix = 16384 exactly.
+        assertEquals("Bearer [redacted]", redactor.text(exact))
+        assertEquals(marker, redactor.text(exact + "8"))
+        // Basic credentials are consumed by the earlier rule, preserving its normal result.
+        assertEquals("Authorization: [redacted]", redactor.text("Authorization: Basic $largeToken"))
+        assertEquals("Bearer [redacted]", redactor.text("Bearer ordinary-token"))
+        val privateMarker = ProgressRedactor(listOf("q", marker))
+        assertEquals("", privateMarker.text("Bearer $largeToken"))
+        assertEquals("", privateMarker.text("api_key=$largeToken"))
+        assertRawRedactionBudgetAdmission()
+    }
+
+    private fun assertRawRedactionBudgetAdmission() {
+        val tooManyWithoutIteration = object : AbstractCollection<String>() {
+            override val size: Int get() = 4097
+            override fun iterator(): Iterator<String> = error("oversized configuration must be refused before iteration")
+        }
+        val countFailure = assertFailsWith<IllegalArgumentException> { ProgressRedactor(tooManyWithoutIteration) }
+        assertEquals("progress redaction values exceed the configured limit", countFailure.message)
+        assertFailsWith<IllegalArgumentException> { ProgressRedactor(List(4097) { "q" }) }
+        val oversizedBlank = " ".repeat(1024 * 1024 + 1)
+        val lengthFailure = assertFailsWith<IllegalArgumentException> { ProgressRedactor(listOf(oversizedBlank)) }
+        assertEquals("progress redaction values exceed the configured limit", lengthFailure.message)
+        assertEquals("ordinary", ProgressRedactor(listOf(oversizedBlank.dropLast(1))).text("ordinary"))
+        val fullPrimaryAndAdditional = ProgressRedactor(List(4096) { "q" }, List(130) { "mode" })
+        assertEquals("[redacted] [redacted]", fullPrimaryAndAdditional.text("q mode"))
+    }
+
+    @Test
     fun `snapshot size planning preserves exact maximal suffix across Unicode gaps and counter boundaries`(): Unit {
         val fixtures = listOf(
             List(31) { it.toLong() },

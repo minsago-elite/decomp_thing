@@ -1026,8 +1026,13 @@ including when an earlier preference fails. Whitespace-only preference IDs remai
 set. After JSON quoting and omission formatting, the formatter checks the complete preview again;
 if a replacement marker or formatting recreates any private ID, it withholds the entire hint as
 an empty string. A fixed replacement cannot be safe for arbitrary configured identifiers. This
-does not change exact-match selection or typed rejection outcomes. Their separate allowance of at most 130 identifiers of
-256 characters leaves the existing 4096-value/1 MiB environment redaction budget intact. These are display hints, not exact selection tokens or additional setter authority. Capability
+does not change exact-match selection for admitted redaction configurations. The separate allowance
+of at most 130 identifiers of 256 characters is independent of the environment redaction budget.
+Environment redaction admits at most 4,096 supplied values and 1,048,576 UTF-16 code units in total
+before blank filtering or de-duplication; raw duplicates and blank text count toward those limits.
+Over-budget configuration uses the existing fixed redaction-limit rejection. Each preview replacement
+also stops when an intermediate exceeds 16,384 code units and uses the secret-aware omission fallback.
+These are display hints, not exact selection tokens or additional setter authority. Capability
 absence and type/ambiguity rejection keep their existing typed outcomes. No setter or prompt is sent
 when the requested preference fails the initial advertisement check.
 
