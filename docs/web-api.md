@@ -30,8 +30,9 @@ artifact as JSON. JSON mutation bodies require
 `Content-Type: application/json`; upload requires `multipart/form-data` with exactly one `binary`
 part. No request to `/api/**` receives SPA HTML, including unknown routes, malformed requests,
 exceptions and unsupported methods. Unsupported methods return `405` plus `Allow`; unsupported
-`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` is permitted
-only for immutable artifact download metadata, where its headers equal GET without a body.
+`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` support is
+route-specific; permitted HEAD requests return the corresponding GET status and content headers
+without a response body.
 GET/HEAD never upload, queue, resume, cancel, accept, initialize Git, fetch or publish anything.
 
 Request fixtures wrap the actual body as `{apiVersion, kind, data}` only to select the schema;
@@ -472,9 +473,10 @@ the SPA retains its activity-view restriction as well. See [the transport projec
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
 internal failures use the same response helper but are not fault-injected by that HTTP test.
-The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET only.
-Other methods return 405 with `Allow: GET` before storage reads; HEAD sends the same error
-headers without a body. Unknown routes retain 404. GET shares v1's bounded Accept policy:
+The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET and HEAD.
+Other methods return 405 with `Allow: GET, HEAD` before storage reads. HEAD returns the same
+status and content headers as GET without a response body. Unknown routes retain 404.
+Both methods share v1's bounded Accept policy:
 a missing header allows JSON; explicit JSON, `application/*` and `*/*` ranges are supported;
 a more specific `q=0` exclusion overrides a broader wildcard. Nonmatching/malformed supported
 ranges yield 406. Repeated Accept headers or a value over 512 characters yield 400. Errors
