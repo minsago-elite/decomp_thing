@@ -59,6 +59,9 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Check frontend freshness diagnostic controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-frontend-freshness.py --verbose
       - name: Type-check frontend source and tests
         run: npm --prefix frontend run typecheck
       - name: Lint frontend source and tests
@@ -93,6 +96,7 @@ jobs:
             build/frontend/bundle-composition.json
 
   web-packaged:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
@@ -214,6 +218,7 @@ jobs:
             build/test-results/test
 
   kotlin-suite:
+    needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: kotlin-${{ matrix.shard }}
@@ -454,6 +459,9 @@ jobs:
           path: build/ci-partition-inventory.json
 
   bundled-ghidra:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -465,6 +473,11 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -499,6 +512,7 @@ jobs:
             build/test-results/test
 
   archival-ghidra:
+    needs: frontend
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -508,6 +522,9 @@ jobs:
       - run: scripts/validate-archival-docker.sh
 
   clang:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -521,6 +538,11 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
