@@ -9,6 +9,40 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `sequence exhaustion preserves a readable boundary and releases rejected startup ownership`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-sequence-exhaustion").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        try {
+            val initial = buildJsonObject {
+                put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", Long.MAX_VALUE - 2)
+                put("queueDropped", 0); put("historyDropped", Long.MAX_VALUE - 3); put("truncated", true)
+                put("events", buildJsonArray { add(buildJsonObject { put("sequence", Long.MAX_VALUE - 3) }) })
+            }
+            Files.writeString(root.resolve(AgentProgressJournal.FILE_NAME), initial.toString())
+            assertNotNull(AgentProgressJournal.read(root))
+            AgentProgressJournal(root, "repair").use { journal ->
+                val failure = assertFailsWith<IllegalStateException> { journal.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+                assertEquals("progress sequence space is exhausted", failure.message)
+            }
+            val snapshot = assertNotNull(AgentProgressJournal.read(root))
+            assertEquals(Long.MAX_VALUE - 1, snapshot.getValue("nextSequence").jsonPrimitive.long)
+            assertEquals(listOf(Long.MAX_VALUE - 3, Long.MAX_VALUE - 2), snapshot.getValue("events").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.long
+            })
+            assertEquals(0L, snapshot.getValue("queueDropped").jsonPrimitive.long)
+            assertEquals(Long.MAX_VALUE - 3, snapshot.getValue("historyDropped").jsonPrimitive.long)
+            val lastReadable = Files.readAllBytes(root.resolve(AgentProgressJournal.FILE_NAME))
+            repeat(2) {
+                val attempt = runCatching { AgentProgressJournal(root, "repair") }
+                // Close an unexpectedly admitted writer before reporting a regression failure.
+                attempt.getOrNull()?.close()
+                assertEquals("progress sequence space is exhausted", assertIs<IllegalStateException>(attempt.exceptionOrNull()).message)
+                assertContentEquals(lastReadable, Files.readAllBytes(root.resolve(AgentProgressJournal.FILE_NAME)))
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `omission ranges preserve prefix interior and trailing gaps across legacy restart`() {
         val root = createTempDirectory("progress-ranges-")
         val legacy = buildJsonObject {

@@ -63,6 +63,7 @@ class AgentProgressJournal(
                 previous.getValue("events").jsonArray.forEach { retained.add(it.jsonObject) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
+            requireSequenceCapacity()
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true; start() }
             enqueue("run_started") { put("status", "running") }
         } catch (problem: Throwable) {
@@ -241,6 +242,7 @@ class AgentProgressJournal(
     private fun enqueue(kind: String, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
+        requireSequenceCapacity()
         val record = buildJsonObject {
             put("sequence", sequence++)
             put("runId", runId)
@@ -252,6 +254,10 @@ class AgentProgressJournal(
         if (queue.size >= maximumQueuedEvents) queueDropped++ else queue.add(record)
         dirty = true
         monitor.notifyAll()
+    }
+
+    private fun requireSequenceCapacity() {
+        check(sequence < Long.MAX_VALUE - 1) { "progress sequence space is exhausted" }
     }
 
     private fun writeLoop() {
