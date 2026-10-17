@@ -272,6 +272,9 @@ jobs:
       - name: Check CI partition routing and report ownership controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-ci-partitions.py
+      - name: Check pinned Goose archive acquisition controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-goose-archive-download.py
       - name: Check recovery scenario coverage controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-web-job-recovery-inventory.py
@@ -300,6 +303,12 @@ jobs:
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
+      - name: Cache verified pinned Goose archive
+        uses: actions/cache@v6
+        if: matrix.shard == 'live'
+        with:
+          path: ${{ github.workspace }}/build/acp-compatibility/download-cache/goose-x86_64-unknown-linux-gnu.tar.bz2
+          key: goose-acp-archive-v1-${{ runner.os }}-${{ runner.arch }}-a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b
       - name: Qualify pinned credential-free third-party ACP initialize
         id: goose-initialize
         if: matrix.shard == 'live'

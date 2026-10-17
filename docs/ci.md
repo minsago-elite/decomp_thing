@@ -410,6 +410,22 @@ jobs:
 
 ## CI Artifacts
 
+### Pinned Goose archive acquisition
+
+The live lane rechecks the exact Goose 1.46.0 archive size and SHA-256 on every
+cache read. Its digest-keyed Actions cache retains only archive bytes, with no
+restore prefix or runtime evidence. Missing bytes use the canonical official
+release URL and then its immutable release-asset API endpoint, with one attempt
+per endpoint, HTTPS-only redirects, a 15-second connection bound, 120 seconds per
+transfer and the exact archive byte ceiling. Invalid successful responses and
+invalid/linked cache entries refuse; complete verified bytes publish atomically
+without replacing an existing entry. Acquisition precedes the application build.
+Transport-only controls use inert bytes and a fake curl. The unchanged archive
+layout, provisioning, runtime manifest, credential-free initialize and required
+outcome gate still apply; no agent invocation is retried and no failure is waived.
+The `--fetch-archive` mode only verifies/acquires bytes and performs no extraction
+or runtime execution. This cache is an optimization, not measured speedup evidence.
+
 Useful artifacts to retain:
 
 - `frontend-verification` from the dedicated frontend job (component results and build/contract metadata)
