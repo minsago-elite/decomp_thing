@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
 import decompengine.jobs.AtomicUploadPublisher
 import decompengine.jobs.JobStoreDirectories
@@ -17,7 +20,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -25,6 +27,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
     @Test fun `scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics`() = withStore { _, root ->
         val absent = root.resolve("absent")

@@ -1,9 +1,11 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.repair.open
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -13,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
     @Test
     fun `upload admission reserves room for every supported status message`() {
@@ -419,7 +422,7 @@ class JobStoreTest {
     private fun historyTestRoot(): java.nio.file.Path {
         val parent = java.nio.file.Path.of("build/test-tmp").toAbsolutePath().normalize()
         java.nio.file.Files.createDirectories(parent)
-        return java.nio.file.Files.createTempDirectory(parent, "job-history-reader-")
+        return createTempDirectory(parent, "job-history-reader-")
     }
 
     private fun historyProject(root: java.nio.file.Path, source: String = "base"): java.nio.file.Path {

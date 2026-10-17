@@ -2,6 +2,7 @@
 """Authored source/XML controls for recovery coverage; no JVM or subject invocation."""
 
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 import xml.etree.ElementTree as ET
@@ -14,7 +15,7 @@ SPEC.loader.exec_module(RECOVERY)
 SUITE = "decompengine.jobs.ExampleTest"
 
 
-def report(methods, suite=SUITE, outcomes=None):
+def report(methods, suite=SUITE, outcomes=None, contexts=None):
     outcomes = outcomes or [None] * len(methods)
     node = ET.Element("testsuite", name=suite, tests=str(len(methods)),
         failures=str(outcomes.count("failure")), errors=str(outcomes.count("error")),
@@ -23,7 +24,20 @@ def report(methods, suite=SUITE, outcomes=None):
         case = ET.SubElement(node, "testcase", classname=suite, name=method)
         if outcome:
             ET.SubElement(case, outcome).text = "PRIVATE failure text is not part of the inventory"
+    if contexts is not None:
+        ET.SubElement(node, "system-out").text = "\n".join(
+            RECOVERY.CONTEXT_PREFIX + json.dumps(context) for context in contexts)
     return ET.tostring(node)
+
+
+def context(method="first()", roots=True):
+    return dict(schemaVersion=1, scope="benign-recovery-fixture-runtime", caseClass=SUITE, caseMethod=method,
+        runtime=dict(javaRuntimeVersion="21.0.12.1+1-LTS", javaVendor="Authored vendor",
+                     javaVmName="Authored VM", osName="Linux", osVersion="AUTHORED-kernel", osArch="amd64"),
+        fixtureRoots=[dict(ordinal=1, provider="sun.nio.fs.LinuxFileSystemProvider", scheme="file", type="ext4",
+                           blockSizeBytes=4096, blockSizeStatus="CAPTURED", readOnly=False,
+                           supportsPosix=True, supportsUnix=True)] if roots else [],
+        filesystemDisposition="OBSERVED" if roots else "NOT_EXERCISED")
 
 
 class RecoveryInventoryControls(unittest.TestCase):
@@ -111,6 +125,82 @@ class RecoveryInventoryControls(unittest.TestCase):
             with self.subTest(source=source):
                 with self.assertRaises(ValueError):
                     RECOVERY.source_test_methods(source)
+
+    def inspect_contexts(self, contexts, methods=None):
+        methods = methods or ["first()"]
+        return RECOVERY.inspect_reports({SUITE: methods},
+            {"TEST.xml": report(methods, contexts=contexts)}, require_context=True)
+
+    def test_each_case_binds_its_own_runtime_and_real_fixture_facts(self):
+        first, second = context(), context("second()")
+        second["fixtureRoots"][0]["type"] = "xfs"
+        result = self.inspect_contexts([first, second], ["first()", "second()"])
+        self.assertEqual([], result["verificationFailures"])
+        self.assertEqual(["ext4", "xfs"], [case["context"]["fixtureRoots"][0]["type"]
+            for case in result["suites"][SUITE]["cases"]])
+        self.assertEqual(2, result["configurationCoverage"]["caseContexts"])
+        self.assertEqual(2, len(result["configurationCoverage"]["observedConfigurations"]))
+
+    def test_missing_duplicate_and_cross_case_contexts_are_refused(self):
+        for contexts in ([], [context(), context()], [context("other()")]):
+            with self.subTest(contextCount=len(contexts)):
+                self.assertTrue(self.inspect_contexts(contexts)["verificationFailures"])
+        wrong_class = context(); wrong_class["caseClass"] = "different.Class"
+        self.assertTrue(self.inspect_contexts([wrong_class])["verificationFailures"])
+        wrong_method_type = context(); wrong_method_type["caseMethod"] = []
+        self.assertTrue(self.inspect_contexts([wrong_method_type])["verificationFailures"])
+
+    def test_no_root_case_is_explicit_and_never_credited_as_observed_filesystem(self):
+        result = self.inspect_contexts([context(roots=False)])
+        self.assertEqual([], result["verificationFailures"])
+        coverage = result["configurationCoverage"]
+        self.assertEqual(0, coverage["fixtureRoots"])
+        self.assertEqual([], coverage["observedConfigurations"])
+        self.assertEqual([dict(className=SUITE, method="first()")], coverage["casesWithoutFixtureRoots"])
+
+    def test_unsupported_block_size_is_retained_without_an_invented_value(self):
+        item = context(); item["fixtureRoots"][0].update(blockSizeBytes=None, blockSizeStatus="UNSUPPORTED")
+        result = self.inspect_contexts([item])
+        self.assertEqual([], result["verificationFailures"])
+        self.assertEqual([dict(className=SUITE, method="first()", ordinal=1)],
+            result["configurationCoverage"]["unsupportedBlockSizeObservations"])
+
+    def test_inconsistent_or_unbounded_root_facts_are_refused(self):
+        for change in ({"ordinal": True}, {"ordinal": 2}, {"blockSizeBytes": True}, {"blockSizeBytes": 0},
+                       {"blockSizeStatus": "UNSUPPORTED"}, {"readOnly": "false"},
+                       {"provider": "PRIVATE/path"}, {"type": "PRIVATE\nvalue"}):
+            item = context(); item["fixtureRoots"][0].update(change)
+            with self.subTest(fields=list(change)):
+                result = self.inspect_contexts([item])
+                self.assertTrue(result["verificationFailures"])
+                self.assertNotIn("PRIVATE", str(result))
+        item = context(); item["fixtureRoots"] *= 257
+        self.assertTrue(self.inspect_contexts([item])["verificationFailures"])
+
+    def test_private_or_unknown_fields_are_not_retained_in_the_inventory(self):
+        for target in ("root", "runtime", "outer"):
+            item = context()
+            node = item["fixtureRoots"][0] if target == "root" else item["runtime"] if target == "runtime" else item
+            node["privatePath"] = "/PRIVATE/fixture"
+            result = self.inspect_contexts([item])
+            self.assertTrue(result["verificationFailures"])
+            self.assertNotIn("PRIVATE", str(result))
+
+    def test_duplicate_json_keys_and_malformed_context_lines_refuse(self):
+        for payload in ('{"schemaVersion":1,"schemaVersion":1}', '{"PRIVATE":', 'x' * (256 * 1024 + 1)):
+            node = ET.fromstring(report(["first()"])); ET.SubElement(node, "system-out").text = RECOVERY.CONTEXT_PREFIX + payload
+            result = RECOVERY.inspect_reports({SUITE: ["first()"]}, {"TEST.xml": ET.tostring(node)}, require_context=True)
+            self.assertTrue(result["verificationFailures"])
+            self.assertNotIn("PRIVATE", str(result))
+
+    def test_runtime_bounds_and_disposition_must_match_actual_roots(self):
+        for field, value in (("javaVendor", "/PRIVATE/vendor"), ("osVersion", "x" * 129)):
+            item = context(); item["runtime"][field] = value
+            result = self.inspect_contexts([item])
+            self.assertTrue(result["verificationFailures"])
+            self.assertNotIn("PRIVATE", str(result))
+        item = context(); item["filesystemDisposition"] = "NOT_EXERCISED"
+        self.assertTrue(self.inspect_contexts([item])["verificationFailures"])
 
 
 if __name__ == "__main__":

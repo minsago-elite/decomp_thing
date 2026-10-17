@@ -38,6 +38,88 @@ SUITES = tuple("decompengine." + name for name in (
     "web.WebApiControllerTest",
 ))
 
+CONTEXT_PREFIX = "web-job-recovery-context-v1 "
+RUNTIME_FIELDS = {"javaRuntimeVersion", "javaVendor", "javaVmName", "osName", "osVersion", "osArch"}
+ROOT_FIELDS = {"ordinal", "provider", "scheme", "type", "blockSizeBytes", "blockSizeStatus",
+               "readOnly", "supportsPosix", "supportsUnix"}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate fixture context key")
+        result[key] = value
+    return result
+
+
+def public_text(value, maximum):
+    return (isinstance(value, str) and 0 < len(value) <= maximum and
+            all(32 <= ord(char) <= 126 and char not in "/\\" for char in value))
+
+
+def fixture_contexts(node, suite, methods):
+    contexts = {}
+    for output in node.iter("system-out"):
+        for line in (output.text or "").splitlines():
+            if not line.startswith(CONTEXT_PREFIX):
+                continue
+            if len(line) > 256 * 1024 or len(line.encode("utf-8")) > 256 * 1024:
+                raise ValueError("fixture context exceeds its byte bound")
+            item = json.loads(line[len(CONTEXT_PREFIX):], object_pairs_hook=unique_object)
+            if (not isinstance(item, dict) or set(item) != {"schemaVersion", "scope", "caseClass",
+                    "caseMethod", "runtime", "fixtureRoots", "filesystemDisposition"} or
+                    type(item["schemaVersion"]) is not int or item["schemaVersion"] != 1 or
+                    item["scope"] != "benign-recovery-fixture-runtime" or item["caseClass"] != suite or
+                    not isinstance(item["caseMethod"], str) or len(item["caseMethod"]) > 1024 or
+                    item["caseMethod"] not in methods or item["caseMethod"] in contexts):
+                raise ValueError("fixture context has invalid or duplicate identity")
+            runtime, roots = item["runtime"], item["fixtureRoots"]
+            if (not isinstance(runtime, dict) or set(runtime) != RUNTIME_FIELDS or
+                    any(not public_text(value, 128) for value in runtime.values()) or
+                    not isinstance(roots, list) or len(roots) > 256):
+                raise ValueError("invalid fixture runtime or root inventory")
+            for ordinal, root in enumerate(roots, 1):
+                if not isinstance(root, dict) or set(root) != ROOT_FIELDS:
+                    raise ValueError("invalid fixture filesystem fields")
+                if (type(root["ordinal"]) is not int or root["ordinal"] != ordinal or
+                        not public_text(root["provider"], 160) or
+                        not re.fullmatch(r"[A-Za-z_$][A-Za-z_0-9$]*(\.[A-Za-z_$][A-Za-z_0-9$]*)*", root["provider"]) or
+                        not public_text(root["scheme"], 32) or
+                        not re.fullmatch(r"[a-z][a-z0-9+.-]*", root["scheme"]) or
+                        not public_text(root["type"], 64) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", root["type"]) or
+                        any(type(root[key]) is not bool for key in ("readOnly", "supportsPosix", "supportsUnix"))):
+                    raise ValueError("invalid fixture filesystem facts")
+                block_size, status = root["blockSizeBytes"], root["blockSizeStatus"]
+                if not ((status == "UNSUPPORTED" and block_size is None) or
+                        (status == "CAPTURED" and type(block_size) is int and 0 < block_size <= 2**63 - 1)):
+                    raise ValueError("invalid fixture block-size observation")
+            if item["filesystemDisposition"] != ("OBSERVED" if roots else "NOT_EXERCISED"):
+                raise ValueError("fixture filesystem disposition contradicts its roots")
+            contexts[item["caseMethod"]] = item
+    if set(contexts) != set(methods):
+        raise ValueError("required testcase fixture context is missing")
+    return contexts
+
+
+def configuration_coverage(suites, required):
+    cases = [case for suite in suites.values() for case in suite["cases"] if "context" in case]
+    no_roots, unsupported, configurations = [], [], {}
+    roots_count = 0
+    for case in cases:
+        context = case["context"]
+        if not context["fixtureRoots"]:
+            no_roots.append(dict(className=case["className"], method=case["method"]))
+        for root in context["fixtureRoots"]:
+            roots_count += 1
+            configuration = dict(runtime=context["runtime"], filesystem={k: v for k, v in root.items() if k != "ordinal"})
+            configurations[json.dumps(configuration, sort_keys=True)] = configuration
+            if root["blockSizeStatus"] == "UNSUPPORTED":
+                unsupported.append(dict(className=case["className"], method=case["method"], ordinal=root["ordinal"]))
+    return dict(required=required, caseContexts=len(cases), fixtureRoots=roots_count,
+                casesWithoutFixtureRoots=no_roots, unsupportedBlockSizeObservations=unsupported,
+                observedConfigurations=[configurations[key] for key in sorted(configurations)])
+
 
 def source_test_methods(source):
     """The selected corpus uses literal, zero-argument Kotlin @Test declarations.
@@ -70,7 +152,7 @@ def required_cases(root):
     return required, sources
 
 
-def inspect_reports(required, reports, allow_unrelated=False):
+def inspect_reports(required, reports, allow_unrelated=False, require_context=False):
     """Compare actual case identities/outcomes and counts, never suite counts alone."""
     failures = []
     suites = {}
@@ -112,6 +194,11 @@ def inspect_reports(required, reports, allow_unrelated=False):
             expected, actual = set(required[name]), set(identities)
             failures.extend("Missing testcase: " + name + "::" + method for method in sorted(expected - actual))
             failures.extend("Unexpected testcase: " + name + "::" + method for method in sorted(actual - expected))
+            if require_context:
+                contexts = fixture_contexts(node, name, expected)
+                for case in cases:
+                    if case["method"] in contexts:
+                        case["context"] = contexts[case["method"]]
             suites[name] = dict(counts, cases=cases, report=report,
                                 xmlBytes=len(payload), xmlSha256=hashlib.sha256(payload).hexdigest())
             for key in totals:
@@ -121,7 +208,8 @@ def inspect_reports(required, reports, allow_unrelated=False):
     failures.extend("Missing suite: " + name for name in required if name not in suites)
     if any(totals[key] for key in ("failures", "errors", "skipped")):
         failures.append("Recovery scenarios contain failures, errors or skipped tests")
-    return dict(totals=totals, suites=suites, verificationFailures=failures)
+    return dict(totals=totals, suites=suites, verificationFailures=failures,
+                configurationCoverage=configuration_coverage(suites, require_context))
 
 
 def source_binding(root):
@@ -139,14 +227,15 @@ def coverage_only(root, reports, output):
         raise ValueError("recovery evidence must remain inside the repository")
     required, sources = required_cases(root)
     inspected = inspect_reports(required, {path.name: path.read_bytes()
-        for path in reports.glob("TEST-*.xml")}, allow_unrelated=True)
-    document = dict(schemaVersion=2, scope="source-declared recovery scenario coverage only",
+        for path in reports.glob("TEST-*.xml")}, allow_unrelated=True, require_context=True)
+    document = dict(schemaVersion=3, scope="source-declared recovery scenario and observed fixture configuration coverage",
         status="failed" if inspected["verificationFailures"] else "passed",
         fullMatrixQualified=False, sourceBinding=source_binding(root), requiredSuites=SUITES,
         requiredCases=required, declarationSources=sources, **inspected,
         limitations=["Does not execute tests; consumes the existing core JVM reports",
                      "Literal zero-argument @Test corpus only; other declaration forms are refused",
-                     "No per-case runtime/filesystem capture or complete supported-configuration qualification",
+                     "Runtime/filesystem facts are observed fixture metadata, not immutable host or execution authority",
+                     "No-root cases and unsupported block-size observations are explicit; full supported-configuration qualification remains separate",
                      "Source snapshots alone do not authenticate the reports' compiled source; retain the CI checkout/compile join",
                      "No power-loss, external-process, provider/model or release authority"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -213,18 +302,18 @@ allprojects {
     for suite in SUITES:
         command.extend(("--tests", suite))
     manifest = {
-        "schemaVersion": 1, "status": "running", "scope": "benign web job recovery",
+        "schemaVersion": 2, "status": "running", "scope": "benign web job recovery",
         "startedAt": stamp.rstrip("-"), "commit": capture("git", "rev-parse", "HEAD"),
         "worktreeDirty": bool(capture("git", "status", "--porcelain")),
         "trackedDiffSha256": hashlib.sha256(subprocess.check_output(
             ["git", "diff", "HEAD", "--binary"], cwd=root)).hexdigest(),
-        "java": capture("java", "-version"), "kernel": capture("uname", "-sr"),
-        "testFilesystem": capture("stat", "-f", "-c", "%T", str(temporary)),
+        "launcherJava": capture("java", "-version"), "launcherKernel": capture("uname", "-sr"),
+        "launcherTemporaryFilesystem": capture("stat", "-f", "-c", "%T", str(temporary)),
         "command": command, "requiredSuites": SUITES,
         "requiredCases": required, "declarationSources": sources,
         "sourceBinding": source_binding(root), "fullMatrixQualified": False,
         "limitations": ["Not full CI or B-series release qualification",
-                        "No per-case runtime/filesystem capture or full supported-configuration matrix",
+                        "Per-case fixture observations do not qualify the full supported-configuration matrix or immutable host authority",
                         "No vulnerability reproduction lane is selected",
                         "No power-loss, kernel-I/O interruption or safe reclamation proof"],
     }
@@ -234,13 +323,14 @@ allprojects {
     with (output / "gradle.log").open("w") as log:
         result = subprocess.run(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
     inspected = inspect_reports(required, {path.name: path.read_bytes()
-        for path in (output / "xml").glob("TEST-*.xml")})
+        for path in (output / "xml").glob("TEST-*.xml")}, require_context=True)
     failures = inspected["verificationFailures"]
     totals = inspected["totals"]
     if result.returncode:
         failures.append("Gradle exited " + str(result.returncode))
     manifest.update(status="failed" if failures else "passed", gradleExit=result.returncode,
-                    totals=totals, suites=inspected["suites"], verificationFailures=failures)
+                    totals=totals, suites=inspected["suites"], verificationFailures=failures,
+                    configurationCoverage=inspected["configurationCoverage"])
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"status": manifest["status"], "totals": totals, "manifest": str(manifest_path)}))
     return 1 if failures else 0

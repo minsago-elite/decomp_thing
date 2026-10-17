@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
 import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.elfFixture
@@ -14,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.*
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebRecoveryAdmissionTest {
     @Test fun `queued request cannot deadlock failed startup cleanup`() = withRoot { root ->
         val broken = root.resolve("a".repeat(32)).createDirectory()
@@ -188,7 +192,7 @@ class WebRecoveryAdmissionTest {
 
     private fun withRoot(block: (Path) -> Unit) {
         val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-recovery-admission").toAbsolutePath())
-        val root = Files.createTempDirectory(temporaryRoot, "web-recovery-")
+        val root = createTempDirectory(temporaryRoot, "web-recovery-")
         try { block(root) } finally { root.toFile().deleteRecursively() }
     }
 }

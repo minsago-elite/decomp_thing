@@ -72,10 +72,24 @@ declaration check. No additional Gradle/JVM test run is started by the guard.
 
 `web-job-recovery-inventory.json` is retained with the core reports. It binds case
 identities/results to XML hashes, declaration source hashes and a Git snapshot;
-the CI checkout/compilation join remains separate evidence. Its
-`fullMatrixQualified` is always false: scenario coverage supplies neither
-per-case runtime/filesystem evidence nor the complete supported recovery matrix,
-power-loss, external-process, provider/model or release qualification.
+the CI checkout/compilation join remains separate evidence. Every selected test
+also emits a bounded record from its existing JUnit JVM: Java runtime/vendor/VM,
+OS/kernel version and architecture, plus provider, filesystem type, block-size
+availability, read-only state and POSIX/Unix views for each created fixture root.
+The fixture factory keeps temporary roots inside the repository. Records contain
+test identities and root ordinals, without fixture paths, prefixes, environment
+values, process identifiers or exception messages.
+
+Missing, duplicated or mismatched records, unknown fields and inconsistent facts
+refuse configuration coverage. Cases without fixture roots and unsupported
+block-size observations remain explicit. These are observed fixture facts;
+they do not authenticate an immutable host, a mount identity or execution
+authority. `fullMatrixQualified` remains false pending the complete supported
+matrix and integration evidence. No power-loss, external-process, provider/model
+or release qualification follows from these records.
+The standalone runner's manifest is version 2; its Java/kernel/temporary-filesystem
+fields describe the launcher, while testcase configuration comes from the JUnit
+records. The report-consumption inventory is version 3.
 
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
