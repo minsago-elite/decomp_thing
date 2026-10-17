@@ -43,12 +43,13 @@ class JobStoreTest {
         assertTrue(replacedFile.message.orEmpty().contains("target binding changed"))
         java.nio.file.Files.delete(path)
         java.nio.file.Files.move(moved, path)
+        val replacementReports = java.nio.file.Files.createDirectory(reports.resolveSibling("replacement-reports"))
+        java.nio.file.Files.write(replacementReports.resolve("ordinary.json"), payload)
         val replacedDirectory = assertFailsWith<IllegalArgumentException> {
             decompengine.repair.readStableRegularFile(root, "${job.id}/reports/ordinary.json", payload.size.toLong(),
                 afterRead = {
                     java.nio.file.Files.move(reports, reports.resolveSibling("retained-reports"))
-                    java.nio.file.Files.createDirectory(reports)
-                    java.nio.file.Files.write(path, payload)
+                    java.nio.file.Files.move(replacementReports, reports)
                 })
         }
         assertTrue(replacedDirectory.message.orEmpty().contains("directory binding changed"))
