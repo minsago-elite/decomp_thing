@@ -157,6 +157,6 @@ java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityAuthenticationPr
 
 (
   cd "$result_directory"
-  sha256sum target.properties config.json evidence.json >ARTIFACTS.sha256
+  sha256sum target.properties failure-summary-controls.json config.json evidence.json >ARTIFACTS.sha256
 )
 echo "ACP codex-acp authentication evidence: $result_directory"
