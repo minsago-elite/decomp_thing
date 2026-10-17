@@ -20,6 +20,39 @@ class RepairRunSemanticsTest {
     private val inputs = (0..2).map { ProcessInput("case$it", listOf("arg$it"), byteArrayOf(it.toByte())) }
 
     @Test
+    fun `throwing repair progress warnings preserve workflow failure interruption and existing owner`(): Unit {
+        val parent = Path.of("build/test-tmp/repair-progress-warning").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        for (warningFailure in listOf(IllegalStateException("PRIVATE-repair-warning"),
+            InterruptedException("PRIVATE-repair-warning"))) {
+            val reports = Files.createTempDirectory(parent, "journal-")
+            val workflowFailure = IllegalStateException("original repair workflow failure")
+            var warnings = 0
+            AgentProgressJournal(reports, "repair").use { owner ->
+                try {
+                    val observed = assertFailsWith<IllegalStateException> {
+                        RepairProgressProjection(reports, onUnavailable = {
+                            warnings++
+                            throw warningFailure
+                        }).use {
+                            assertEquals(warningFailure is InterruptedException, Thread.currentThread().isInterrupted)
+                            throw workflowFailure
+                        }
+                    }
+                    assertSame(workflowFailure, observed)
+                    assertEquals(1, warnings)
+                    assertEquals(warningFailure is InterruptedException, Thread.currentThread().isInterrupted)
+                } finally { Thread.interrupted() }
+                // The failed optional projection cannot release this other writer's lease.
+                owner.phase(AgentWorkflowPhase.COMPLETED)
+            }
+            val snapshot = assertNotNull(AgentProgressJournal.read(reports))
+            assertFalse(snapshot.toString().contains("PRIVATE-repair-warning"))
+            AgentProgressJournal(reports, "repair").use { it.phase(AgentWorkflowPhase.COMPLETED) }
+        }
+    }
+
+    @Test
     fun `compile then partial behavior then full success only publishes the last revision`() {
         val fixture = fixture("broken", "pass1", "pass3")
         val result = fixture.loop.runRepair(fixture.root, fixture.original, inputs, maxIterations = 3)

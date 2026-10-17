@@ -58,6 +58,9 @@ graph head. The build phase encloses the provider call; the behavior phase marks
 report, not live per-case provider telemetry. A busy or failed journal is disabled with one fixed
 diagnostic and cannot change acceptance, consume another repair attempt or replace durable failure.
 Close retains the bounded journal drain and preserves thread interruption while releasing its lock.
+Ordinary exceptions from the fixed repair warning sink are contained; warning interruption is
+restored without replacing the original workflow failure or changing another journal owner's lease.
+The warning still runs synchronously, so a blocked sink has no bounded retirement guarantee.
 
 The repair CLI consumes the whole-run outcome, prints at most 20 typed iteration dispositions, and
 returns a nonzero exit for unsuccessful or incomplete validation. It omits peer summaries, prompts

@@ -5,7 +5,12 @@ import decompengine.jobs.AgentProgressJournal
 import java.nio.file.Path
 
 /** Optional operator projection. Neither persistence nor observer failure changes repair authority. */
-internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable {
+internal class RepairProgressProjection(
+    reportsDirectory: Path,
+    private val onUnavailable: () -> Unit = {
+        System.err.println("Repair progress is unavailable; durable repair state remains authoritative.")
+    },
+) : AutoCloseable {
     private var warned = false
     private var journal: AgentProgressJournal? = null
 
@@ -53,7 +58,11 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             if (!warned) {
                 warned = true
-                System.err.println("Repair progress is unavailable; durable repair state remains authoritative.")
+                try {
+                    onUnavailable()
+                } catch (warningFailure: Exception) {
+                    if (warningFailure is InterruptedException) Thread.currentThread().interrupt()
+                }
             }
         }
     }
