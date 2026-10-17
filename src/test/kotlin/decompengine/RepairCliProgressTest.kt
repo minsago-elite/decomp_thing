@@ -16,6 +16,93 @@ import kotlinx.serialization.json.*
 
 class RepairCliProgressTest {
     @Test
+    fun `reconstruction terminal display drains owned callbacks without retained file reads`(): Unit {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/reconstruction-no-read"))
+        for (phase in listOf(AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED)) {
+            val root = createTempDirectory(parent, "journal-")
+            val bytes = ByteArrayOutputStream()
+            val reads = java.util.concurrent.atomic.AtomicInteger()
+            PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+                ReconstructionCliProgress.open(root, emptyList(), output, readSnapshot = {
+                    reads.incrementAndGet()
+                    error("reconstruction console must not depend on retained snapshot latency")
+                }).use { progress ->
+                    progress.phase(AgentWorkflowPhase.ANALYZING)
+                    progress.phase(phase)
+                    progress.close()
+                    val lines = bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.toList()
+                    assertEquals(listOf("reconstruction: analyzing", "reconstruction: ${phase.name.lowercase()}"), lines)
+                    assertEquals(0, reads.get())
+                }
+            }
+            val snapshot = assertNotNull(AgentProgressJournal.read(root))
+            assertTrue(snapshot.getValue("events").jsonArray.any {
+                it.jsonObject["phase"]?.jsonPrimitive?.content == phase.name.lowercase()
+            })
+        }
+        assertBoundedReconstructionMailbox(parent)
+    }
+
+    private fun assertBoundedReconstructionMailbox(parent: Path) {
+        val root = createTempDirectory(parent, "bounded-mailbox-")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val published = CountDownLatch(1)
+        val terminalPrinted = CountDownLatch(1)
+        val first = java.util.concurrent.atomic.AtomicBoolean(true)
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val failure = AtomicReference<Throwable?>()
+        val bytes = ByteArrayOutputStream()
+        val output = PrintStream(object : OutputStream() {
+            override fun write(value: Int) {
+                if (first.compareAndSet(true, false)) {
+                    entered.countDown()
+                    while (release.count > 0) try { release.await() } catch (_: InterruptedException) { /* Controlled blocked console. */ }
+                }
+                bytes.write(value)
+                if (value == '\n'.code && bytes.toString(Charsets.UTF_8).lineSequence().any {
+                    it == "reconstruction: completed"
+                }) terminalPrinted.countDown()
+            }
+        }, true, Charsets.UTF_8)
+        val progress = ReconstructionCliProgress.open(root, emptyList(), output, readSnapshot = {
+            reads.incrementAndGet()
+            error("reconstruction console must not read retained history")
+        })
+        val producer = Thread {
+            try {
+                progress.phase(AgentWorkflowPhase.ANALYZING)
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                repeat(64) { progress.phase(AgentWorkflowPhase.BUILD_VALIDATING) }
+                progress.phase(AgentWorkflowPhase.COMPLETED)
+                published.countDown()
+            } catch (problem: Throwable) { failure.set(problem) }
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertTrue(published.await(5, TimeUnit.SECONDS), "blocked console stalled phase capture")
+            assertNull(failure.get())
+            release.countDown()
+            assertTrue(terminalPrinted.await(5, TimeUnit.SECONDS))
+            producer.join(5000)
+            progress.close()
+            assertEquals(0, reads.get())
+            val lines = bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.toList()
+            assertEquals(listOf("reconstruction: analyzing", "reconstruction progress omitted 33 older phase update(s)") +
+                List(31) { "reconstruction: build validating" } + "reconstruction: completed", lines)
+            val snapshot = assertNotNull(AgentProgressJournal.read(root))
+            assertEquals(67L, snapshot.getValue("nextSequence").jsonPrimitive.long)
+            assertEquals(0L, snapshot.getValue("queueDropped").jsonPrimitive.long)
+            assertEquals(0L, snapshot.getValue("historyDropped").jsonPrimitive.long)
+        } finally {
+            release.countDown()
+            producer.join(5000)
+            progress.close()
+            output.close()
+        }
+    }
+
+    @Test
     fun `cursor skips prior history reports gaps and never copies peer text`() {
         val cursor = RepairCliProgressCursor(snapshot(5, emptyList()))
         val lines = cursor.advance(snapshot(8, listOf(event(4, "accepted"), event(5, "provisional"), event(7, "exhausted"))))

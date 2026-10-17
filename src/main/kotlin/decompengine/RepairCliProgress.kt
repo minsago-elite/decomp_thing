@@ -42,12 +42,14 @@ internal class ReconstructionCliProgress private constructor(
             reportsDirectory: Path,
             sensitiveValues: Collection<String>,
             output: PrintStream,
+            readSnapshot: (Path) -> JsonObject? = { directory -> AgentProgressJournal.read(directory) },
         ): ReconstructionCliProgress {
-            val observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION)
+            val observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION, readSnapshot)
             var journal: BestEffortProgressJournal? = null
             try {
                 val owned = BestEffortProgressJournal(
                     reportsDirectory, "reconstruction", sensitiveValues,
+                    onPhase = observer::reconstructionPhase,
                     onUnavailable = observer::unavailable,
                 )
                 journal = owned
@@ -71,15 +73,18 @@ internal class CliProgressObserver(
     private val reportsDirectory: Path,
     private val output: PrintStream = System.err,
     private val workflow: CliProgressWorkflow = CliProgressWorkflow.REPAIR,
+    private val readSnapshot: (Path) -> JsonObject? = { directory -> AgentProgressJournal.read(directory) },
 ) : AutoCloseable {
     private val stopped = AtomicBoolean()
     private val drainRequested = AtomicBoolean()
     private val wakeUp = Object()
     private val reconstructionRunId = AtomicReference<String?>()
     private val warningRequested = AtomicBoolean()
-    private val cursor = RepairCliProgressCursor(
-        runCatching { AgentProgressJournal.read(reportsDirectory) }.getOrNull(), workflow,
-    )
+    private val reconstructionPhases = java.util.ArrayDeque<AgentWorkflowPhase>()
+    private var omittedReconstructionPhases = 0L
+    private val cursor = if (workflow == CliProgressWorkflow.REPAIR) RepairCliProgressCursor(
+        runCatching { readSnapshot(reportsDirectory) }.getOrNull(), workflow,
+    ) else null
     private val worker = Thread(::observe, "${workflow.wireName}-cli-progress").apply { isDaemon = true; start() }
 
     fun unavailable() {
@@ -91,6 +96,35 @@ internal class CliProgressObserver(
         check(workflow == CliProgressWorkflow.RECONSTRUCTION)
         check(reconstructionRunId.compareAndSet(null, runId))
         synchronized(wakeUp) { wakeUp.notifyAll() }
+    }
+
+    /** Fixed owned enum values only; no console or filesystem work on a workflow callback. */
+    fun reconstructionPhase(phase: AgentWorkflowPhase) {
+        check(workflow == CliProgressWorkflow.RECONSTRUCTION)
+        synchronized(wakeUp) {
+            if (stopped.get() || warningRequested.get() || reconstructionRunId.get() == null) return@synchronized
+            if (reconstructionPhases.size == 32) {
+                reconstructionPhases.removeFirst()
+                omittedReconstructionPhases = Math.addExact(omittedReconstructionPhases, 1L)
+            }
+            reconstructionPhases.addLast(phase)
+            wakeUp.notifyAll()
+        }
+    }
+
+    private fun emitReconstructionPhases() {
+        val (omitted, phases) = synchronized(wakeUp) {
+            val batch = omittedReconstructionPhases to reconstructionPhases.toList()
+            omittedReconstructionPhases = 0L
+            reconstructionPhases.clear()
+            batch
+        }
+        if (stopped.get() || warningRequested.get()) return
+        if (omitted > 0) output.println("reconstruction progress omitted $omitted older phase update(s)")
+        phases.forEach { phase ->
+            if (!stopped.get() && !warningRequested.get())
+                output.println("reconstruction: ${phase.name.lowercase().replace('_', ' ')}")
+        }
     }
 
     private fun observe() {
@@ -105,15 +139,18 @@ internal class CliProgressObserver(
             }
         }
         while (!stopped.get()) {
-            // A close requested during a read needs another read started after the journal flush.
+            // Reconstruction drains owned phase notifications without a final storage read.
             val finalPoll = drainRequested.get()
             try {
                 if (warningRequested.get()) warnUnavailable()
-                val runId = reconstructionRunId.get()
-                if (!warningRequested.get() && (workflow == CliProgressWorkflow.REPAIR || runId != null)) {
-                    val snapshot = AgentProgressJournal.read(reportsDirectory)
-                    if (snapshot != null) cursor.advance(snapshot, runId).forEach { line ->
-                        if (!stopped.get() && !warningRequested.get()) output.println(line)
+                if (!warningRequested.get()) {
+                    if (workflow == CliProgressWorkflow.RECONSTRUCTION) {
+                        emitReconstructionPhases()
+                    } else {
+                        val snapshot = readSnapshot(reportsDirectory)
+                        if (snapshot != null) checkNotNull(cursor).advance(snapshot).forEach { line ->
+                            if (!stopped.get() && !warningRequested.get()) output.println(line)
+                        }
                     }
                 }
             } catch (_: Exception) {
@@ -122,7 +159,10 @@ internal class CliProgressObserver(
             if (finalPoll) return
             try {
                 synchronized(wakeUp) {
-                    if (!drainRequested.get() && !stopped.get()) wakeUp.wait(250)
+                    if (!drainRequested.get() && !stopped.get() &&
+                        (workflow != CliProgressWorkflow.RECONSTRUCTION || warningRequested.get() || reconstructionPhases.isEmpty())) {
+                        wakeUp.wait(250)
+                    }
                 }
             } catch (_: InterruptedException) { return }
         }
@@ -130,7 +170,7 @@ internal class CliProgressObserver(
 
     override fun close() {
         if (workflow == CliProgressWorkflow.RECONSTRUCTION) drainRequested.set(true) else stopped.set(true)
-        // Wake the observer without interrupting a final regular-file read.
+        // The reconstruction mailbox is ready after the journal owner's bounded close.
         synchronized(wakeUp) { wakeUp.notifyAll() }
         val interrupted = Thread.interrupted()
         try {

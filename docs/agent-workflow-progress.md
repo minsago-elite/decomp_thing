@@ -20,7 +20,9 @@ keep display meanings distinct; they do not validate a graph or confer acceptanc
 
 One journal writer owns a filesystem lock. Producers normalize and enqueue without disk I/O;
 the writer forces a temporary file, atomically replaces the snapshot, and forces its directory.
-Defaults bound the queue to 128 events, retained history to 256 events and the snapshot to 512 KiB.
+Defaults bound the ordinary queue to 128 events with one reserved overflow terminal record,
+retained history to 256 events and the snapshot to 512 KiB. Superseding a pending overflow terminal
+counts the earlier terminal as queue loss; both ordinary and reserved records drain in order.
 Overflow is explicit through sequence gaps, queue/history omission counts and `truncated`. Readers
 accept at most 2 MiB and 1,024 ordered records. Closing drains the bounded queue and waits at most
 five seconds; persistence or cleanup failure is reported instead of claiming a complete projection.
@@ -37,6 +39,16 @@ Redaction is a display precaution, not a claim that arbitrary unconfigured secre
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history
 from disk. CLI progress phases go to stderr; source/archive result paths remain on stdout.
+
+Reconstruction CLI phase callbacks from the owned journal adapter enter a separate 32-phase
+mailbox. The console worker reads only fixed phase enums from that mailbox; it does not read a
+snapshot during construction, observation or close. Slow retained-file reads therefore cannot
+suppress terminal console phases. The journal remains the browser/replay history, with its own
+full-event loss counts. Mailbox omissions count console phase updates only. Callback capture and
+run binding do not copy peer text or borrow another writer's observations. Close first attempts
+the owned journal flush, then drains the mailbox with the existing 200-millisecond observer join.
+A blocked console can still retain the one daemon or omit pending console lines on process exit;
+console display is optional and never replaces the separate typed workflow result.
 
 Repair runs now own a journal for their reports directory. Captured task events and final agent
 receipts carry the durable repair run ID; policy checking precedes candidate validation. Provisional,
