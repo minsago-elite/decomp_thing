@@ -202,6 +202,24 @@ class RecoveryInventoryControls(unittest.TestCase):
         item = context(); item["filesystemDisposition"] = "NOT_EXERCISED"
         self.assertTrue(self.inspect_contexts([item])["verificationFailures"])
 
+    def test_source_cannot_add_a_temporary_root_outside_the_recorded_factory(self):
+        source = ("import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory\n"
+                  "@ExtendWith(RecoveryMatrixEvidence::class)\nclass ExampleTest {\n"
+                  "@Test fun `recorded root`() { val root = createTempDirectory(\"fixture-\") }\n}")
+        RECOVERY.require_fixture_instrumentation(source)
+        for changed in (source.replace("@ExtendWith(RecoveryMatrixEvidence::class)", ""),
+                        source.replace("import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory", ""),
+                        source.replace('createTempDirectory("fixture-")', 'Files.createTempDirectory("fixture-")'),
+                        source.replace('createTempDirectory("fixture-")', 'kotlin.io.path.createTempDirectory("fixture-")'),
+                        source + "\nimport java.nio.file.Files.createTempDirectory as unrecorded",
+                        source + "\nval factory = Dirs::createTempDirectory",
+                        source + "\nval root = createTempDir()",
+                        source + "\nfun createTempDirectory(prefix: String) = fallback(prefix)",
+                        source + "\nval createTempDirectory = otherFactory"):
+            with self.subTest(sourceChanged=True):
+                with self.assertRaises(ValueError):
+                    RECOVERY.require_fixture_instrumentation(changed)
+
 
 if __name__ == "__main__":
     unittest.main()

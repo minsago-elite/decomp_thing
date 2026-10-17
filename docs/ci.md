@@ -81,7 +81,9 @@ test identities and root ordinals, without fixture paths, prefixes, environment
 values, process identifiers or exception messages.
 
 Missing, duplicated or mismatched records, unknown fields and inconsistent facts
-refuse configuration coverage. Cases without fixture roots and unsupported
+refuse configuration coverage. The selected source contract also refuses known
+direct temporary-root APIs or local bindings that bypass the recorded factory.
+Cases without fixture roots and unsupported
 block-size observations remain explicit. These are observed fixture facts;
 they do not authenticate an immutable host, a mount identity or execution
 authority. `fullMatrixQualified` remains false pending the complete supported

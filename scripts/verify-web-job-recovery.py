@@ -141,13 +141,24 @@ def source_test_methods(source):
     return methods
 
 
+def require_fixture_instrumentation(source):
+    if (source.count("import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory") != 1 or
+            source.count("@ExtendWith(RecoveryMatrixEvidence::class)") != 1 or
+            re.search(r"\b[A-Za-z_][A-Za-z_0-9.]*\s*(?:\.|::)\s*createTempDirectory\b", source) or
+            re.search(r"\bcreateTempDir\b", source) or
+            re.search(r"\b(?:fun|val|var)\s+`?createTempDirectory`?\b", source)):
+        raise ValueError("selected recovery source bypasses its fixture context contract")
+
+
 def required_cases(root):
     required = {}
     sources = []
     for suite in SUITES:
         relative = "src/test/kotlin/" + suite.replace(".", "/") + ".kt"
         payload = (root / relative).read_bytes()
-        required[suite] = source_test_methods(payload.decode("utf-8"))
+        source = payload.decode("utf-8")
+        require_fixture_instrumentation(source)
+        required[suite] = source_test_methods(source)
         sources.append(dict(path=relative, bytes=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
     return required, sources
 
