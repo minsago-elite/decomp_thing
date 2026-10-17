@@ -23,15 +23,27 @@ import java.util.concurrent.atomic.AtomicReference
  * Callbacks only normalize and enqueue; one owned writer publishes atomic snapshots. An overloaded
  * view drops records with explicit sequence gaps and counters, never backpressures protocol I/O.
  */
-class AgentProgressJournal(
+class AgentProgressJournal private constructor(
     private val reportsDirectory: Path,
     private val workflow: String,
-    sensitiveValues: Collection<String> = emptyList(),
-    private val maximumEvents: Int = 256,
-    private val maximumQueuedEvents: Int = 128,
-    private val maximumSnapshotBytes: Int = 512 * 1024,
-    private val onPhase: (AgentWorkflowPhase) -> Unit = {},
+    sensitiveValues: Collection<String>,
+    private val maximumEvents: Int,
+    private val maximumQueuedEvents: Int,
+    private val maximumSnapshotBytes: Int,
+    private val onPhase: (AgentWorkflowPhase) -> Unit,
+    private val afterSnapshotWrite: (() -> Unit)?,
 ) : AgentWorkflowProgress, AutoCloseable {
+    constructor(
+        reportsDirectory: Path,
+        workflow: String,
+        sensitiveValues: Collection<String> = emptyList(),
+        maximumEvents: Int = 256,
+        maximumQueuedEvents: Int = 128,
+        maximumSnapshotBytes: Int = 512 * 1024,
+        onPhase: (AgentWorkflowPhase) -> Unit = {},
+    ) : this(reportsDirectory, workflow, sensitiveValues, maximumEvents, maximumQueuedEvents,
+        maximumSnapshotBytes, onPhase, null)
+
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
     private val retained = ArrayDeque<JsonObject>()
@@ -55,6 +67,7 @@ class AgentProgressJournal(
         writerLease = requireNotNull(AgentProgressJournalLease.tryAcquire(reportsDirectory) {
             FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
         }) { "another workflow owns the progress journal" }
+        var startedWriter: Thread? = null
         try {
             val previous = read(reportsDirectory)
             if (previous != null) {
@@ -65,10 +78,14 @@ class AgentProgressJournal(
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
             requireSequenceCapacity()
-            writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true; start() }
+            writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
+            startedWriter = writer
+            writer.start()
             enqueue("run_started") { put("status", "running") }
         } catch (problem: Throwable) {
-            writerLease.close()
+            synchronized(monitor) { closed = true; monitor.notifyAll() }
+            // A started writer keeps ownership until its own final publication is over.
+            if (startedWriter?.isAlive != true) writerLease.close()
             throw problem
         }
     }
@@ -290,8 +307,15 @@ class AgentProgressJournal(
                 } finally {
                     Files.deleteIfExists(temporary)
                 }
+                afterSnapshotWrite?.invoke()
             }
-        } catch (problem: Throwable) { failure.set(problem) }
+        } catch (problem: Throwable) {
+            failure.set(problem)
+        } finally {
+            // Close may already have exhausted its join budget. The writer still retires
+            // its own lease once no further snapshot can be published.
+            try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+        }
     }
 
     private fun snapshot(): JsonObject = buildJsonObject {
@@ -315,6 +339,15 @@ class AgentProgressJournal(
     }
 
     companion object {
+        /** Controlled writer boundary for component qualification, without filesystem fault injection. */
+        internal fun withSnapshotWriteHook(
+            reportsDirectory: Path,
+            workflow: String,
+            afterSnapshotWrite: () -> Unit,
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite,
+        )
+
         const val FILE_NAME = "agent-progress.json"
         internal const val MAXIMUM_READ_BYTES = 2 * 1024 * 1024
         private const val MAXIMUM_MESSAGE_CHARACTERS = 8192

@@ -9,6 +9,52 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `writer retires ownership after a timed out close once publication has stopped`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-late-writer").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val first = java.util.concurrent.atomic.AtomicBoolean(true)
+        val ownedThread = java.util.concurrent.atomic.AtomicReference<Thread>()
+        val journal = AgentProgressJournal.withSnapshotWriteHook(root, "repair") {
+            if (first.compareAndSet(true, false)) {
+                ownedThread.set(Thread.currentThread())
+                entered.countDown()
+                while (release.count > 0) try {
+                    release.await()
+                } catch (_: InterruptedException) { /* Model a noninterruptible owned publication. */ }
+            }
+        }
+        try {
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            journal.phase(AgentWorkflowPhase.BUILD_VALIDATING)
+            val failure = assertFailsWith<IllegalStateException> { journal.close() }
+            assertEquals("progress writer did not stop within five seconds", failure.message)
+            val contender = runCatching { AgentProgressJournal(root, "repair") }
+            // Close an unexpectedly admitted owner before reporting the regression.
+            contender.getOrNull()?.close()
+            assertEquals("another workflow owns the progress journal",
+                assertIs<IllegalArgumentException>(contender.exceptionOrNull()).message)
+            release.countDown()
+            val writer = assertNotNull(ownedThread.get())
+            writer.join(5000)
+            assertFalse(writer.isAlive)
+            val flushed = assertNotNull(AgentProgressJournal.read(root))
+            assertTrue(flushed.getValue("events").jsonArray.any {
+                it.jsonObject["phase"]?.jsonPrimitive?.content == "build_validating"
+            })
+            // No retry of the original close occurs before this independent acquisition.
+            AgentProgressJournal(root, "repair").use { it.phase(AgentWorkflowPhase.COMPLETED) }
+            assertNotNull(AgentProgressJournal.read(root))
+        } finally {
+            release.countDown()
+            ownedThread.get()?.join(5000)
+            journal.close()
+            // Keep the repository-local fixture; never delete under an unretired writer.
+        }
+    }
+
+    @Test
     fun `sequence exhaustion preserves a readable boundary and releases rejected startup ownership`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-sequence-exhaustion").toAbsolutePath())
         val root = createTempDirectory(parent, "journal-")
