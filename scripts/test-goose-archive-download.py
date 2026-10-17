@@ -49,6 +49,15 @@ if "publish" in item:
     cache = root / "build/acp-compatibility/download-cache/goose-x86_64-unknown-linux-gnu.tar.bz2"
     cache.write_bytes(bytes.fromhex(item["publish"]))
     (root / "published-inode").write_text(str(cache.stat().st_ino))
+if "publishKind" in item:
+    cache = root / "build/acp-compatibility/download-cache/goose-x86_64-unknown-linux-gnu.tar.bz2"
+    target = root / "retained-publication"
+    target.mkdir()
+    if item["publishKind"] == "directory":
+        cache.mkdir()
+    else:
+        cache.symlink_to(target, target_is_directory=True)
+    (root / "published-inode").write_text(str(cache.lstat().st_ino))
 sys.exit(item.get("exit", 0))
 ''')
         curl.chmod(0o700)
@@ -139,6 +148,20 @@ sys.exit(item.get("exit", 0))
                 self.assertEqual(payload, self.cache.read_bytes())
                 self.assertEqual(int((self.root / "published-inode").read_text()), self.cache.stat().st_ino)
                 self.cache.unlink()
+
+    def test_atomic_publication_refuses_directory_and_link_destinations(self):
+        for kind in ("directory", "linked-directory"):
+            with self.subTest(kind=kind):
+                calls = self.run_plan([{"hex": FIXTURE.hex(), "publishKind": kind}], success=False)
+                self.assertEqual(1, len(calls))
+                self.assertEqual(int((self.root / "published-inode").read_text()), self.cache.lstat().st_ino)
+                self.assertEqual([], list((self.root / "retained-publication").iterdir()))
+                if self.cache.is_symlink():
+                    self.cache.unlink()
+                else:
+                    self.assertEqual([], list(self.cache.iterdir()))
+                    self.cache.rmdir()
+                (self.root / "retained-publication").rmdir()
 
     def test_workflow_cache_key_keeps_the_unchanged_reviewed_content_pin(self):
         workflow = (REPOSITORY / ".github/workflows/ci.yml").read_text()

@@ -100,7 +100,7 @@ else
     exit 1
   fi
   # A hard link publishes complete verified bytes atomically without replacement.
-  if ! ln -- "$archive_path" "$cache_archive"; then
+  if ! ln --no-target-directory -- "$archive_path" "$cache_archive"; then
     if ! verify_archive "$cache_archive"; then
       echo "pinned Goose cache publication found an incompatible existing entry" >&2
       exit 1
