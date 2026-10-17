@@ -105,13 +105,18 @@ class AgentProgressJournal private constructor(
     private fun beginCorrelatedTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String?): AgentTaskProgress {
         val safeTaskId = redactor.text(taskId)
         val binding = AgentExecutionRequestBinding.capture(request)
+        val taskIdSha256 = digest(taskId)
+        val workflowRun = workflowRunId?.let { redactor.text(it) to digest(it) }
         val turnId = UUID.randomUUID().toString()
         fun post(kind: String, body: JsonObjectBuilder.() -> Unit) = enqueue(kind) {
             put("taskId", safeTaskId)
-            put("taskIdSha256", digest(taskId))
+            put("taskIdSha256", taskIdSha256)
             put("turnId", turnId)
             put("requestSha256", binding.requestSha256)
-            workflowRunId?.let { put("workflowRunId", redactor.text(it)); put("workflowRunIdSha256", digest(it)) }
+            workflowRun?.let { (preview, commitment) ->
+                put("workflowRunId", preview)
+                put("workflowRunIdSha256", commitment)
+            }
             body()
         }
         post("task_started") { put("phase", "agent_running") }

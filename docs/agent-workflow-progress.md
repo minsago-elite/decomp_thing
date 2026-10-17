@@ -9,6 +9,10 @@ is retried. Events bind the immutable request digest, task identity digest and m
 sequence. The terminal task record maps that turn to the session digest and final stop reason or
 failure classification. It explicitly records that validation is still pending. A workflow-owned
 accepted phase may subsequently reference an accepted source digest.
+Task identity digests and workflow-run display values are prepared once before queue admission.
+Later task records reuse those immutable values instead of rehashing raw task/run IDs or
+redacting the same run preview inside the producer monitor for every callback. Raw event and
+request admission and total callback cost still need their separate whole-operation bounds.
 
 `workflowRunId` and its digest correlate task events and `workflow_run_state` observations with a
 durable workflow run. They are separate from the journal writer's `runId`, which changes on restart.
