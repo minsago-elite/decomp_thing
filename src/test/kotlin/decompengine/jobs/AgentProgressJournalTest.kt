@@ -858,6 +858,41 @@ class AgentProgressJournalTest {
         secrets.forEach { assertFalse(persisted.contains(it)) }
     }
 
+    @Test
+    fun `streamed display commitments preserve whole text encoding across bounded chunks`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-streamed-hash").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val high = 0xd800.toChar().toString()
+        val low = 0xdc00.toChar().toString()
+        val pair = charArrayOf(0xd83d.toChar(), 0xde00.toChar()).concatToString()
+        val cases = listOf("", "ordinary", 0xfffd.toChar().toString(), high, low,
+            "a".repeat(4_095) + pair + "b".repeat(4_096),
+            "a".repeat(4_096) + pair + "b".repeat(4_095),
+            "a".repeat(4_095) + high + "x" + "b".repeat(4_096),
+            "a".repeat(8_192) + low,
+            pair.repeat(5_000), pair.repeat(5_000) + high,
+            "a".repeat(16_384) + high)
+        val expected = cases.map { text -> java.security.MessageDigest.getInstance("SHA-256")
+            .digest(receiptCommitmentBytes(text)).joinToString("") { "%02x".format(it) } }
+        cases.forEachIndexed { index, text ->
+            assertEquals(expected[index], AgentProgressJournal.displayCommitment(text), "case=$index")
+        }
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("streamed-hash-task", request(root))
+            cases.forEachIndexed { index, text ->
+                task.event(AgentMessageEvent(index.toLong(), "case-$index", AgentMessageRole.THOUGHT, text))
+            }
+        }
+        val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
+            .map { it.jsonObject }.filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(cases.size, messages.size)
+        messages.forEachIndexed { index, record ->
+            assertEquals(expected[index], record.getValue("contentSha256").jsonPrimitive.content)
+            assertEquals(cases[index].length, record.getValue("chunkCharacters").jsonPrimitive.int)
+            assertFalse("text" in record)
+        }
+    }
+
     private fun request(root: java.nio.file.Path) = AgentExecutionRequest(
         "fixture task", listOf(AgentWorkspaceRoot("project", root.toAbsolutePath().normalize())),
         accessPolicy = AgentAccessPolicy(emptyList()),

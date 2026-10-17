@@ -540,8 +540,54 @@ class AgentProgressJournal private constructor(
             gap(next)
         }
 
-        private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")
-            .digest(receiptCommitmentBytes(text)).joinToString("") { "%02x".format(it) }
+        /** Complete display commitment with bounded encoding buffers and the receipt text domain. */
+        internal fun displayCommitment(text: String): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var malformed = false
+            var index = 0
+            while (index < text.length) {
+                val unit = text[index]
+                if (unit.isHighSurrogate()) {
+                    if (index + 1 >= text.length || !text[index + 1].isLowSurrogate()) {
+                        malformed = true
+                        break
+                    }
+                    index++
+                } else if (unit.isLowSurrogate()) {
+                    malformed = true
+                    break
+                }
+                index++
+            }
+            if (malformed) {
+                // Malformation anywhere classifies the WHOLE input as ff + raw UTF-16BE.
+                // Never encode a valid prefix as UTF-8 before discovering a later bad unit.
+                digest.update(0xff.toByte())
+                val buffer = ByteArray(8_192)
+                var used = 0
+                for (unit in text) {
+                    if (used == buffer.size) {
+                        digest.update(buffer, 0, used)
+                        used = 0
+                    }
+                    buffer[used++] = (unit.code ushr 8).toByte()
+                    buffer[used++] = unit.code.toByte()
+                }
+                if (used > 0) digest.update(buffer, 0, used)
+            } else {
+                var start = 0
+                while (start < text.length) {
+                    var end = start + minOf(4_096, text.length - start)
+                    if (end < text.length && text[end - 1].isHighSurrogate()) end--
+                    // Each bounded, whole-codepoint chunk keeps the existing strict codec.
+                    digest.update(receiptCommitmentBytes(text.substring(start, end)))
+                    start = end
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        private fun digest(text: String): String = displayCommitment(text)
     }
 }
 

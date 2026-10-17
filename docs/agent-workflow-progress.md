@@ -9,6 +9,11 @@ is retried. Events bind the immutable request digest, task identity digest and m
 sequence. The terminal task record maps that turn to the session digest and final stop reason or
 failure classification. It explicitly records that validation is still pending. A workflow-owned
 accepted phase may subsequently reference an accepted source digest.
+Display identity/content hashing classifies the complete text before encoding. Valid strings stream
+through chunks of at most 4,096 UTF-16 units without splitting a surrogate pair; malformed strings
+stream the receipt domain marker and every raw UTF-16BE unit through an 8,192-byte buffer. This
+preserves the complete commitment while bounding temporary encoding buffers. Raw input length,
+whole hashing time and request-binding admission still need their separate operation budgets.
 Task identity digests and workflow-run display values are prepared once before queue admission.
 Later task records reuse those immutable values instead of rehashing raw task/run IDs or
 redacting the same run preview inside the producer monitor for every callback. Raw event and
