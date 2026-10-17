@@ -800,21 +800,61 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ### Reproducing the web job recovery matrix
 
-Run `python3 scripts/verify-web-job-recovery.py` from a provisioned checkout with cached Gradle
-dependencies. This offline command selects eleven benign storage/web test classes covering upload and
-metadata publication, directory preparation, controlled JVM exits, ownership/shutdown, retained-file
-inventory and HTTP presentation. It does not select the patch reproduction lane or certify full B-series
-release readiness. Keep unrelated Gradle invocations separate while it runs.
+The selected storage/web classes are declared in `SUITES` in
+`scripts/verify-web-job-recovery.py`. Required case names come from each class's literal zero-argument
+`@Test` declarations. The corpus covers publication, controlled JVM exits, ownership/shutdown,
+retained-file inventory and HTTP presentation; it also retains supporting integration checks. A complete
+case inventory supplies the inputs to the supported fault/configuration acceptance audit.
 
-Each invocation creates a unique directory under `build/web-job-recovery-verification/` with workspace
-temporary files, isolated fresh JUnit/HTML reports, Gradle output and a JSON manifest. The manifest records
-the source commit, dirty-worktree flag and tracked-diff digest, exact command, required suites, runtime
-and test-filesystem details, totals and report digests. For reproducible source identity, run a clean
-committed checkout; the diff digest does not capture untracked source contents. JVM option environment
-variables are removed for this scoped run and temporary storage is directed into its evidence directory.
-The runner disables test output reuse and fails on a nonzero build exit, missing/unexpected/duplicate
-suites, empty or malformed reports, failures, errors or skips. An interrupted run without a terminal
-manifest is incomplete evidence. Its own lock prevents concurrent invocations of this runner.
+#### Reuse existing core reports
+
+Primary Actions verification reuses the core JVM invocation. While its reports are still at their
+original location, the report-only command is:
+
+```sh
+python3 scripts/verify-web-job-recovery.py \
+  --reports build/test-results/test \
+  --output build/web-job-recovery-inventory.json
+```
+
+Use `build/test-results/full-suite` after the CI retention step renames the directory. For downloaded
+reports, point `--reports` at their repository-local `test-results/full-suite` directory. `--reports` and
+`--output` must be supplied together and resolve inside the repository. This mode inspects XML without
+invoking Gradle and permits unrelated core suites alongside the required corpus.
+
+The schema-3 inventory records every required method, declaration-source commitment, suite XML
+byte/hash commitment, actual outcome and matching per-case configuration record. Missing, duplicate,
+malformed, failing or skipped required cases and missing/misbound records fail verification. Retain the
+CI checkout/compile evidence separately: the inspector's source snapshot does not authenticate which
+source produced supplied reports.
+
+#### Run an isolated reproduction
+
+From a provisioned checkout with cached Gradle dependencies, run:
+
+```sh
+python3 scripts/verify-web-job-recovery.py
+```
+
+This offline mode invokes Gradle for the declared corpus, with fresh JUnit/HTML reports, Gradle output,
+JVM temporary storage and a schema-2 terminal manifest under a unique
+`build/web-job-recovery-verification/` directory. Fixture factories retain their repository-local roots
+and explicit parents; those roots need not be inside the invocation's evidence directory. Their actual
+filesystem observations are attached to their own case records.
+
+The manifest retains source commit/tree, dirty-worktree and tracked-diff bindings, exact command,
+declaration/report commitments, observed runtime/filesystem details and outcomes. Use a clean committed
+checkout; the tracked-diff digest does not capture untracked source contents. The runner disables test
+output reuse and refuses nonzero builds, unexpected/missing/duplicate suites, malformed or empty
+reports, failures, errors, skips and missing case configuration. An interrupted run without a terminal
+manifest is incomplete. Its lock serializes this runner; keep unrelated Gradle invocations separate.
+
+Both modes keep no-root cases and unsupported block-size observations explicit and retain
+`fullMatrixQualified=false`. Record the tested native-host architecture, filesystem properties,
+fault/restart boundaries and unsupported/skipped cases in the acceptance matrix. The store contract
+admits `amd64`/`x86_64` and `aarch64`; compiler-target coverage does not establish native-host coverage.
+Observed fixture facts do not grant immutable-host, process execution or safe reclamation authority.
+Neither mode selects the patch reproduction lane or certifies B-series release readiness.
 
 ### ACP SDK upgrades
 
