@@ -377,6 +377,58 @@ class FreshnessControls(unittest.TestCase):
         self.assertEqual(f.sha(b'authored UI'),rows['index.html']['sha256'])
         self.assertTrue(stream.closed);close.assert_not_called()
 
+    def _inspect_metadata_jar(self, entries, *, refuse=False):
+        data=io.BytesIO()
+        with f.zipfile.ZipFile(data,'w',compression=f.zipfile.ZIP_STORED) as archive:
+            for name,mode,payload in entries:
+                info=f.zipfile.ZipInfo('decompengine/web/ui/'+name)
+                info.create_system=3;info.external_attr=mode<<16
+                archive.writestr(info,payload)
+        raw=data.getvalue()
+        class Stream(io.BytesIO):
+            def fileno(self):return 42
+        stream=Stream(raw)
+        metadata=SimpleNamespace(st_dev=1,st_ino=2,st_mode=f.stat.S_IFREG|0o644,st_size=len(raw),st_mtime_ns=3,st_ctime_ns=4)
+        files=f.Files.__new__(f.Files);files.ledger=f.Ledger(Clock());files.repository=Path('/repo')
+        opened=[];original_open=f.zipfile.ZipFile.open
+        def open_member(archive,info,*args,**kwargs):
+            opened.append(info.filename)
+            if info.is_dir():raise AssertionError('directory payload must not be opened')
+            return original_open(archive,info,*args,**kwargs)
+        result=None
+        with patch.object(files,'path',return_value=Path('/repo/app.jar')),patch.object(f.os,'open',return_value=42),patch.object(f.os,'fstat',return_value=metadata),patch.object(f.os,'fdopen',return_value=stream),patch.object(Path,'stat',return_value=metadata),patch.object(f.zipfile.ZipFile,'open',new=open_member),patch.object(f.os,'close') as close:
+            if refuse:
+                with self.assertRaises(f.Refusal):files.jar_ui('/repo/app.jar')
+                self.assertEqual([],opened)
+            else:result=files.jar_ui('/repo/app.jar')
+        self.assertTrue(stream.closed);close.assert_not_called()
+        return result,opened
+
+    def test_jar_ui_directory_paths_reject_before_payload(self):
+        for name in ('../../outside/','assets/../outside/','/absolute/','assets//child/','assets/./child/','assets\\child/'):
+            with self.subTest(name=name):
+                self._inspect_metadata_jar([(name,f.stat.S_IFDIR|0o755,b'')],refuse=True)
+
+    def test_jar_ui_directory_suffix_does_not_override_type_or_payload(self):
+        for name,mode,payload in (
+                ('link/',f.stat.S_IFLNK|0o777,b'target'),
+                ('pipe/',f.stat.S_IFIFO|0o600,b''),
+                ('regular/',f.stat.S_IFREG|0o644,b''),
+                ('not-directory',f.stat.S_IFDIR|0o755,b''),
+                ('assets/',f.stat.S_IFDIR|0o755,b'hidden'),
+                ('',f.stat.S_IFREG|0o644,b'')):
+            with self.subTest(name=name,mode=mode):
+                self._inspect_metadata_jar([(name,mode,payload)],refuse=True)
+
+    def test_jar_ui_genuine_directories_preserve_exact_regular_payloads(self):
+        entries=[('',f.stat.S_IFDIR|0o755,b''),('assets/',f.stat.S_IFDIR|0o755,b''),
+                 ('assets/nested/',0,b''),('index.html',f.stat.S_IFREG|0o644,b'authored UI'),
+                 ('asset-manifest.json',0,b'authored manifest')]
+        rows,opened=self._inspect_metadata_jar(entries)
+        self.assertEqual({'index.html':{'bytes':11,'sha256':f.sha(b'authored UI')},
+                          'asset-manifest.json':{'bytes':17,'sha256':f.sha(b'authored manifest')}},rows)
+        self.assertEqual(['decompengine/web/ui/index.html','decompengine/web/ui/asset-manifest.json'],opened)
+
     def test_cleanup_observation_expiry_never_signals_or_masks_primary(self):
         for late_observation in (1,3):
             with self.subTest(observation=late_observation):

@@ -243,9 +243,17 @@ class Files:
                         self.ledger.check()
                         if not info.filename.startswith('decompengine/web/ui/'): continue
                         name=info.filename[len('decompengine/web/ui/'):]
-                        if info.is_dir(): continue
-                        if not name or '..' in Path(name).parts or name.startswith('/') or name in rows: raise Refusal('unsafe/duplicate UI entry')
-                        if stat.S_ISLNK(info.external_attr>>16): raise Refusal('JAR UI symlink')
+                        directory=info.is_dir()
+                        relative=name[:-1] if directory else name
+                        if (not name and not directory) or '\\' in name or (relative and any(part in ('','..','.') for part in relative.split('/'))):
+                            raise Refusal('unsafe UI entry')
+                        kind=stat.S_IFMT(info.external_attr>>16)
+                        if kind==stat.S_IFLNK: raise Refusal('JAR UI symlink')
+                        if kind not in (0,stat.S_IFDIR if directory else stat.S_IFREG): raise Refusal('JAR UI entry type')
+                        if directory:
+                            if info.file_size!=0: raise Refusal('JAR UI directory payload')
+                            continue
+                        if name in rows: raise Refusal('duplicate UI entry')
                         total += info.file_size
                         if len(rows)>=2049 or info.file_size>16*1024**2 or total>65*1024**2: raise Refusal('JAR UI bounds')
                         ui.admit(name,info.file_size)
