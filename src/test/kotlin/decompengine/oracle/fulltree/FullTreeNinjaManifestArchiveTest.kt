@@ -22,7 +22,7 @@ import org.tukaani.xz.XZOutputStream
 
 class FullTreeNinjaManifestArchiveTest {
     @Test
-    fun `strict archive derives deterministic immutable closure and rule manifests`() =
+    fun `strict archive derives deterministic immutable closure and rule manifests`(): Unit =
         inControlTemporaryDirectory { directory ->
             val files = validNinjaManifestFiles()
             val rootBytes = files.getValue("build.ninja")
@@ -229,7 +229,7 @@ class FullTreeNinjaManifestArchiveTest {
         }
 
     @Test
-    fun `text root epoch and caller lowered bounds fail closed`() =
+    fun `text root epoch and caller lowered bounds fail closed`(): Unit =
         inControlTemporaryDirectory { directory ->
             val textVariants = listOf(
                 "rule CXX\r\n".toByteArray(StandardCharsets.UTF_8),
