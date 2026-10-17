@@ -10,6 +10,7 @@ import errno
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 import selectors
 import signal
@@ -30,6 +31,7 @@ FIXED = ('build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle
          'contracts/web/v1/contract.schema.json')
 SOURCE = (8192, 16*1024**2, 128*1024**2, 32)
 OUTPUT = (8192, 16*1024**2, 64*1024**2, 16)
+TOOLS = (16384, 128*1024**2, 512*1024**2, 32)
 SOURCE_OUTPUTS = ('build', '.gradle', 'frontend/node_modules')
 NPM_LINK = '../lib/node_modules/npm/bin/npm-cli.js'
 GROUP_ENTRIES = 256  # All entries/advances, including the EOF observation.
@@ -238,6 +240,65 @@ class Files:
                     else: raise Refusal('inventory special file')
         walk(root,0); return dict(sorted(rows.items()))
 
+    def tool_inventory(self, roots, pins):
+        observed={}; entries=total=0
+        def visit(path, depth):
+            nonlocal entries,total
+            self.ledger.check(); entries+=1
+            if entries>TOOLS[0] or depth>TOOLS[3]: raise Refusal('tool inventory work bound')
+            name=str(path)
+            if name not in pins: raise Refusal('unexpected tool input')
+            pin=pins[name]; first=path.lstat(); self.ledger.check()
+            kind=('directory' if stat.S_ISDIR(first.st_mode) else 'regular' if stat.S_ISREG(first.st_mode) else 'symlink' if stat.S_ISLNK(first.st_mode) else 'special')
+            if kind!=pin['kind'] or stat.S_IMODE(first.st_mode)!=pin['mode']: raise Refusal('tool input type or mode changed')
+            row={'kind':kind,'mode':pin['mode']}
+            if kind=='directory':
+                with os.scandir(path) as items:
+                    while True:
+                        self.ledger.check(); entries+=1
+                        if entries>TOOLS[0]: raise Refusal('tool inventory work bound')
+                        try: item=next(items)
+                        except StopIteration: break
+                        visit(path/item.name,depth+1)
+            else:
+                if first.st_size!=pin['bytes']: raise Refusal('tool input size changed')
+                total+=first.st_size
+                if first.st_size<0 or first.st_size>TOOLS[1] or total>TOOLS[2]: raise Refusal('tool inventory byte bound')
+                if kind=='regular': data=self.read(path,pin['bytes'])
+                else:
+                    if first.st_size>512: raise Refusal('tool link bound')
+                    data=os.readlink(path).encode();self.ledger.check();row['target']=pin['target']
+                    if data!=pin['target'].encode(): raise Refusal('tool link changed')
+                row.update(bytes=len(data),sha256=sha(data))
+            last=path.lstat();self.ledger.check()
+            fields=('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns')
+            if any(getattr(first,k)!=getattr(last,k) for k in fields): raise Refusal('tool input changed during inventory')
+            if row!=pin: raise Refusal('tool input digest changed')
+            observed[name]=row
+        for root in roots: visit(self.path(root),0)
+        if observed!=pins: raise Refusal('missing tool input')
+        return observed
+
+    def seed_tool_cache(self, root, destination, pins):
+        # Only the fresh owned runtime home is removed. Original reviewed input
+        # roots are never writable cache destinations or updated expected pins.
+        root=Path(root);destination=self.path(destination)
+        if destination==root or destination.is_relative_to(root) or root.is_relative_to(destination): raise Refusal('tool seed destination overlap')
+        self.remove(destination);destination.mkdir(parents=True)
+        for name,pin in sorted(pins.items(),key=lambda item:(len(Path(item[0]).parts),item[0])):
+            path=Path(name)
+            if not path.is_relative_to(root): continue
+            target=destination/path.relative_to(root);self.ledger.check()
+            if pin['kind']=='directory':
+                target.mkdir(parents=True,exist_ok=True);target.chmod(pin['mode']|0o700)
+            elif pin['kind']=='regular':
+                data=self.read(path,pin['bytes'])
+                if len(data)!=pin['bytes'] or sha(data)!=pin['sha256']: raise Refusal('tool cache seed changed')
+                self.write(target,data);target.chmod(pin['mode']|0o600)
+            else:
+                target.parent.mkdir(parents=True,exist_ok=True);os.symlink(pin['target'],target)
+            self.ledger.check()
+
     def remove(self, root):
         # Metadata-only unlinks of leaf symlinks; never follow them into targets.
         requested=Path(root); parent=self.path(requested.parent)
@@ -319,18 +380,86 @@ class Files:
 
 
 
-def npm_inputs(manifest, files):
-    """Fixed launcher-text/entry-byte pins, not a transitive npm closure."""
-    home=Path(manifest['nodeHome'])
+class Toolchain:
+    """Private closed provisioning input; runtime cache writes never repin it."""
+    def __init__(self, manifest, files):
+        self.roots={key:str(files.path(manifest[key])) for key in ('gradleHome','nodeHome','javaHome')}
+        roots=[Path(value) for value in self.roots.values()]
+        if any(a.is_relative_to(b) or b.is_relative_to(a) for i,a in enumerate(roots) for b in roots[i+1:]): raise Refusal('disjoint tool roots required')
+        rows=manifest.get('tools')
+        if type(rows) is not dict or not 0<len(rows)<=TOOLS[0]: raise Refusal('closed tool input count')
+        self.pins={};total=0
+        for name,row in rows.items():
+            if type(name) is not str or not Path(name).is_absolute() or Path(name).as_posix()!=name or '..' in Path(name).parts or len(name.encode())>512 or name.find(chr(0))>=0: raise Refusal('tool input path')
+            owners=[root for root in roots if Path(name).is_relative_to(root)]
+            if len(owners)!=1 or len(Path(name).relative_to(owners[0]).parts)>TOOLS[3]: raise Refusal('tool input outside closed roots')
+            if type(row) is not dict or row.get('kind') not in ('directory','regular','symlink') or type(row.get('mode')) is not int or not 0<=row['mode']<=0o777: raise Refusal('tool input metadata')
+            fields={'kind','mode'} if row['kind']=='directory' else {'kind','mode','bytes','sha256'} | ({'target'} if row['kind']=='symlink' else set())
+            if set(row)!=fields: raise Refusal('closed tool pin fields')
+            if row['kind']!='directory':
+                if type(row['bytes']) is not int or not 0<=row['bytes']<=TOOLS[1] or type(row['sha256']) is not str or len(row['sha256'])!=64 or any(c not in '0123456789abcdef' for c in row['sha256']): raise Refusal('tool pin bytes or digest')
+                total+=row['bytes']
+                if total>TOOLS[2]: raise Refusal('tool pin aggregate')
+            if row['kind']=='symlink':
+                target=row['target']
+                if type(target) is not str or not target or Path(target).is_absolute() or len(target.encode())>512 or chr(0) in target or row['bytes']!=len(target.encode()) or row['sha256']!=sha(target.encode()): raise Refusal('tool link pin')
+                resolved=Path(posixpath.normpath(str(Path(name).parent/target)))
+                if not resolved.is_relative_to(owners[0]): raise Refusal('tool link escapes root')
+            self.pins[name]=dict(row)
+        for name,row in self.pins.items():
+            path=Path(name)
+            owner=next(root for root in roots if path.is_relative_to(root))
+            for parent in (path.parent,*path.parents):
+                if parent==owner.parent: break
+                if str(parent) not in self.pins or self.pins[str(parent)]['kind']!='directory': raise Refusal('unreviewed tool parent directory')
+            if row['kind']=='symlink':
+                target=posixpath.normpath(str(path.parent/row['target']))
+                if target not in self.pins or self.pins[target]['kind']!='regular': raise Refusal('tool link target must be a reviewed regular leaf')
+        for root in roots:
+            if str(root) not in self.pins or self.pins[str(root)]['kind']!='directory': raise Refusal('reviewed tool root required')
+        self.gradle=str(files.path(manifest['gradle']))
+        required=(self.gradle,str(Path(self.roots['nodeHome'])/'bin/node'),str(Path(self.roots['javaHome'])/'bin/java'))
+        if not Path(self.gradle).is_relative_to(Path(self.roots['gradleHome'])): raise Refusal('Gradle launcher outside reviewed context')
+        for name in required:
+            if name not in self.pins or self.pins[name]['kind']!='regular' or not self.pins[name]['mode']&0o111: raise Refusal('reviewed regular executable required')
+        self.commitment=sha(canonical(self.pins))
+
+    def require(self, files):
+        try: files.tool_inventory(tuple(self.roots.values()),self.pins)
+        except Refusal as error:
+            # Retain the existing npm refusal classification while checking its
+            # complete distribution and the other reviewed tool contexts.
+            raise Refusal('npm reviewed input or toolchain inventory disagreement: '+str(error)) from error
+        return self.commitment
+
+    def seed(self, files, destination):
+        self.require(files)
+        files.seed_tool_cache(self.roots['gradleHome'],destination,self.pins)
+        root=Path(self.roots['gradleHome']);runtime={}
+        for name,pin in self.pins.items():
+            if Path(name).is_relative_to(root):
+                row=dict(pin)
+                if row['kind']!='symlink':row['mode']|=0o700 if row['kind']=='directory' else 0o600
+                runtime[str(Path(destination)/Path(name).relative_to(root))]=row
+        files.tool_inventory((str(destination),),runtime)
+        self.require(files)
+
+
+def npm_inputs(manifest, files, toolchain=None):
+    """Keep fixed npm leaf checks and require the entire private tool inventory."""
+    raw=manifest.get('tools',{});home=Path(manifest['nodeHome'])
     names=(str(home/'bin/npm'),str(home/'lib/node_modules/npm/bin/npm-cli.js'))
-    tools=manifest.get('tools',{})
-    if any(name not in tools for name in names): raise Refusal('required npm input lacks reviewed pin')
+    if any(name not in raw for name in names): raise Refusal('required npm input lacks reviewed pin')
+    toolchain=Toolchain(manifest,files) if toolchain is None else toolchain
+    pinned_home=Path(toolchain.roots['nodeHome'])
+    names=(str(pinned_home/'bin/npm'),str(pinned_home/'lib/node_modules/npm/bin/npm-cli.js'))
+    if any(name not in toolchain.pins for name in names): raise Refusal('required npm input lacks reviewed pin')
+    toolchain.require(files)  # All metadata admission precedes fixed leaf payloads, too.
     observed={}
     for i,name in enumerate(names):
         data=files.npm_launcher(name) if i==0 else files.read(name,128*1024**2)
-        row=tools[name]
-        if type(row) is not dict or type(row.get('bytes')) is not int or row!={'sha256':sha(data),'bytes':len(data)}:
-            raise Refusal('npm reviewed input disagreement')
+        row=toolchain.pins[name]
+        if row['kind']!=('symlink' if i==0 else 'regular') or row.get('bytes')!=len(data) or row.get('sha256')!=sha(data): raise Refusal('npm reviewed input disagreement')
         observed[name]={**row,'kind':'fixed-symlink-text' if i==0 else 'regular-entry-bytes'}
     return observed
 
@@ -568,6 +697,7 @@ class Freshness:
         self.manifest=manifest; self.ledger=ledger; self.fs=files; self.runner=runner
         self.active=None
         self._inputs=source_view(manifest.get('sources'))
+        self._tools=Toolchain(manifest,files)
         self.phases={name:{'status':'NOT_RUN'} for name in ('cold','unchanged','warm','fresh','stale','drift')}
 
     def require_inputs(self):
@@ -596,10 +726,10 @@ class Freshness:
         self._inputs=view
 
     def run_checked(self, argv, env):
-        self.require_inputs()
+        self.require_inputs(); self._tools.require(self.fs)
         result=self.runner(argv,self.fixture,env)
         if result.get('intervened') is not False or result.get('reaped') is not True: raise Refusal('uncertain command')
-        self.require_inputs()
+        self.require_inputs(); self._tools.require(self.fs)
         return result
 
     def enter(self, mode):
@@ -650,23 +780,24 @@ class Freshness:
         names=TASKS[:3] if mode=='drift' else TASKS
         guard=self.work/'graph.gradle'; self.fs.write(guard,init_guard(names))
         m=self.manifest
-        env={'PATH':str(Path(m['nodeHome'])/'bin')+':/usr/bin:/bin','HOME':str(self.work/'home'),
-             'JAVA_HOME':m['javaHome'],'GRADLE_USER_HOME':m['gradleHome'],
+        env={'PATH':str(Path(self._tools.roots['nodeHome'])/'bin')+':/usr/bin:/bin','HOME':str(self.work/'home'),
+             'JAVA_HOME':self._tools.roots['javaHome'],'GRADLE_USER_HOME':str(self.work/'gradle-home'),
              'LANG':'C.UTF-8','LC_ALL':'C.UTF-8','TMPDIR':str(self.work/'tmp'),
              'NPM_CONFIG_CACHE':str(self.work/'npm-download-cache'),
              'NPM_CONFIG_USERCONFIG':str(self.work/'empty-npmrc'),
              'NPM_CONFIG_GLOBALCONFIG':str(self.work/'empty-global-npmrc'),
              'NPM_CONFIG_OFFLINE':'false' if mode=='cold' else 'true'}
-        argv=[m['gradle'],'--offline','--no-daemon','--no-build-cache','--console=plain',
+        argv=[self._tools.gradle,'--offline','--no-daemon','--no-build-cache','--console=plain',
               '--project-cache-dir',str(self.fixture/'.gradle'),'-I',str(guard),
-              '-PfrontendNodeHome='+m['nodeHome'],'frontendBuild' if mode=='drift' else 'stageFrontend']
+              '-PfrontendNodeHome='+self._tools.roots['nodeHome'],'frontendBuild' if mode=='drift' else 'stageFrontend']
         return argv,env
 
     def build(self, mode):
         self.enter(mode)
-        pins=npm_inputs(self.manifest,self.fs)
+        pins=npm_inputs(self.manifest,self.fs,self._tools)
+        self._tools.seed(self.fs,self.work/'gradle-home')
         argv,env=self.command(mode); result=self.run_checked(argv,env)
-        if npm_inputs(self.manifest,self.fs)!=pins: raise Refusal('npm inputs changed across command')
+        if npm_inputs(self.manifest,self.fs,self._tools)!=pins: raise Refusal('npm inputs changed across command')
         self.ledger.check(); actual=require_outcomes(result,mode)
         self.phases[mode]={'status':'BUILD_COMPLETED','taskOutcomes':actual,'npmInputPins':pins,'copiedInputSha256':sha(canonical(self._inputs)),'elapsedSeconds':self.ledger.clock()-self.ledger.start}
         self.fs.write(self.evidence/(mode+'-outcomes.json'),canonical(self.phases[mode]),evidence=True)
@@ -683,7 +814,7 @@ class Freshness:
                 value=closed_json(original); value['definitions']['freshnessDriftProbe']={'type':'string','enum':['authored']}; changed=canonical(value)
             self.replace_input(name,changed)
             argv,env=self.command('drift')
-            checked=self.run_checked([str(Path(self.manifest['nodeHome'])/'bin/node'),str(self.fixture/'scripts/generate-web-api.mjs'),'--check'],env)
+            checked=self.run_checked([str(Path(self._tools.roots['nodeHome'])/'bin/node'),str(self.fixture/'scripts/generate-web-api.mjs'),'--check'],env)
             self.ledger.check()
             if checked['code']!=1 or b'Generated contract drift:' not in checked['output'] or checked['intervened'] or not checked['reaped']:
                 raise Refusal('missing intended API drift refusal')
@@ -735,9 +866,9 @@ class Freshness:
         for n in ('frontend/src/api/generated.ts','frontend/src/api/generated-schema.ts'):
             if self.fs.read(self.fixture/n)!=self.fs.read(self.source/n): raise Refusal('generated API changed')
         if self.baseline()!=baseline: raise Refusal('packaged baseline changed')
-        npm_inputs(self.manifest,self.fs)
+        npm_inputs(self.manifest,self.fs,self._tools)
         self.ledger.check()
-        return {'status':'PASSED_STAGE_ONLY','phases':self.phases,'packagedBaseline':baseline,'copiedInputSha256':sha(canonical(self._inputs)),
+        return {'status':'PASSED_STAGE_ONLY','phases':self.phases,'packagedBaseline':baseline,'copiedInputSha256':sha(canonical(self._inputs)),'toolInputSha256':self._tools.commitment,
                 'fullIssue651Accepted':False,'descendantAbsenceProven':False,'coldGradleQualified':False}
 
 
@@ -778,22 +909,11 @@ def prepare(source, work, manifest, files):
         row=manifest['sources'][name]
         if type(row) is not dict or set(row)!={'sha256','bytes','mode'} or type(row['bytes']) is not int or type(row['mode']) is not int or not 0<=row['mode']<=0o777: raise Refusal('exact source pin types required')
         if total>128*1024**2 or set(row)!={'sha256','bytes','mode'} or row['sha256']!=sha(data) or row['bytes']!=len(data) or row['mode']!=stat.S_IMODE((source/name).stat().st_mode): raise Refusal('source pin disagreement')
-    if len(manifest['tools'])>256: raise Refusal('tool input count')
-    npm_pins=npm_inputs(manifest,files)
-    tool_bytes=0
-    for name,row in manifest['tools'].items():
-        if name==str(Path(manifest['nodeHome'])/'bin/npm'):
-            data=files.npm_launcher(name)
-        else:
-            p=files.path(name); data=files.read(p,min(128*1024**2,512*1024**2-tool_bytes))
-        tool_bytes+=len(data)
-        if tool_bytes>512*1024**2: raise Refusal('tool input aggregate')
-        if type(row) is not dict or type(row.get('bytes')) is not int or row!={'sha256':sha(data),'bytes':len(data)}: raise Refusal('provisioned tool pin disagreement')
-    for value in ('gradleHome','nodeHome','javaHome'):
-        if not files.path(manifest[value]).is_dir(): raise Refusal('provisioned context missing')
-    for name in (manifest['gradle'],str(Path(manifest['nodeHome'])/'bin/node'),str(Path(manifest['javaHome'])/'bin/java')):
-        if name not in manifest['tools']: raise Refusal('required executable lacks reviewed pin')
-    if not files.path(manifest['gradle']).is_relative_to(files.path(manifest['gradleHome'])): raise Refusal('Gradle distribution must already be provisioned in same cache')
+    toolchain=Toolchain(manifest,files)
+    toolchain.require(files);npm_pins=npm_inputs(manifest,files,toolchain)
+    for root in toolchain.roots.values():
+        root=files.path(root)
+        if work==root or work.is_relative_to(root) or root.is_relative_to(work) or source==root or source.is_relative_to(root) or any((source/name).is_relative_to(root) for name in selected): raise Refusal('tool/work contexts and copied inputs must be disjoint')
     baseline_paths(source,work,manifest['packagedBaseline'],files)
     work.mkdir(parents=True)
     for name in ('fixture','evidence','home','tmp','npm-download-cache'): (work/name).mkdir()
@@ -804,7 +924,7 @@ def prepare(source, work, manifest, files):
         files.write(work/'fixture'/name,data); (work/'fixture'/name).chmod(manifest['sources'][name]['mode'])
     fingerprint={n:manifest['sources'][n]['sha256'] for n in KEYS}
     fingerprint.update(os=manifest['os'],arch=manifest['arch'])
-    files.write(work/'evidence/inputs.json',canonical({'manifest':manifest,'npmInputPins':npm_pins,'npmCacheInputSha256':sha(canonical(fingerprint))}),evidence=True)
+    files.write(work/'evidence/inputs.json',canonical({'manifest':manifest,'toolInputSha256':toolchain.commitment,'npmInputPins':npm_pins,'npmCacheInputSha256':sha(canonical(fingerprint))}),evidence=True)
 
 
 def main(argv=None):

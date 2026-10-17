@@ -14,7 +14,7 @@ spec.loader.exec_module(f)
 
 
 class MemoryFiles:
-    def __init__(self,ledger): self.ledger=ledger; self.data={}; self.modes={}; self.removed=[]
+    def __init__(self,ledger): self.ledger=ledger; self.data={}; self.modes={}; self.removed=[]; self.tool_kinds={}; self.tool_seeds=[]
     def path(self,path): return Path(path)
     def read(self,path,maximum=16*1024**2):
         self.ledger.check(); data=self.data[str(path)]
@@ -37,11 +37,41 @@ class MemoryFiles:
             for name,row in rows.items():row['mode']=self.modes.get(prefix+name,0o644)
         if dist_assets and len(rows)>2048:raise f.Refusal('dist asset file bound')
         return f.check_ui_partition(rows) if partitioned_ui else rows
+    def tool_inventory(self,roots,pins):
+        names=set(self.tool_kinds)|set(self.data)
+        names={name for name in names if any(Path(name).is_relative_to(Path(root)) for root in roots)}
+        rows={}
+        for name in sorted(names):
+            if name not in pins:raise f.Refusal('unexpected tool input')
+            kind=self.tool_kinds.get(name,'regular');row={'kind':kind,'mode':self.modes.get(name,0o755 if kind=='directory' else 0o644)}
+            if kind!='directory':
+                if name not in self.data:raise f.Refusal('missing tool input')
+                data=self.read(name,pins[name].get('bytes',0))
+                row.update(bytes=len(data),sha256=f.sha(data))
+                if kind=='symlink':row['target']=data.decode()
+            if row!=pins[name]:raise f.Refusal('tool input disagreement')
+            rows[name]=row
+        if rows!=pins:raise f.Refusal('missing tool input')
+        return rows
+    def seed_tool_cache(self,root,destination,pins):
+        self.remove(destination);self.tool_seeds.append(f.sha(f.canonical(pins)))
+        for name,pin in pins.items():
+            if not Path(name).is_relative_to(Path(root)):continue
+            target=str(Path(destination)/Path(name).relative_to(root))
+            self.tool_kinds[target]=pin['kind'];self.modes[target]=pin['mode'] if pin['kind']=='symlink' else pin['mode']|(0o700 if pin['kind']=='directory' else 0o600)
+            if pin['kind']=='directory':continue
+            data=self.read(name,pin['bytes'])
+            if f.sha(data)!=pin['sha256']:raise f.Refusal('tool cache seed changed')
+            self.write(Path(destination)/Path(name).relative_to(root),data)
+
     def remove(self,path):
         self.ledger.check(); prefix=str(path); self.removed.append(prefix)
         for name in list(self.data):
             if name==prefix or name.startswith(prefix+'/'):
                 del self.data[name];self.modes.pop(name,None)
+        for name in list(self.tool_kinds):
+            if name==prefix or name.startswith(prefix+'/'):
+                del self.tool_kinds[name];self.modes.pop(name,None)
 
 
 def build_output(mode):
@@ -123,8 +153,23 @@ class FreshnessControls(unittest.TestCase):
         files.write(source/'build/generated/frontend-resources/decompengine/web/ui/index.html',b'original staged UI')
         files.write(source/'build/generated/frontend-resources/decompengine/web/ui/asset-manifest.json',b'authored original private manifest')
         tools={}
-        for name,data in (('/repo/node/bin/npm',f.NPM_LINK.encode('ascii')),('/repo/node/lib/node_modules/npm/bin/npm-cli.js',b'// authored inert npm entry')):
-            files.write(name,data);tools[name]={'bytes':len(data),'sha256':f.sha(data)}
+        leaves=(('/repo/cache/bin/gradle',b'authored Gradle launcher',0o755,'regular'),
+                ('/repo/cache/lib/gradle-launcher.jar',b'authored Gradle implementation',0o644,'regular'),
+                ('/repo/cache/caches/modules/dependency.jar',b'authored offline dependency',0o644,'regular'),
+                ('/repo/cache/init.d/trusted.gradle',b'authored reviewed initializer',0o644,'regular'),
+                ('/repo/node/bin/node',b'authored Node executable',0o755,'regular'),
+                ('/repo/node/bin/npm',f.NPM_LINK.encode('ascii'),0o777,'symlink'),
+                ('/repo/node/lib/node_modules/npm/bin/npm-cli.js',b'// authored inert npm entry',0o644,'regular'),
+                ('/repo/node/lib/node_modules/npm/lib/cli.js',b'// authored npm implementation',0o644,'regular'),
+                ('/repo/java/bin/java',b'authored Java launcher',0o755,'regular'),
+                ('/repo/java/lib/modules',b'authored Java runtime',0o644,'regular'))
+        for name,data,mode,kind in leaves:
+            files.write(name,data);files.modes[name]=mode;files.tool_kinds[name]=kind
+            tools[name]={'kind':kind,'mode':mode,'bytes':len(data),'sha256':f.sha(data)}
+            if kind=='symlink':tools[name]['target']=data.decode()
+            for parent in Path(name).parents:
+                if str(parent)=='/repo':break
+                tools[str(parent)]={'kind':'directory','mode':0o755};files.tool_kinds[str(parent)]='directory';files.modes[str(parent)]=0o755
         manifest={'sources':{name:{'bytes':len(data),'sha256':f.sha(data),'mode':0o644} for name,data in originals.items()},'tools':tools,'gradle':'/repo/cache/bin/gradle','gradleHome':'/repo/cache','nodeHome':'/repo/node','javaHome':'/repo/java','packagedBaseline':baseline}
         runner=ProducedFixture(files,fixture,defect)
         return f.Freshness(source,work,manifest,ledger,files,runner),runner,files,clock
@@ -235,11 +280,12 @@ class FreshnessControls(unittest.TestCase):
         for argv,env in runner.calls:
             self.assertNotIn('--rerun-tasks',argv)
             self.assertEqual('/repo/work/npm-download-cache',env['NPM_CONFIG_CACHE'])
-            self.assertEqual('/repo/cache',env['GRADLE_USER_HOME'])
+            self.assertEqual('/repo/work/gradle-home',env['GRADLE_USER_HOME'])
         self.assertEqual('false',runner.calls[0][1]['NPM_CONFIG_OFFLINE'])
         self.assertTrue(all(env['NPM_CONFIG_OFFLINE']=='true' for _,env in runner.calls[1:]))
         self.assertEqual(b'original checkout UI',files.read('/repo/source/build/frontend/dist/index.html'))
-        self.assertTrue(all('/repo/work/fixture/' in p for p in files.removed))
+        self.assertTrue(all('/repo/work/fixture/' in p or p=='/repo/work/gradle-home' for p in files.removed))
+        self.assertEqual(6,files.removed.count('/repo/work/gradle-home'))
 
     def test_required_checkout_baselines_cannot_be_replaced_or_omitted(self):
         diagnostic,_,files,_=self.harness(); original=diagnostic.manifest['packagedBaseline']
@@ -528,6 +574,136 @@ class FreshnessControls(unittest.TestCase):
                 self.assertEqual('FAILED_OR_UNKNOWN',result['status']);self.assertIn('ordinary cancellation',result['reason'])
                 self.assertTrue(result['fixtureRetained']);self.assertFalse(result['fullIssue651Accepted'])
 
+    def test_closed_toolchain_rejects_omitted_extra_changed_and_mode_inputs(self):
+        leaves=('/repo/cache/lib/gradle-launcher.jar','/repo/cache/caches/modules/dependency.jar','/repo/cache/init.d/trusted.gradle','/repo/node/lib/node_modules/npm/lib/cli.js','/repo/java/lib/modules')
+        for name in leaves:
+            for defect in ('omitted','extra','changed','mode'):
+                with self.subTest(name=name,defect=defect):
+                    diagnostic,runner,files,_=self.harness()
+                    if defect=='omitted':
+                        del diagnostic.manifest['tools'][name];diagnostic._tools=f.Toolchain(diagnostic.manifest,files)
+                    elif defect=='extra':files.write(name+'.unreviewed',b'unknown code')
+                    elif defect=='changed':files.data[name]+=b'changed'
+                    else:files.modes[name]^=0o100
+                    with self.assertRaises(f.Refusal):diagnostic.run()
+                    self.assertEqual([],runner.calls)
+
+    def test_every_command_revalidates_full_tool_context_before_next_credit(self):
+        for index in range(9):
+            with self.subTest(command=index):
+                diagnostic,runner,files,_=self.harness();original=diagnostic.runner
+                def invoke(argv,cwd,env):
+                    result=original(argv,cwd,env)
+                    if len(runner.calls)==index+1:files.data['/repo/node/lib/node_modules/npm/lib/cli.js']+=b'changed'
+                    return result
+                diagnostic.runner=invoke
+                with self.assertRaises(f.Refusal):diagnostic.run()
+                self.assertEqual(index+1,len(runner.calls))
+
+    def test_tool_manifest_alias_cannot_repin_mutated_runtime_inputs(self):
+        diagnostic,runner,files,_=self.harness();name='/repo/cache/lib/gradle-launcher.jar'
+        files.data[name]+=b'changed';diagnostic.manifest['tools'][name]['bytes']=len(files.data[name]);diagnostic.manifest['tools'][name]['sha256']=f.sha(files.data[name])
+        diagnostic.manifest['gradle']='/repo/unknown-launcher';diagnostic.manifest['nodeHome']='/repo/unknown-node'
+        with self.assertRaises(f.Refusal):diagnostic.run()
+        self.assertEqual([],runner.calls);self.assertEqual('/repo/cache/bin/gradle',diagnostic._tools.gradle)
+
+    def test_each_gradle_invocation_gets_reviewed_seed_not_prior_cache_writes(self):
+        diagnostic,runner,files,_=self.harness();original=diagnostic.runner;seen=[]
+        seed='/repo/work/gradle-home/caches/modules/dependency.jar';original_bytes=files.data['/repo/cache/caches/modules/dependency.jar']
+        def invoke(argv,cwd,env):
+            if argv[-1]!='--check':
+                seen.append(files.read(seed));files.write(seed,b'authored prior invocation cache write')
+            return original(argv,cwd,env)
+        diagnostic.runner=invoke;result=diagnostic.run()
+        self.assertEqual('PASSED_STAGE_ONLY',result['status']);self.assertEqual([original_bytes]*6,seen)
+        self.assertEqual(original_bytes,files.read('/repo/cache/caches/modules/dependency.jar'))
+        self.assertEqual(6,len(files.tool_seeds));self.assertEqual(1,len(set(files.tool_seeds)))
+        self.assertEqual(9,len(runner.calls));self.assertEqual(3,sum(argv[-1]=='--check' for argv,_ in runner.calls))
+
+    def test_closed_toolchain_pin_types_roots_and_internal_link_targets_refuse(self):
+        for defect in ('missing-parent','overlap','escape-link','link-chain','unknown-field','non-executable','bad-digest','too-many'):
+            with self.subTest(defect=defect):
+                diagnostic,_,files,_=self.harness();manifest=diagnostic.manifest
+                if defect=='missing-parent':del manifest['tools']['/repo/node/lib/node_modules/npm/lib']
+                elif defect=='overlap':manifest['javaHome']='/repo/cache/java'
+                elif defect in ('escape-link','link-chain'):
+                    target='../../../outside' if defect=='escape-link' else 'npm'
+                    row=manifest['tools']['/repo/node/bin/npm'];row.update(target=target,bytes=len(target),sha256=f.sha(target.encode()))
+                elif defect=='unknown-field':manifest['tools']['/repo/java/lib/modules']['optional']=True
+                elif defect=='non-executable':manifest['tools']['/repo/java/bin/java']['mode']=0o644
+                elif defect=='bad-digest':manifest['tools']['/repo/java/lib/modules']['sha256']='x'*64
+                else:manifest['tools']={str(i):{} for i in range(f.TOOLS[0]+1)}
+                with self.assertRaises(f.Refusal):f.Toolchain(manifest,files)
+
+    def test_actual_tool_inventory_refuses_unknown_size_or_mode_before_payload(self):
+        def metadata(mode,size=0):return SimpleNamespace(st_dev=1,st_ino=2,st_mode=mode,st_size=size,st_mtime_ns=3,st_ctime_ns=4)
+        for defect in ('unknown','size','mode'):
+            with self.subTest(defect=defect):
+                files=f.Files.__new__(f.Files);files.repository=Path('/repo');files.ledger=f.Ledger(Clock())
+                directory=metadata(f.stat.S_IFDIR|0o755);leaf=metadata(f.stat.S_IFREG|(0o600 if defect=='mode' else 0o644),2 if defect=='size' else 1)
+                class Entries:
+                    def __init__(self):self.done=False;self.closed=False
+                    def __enter__(self):return self
+                    def __exit__(self,*args):self.closed=True
+                    def __next__(self):
+                        if self.done:raise StopIteration
+                        self.done=True;return SimpleNamespace(name='input')
+                entries=Entries();pins={'/repo/tools':{'kind':'directory','mode':0o755}}
+                if defect!='unknown':pins['/repo/tools/input']={'kind':'regular','mode':0o644,'bytes':1,'sha256':f.sha(b'x')}
+                with patch.object(files,'path',side_effect=Path),patch.object(Path,'lstat',autospec=True,side_effect=lambda path:directory if str(path)=='/repo/tools' else leaf),patch.object(f.os,'scandir',return_value=entries),patch.object(files,'read') as read:
+                    with self.assertRaises(f.Refusal):files.tool_inventory(('/repo/tools',),pins)
+                read.assert_not_called();self.assertTrue(entries.closed)
+
+    def test_actual_tool_inventory_internal_links_races_deadline_and_scan_bound(self):
+        for defect in ('positive','changed-link','raced-link','late-link','entry-limit'):
+            with self.subTest(defect=defect):
+                clock=Clock();files=f.Files.__new__(f.Files);files.repository=Path('/repo');files.ledger=f.Ledger(clock)
+                pins={'/repo/tools':{'kind':'directory','mode':0o755},'/repo/tools/target':{'kind':'regular','mode':0o644,'bytes':1,'sha256':f.sha(b'x')},'/repo/tools/alias':{'kind':'symlink','mode':0o777,'target':'target','bytes':6,'sha256':f.sha(b'target')}}
+                seen={}
+                def metadata(path):
+                    name=str(path);pin=pins[name];seen[name]=seen.get(name,0)+1
+                    mode={'directory':f.stat.S_IFDIR,'regular':f.stat.S_IFREG,'symlink':f.stat.S_IFLNK}[pin['kind']]|pin['mode']
+                    inode=3 if defect=='raced-link' and name.endswith('/alias') and seen[name]>1 else 2
+                    return SimpleNamespace(st_dev=1,st_ino=inode,st_mode=mode,st_size=pin.get('bytes',0),st_mtime_ns=3,st_ctime_ns=4)
+                class Entries:
+                    def __init__(self):self.names=iter(('target','alias'));self.closed=False
+                    def __enter__(self):return self
+                    def __exit__(self,*args):self.closed=True
+                    def __next__(self):return SimpleNamespace(name=next(self.names))
+                entries=Entries()
+                def link(path):
+                    if defect=='late-link':clock.now=406
+                    return 'changed' if defect=='changed-link' else 'target'
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(files,'path',side_effect=Path))
+                    stack.enter_context(patch.object(Path,'lstat',autospec=True,side_effect=metadata))
+                    stack.enter_context(patch.object(f.os,'scandir',return_value=entries))
+                    stack.enter_context(patch.object(f.os,'readlink',side_effect=link))
+                    read=stack.enter_context(patch.object(files,'read',return_value=b'x'))
+                    if defect=='entry-limit':stack.enter_context(patch.object(f,'TOOLS',(3,*f.TOOLS[1:])))
+                    if defect=='positive':self.assertEqual(pins,files.tool_inventory(('/repo/tools',),pins))
+                    else:
+                        with self.assertRaises(f.Refusal):files.tool_inventory(('/repo/tools',),pins)
+                self.assertTrue(entries.closed);self.assertEqual(1,read.call_count)
+                self.assertEqual(420,files.ledger.end)
+
+    def test_tool_context_final_credit_revalidates_even_after_all_commands(self):
+        diagnostic,runner,files,_=self.harness();original=diagnostic.baseline;calls=[]
+        def baseline():
+            result=original();calls.append(1)
+            if len(calls)==2:files.data['/repo/java/lib/modules']+=b'late mutation'
+            return result
+        diagnostic.baseline=baseline
+        with self.assertRaises(f.Refusal):diagnostic.run()
+        self.assertEqual(9,len(runner.calls));self.assertEqual(2,len(calls))
+
+    def test_toolchain_whole_private_pins_survive_all_owned_source_edits(self):
+        diagnostic,runner,files,_=self.harness();before=f.canonical(diagnostic.manifest['tools']);commitment=diagnostic._tools.commitment
+        result=diagnostic.run()
+        self.assertEqual('PASSED_STAGE_ONLY',result['status']);self.assertEqual(commitment,result['toolInputSha256'])
+        self.assertEqual(before,f.canonical(diagnostic.manifest['tools']));self.assertEqual(commitment,diagnostic._tools.require(files))
+        self.assertEqual(9,len(runner.calls));self.assertEqual(6,len(files.tool_seeds))
+
     def test_actual_runner_late_zero_and_leftovers_fail_without_post_reap_signal(self):
         for defect in ('success','late-zero','leftover','timeout'):
             with self.subTest(defect=defect):
@@ -770,7 +946,7 @@ class FreshnessControls(unittest.TestCase):
             self.assertEqual([],producer.calls)
         diagnostic,_,files,_=self.harness();rows=f.npm_inputs(diagnostic.manifest,files)
         self.assertEqual({'fixed-symlink-text','regular-entry-bytes'},{row['kind'] for row in rows.values()})
-        for name in diagnostic.manifest['tools']:
+        for name in ('/repo/node/bin/npm','/repo/node/lib/node_modules/npm/bin/npm-cli.js'):
             original=files.data[name];files.data[name]=original+b'changed'
             with self.subTest(name=name),self.assertRaises(f.Refusal):f.npm_inputs(diagnostic.manifest,files)
             files.data[name]=original
