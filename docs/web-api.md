@@ -169,6 +169,19 @@ are never browser diagnostics.
 | `501` / `503` | `CAPABILITY_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `SERVER_DRAINING` | Explain reason and retain view |
 | `500` / `504` | `INTERNAL_ERROR`, `DEADLINE_EXCEEDED` | Show request ID; reconcile uncertain mutation outcome |
 
+An authorized streamed upload that reports a typed uncertain publication returns
+`409 RECOVERY_REQUIRED` with `Location: <basePath>api/v1/jobs/<jobId>`. The existing
+error envelope remains unchanged, with `retryable:false` and no `Retry-After`.
+The location identifies the retained job for an authenticated read; it is not an
+instruction to submit the upload again or an assertion that analysis completed.
+Private filesystem causes and paths are withheld.
+
+Until storage is reopened, the job read truthfully reports recovery is required.
+The service also refuses further uploads. That separate
+`503 RECOVERY_REQUIRED` refusal has no guessed job location. After explicit
+restart/reconciliation, an upload with the same idempotency key and intent can
+replay its retained publication receipt rather than create another job.
+
 The server advertises stricter configured limits at bootstrap. Contract defaults are 30 seconds
 for ordinary HTTP requests, 120 seconds for upload and 120 seconds download idle time; JSON bodies
 are at most 1 MiB and complete upload requests at most 32 MiB. Stream source reads in at most
