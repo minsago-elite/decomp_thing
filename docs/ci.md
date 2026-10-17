@@ -164,8 +164,8 @@ selection and its required aggregate; the packaged lane no longer repeats those
 hundreds of executions. It retains all methods in `BrowserSessionExpiryTest`,
 including HTTP-clock and process-cleanup controls, because the actual browser
 method is explicitly skipped on ordinary hosts without Chrome. A report gate
-requires that exact browser method once, valid class/method identities and no
-failed, errored or skipped case in its suite. Missing, linked, malformed, oversized,
+requires that exact browser method once, valid suite/class/method identities,
+matching aggregate counts and no failed, errored or skipped case in its suite. Missing, linked, malformed, oversized,
 foreign, duplicate and empty reports refuse; the retained receipt binds the exact
 XML bytes/hash. Core runs the report gate's positive and negative controls.
 Packaging, archive/helper/closure verification and every packaged browser journey

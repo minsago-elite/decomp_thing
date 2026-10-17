@@ -114,6 +114,11 @@ def check_browser_expiry_report(root):
         raise ValueError("required real browser expiry case is missing")
     if any(case.find(kind) is not None for case in cases for kind in ("skipped", "failure", "error")):
         raise ValueError("browser expiry case failed or skipped")
+    if suite.tag != "testsuite" or suite.get("name") != BROWSER_EXPIRY_CLASS:
+        raise ValueError("browser expiry suite identity differs")
+    for field, expected in (("tests", len(cases)), ("skipped", 0), ("failures", 0), ("errors", 0)):
+        if suite.get(field) != str(expected):
+            raise ValueError("browser expiry suite counts differ")
     return {"schemaVersion": 1, "status": "passed", "scope": "packaged browser expiry JVM selection",
             "PASS": len(cases), "SKIP": 0, "className": BROWSER_EXPIRY_CLASS,
             "methods": sorted(names), "input": {"path": path.name, "bytes": len(raw),
@@ -365,8 +370,9 @@ class BrowserExpiryReportTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def write(self, names=None, outcome=None, classname=BROWSER_EXPIRY_CLASS):
-        suite = ET.Element("testsuite")
         case_names = names if names is not None else [BROWSER_EXPIRY_METHOD, "HTTP expiry()", "cleanup()"]
+        suite = ET.Element("testsuite", name=BROWSER_EXPIRY_CLASS, tests=str(len(case_names)),
+                           skipped="0", failures="0", errors="0")
         for name in case_names:
             case = ET.SubElement(suite, "testcase", classname=classname, name=name)
             if outcome is not None:
@@ -417,6 +423,26 @@ class BrowserExpiryReportTest(unittest.TestCase):
         target.write_text("<testsuite/>", encoding="utf-8")
         self.path.symlink_to(target)
         with self.assertRaisesRegex(ValueError, "missing or linked"):
+            check_browser_expiry_report(self.root)
+
+    def test_suite_identity_and_counts_must_match_actual_positive_cases(self):
+        for field, value in (("name", "foreign"), ("tests", "4"), ("skipped", "1"),
+                             ("failures", "1"), ("errors", "1"), ("tests", "03"), ("tests", None)):
+            with self.subTest(field=field, value=value):
+                self.write()
+                suite = ET.parse(self.path).getroot()
+                if value is None:
+                    suite.attrib.pop(field)
+                else:
+                    suite.set(field, value)
+                ET.ElementTree(suite).write(self.path, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "suite identity|suite counts"):
+                    check_browser_expiry_report(self.root)
+        self.write()
+        suite = ET.parse(self.path).getroot()
+        suite.tag = "testsuites"
+        ET.ElementTree(suite).write(self.path, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "suite identity"):
             check_browser_expiry_report(self.root)
 
     def test_empty_and_unnamed_case_reports_are_refused(self):
