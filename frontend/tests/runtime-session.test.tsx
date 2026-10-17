@@ -26,6 +26,7 @@ it('projects existing session evidence, reports mismatches, and clears it at log
     expect(screen.getByText(/queue position and start time are not reported/)).toBeTruthy();
     expect(screen.getByText('degraded')).toBeTruthy();
     expect(screen.getByText('Uploads unavailable')).toBeTruthy();
+    expect(screen.getByText('Server instance').nextElementSibling?.textContent).toBe('Not reported');
     expect(screen.getByText('AGENT_NOT_CONFIGURED')).toBeTruthy();
     expect(screen.getByText(/server reports a different UI build/)).toBeTruthy();
     expect(document.body.textContent).not.toContain(data.csrfToken);
@@ -41,6 +42,29 @@ it('projects existing session evidence, reports mismatches, and clears it at log
   } finally { session.dispose(); }
 });
 
+
+it('reports a new server instance with unchanged builds and does not fetch on render', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValue(data), exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    expect(screen.getByText('server_fixture_1')).toBeTruthy();
+    expect(screen.queryByText(/server reports a different UI build/)).toBeNull();
+    expect(gateway.bootstrap).toHaveBeenCalledOnce();
+    gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_2' });
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText('server_fixture_1')).toBeNull();
+    expect(screen.getByText('server_fixture_2')).toBeTruthy();
+    expect(screen.queryByText(/server reports a different UI build/)).toBeNull();
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain(data.csrfToken);
+  } finally { session.dispose(); }
+});
 
 it('keeps missing scheduler metadata unknown', async () => {
   const { SchedulerSummary } = await import('../src/jobs/SchedulerSummary');

@@ -23,6 +23,8 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    // The build hash is stable across restarts; this identity belongs to one listener lifetime.
+    private val serverInstanceId = UUID.randomUUID().toString()
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
@@ -236,6 +238,7 @@ internal class WebApiController(
         put("apiVersions", JsonArray(listOf(JsonPrimitive(1))))
         put("applicationBuildId", applicationBuildId)
         put("uiBuildId", assets.manifest.buildId)
+        put("serverInstanceId", serverInstanceId)
         put("basePath", assets.basePath)
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())

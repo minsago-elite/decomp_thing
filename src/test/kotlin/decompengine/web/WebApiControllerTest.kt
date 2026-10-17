@@ -29,6 +29,56 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `bootstrap exposes bounded defaults and stable per-listener identity across sessions and restart`(): Unit {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/web-api-bootstrap").toAbsolutePath())
+        val root = createTempDirectory(parent, "instance-")
+        var executions = 0
+        fun create() = UploadServer("127.0.0.1", 0, root,
+            JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ },
+            uiMode = WebUiMode.SPA, basePath = "/workbench/")
+        fun bootstrap(server: UploadServer, cookie: String): JsonObject = assertEnvelope(
+            request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+        var server = create()
+        try {
+            server.start()
+            assertError(request(server, "/workbench/api/v1/bootstrap"), 401, "SESSION_REQUIRED")
+            val cookie = establish(server)
+            val first = bootstrap(server, cookie)
+            val identity = first.getValue("serverInstanceId").jsonPrimitive.content
+            assertEquals(identity, java.util.UUID.fromString(identity).toString())
+            assertEquals(identity, bootstrap(server, cookie).getValue("serverInstanceId").jsonPrimitive.content)
+            assertEquals(identity, bootstrap(server, establish(server)).getValue("serverInstanceId").jsonPrimitive.content)
+            assertEquals(listOf("1"), first.getValue("apiVersions").jsonArray.map { it.jsonPrimitive.content })
+            assertTrue(first.getValue("applicationBuildId").jsonPrimitive.content.isNotBlank())
+            assertTrue(first.getValue("uiBuildId").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")))
+            assertEquals("/workbench/", first.getValue("basePath").jsonPrimitive.content)
+            assertEquals("degraded", first.getValue("readiness").jsonPrimitive.content)
+            val capability = first.getValue("capabilities").jsonArray.single().jsonObject
+            assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
+            assertTrue(capability.getValue("workflows").jsonArray.isEmpty())
+            val limits = first.getValue("limits").jsonObject
+            assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)
+            assertEquals("30000", limits.getValue("requestDeadlineMs").jsonPrimitive.content)
+            assertEquals("120000", limits.getValue("uploadDeadlineMs").jsonPrimitive.content)
+            assertEquals("0", limits.getValue("maxSourceChunkBytes").jsonPrimitive.content)
+            assertEquals("0", limits.getValue("maxLogChunkBytes").jsonPrimitive.content)
+            assertEquals("50", limits.getValue("defaultPageLimit").jsonPrimitive.content)
+            assertEquals("200", limits.getValue("maxPageLimit").jsonPrimitive.content)
+            assertFalse(first.toString().contains(root.toString()))
+            server.stop()
+            server = create()
+            server.start()
+            assertError(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 401, "SESSION_REQUIRED")
+            val restarted = bootstrap(server, establish(server))
+            assertNotEquals(identity, restarted.getValue("serverInstanceId").jsonPrimitive.content)
+            assertEquals(first.getValue("applicationBuildId"), restarted.getValue("applicationBuildId"))
+            assertEquals(first.getValue("uiBuildId"), restarted.getValue("uiBuildId"))
+            assertEquals(first.getValue("limits"), restarted.getValue("limits"))
+            assertEquals(0, executions)
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `versioned recovery summary is private negotiated and never reclaims retained data`() = withServer { server, store, id ->
         val root = store.storageRoot
         val stage = Files.createDirectory(root.resolve(".upload-stream-v1-97001"),

@@ -34,6 +34,7 @@ export default function Runtime({ identity, session = null }: { identity: BuildI
         <dl>
           <dt>Readiness</dt><dd>{snapshot.readiness}</dd>
           <dt>Server build</dt><dd><code>{snapshot.applicationBuildId}</code></dd>
+          <dt>Server instance</dt><dd>{snapshot.serverInstanceId ? <code>{snapshot.serverInstanceId}</code> : 'Not reported'}</dd>
           <dt>Java</dt><dd>{snapshot.runtime.javaVersion}</dd>
           <dt>Platform</dt><dd>{snapshot.runtime.osName} / {snapshot.runtime.architecture}</dd>
           <dt>Git</dt><dd>{snapshot.runtime.gitVersion ?? 'Not reported'}</dd>

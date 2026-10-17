@@ -58,7 +58,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">Job overview</h1>
     <a href={appPath(basePath, '/')}>Return to jobs</a>
-    {state?.status === 'authenticated' ? <JobDetails key={jobId} jobId={jobId} basePath={basePath} />
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} />
       : <p>Connect a local session to view this job.</p>}
   </section>;
 }
