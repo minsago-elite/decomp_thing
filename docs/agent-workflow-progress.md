@@ -42,6 +42,13 @@ Redaction is a display precaution, not a claim that arbitrary unconfigured secre
 Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
 malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
 therefore cannot collapse through replacement encoding and merge separate message buffers.
+Configured literals reuse immutable prefix indexes for exact UTF-16 matching. Literal searches and
+non-overlapping replacements use prefix fallback instead of repeatedly retrying long shared prefixes.
+The same index checks final formatted hints and omission markers. The existing ordering, eight-pass
+policy and 16,384-character replacement limit stay in force; the replacement builder also stays
+within that limit. Index arrays require at most four bytes per admitted normalized code unit, plus
+per-literal object/array overhead. Overall callback deadlines, raw event/request admission and total
+shared-consumer resource qualification remain separate unfinished work.
 
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history

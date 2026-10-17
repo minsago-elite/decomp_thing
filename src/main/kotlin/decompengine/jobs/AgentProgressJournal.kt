@@ -548,7 +548,7 @@ class AgentProgressJournal private constructor(
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
 internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
     private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
-    private val secrets: List<String>
+    private val secrets: List<ProgressLiteralSecret>
     init {
         // Bound supplied work before blank scanning and de-duplication, not only its result.
         require(values.size <= 4096 && values.sumOf { it.length.toLong() } <= 1024 * 1024) {
@@ -564,11 +564,11 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         }
         secrets = (primary + additionalValues.filter { it.isNotEmpty() })
             .map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
-            .distinct().sortedByDescending(String::length)
+            .distinct().sortedByDescending(String::length).map(::ProgressLiteralSecret)
     }
 
     /** True when any configured secret survives into the given formatted output. */
-    fun leaks(text: String): Boolean = secrets.any { text.contains(it) }
+    fun leaks(text: String): Boolean = secrets.any { it.occursIn(text) }
 
     fun text(value: String, maximumCharacters: Int = 512): String {
         require(maximumCharacters >= 0)
@@ -607,8 +607,7 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         // configured replacements too: a secret can itself match a header or scheme fragment.
         if (!replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")) return null
         for (secret in secrets) {
-            safe = safe.replace(secret, "[redacted]")
-            if (safe.length > MAXIMUM_REDACTION_CHARACTERS) return null
+            safe = secret.replaceBounded(safe, "[redacted]", MAXIMUM_REDACTION_CHARACTERS) ?: return null
         }
         if (!replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")) return null
         if (!replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")) return null
@@ -619,5 +618,53 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     private companion object {
         const val REDACTION_PASSES = 8
         const val MAXIMUM_REDACTION_CHARACTERS = 16_384
+    }
+}
+
+/** Immutable literal index; prefix fallback avoids rescanning a long repeated-prefix match. */
+internal class ProgressLiteralSecret(private val value: String) {
+    private val prefix: IntArray
+
+    init {
+        require(value.isNotEmpty()) { "redaction literal must not be empty" }
+        prefix = IntArray(value.length)
+        for (index in 1 until value.length) {
+            var matched = prefix[index - 1]
+            while (matched > 0 && value[index] != value[matched]) matched = prefix[matched - 1]
+            if (value[index] == value[matched]) matched++
+            prefix[index] = matched
+        }
+    }
+
+    fun occursIn(source: String): Boolean = find(source, 0) >= 0
+
+    /** Literal, non-overlapping replacement with no intermediate builder beyond the existing cap. */
+    fun replaceBounded(source: String, replacement: String, maximumCharacters: Int): String? {
+        require(maximumCharacters >= 0)
+        var match = find(source, 0)
+        if (match < 0) return source.takeIf { it.length <= maximumCharacters }
+        val maximumGrowth = (replacement.length.toLong() - value.length).coerceAtLeast(0)
+        val maximumOutput = source.length.toLong() + (source.length / value.length).toLong() * maximumGrowth
+        val output = StringBuilder(minOf(maximumCharacters.toLong(), maximumOutput).toInt())
+        var copied = 0
+        while (match >= 0) {
+            if (output.length.toLong() + match - copied + replacement.length > maximumCharacters) return null
+            output.append(source, copied, match).append(replacement)
+            copied = match + value.length
+            match = find(source, copied)
+        }
+        if (output.length.toLong() + source.length - copied > maximumCharacters) return null
+        return output.append(source, copied, source.length).toString()
+    }
+
+    private fun find(source: String, start: Int): Int {
+        if (value.length > source.length - start) return -1
+        var matched = 0
+        for (index in start until source.length) {
+            while (matched > 0 && source[index] != value[matched]) matched = prefix[matched - 1]
+            if (source[index] == value[matched]) matched++
+            if (matched == value.length) return index - value.length + 1
+        }
+        return -1
     }
 }

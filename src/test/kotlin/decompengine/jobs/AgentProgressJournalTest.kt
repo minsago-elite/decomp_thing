@@ -9,6 +9,54 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `indexed literal redaction preserves bounded replacement and UTF16 matching`(): Unit {
+        val sources = mutableListOf("")
+        var layer = listOf("")
+        repeat(6) {
+            layer = layer.flatMap { listOf(it + "a", it + "b") }
+            sources.addAll(layer)
+        }
+        val high = 0xd800.toChar().toString()
+        val low = 0xdc00.toChar().toString()
+        val nul = 0.toChar().toString()
+        val slash = 0x5c.toChar().toString()
+        val dollar = 0x24.toChar().toString()
+        sources.addAll(listOf(high, low, high + low, low + high, "a" + high + "b",
+            high + high + low, "a" + nul + "b", "[a]", slash + "aba", dollar + "1"))
+        val patterns = listOf("a", "b", "aa", "ab", "aba", "aab", "aaa", "abab", "baab", "bbbb",
+            high, low, high + low, nul, "[", slash, dollar)
+        val replacements = listOf("", "x", "aa", "[redacted]", dollar + "1")
+        for (pattern in patterns) {
+            val indexed = ProgressLiteralSecret(pattern)
+            for (source in sources) {
+                assertEquals(source.contains(pattern), indexed.occursIn(source))
+                for (replacement in replacements) {
+                    // The JDK's literal implementation is an independent small-input oracle.
+                    val expected = source.replace(pattern, replacement)
+                    for (limit in listOf(0, 1, 4, 16, 16_384)) {
+                        assertEquals(expected.takeIf { it.length <= limit },
+                            indexed.replaceBounded(source, replacement, limit))
+                    }
+                }
+            }
+        }
+        val repeatedPrefix = "a".repeat(4095) + "b"
+        val repeatedSource = "a".repeat(16_383) + "b"
+        val indexed = ProgressLiteralSecret(repeatedPrefix)
+        assertTrue(indexed.occursIn(repeatedSource))
+        assertFalse(indexed.occursIn(repeatedSource.dropLast(1)))
+        assertEquals(repeatedSource.replace(repeatedPrefix, "x"),
+            indexed.replaceBounded(repeatedSource, "x", 16_384))
+        val expanding = ProgressLiteralSecret("q")
+        val exact = "q".repeat(1638) + "1234"
+        assertEquals(16_384, assertNotNull(expanding.replaceBounded(exact, "[redacted]", 16_384)).length)
+        assertNull(expanding.replaceBounded(exact + "5", "[redacted]", 16_384))
+        assertEquals("", ProgressLiteralSecret("aa").replaceBounded("aaaaaaaa", "", 0))
+        assertFailsWith<IllegalArgumentException> { ProgressLiteralSecret("") }
+        assertFailsWith<IllegalArgumentException> { indexed.replaceBounded("", "x", -1) }
+    }
+
+    @Test
     fun `display commitments keep malformed UTF16 identities and interleaved messages distinct`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-identities").toAbsolutePath())
         val root = createTempDirectory(parent, "journal-")
