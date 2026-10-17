@@ -5470,6 +5470,31 @@ internal fun requireColdSystemdManagerFeaturesUnfiltered(output: String, manager
     ) isolationFail("cold systemd manager features were malformed or incomplete")
 }
 
+/** Shape/comparison diagnostics only; this must never decide mutation or absence authority. */
+internal fun describeObservationCleanupTarget(
+    properties: Map<String, String>,
+    expectedUnitName: String,
+    expectedInvocationId: String,
+    expectedControlGroup: String,
+): String {
+    val loadState = properties["LoadState"]?.takeIf {
+        it in setOf("loaded", "not-found", "error", "masked", "merged", "stub")
+    } ?: "other"
+    val activeState = properties["ActiveState"]?.takeIf {
+        it in setOf("active", "inactive", "activating", "deactivating", "failed", "reloading", "maintenance", "refreshing")
+    } ?: "other"
+    val invocation = properties["InvocationID"].orEmpty()
+    val controlGroup = properties["ControlGroup"].orEmpty()
+    return "last guarded cleanup metadata (diagnostic only): " +
+        "loadState=$loadState; activeState=$activeState; " +
+        "idMatches=${properties["Id"] == expectedUnitName}; transientYes=${properties["Transient"] == "yes"}; " +
+        "invocationPresent=${invocation.isNotEmpty()}; invocationMatches=${invocation == expectedInvocationId}; " +
+        "invocationSyntaxValid=${invocation.matches(SYSTEMD_ID128)}; " +
+        "invocationReserved=${invocation in RESERVED_SYSTEMD_ID128S}; " +
+        "controlGroupBlank=${controlGroup.isBlank()}; controlGroupAbsolute=${controlGroup.startsWith('/')}; " +
+        "controlGroupHasNul=${'\u0000' in controlGroup}; controlGroupMatchesRetained=${controlGroup == expectedControlGroup}"
+}
+
 private enum class ObservationUnitMutationTargetState {
     SAME,
     ABSENT,
@@ -5860,6 +5885,7 @@ private class ManagedObservationUnit(
     private var cgroupPath: Path? = null
     private var cgroupDescriptor: LinuxDescriptor? = null
     private var invocationId: String? = null
+    private var lastCleanupTargetDiagnostic: String? = null
     private val mainPid: Long = process?.pid() ?: processHandle.pid
     private var keeperPids: Set<Long>? = null
     private var bootProcessHandles: Map<Long, decompengine.acp.LinuxProcessDescriptor>? = null
@@ -6885,15 +6911,23 @@ private class ManagedObservationUnit(
     fun stopAndProveRemoved() {
         if (cleaned) return
         val cgroup = cgroupPath ?: isolationFail("isolated cgroup was not retained for cleanup")
-        controller.killStopAndRequireAbsent(
-            knownCgroup = cgroup,
-            processHandle = processHandle,
-            awaitLocalProcess = {
-                process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
-            },
-            observeTarget = ::observeUnitMutationTarget,
-            killPinnedProcesses = ::killRetainedProcessHandles,
-        )
+        try {
+            controller.killStopAndRequireAbsent(
+                knownCgroup = cgroup,
+                processHandle = processHandle,
+                awaitLocalProcess = {
+                    process?.waitFor(SYSTEMD_POLL_MILLIS, TimeUnit.MILLISECONDS)
+                },
+                observeTarget = ::observeUnitMutationTarget,
+                killPinnedProcesses = ::killRetainedProcessHandles,
+            )
+        } catch (failure: Throwable) {
+            lastCleanupTargetDiagnostic?.let { diagnostic ->
+                // A diagnostic attachment must not replace the original ownership failure.
+                runCatching { failure.addSuppressed(FullTreeFunctionObservationIsolationException(diagnostic)) }
+            }
+            throw failure
+        }
         val retained = bootProcessHandles
         if (retained != null && retained.values.any { LinuxFilesystemSyscalls.processExists(it) }) {
             isolationFail("isolated BOOT pidfd remained live after unit and cgroup absence")
@@ -6927,12 +6961,19 @@ private class ManagedObservationUnit(
      * the deterministic name. The check/command interval assumes cooperative same-UID peers.
      */
     private fun observeUnitMutationTarget(): ObservationUnitMutationTargetState {
+        lastCleanupTargetDiagnostic = null
         val expectedCgroup = cgroupPath
             ?: isolationFail("isolated cleanup lacks its retained cgroup path")
         cgroupDescriptor ?: isolationFail("isolated cleanup lacks its retained cgroup descriptor")
         val expectedInvocation = invocationId
             ?: isolationFail("isolated cleanup lacks its retained systemd invocation")
         val properties = controller.show()
+        lastCleanupTargetDiagnostic = runCatching {
+            describeObservationCleanupTarget(
+                properties, unitName, expectedInvocation,
+                expectedCgroup.toString().removePrefix(CGROUP_ROOT.toString()),
+            )
+        }.getOrNull()
         if (properties["LoadState"] == "not-found") {
             return ObservationUnitMutationTargetState.ABSENT
         }

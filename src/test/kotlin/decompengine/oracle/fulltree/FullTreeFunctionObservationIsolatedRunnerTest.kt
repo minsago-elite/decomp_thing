@@ -3838,3 +3838,40 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         const val TEST_LEASE_RECORD_FILE = "lease.json"
     }
 }
+
+/** Pure diagnostic controls; no live tag, native setup, controller or filesystem access. */
+class FullTreeFunctionObservationCleanupDiagnosticTest {
+    @Test
+    fun `cleanup diagnostic retains bounded comparison shapes without raw manager identities`() {
+        val name = "owned.scope"
+        val invocation = "1234567890abcdef".repeat(2)
+        val cgroup = "/controlled/owned.scope"
+        val properties = mapOf(
+            "Id" to name, "Transient" to "yes", "InvocationID" to invocation,
+            "ControlGroup" to cgroup, "LoadState" to "loaded", "ActiveState" to "active",
+        )
+        val matching = describeObservationCleanupTarget(properties, name, invocation, cgroup)
+        assertTrue(matching.contains("idMatches=true"))
+        assertTrue(matching.contains("invocationMatches=true"))
+        assertTrue(matching.contains("controlGroupMatchesRetained=true"))
+        val foreign = describeObservationCleanupTarget(properties + mapOf(
+            "Id" to "foreign.scope", "InvocationID" to "ab".repeat(16), "ControlGroup" to "/foreign",
+        ), name, invocation, cgroup)
+        assertTrue(foreign.contains("idMatches=false"))
+        assertTrue(foreign.contains("invocationMatches=false"))
+        assertTrue(foreign.contains("controlGroupMatchesRetained=false"))
+        val reserved = describeObservationCleanupTarget(properties + ("InvocationID" to "0".repeat(32)), name, invocation, cgroup)
+        assertTrue(reserved.contains("invocationReserved=true"))
+        val marker = "PRIVATE-manager-text\n/path/credential"
+        val malformed = describeObservationCleanupTarget(properties.mapValues { marker.repeat(2048) }, name, invocation, cgroup)
+        assertTrue(malformed.contains("loadState=other"))
+        assertTrue(malformed.contains("activeState=other"))
+        assertTrue(malformed.contains("invocationSyntaxValid=false"))
+        for (diagnostic in listOf(matching, foreign, reserved, malformed)) {
+            assertTrue(diagnostic.length <= 768)
+            assertTrue(marker !in diagnostic && invocation !in diagnostic && cgroup !in diagnostic && name !in diagnostic)
+            assertTrue("PRIVATE-manager-text" !in diagnostic && "/path/credential" !in diagnostic)
+            assertTrue("foreign.scope" !in diagnostic && "/foreign" !in diagnostic)
+        }
+    }
+}
