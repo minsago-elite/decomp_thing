@@ -43,6 +43,19 @@ The relocatable reader also validates active section address alignment, disjoint
 file-backed extents, absent program-table offsets, symbol-table local/nonlocal partitions,
 and string-table boundary NUL bytes. Empty and `SHT_NOBITS` sections own no file bytes;
 empty string tables remain valid when all referenced names are zero.
+Non-allocated sections must have zero addresses, compressed `SHT_NOBITS` sections refuse,
+and section-index references cannot enter another group. A group's own signature table
+may be a member; symbol-table local counts and group signature indices remain scalar
+fields. Every symbol-name index is bounded, including non-signatures; the string table's
+validated final NUL ensures termination without repeatedly decoding unused names.
+
+`rawEntryPoint` retains the unsigned `e_entry` field as input metadata. It is never a linked
+RVA, a process entry assertion or execution authority. GABI requires zero when no entry is
+associated; it does not impose a type-wide zero rule. GNU ld's
+[`lang_end`](https://gnu.googlesource.com/binutils-gdb/+/4eeb0fc9a97e97b06c43e0fdb15d56ceef69a963/ld/ldlang.c)
+also permits an explicit start value for partial links, and
+[BFD's ELF header writer](https://gnu.googlesource.com/binutils-gdb/+/4eeb0fc9a97e97b06c43e0fdb15d56ceef69a963/bfd/elf.c)
+retains that value. Existing linked readers still reject `ET_REL` regardless of this field.
 
 The existing file, header, symbol, string and parse-work bounds still apply. Separate defaults
 bound groups to 16,384, memberships to 131,072 and unique signature-name bytes to 8 MiB.

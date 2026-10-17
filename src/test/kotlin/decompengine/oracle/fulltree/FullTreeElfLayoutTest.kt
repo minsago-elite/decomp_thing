@@ -312,6 +312,143 @@ class FullTreeElfLayoutTest {
             }
         }
 
+    @Test
+    fun `relocatable sections without allocation reject addresses while allocated addresses remain raw`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                for (member in listOf(5, 6)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply {
+                        section(member, flags = 0x200, address = 4, alignment = 4)
+                    }
+                    val path = writeElf(directory.resolve("nonallocated-$is64Bit-$littleEndian-$member.o"), fixture.bytes)
+                    val failure = assertFailsWith<FullTreeControlException> { readGroups(path) }
+                    assertTrue(failure.message.orEmpty().contains("non-allocated"))
+                }
+                for (allocated in listOf(false, true)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply {
+                        section(5, flags = if (allocated) 0x206 else 0x204,
+                            address = if (allocated) 8 else 0, alignment = 4)
+                    }
+                    val path = writeElf(directory.resolve("raw-member-address-$is64Bit-$littleEndian-$allocated.o"), fixture.bytes)
+                    assertEquals(if (allocated) 8UL else 0UL, readGroups(path).groups[0].members[0].address)
+                }
+            }
+        }
+
+    @Test
+    fun `relocatable entry values remain unsigned raw metadata without admitting a linked image`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                for ((index, entry) in listOf(0UL, 0x1234UL, if (is64Bit) ULong.MAX_VALUE else 0xffffffffUL).withIndex()) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply { entryPoint(entry) }
+                    val path = writeElf(directory.resolve("raw-entry-$is64Bit-$littleEndian-$index.o"), fixture.bytes)
+                    assertEquals(entry, readGroups(path).rawEntryPoint)
+                    StableControlFile.open(path, Files.size(path), "raw entry").use { source ->
+                        assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanLayout(source, "linked") }
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `group section references stay within their group without treating symbol counts as section indexes`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                val mutations: List<(GroupElfBytes) -> Unit> = listOf(
+                    { it.section(5, flags = 0x246, info = 7) },
+                    { it.section(5, flags = 0x286, link = 7) },
+                    { it.section(5, flags = 0x246, info = 9) },
+                )
+                mutations.forEachIndexed { index, mutate ->
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).also(mutate)
+                    val path = writeElf(directory.resolve("external-reference-$is64Bit-$littleEndian-$index.o"), fixture.bytes)
+                    val failure = assertFailsWith<FullTreeControlException> { readGroups(path) }
+                    assertTrue(failure.message.orEmpty().contains("section reference"))
+                }
+                for (type in listOf(4L, 9L)) for (grouped in listOf(false, true)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply { relocationMember(type, grouped) }
+                    val path = writeElf(directory.resolve("relocation-reference-$is64Bit-$littleEndian-$type-$grouped.o"), fixture.bytes)
+                    if (grouped) assertEquals(listOf(5, 7), readGroups(path).groups.single().members.map { it.sectionIndex })
+                    else {
+                        val failure = assertFailsWith<FullTreeControlException> { readGroups(path) }
+                        assertTrue(failure.message.orEmpty().contains("section reference"))
+                    }
+                }
+                val internal = GroupElfBytes(is64Bit, littleEndian).apply { section(5, flags = 0x246, info = 6) }
+                assertEquals(2, readGroups(writeElf(directory.resolve("internal-reference-$is64Bit-$littleEndian.o"), internal.bytes)).groups.size)
+                // The signature table can be a member of the group defined by its referencing header.
+                val ownTable = GroupElfBytes(is64Bit, littleEndian).apply {
+                    section(2, type = 1, link = 0, info = 0)
+                    section(7, flags = 6)
+                    section(3, flags = 0x200)
+                    word(GroupElfBytes.FIRST_GROUP + 4, 3)
+                    section(5, flags = 6)
+                }
+                val owned = readGroups(writeElf(directory.resolve("own-signature-table-$is64Bit-$littleEndian.o"), ownTable.bytes))
+                assertEquals(listOf(3, 6), owned.groups.single().members.map { it.sectionIndex })
+                // sh_info=5 is a local-symbol boundary, even though section 5 is a group member.
+                val scalar = GroupElfBytes(is64Bit, littleEndian).apply { allLocalSymbols(5) }
+                val observed = readGroups(writeElf(directory.resolve("scalar-symbol-boundary-$is64Bit-$littleEndian.o"), scalar.bytes))
+                assertEquals(5L, observed.scannedSymbols)
+                assertEquals(2, observed.groups.size)
+            }
+        }
+
+    @Test
+    fun `all symbol name references are bounded even when only another symbol is a group signature`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                for (offset in listOf(18L, 0xffffffffL)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply {
+                        section(2, info = 1)
+                        word(GroupElfBytes.SYMBOLS + 2 * symbolStride, offset)
+                    }
+                    val path = writeElf(directory.resolve("unused-name-$is64Bit-$littleEndian-$offset.o"), fixture.bytes)
+                    val failure = assertFailsWith<FullTreeControlException> { readGroups(path) }
+                    assertTrue(failure.message.orEmpty().contains("symbol name offset"))
+                }
+                val empty = GroupElfBytes(is64Bit, littleEndian).apply {
+                    section(2, info = 1)
+                    section(4, size = 0)
+                    word(GroupElfBytes.SYMBOLS + symbolStride, 0)
+                    word(GroupElfBytes.SYMBOLS + 2 * symbolStride, 1)
+                }
+                assertFailsWith<FullTreeControlException> {
+                    readGroups(writeElf(directory.resolve("empty-unused-name-$is64Bit-$littleEndian.o"), empty.bytes))
+                }
+                for (offset in listOf(0L, 2L, 17L)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply {
+                        section(2, info = 1)
+                        word(GroupElfBytes.SYMBOLS + 2 * symbolStride, offset)
+                    }
+                    val observed = readGroups(writeElf(directory.resolve("valid-unused-name-$is64Bit-$littleEndian-$offset.o"), fixture.bytes))
+                    assertEquals(1L, observed.groups[1].signature.symbolIndex)
+                    assertEquals(3L, observed.scannedSymbols)
+                }
+            }
+        }
+
+    @Test
+    fun `compressed NOBITS members refuse while file backed relocatable compressed members remain raw`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                for (flags in listOf(0xa00L, 0xa03L)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply { section(6, flags = flags) }
+                    val path = writeElf(directory.resolve("compressed-nobits-$is64Bit-$littleEndian-$flags.o"), fixture.bytes)
+                    val failure = assertFailsWith<FullTreeControlException> { readGroups(path) }
+                    assertTrue(failure.message.orEmpty().contains("compressed SHT_NOBITS"))
+                }
+                for (allocated in listOf(false, true)) {
+                    val fixture = GroupElfBytes(is64Bit, littleEndian).apply { compressedMember(allocated) }
+                    val path = writeElf(directory.resolve("raw-compressed-$is64Bit-$littleEndian-$allocated.o"), fixture.bytes)
+                    val member = readGroups(path).groups[0].members[0]
+                    assertEquals(if (allocated) 0xa06UL else 0xa04UL, member.flags)
+                    assertEquals(if (is64Bit) 32UL else 20UL, member.size)
+                    assertEquals(0x180L, member.offset)
+                }
+            }
+        }
+
     private fun readGroups(
         path: Path,
         limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
@@ -1308,6 +1445,46 @@ private class GroupElfBytes(val is64Bit: Boolean = true, val littleEndian: Boole
         programOffset(offset)
         half(if (is64Bit) 54 else 42, entrySize)
         half(if (is64Bit) 56 else 44, count)
+    }
+
+    fun entryPoint(value: ULong) {
+        if (is64Bit) FullTreeElfTestBytes.put64(bytes, 24, value, littleEndian)
+        else {
+            require(value <= 0xffffffffUL)
+            word(24, value.toLong())
+        }
+    }
+
+    fun relocationMember(type: Long, grouped: Boolean) {
+        require(type == 4L || type == 9L)
+        section(2, type = 1, link = 0, info = 0)
+        section(7, type = type, flags = if (grouped) 0x200 else 0, size = 0,
+            link = 3, info = 5, alignment = if (is64Bit) 8 else 4,
+            entrySize = if (type == 4L) (if (is64Bit) 24 else 12) else (if (is64Bit) 16 else 8))
+        if (grouped) {
+            word(FIRST_GROUP + 8, 7)
+            section(6, flags = 3)
+        }
+    }
+
+    fun allLocalSymbols(count: Int) {
+        val destination = 0x180
+        require(count >= 3 && count.toLong() * symbolStride <= SECTION_TABLE - destination)
+        symbolInfo(1, 0)
+        symbolInfo(2, 0)
+        bytes.copyInto(bytes, destination, SYMBOLS, SYMBOLS + 3 * symbolStride)
+        section(3, offset = destination.toLong(), size = count.toLong() * symbolStride, info = count)
+    }
+
+    fun compressedMember(allocated: Boolean) {
+        val start = 0x180
+        val headerBytes = if (is64Bit) 24 else 12
+        word(start, 1) // ZLIB, with an authored empty stream; no decompressor is invoked.
+        wide(start + if (is64Bit) 8 else 4, 0)
+        wide(start + if (is64Bit) 16 else 8, 1)
+        byteArrayOf(0x78, 0x9c.toByte(), 3, 0, 0, 0, 0, 1).copyInto(bytes, start + headerBytes)
+        section(5, flags = if (allocated) 0xa06 else 0xa04, offset = start.toLong(),
+            size = (headerBytes + 8).toLong(), alignment = if (is64Bit) 8 else 4)
     }
 
     fun section(index: Int, type: Long? = null, flags: Long? = null, address: Long? = null, offset: Long? = null,

@@ -197,6 +197,7 @@ internal class FullTreeElfSectionGroupObservation(
     val machine: Int,
     val osAbi: Int,
     val abiVersion: Int,
+    val rawEntryPoint: ULong,
     val scannedSymbols: Long,
     groups: List<FullTreeElfSectionGroup>,
 ) {
@@ -435,6 +436,7 @@ private class ElfReader(
                 fail("ELF SHF_GROUP section has no group membership")
             }
         }
+        validateGroupSectionReferences(sections, owners)
         var signatureBytes = 0L
         val scanned = scanSymbols(headers, sections, objectMode = true) { symbol ->
             val key = symbol.tableIndex to symbol.index
@@ -463,7 +465,28 @@ private class ElfReader(
                 section.alignment, section.offset, section.size, signature, members)
         }
         return FullTreeElfSectionGroupObservation(headers.elfClass, headers.byteOrder, headers.machine,
-            headers.osAbi, headers.abiVersion, scanned, groups)
+            headers.osAbi, headers.abiVersion, headers.rawEntryPoint, scanned, groups)
+    }
+
+    private fun validateGroupSectionReferences(sections: List<FunctionElfSection>, owners: IntArray) {
+        fun checkReference(sourceGroup: Int, target: Int) {
+            if (target == SHN_UNDEF) return
+            if (target !in sections.indices) fail("ELF section reference is outside its section table")
+            val targetGroup = owners[target]
+            if (targetGroup != -1 && targetGroup != sourceGroup) {
+                fail("ELF section reference enters a group from outside that group")
+            }
+        }
+        sections.forEach { section ->
+            step("group section references")
+            if (section.type == SHT_NULL) return@forEach
+            // A group may contain its own signature table; its defining header owns that reference.
+            val sourceGroup = if (section.type == SHT_GROUP) section.index else owners[section.index]
+            checkReference(sourceGroup, section.link)
+            if (section.type == SHT_REL || section.type == SHT_RELA || section.flags and SHF_INFO_LINK != 0UL) {
+                checkReference(sourceGroup, section.info)
+            }
+        }
     }
 
     fun scanFunctions(consume: (FullTreeElfFunctionSymbol) -> Unit): FullTreeElfLayoutObservation {
@@ -690,6 +713,12 @@ private class ElfReader(
             step("relocatable section structure")
             if (section.type == SHT_NULL) return@forEach
             val alignment = section.alignment
+            if (section.flags and SHF_ALLOC == 0UL && section.address != 0UL) {
+                fail("ELF non-allocated section has a nonzero address")
+            }
+            if (section.type == SHT_NOBITS && section.flags and SHF_COMPRESSED != 0UL) {
+                fail("ELF compressed SHT_NOBITS section is invalid")
+            }
             if (alignment > 1UL && ((alignment and (alignment - 1UL)) != 0UL || section.address % alignment != 0UL)) {
                 fail("ELF relocatable section has invalid address alignment")
             }
@@ -808,6 +837,11 @@ private class ElfReader(
                     info = symbol[12].toInt() and 0xff
                     rawSectionIndex = u16(symbol, 14, byteOrder)
                 }
+                // ET_REL string tables already have a final NUL, so every in-range name terminates.
+                // Check every entry, including names that are not selected as group signatures.
+                if (headers.elfType == "ET_REL" && nameOffset != 0L && nameOffset.toULong() >= strings.size) {
+                    fail("relocatable symbol name offset exceeds its string table")
+                }
                 if (headers.elfType == "ET_REL" && ((info ushr 4 == 0) != (symbolIndex < section.info.toLong()))) {
                     fail("relocatable symbol table ${section.name} disagrees with its local-symbol boundary")
                 }
@@ -868,6 +902,8 @@ private class ElfReader(
             else -> fail("ELF type is not ET_EXEC or ET_DYN")
         }
         val machine = u16(header, 18, byteOrder)
+        val rawEntryPoint = if (elfClass == ELFCLASS64) u64(header, 24, byteOrder)
+            else u32(header, 24, byteOrder).toULong()
         if (u32(header, 20, byteOrder) != EV_CURRENT.toLong()) fail("ELF header version is invalid")
         val headerSize = u16(header, if (elfClass == ELFCLASS64) 52 else 40, byteOrder)
         if (headerSize != headerBytes) fail("ELF header size is noncanonical")
@@ -954,6 +990,7 @@ private class ElfReader(
             machine = machine,
             osAbi = identification[EI_OSABI].toInt() and 0xff,
             abiVersion = identification[EI_ABIVERSION].toInt() and 0xff,
+            rawEntryPoint = rawEntryPoint,
             programOffset = programOffset,
             programEntrySize = programEntrySize,
             programCount = programCount,
@@ -1270,6 +1307,7 @@ private data class ParsedElfHeaders(
     val machine: Int,
     val osAbi: Int,
     val abiVersion: Int,
+    val rawEntryPoint: ULong,
     val programOffset: Long,
     val programEntrySize: Int,
     val programCount: Int,
@@ -1447,11 +1485,14 @@ private const val PF_X = 1L
 private const val SHT_SYMTAB = 2L
 private const val SHT_NULL = 0L
 private const val SHT_STRTAB = 3L
+private const val SHT_RELA = 4L
 private const val SHT_NOBITS = 8L
+private const val SHT_REL = 9L
 private const val SHT_DYNSYM = 11L
 private const val SHT_GROUP = 17L
 private const val SHT_SYMTAB_SHNDX = 18L
 private const val SHF_ALLOC = 0x2UL
+private const val SHF_INFO_LINK = 0x40UL
 private const val SHF_GROUP = 0x200UL
 private const val SHF_TLS = 0x400UL
 private const val SHF_COMPRESSED = 0x800UL
