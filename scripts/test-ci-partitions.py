@@ -86,6 +86,55 @@ def report_command(arguments):
     return 0 if report["status"] == "passed" else 1
 
 
+BROWSER_EXPIRY_CLASS = "decompengine.web.BrowserSessionExpiryTest"
+BROWSER_EXPIRY_METHOD = "expired browser session rejects private reads and accepts only an explicit fresh operator link()"
+
+
+def check_browser_expiry_report(root):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("missing or linked browser report directory")
+    path = root / f"TEST-{BROWSER_EXPIRY_CLASS}.xml"
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("missing or linked browser expiry report")
+    with path.open("rb") as source:
+        raw = source.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("browser expiry report exceeds its byte bound")
+    try:
+        suite = ET.fromstring(raw)
+    except ET.ParseError as failure:
+        raise ValueError("malformed browser expiry report") from failure
+    cases = list(suite.iter("testcase"))
+    names = [case.get("name") for case in cases]
+    if not cases or any(case.get("classname") != BROWSER_EXPIRY_CLASS or not case.get("name") for case in cases):
+        raise ValueError("missing or foreign browser expiry test identity")
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate browser expiry test identity")
+    if BROWSER_EXPIRY_METHOD not in names:
+        raise ValueError("required real browser expiry case is missing")
+    if any(case.find(kind) is not None for case in cases for kind in ("skipped", "failure", "error")):
+        raise ValueError("browser expiry case failed or skipped")
+    return {"schemaVersion": 1, "status": "passed", "scope": "packaged browser expiry JVM selection",
+            "PASS": len(cases), "SKIP": 0, "className": BROWSER_EXPIRY_CLASS,
+            "methods": sorted(names), "input": {"path": path.name, "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest()}}
+
+
+def browser_report_command(arguments):
+    parser = argparse.ArgumentParser(description="Require positive real-browser expiry JUnit evidence")
+    parser.add_argument("--check-browser-reports", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    options = parser.parse_args(arguments)
+    try:
+        report = check_browser_expiry_report(options.check_browser_reports)
+    except (ValueError, OSError) as failure:
+        report = {"schemaVersion": 1, "status": "failed", "reason": str(failure)}
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    options.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report))
+    return 0 if report["status"] == "passed" else 1
+
+
 class CiPartitionRoutingTest(unittest.TestCase):
     def setUp(self):
         build = REPOSITORY / "build"
@@ -303,7 +352,84 @@ class CiPartitionReportTest(unittest.TestCase):
             check_partition_reports(self.root)
 
 
+class BrowserExpiryReportTest(unittest.TestCase):
+    def setUp(self):
+        build = REPOSITORY / "build"
+        build.mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="ci browser report ", dir=build)
+        self.root = Path(self.temporary.name)
+        self.path = self.root / f"TEST-{BROWSER_EXPIRY_CLASS}.xml"
+        self.write()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, names=None, outcome=None, classname=BROWSER_EXPIRY_CLASS):
+        suite = ET.Element("testsuite")
+        case_names = names if names is not None else [BROWSER_EXPIRY_METHOD, "HTTP expiry()", "cleanup()"]
+        for name in case_names:
+            case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+            if outcome is not None:
+                ET.SubElement(case, outcome)
+        ET.ElementTree(suite).write(self.path, encoding="utf-8")
+
+    def test_positive_browser_case_and_companions_bind_exact_report_bytes(self):
+        report = check_browser_expiry_report(self.root)
+        self.assertEqual(3, report["PASS"])
+        self.assertEqual(0, report["SKIP"])
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(), report["input"]["sha256"])
+        self.assertIn(BROWSER_EXPIRY_METHOD, report["methods"])
+
+    def test_skipped_failed_or_errored_browser_case_is_refused(self):
+        for outcome in ("skipped", "failure", "error"):
+            with self.subTest(outcome=outcome):
+                self.write(outcome=outcome)
+                with self.assertRaisesRegex(ValueError, "failed or skipped"):
+                    check_browser_expiry_report(self.root)
+
+    def test_passing_companions_cannot_replace_required_browser_journey(self):
+        self.write(names=["HTTP expiry()", "cleanup()"])
+        with self.assertRaisesRegex(ValueError, "required real browser expiry case is missing"):
+            check_browser_expiry_report(self.root)
+
+    def test_duplicate_browser_execution_identity_is_refused(self):
+        self.write(names=[BROWSER_EXPIRY_METHOD, BROWSER_EXPIRY_METHOD])
+        with self.assertRaisesRegex(ValueError, "duplicate browser expiry test identity"):
+            check_browser_expiry_report(self.root)
+
+    def test_foreign_class_with_the_same_method_cannot_satisfy_browser_evidence(self):
+        self.write(classname="decompengine.web.UnrelatedTest")
+        with self.assertRaisesRegex(ValueError, "foreign browser expiry test identity"):
+            check_browser_expiry_report(self.root)
+
+    def test_malformed_and_oversized_reports_are_refused(self):
+        for payload, reason in [(b"<testsuite", "malformed"), (b"x" * (1024 * 1024 + 1), "byte bound")]:
+            with self.subTest(reason=reason):
+                self.path.write_bytes(payload)
+                with self.assertRaisesRegex(ValueError, reason):
+                    check_browser_expiry_report(self.root)
+
+    def test_missing_and_linked_reports_are_refused(self):
+        self.path.unlink()
+        with self.assertRaisesRegex(ValueError, "missing or linked"):
+            check_browser_expiry_report(self.root)
+        target = self.root / "target.xml"
+        target.write_text("<testsuite/>", encoding="utf-8")
+        self.path.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "missing or linked"):
+            check_browser_expiry_report(self.root)
+
+    def test_empty_and_unnamed_case_reports_are_refused(self):
+        for names in ([], [""]):
+            with self.subTest(names=names):
+                self.write(names=names)
+                with self.assertRaisesRegex(ValueError, "missing or foreign"):
+                    check_browser_expiry_report(self.root)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--check-reports":
         sys.exit(report_command(sys.argv[1:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-browser-reports":
+        sys.exit(browser_report_command(sys.argv[1:]))
     unittest.main()

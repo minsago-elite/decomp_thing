@@ -140,12 +140,12 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
-      - name: Build archives and verify JVM web contracts and distribution contents
+      - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+          ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -153,6 +153,11 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Require positive real-browser expiry evidence
+        run: >-
+          python3 scripts/test-ci-partitions.py
+          --check-browser-reports build/test-results/test
+          --output build/packaged-web-ci/browser-expiry-tests.json
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \
