@@ -88,6 +88,18 @@ instance-bound upload observations. Durable upload tickets retain their explicit
 path; the browser does not replay a mutation automatically. No identity enables workflow actions
 or changes their separate capability/authorization gates.
 
+### Unexpected internal API failures
+
+The HTTP matrix exercises unexpected exceptions inside real v1/legacy request dispatchers,
+including unknown v1 routes/majors and the shared versioned session/CSRF routes in legacy mode.
+It requires `500 INTERNAL_ERROR`, JSON, no-store caching, matching opaque response/header IDs and
+fixed messages without exception text or private values. A response already committed is closed;
+the server does not attempt to append a second error envelope. Each scenario recovers through
+a read under the original session, without changing stored job bytes, invoking a workflow or
+replaying an ambiguous session mutation. This covers controller routing separately from the
+direct error-renderer control; it does not establish live provider/tool behavior, complete
+legacy sunset migration or production-release qualification.
+
 ## Resource and authority identities
 
 | Identity | Meaning and lifetime | Must not be substituted with |

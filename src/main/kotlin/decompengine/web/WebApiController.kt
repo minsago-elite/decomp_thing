@@ -53,6 +53,9 @@ internal class WebApiController(
                 access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested API route is unavailable."))
             } catch (failure: WebAccessDenied) {
                 access.sendDenied(exchange, failure)
+            } catch (_: Exception) {
+                if (exchange.responseCode != -1) exchange.close()
+                else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
             }
             return true
         }
