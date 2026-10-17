@@ -21,7 +21,6 @@ import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
-import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2
 import decompengine.repair.RepairRuntimeConfiguration
@@ -180,10 +179,7 @@ private fun runReconstruct(args: List<String>) {
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
-    BestEffortProgressJournal(
-        output, "reconstruction", environment.values,
-        onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
-    ).use { progress ->
+    withReconstructionCliProgress(output, environment.values) { progress ->
         val strategy = try {
             selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
         } catch (e: IllegalArgumentException) {
