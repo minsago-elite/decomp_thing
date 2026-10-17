@@ -7,9 +7,196 @@ import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class FullTreeElfLayoutTest {
+    @Test
+    fun `relocatable groups retain raw signatures flags and unique member headers in both ELF classes and byte orders`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
+                val fixture = GroupElfBytes(is64Bit, littleEndian)
+                val path = writeElf(directory.resolve("groups-$is64Bit-$littleEndian.o"), fixture.bytes)
+                val observed = readGroups(path)
+                assertEquals(if (is64Bit) 2 else 1, observed.elfClass)
+                assertEquals(if (littleEndian) 1 else 2, observed.byteOrder)
+                assertEquals(if (is64Bit) 62 else 3, observed.machine)
+                assertEquals(3L, observed.scannedSymbols)
+                assertEquals(listOf(1, 2), observed.groups.map { it.sectionIndex })
+                val first = observed.groups[0]
+                assertEquals(".group.first", first.name)
+                assertEquals(1L, first.flags)
+                assertTrue(first.isComdat)
+                assertEquals("signature", first.signature.name)
+                assertEquals(3, first.signature.symbolTableSectionIndex)
+                assertEquals(1L, first.signature.symbolIndex)
+                assertEquals(0x20, first.signature.info) // A weak undefined signature is permitted.
+                assertEquals(FullTreeElfSymbolSectionKind.UNDEFINED, first.signature.sectionKind)
+                assertEquals(listOf(5, 6), first.members.map { it.sectionIndex })
+                assertEquals(listOf(".text.first", ".bss.first"), first.members.map { it.name })
+                assertEquals(listOf(1L, 8L), first.members.map { it.type })
+                assertEquals(listOf(4UL, 8UL), first.members.map { it.size })
+                assertEquals(listOf(0x206UL, 0x203UL), first.members.map { it.flags })
+                val second = observed.groups[1]
+                assertEquals(0x80000000L, second.flags) // Retain processor bits without interpreting them.
+                assertTrue(!second.isComdat)
+                assertEquals("second", second.signature.name)
+                assertEquals(7L, second.signature.resolvedSectionIndex)
+                assertEquals(listOf(7), second.members.map { it.sectionIndex })
+                assertTrue(Files.readAllBytes(path).contentEquals(fixture.bytes))
+            }
+        }
+
+    @Test
+    fun `group decoding does not admit relocatable inputs to linked function object or layout scans`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = GroupElfBytes()
+            val path = writeElf(directory.resolve("groups.o"), fixture.bytes)
+            StableControlFile.open(path, Files.size(path), "relocatable").use { source ->
+                assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanLayout(source, "linked") }
+                assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanFunctions(source, "linked") {} }
+                assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanObjects(source, "linked") {} }
+            }
+            val linked = FullTreeElfTestBytes.build(TestElfVariant(true, true, false, false), emptyList())
+            val linkedPath = writeElf(directory.resolve("linked.elf"), linked)
+            assertFailsWith<FullTreeControlException> { readGroups(linkedPath) }
+            assertEquals(2, readGroups(path).groups.size)
+        }
+
+    @Test
+    fun `group membership refuses missing preceding duplicate cross-group and orphan sections`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val changes: List<(GroupElfBytes) -> Unit> = listOf(
+                { it.word(GroupElfBytes.FIRST_GROUP + 4, 9) },
+                { it.word(GroupElfBytes.FIRST_GROUP + 4, 0) },
+                { it.section(5, flags = 6) },
+                { it.word(GroupElfBytes.FIRST_GROUP + 8, 5) },
+                { it.word(GroupElfBytes.SECOND_GROUP + 4, 5) },
+                { it.section(1, size = 8) },
+                { it.section(5, type = 0) },
+            )
+            changes.forEachIndexed { index, change ->
+                val fixture = GroupElfBytes().also(change)
+                val path = writeElf(directory.resolve("membership-$index.o"), fixture.bytes)
+                assertFailsWith<FullTreeControlException> { readGroups(path) }
+            }
+        }
+
+    @Test
+    fun `group signature references and malformed symbol data refuse without a partial observation`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val changes: List<(GroupElfBytes) -> Unit> = listOf(
+                { it.section(1, link = 4) },
+                { it.section(1, info = 3) },
+                { it.section(3, link = 5) },
+                { it.bytes[GroupElfBytes.STRINGS + 1] = 0xff.toByte() },
+                { it.signatureSection(1, 0xffff) },
+                { it.signatureSection(1, 9) },
+            )
+            changes.forEachIndexed { index, change ->
+                val fixture = GroupElfBytes().also(change)
+                val path = writeElf(directory.resolve("signature-$index.o"), fixture.bytes)
+                var observed: FullTreeElfSectionGroupObservation? = null
+                assertFailsWith<FullTreeControlException> { observed = readGroups(path) }
+                assertEquals(null, observed)
+            }
+        }
+
+    @Test
+    fun `group words flags and file extents are checked before member allocation`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val changes: List<(GroupElfBytes) -> Unit> = listOf(
+                { it.section(1, flags = 0x800) },
+                { it.section(1, size = 0) },
+                { it.section(1, size = 5) },
+                { it.section(1, entrySize = 8) },
+                { it.word(GroupElfBytes.FIRST_GROUP, 2) },
+                { it.section(1, offset = it.bytes.size.toLong() - 4) },
+                { it.section(1, size = 0xffffffffL) },
+            )
+            changes.forEachIndexed { index, change ->
+                val fixture = GroupElfBytes().also(change)
+                val path = writeElf(directory.resolve("words-$index.o"), fixture.bytes)
+                assertFailsWith<FullTreeControlException> { readGroups(path) }
+            }
+        }
+
+    @Test
+    fun `group limits bound groups memberships signature bytes symbols and parser work`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val path = writeElf(directory.resolve("bounded.o"), GroupElfBytes().bytes)
+            for (limits in listOf(
+                FullTreeElfSectionGroupLimits(maximumGroups = 1),
+                FullTreeElfSectionGroupLimits(maximumMemberships = 2),
+                FullTreeElfSectionGroupLimits(maximumSignatureNameBytes = 14),
+            )) assertFailsWith<FullTreeControlException> { readGroups(path, groupLimits = limits) }
+            for (limits in listOf(
+                FullTreeElfLayoutLimits(maximumSymbols = 2),
+                FullTreeElfLayoutLimits(maximumParseSteps = 1),
+                FullTreeElfLayoutLimits(maximumSectionHeaders = 8),
+            )) assertFailsWith<FullTreeControlException> { readGroups(path, limits = limits) }
+            assertEquals(2, readGroups(path).groups.size)
+        }
+
+    @Test
+    fun `group observations keep empty raw signature names and expose immutable membership lists`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = GroupElfBytes().apply { word(GroupElfBytes.SYMBOLS + symbolStride, 0) }
+            val path = writeElf(directory.resolve("empty-signature.o"), fixture.bytes)
+            val observed = readGroups(path)
+            assertEquals("", observed.groups[0].signature.name)
+            assertEquals(".group.first", observed.groups[0].name)
+            assertFailsWith<UnsupportedOperationException> { (observed.groups as MutableList<*>).clear() }
+            assertFailsWith<UnsupportedOperationException> { (observed.groups[0].members as MutableList<*>).clear() }
+            assertEquals(listOf(5, 6), observed.groups[0].members.map { it.sectionIndex })
+        }
+
+    @Test
+    fun `group parser cancellation propagates from member work without modifying source`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = GroupElfBytes()
+            val path = writeElf(directory.resolve("cancelled.o"), fixture.bytes)
+            val cancelled = IllegalStateException("controlled group cancellation")
+            val failure = assertFailsWith<IllegalStateException> {
+                readGroups(path, checkpoint = { stage -> if (stage.contains("section-group members")) throw cancelled })
+            }
+            assertSame(cancelled, failure)
+            assertTrue(Files.readAllBytes(path).contentEquals(fixture.bytes))
+        }
+
+    @Test
+    fun `group scan rejects source replacement before any observation can escape`(): Unit =
+        inControlTemporaryDirectory { directory ->
+            val fixture = GroupElfBytes()
+            val path = writeElf(directory.resolve("changing.o"), fixture.bytes)
+            val replacement = writeElf(directory.resolve("replacement.o"), fixture.bytes)
+            val prior = directory.resolve("prior.json")
+            Files.writeString(prior, "retained prior evidence")
+            var replaced = false
+            var observed: FullTreeElfSectionGroupObservation? = null
+            assertFailsWith<FullTreeControlException> {
+                observed = readGroups(path, checkpoint = { stage ->
+                    if (!replaced && stage.contains("section-group members")) {
+                        Files.move(replacement, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        replaced = true
+                    }
+                })
+            }
+            assertTrue(replaced)
+            assertEquals(null, observed)
+            assertEquals("retained prior evidence", Files.readString(prior))
+        }
+
+    private fun readGroups(
+        path: Path,
+        limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
+        groupLimits: FullTreeElfSectionGroupLimits = FullTreeElfSectionGroupLimits(),
+        checkpoint: (String) -> Unit = {},
+    ): FullTreeElfSectionGroupObservation =
+        StableControlFile.open(path, Files.size(path), "group fixture").use { source ->
+            FullTreeElfLayout.scanRelocatableGroups(source, "group fixture", limits, groupLimits, checkpoint)
+        }
+
     @Test
     fun `executable membership merges overlaps and keeps logarithmic boundary semantics`() {
         val membership = FullTreeElfExecutableMembership.fromSorted(
@@ -934,4 +1121,77 @@ internal object FullTreeElfTestBytes {
 internal fun writeElf(path: Path, bytes: ByteArray): Path = path.also {
     Files.write(it, bytes)
     Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rw-r--r--"))
+}
+
+/** Authored data only: two ET_REL groups, no program headers, executable launch or compiler. */
+private class GroupElfBytes(val is64Bit: Boolean = true, val littleEndian: Boolean = true) {
+    val symbolStride = if (is64Bit) 24 else 16
+    private val sectionStride = if (is64Bit) 64 else 40
+    val bytes = ByteArray(SECTION_TABLE + 9 * sectionStride)
+
+    init {
+        byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()).copyInto(bytes)
+        bytes[4] = if (is64Bit) 2 else 1
+        bytes[5] = if (littleEndian) 1 else 2
+        bytes[6] = 1
+        half(16, 1)
+        half(18, if (is64Bit) 62 else 3)
+        word(20, 1)
+        wide(if (is64Bit) 40 else 32, SECTION_TABLE.toLong())
+        half(if (is64Bit) 52 else 40, if (is64Bit) 64 else 52)
+        half(if (is64Bit) 58 else 46, sectionStride)
+        half(if (is64Bit) 60 else 48, 9)
+        half(if (is64Bit) 62 else 50, 8)
+        val names = "\u0000.group.first\u0000.group.second\u0000.symtab\u0000.strtab\u0000.text.first\u0000.bss.first\u0000.text.second\u0000.shstrtab\u0000"
+        names.toByteArray().copyInto(bytes, NAMES)
+        "\u0000signature\u0000second\u0000".toByteArray().copyInto(bytes, STRINGS)
+        fun named(index: Int, name: String) { word(SECTION_TABLE + index * sectionStride, names.indexOf(name)) }
+        named(1, ".group.first"); section(1, type = 17, offset = FIRST_GROUP.toLong(), size = 12, link = 3, info = 1, alignment = 4, entrySize = 4)
+        named(2, ".group.second"); section(2, type = 17, offset = SECOND_GROUP.toLong(), size = 8, link = 3, info = 2, alignment = 4, entrySize = 4)
+        named(3, ".symtab"); section(3, type = 2, offset = SYMBOLS.toLong(), size = 3L * symbolStride, link = 4, info = 1, alignment = if (is64Bit) 8 else 4, entrySize = symbolStride.toLong())
+        named(4, ".strtab"); section(4, type = 3, offset = STRINGS.toLong(), size = 18, alignment = 1)
+        named(5, ".text.first"); section(5, type = 1, flags = 0x206, offset = 0xf0, size = 4, alignment = 4)
+        named(6, ".bss.first"); section(6, type = 8, flags = 0x203, offset = 0xf4, size = 8, alignment = 4)
+        named(7, ".text.second"); section(7, type = 1, flags = 0x206, offset = 0x100, size = 4, alignment = 4)
+        named(8, ".shstrtab"); section(8, type = 3, offset = NAMES.toLong(), size = names.toByteArray().size.toLong(), alignment = 1)
+        word(FIRST_GROUP, 1); word(FIRST_GROUP + 4, 5); word(FIRST_GROUP + 8, 6)
+        word(SECOND_GROUP, 0x80000000L); word(SECOND_GROUP + 4, 7)
+        word(SYMBOLS + symbolStride, 1)
+        bytes[SYMBOLS + symbolStride + if (is64Bit) 4 else 12] = 0x20
+        word(SYMBOLS + 2 * symbolStride, 11)
+        bytes[SYMBOLS + 2 * symbolStride + if (is64Bit) 4 else 12] = 0x10
+        signatureSection(2, 7)
+    }
+
+    fun word(offset: Int, value: Long) = FullTreeElfTestBytes.put32(bytes, offset, value, littleEndian)
+    fun word(offset: Int, value: Int) = word(offset, value.toLong())
+    private fun half(offset: Int, value: Int) = FullTreeElfTestBytes.put16(bytes, offset, value, littleEndian)
+    private fun wide(offset: Int, value: Long) {
+        if (is64Bit) FullTreeElfTestBytes.put64(bytes, offset, value.toULong(), littleEndian)
+        else word(offset, value)
+    }
+    fun signatureSection(symbol: Int, section: Int) =
+        half(SYMBOLS + symbol * symbolStride + if (is64Bit) 6 else 14, section)
+
+    fun section(index: Int, type: Long? = null, flags: Long? = null, offset: Long? = null,
+                size: Long? = null, link: Int? = null, info: Int? = null, alignment: Long? = null, entrySize: Long? = null) {
+        val start = SECTION_TABLE + index * sectionStride
+        type?.let { word(start + 4, it) }
+        flags?.let { wide(start + 8, it) }
+        offset?.let { wide(start + if (is64Bit) 24 else 16, it) }
+        size?.let { wide(start + if (is64Bit) 32 else 20, it) }
+        link?.let { word(start + if (is64Bit) 40 else 24, it) }
+        info?.let { word(start + if (is64Bit) 44 else 28, it) }
+        alignment?.let { wide(start + if (is64Bit) 48 else 32, it) }
+        entrySize?.let { wide(start + if (is64Bit) 56 else 36, it) }
+    }
+
+    companion object {
+        const val FIRST_GROUP = 0x60
+        const val SECOND_GROUP = 0x70
+        const val SYMBOLS = 0x80
+        const val STRINGS = 0xd0
+        const val NAMES = 0x110
+        const val SECTION_TABLE = 0x200
+    }
 }
