@@ -5495,6 +5495,21 @@ internal fun describeObservationCleanupTarget(
         "controlGroupHasNul=${'\u0000' in controlGroup}; controlGroupMatchesRetained=${controlGroup == expectedControlGroup}"
 }
 
+/** Fixed labels from the existing failed selection; this diagnostic never grants mutation authority. */
+internal fun describeObservationCgroupSelectionFailure(failure: Throwable): String {
+    val kind = if (failure is FullTreeFunctionObservationIsolationException) when (failure.message) {
+        "descriptor-pinned isolated cgroup changed identity" -> "retained-identity"
+        "isolated cgroup path selected a replacement directory" -> "path-replacement"
+        "cannot reselect the descriptor-pinned isolated cgroup" -> "reselection-failed"
+        else -> "other"
+    } else "other"
+    val captured = if (kind == "reselection-failed") {
+        failure.cause as? decompengine.acp.LinuxSyscallException
+    } else null
+    return "cgroupSelectionFailure=$kind; cgroupSelectionErrnoPresent=${captured != null}; " +
+        "cgroupSelectionMissingErrno=${captured?.errno == LinuxFilesystemSyscalls.ENOENT}"
+}
+
 private enum class ObservationUnitMutationTargetState {
     SAME,
     ABSENT,
@@ -6999,7 +7014,14 @@ private class ManagedObservationUnit(
         }
         return runCatching { requirePinnedCgroupSelection(expectedCgroup) }.fold(
             onSuccess = { ObservationUnitMutationTargetState.SAME },
-            onFailure = { ObservationUnitMutationTargetState.REPLACED },
+            onFailure = { failure ->
+                runCatching {
+                    lastCleanupTargetDiagnostic = lastCleanupTargetDiagnostic?.let {
+                        "$it; ${describeObservationCgroupSelectionFailure(failure)}"
+                    }
+                }
+                ObservationUnitMutationTargetState.REPLACED
+            },
         )
     }
 
