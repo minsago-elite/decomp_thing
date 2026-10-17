@@ -130,8 +130,13 @@ javac \
   -cp "$distribution_lib/*" \
   -d "$support_classes" \
   scripts/support/AcpCompatibilityJson.java \
+  scripts/support/AcpCompatibilityFailureSummary.java \
+  scripts/support/AcpCompatibilityFailureSummaryControls.java \
   scripts/support/AcpCompatibilityProvisioner.java \
   scripts/support/AcpCompatibilityAuthenticationProbe.java
+
+java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityFailureSummaryControls \
+  >"$result_directory/failure-summary-controls.json"
 
 config_file="$result_directory/config.json"
 java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityProvisioner \
@@ -152,6 +157,6 @@ java -cp "$support_classes:$distribution_lib/*" AcpCompatibilityAuthenticationPr
 
 (
   cd "$result_directory"
-  sha256sum target.properties config.json evidence.json >ARTIFACTS.sha256
+  sha256sum target.properties failure-summary-controls.json config.json evidence.json >ARTIFACTS.sha256
 )
 echo "ACP codex-acp authentication evidence: $result_directory"
