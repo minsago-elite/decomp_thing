@@ -9,6 +9,58 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `saturated queue retains the last terminal phase and exact loss through the CLI projection`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-terminal").toAbsolutePath())
+        val terminals = listOf(AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED)
+        for (limit in listOf(1, 128)) for (phases in terminals.map { listOf(it) } + listOf(terminals)) {
+            val root = createTempDirectory(parent, "journal-")
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val first = java.util.concurrent.atomic.AtomicBoolean(true)
+            val journal = AgentProgressJournal.withSnapshotEncodeHooks(root, "reconstruction", {
+                if (first.compareAndSet(true, false)) {
+                    entered.countDown()
+                    check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                }
+            }, {}, maximumQueuedEvents = limit)
+            try {
+                assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                val normalCount = limit + 128
+                repeat(normalCount) { journal.phase(AgentWorkflowPhase.AGENT_RUNNING) }
+                phases.forEach { journal.phase(it) }
+                release.countDown()
+                journal.close()
+                val snapshot = assertNotNull(AgentProgressJournal.read(root))
+                val lastSequence = (normalCount + phases.size).toLong()
+                assertEquals(lastSequence + 1, snapshot.getValue("nextSequence").jsonPrimitive.long)
+                assertEquals((128 + phases.size - 1).toLong(), snapshot.getValue("queueDropped").jsonPrimitive.long)
+                assertEquals(0L, snapshot.getValue("historyDropped").jsonPrimitive.long)
+                val events = snapshot.getValue("events").jsonArray.map { it.jsonObject }
+                assertEquals((0L..limit.toLong()).toList() + lastSequence,
+                    events.map { it.getValue("sequence").jsonPrimitive.long })
+                assertEquals(phases.last().name.lowercase(), events.last().getValue("phase").jsonPrimitive.content)
+                val range = snapshot.getValue("omittedSequenceRanges").jsonArray.single().jsonObject
+                assertEquals((limit + 1).toString(), range.getValue("startInclusive").jsonPrimitive.content)
+                assertEquals(lastSequence.toString(), range.getValue("endExclusive").jsonPrimitive.content)
+                val cursor = decompengine.RepairCliProgressCursor(null, decompengine.CliProgressWorkflow.RECONSTRUCTION)
+                val output = cursor.advance(snapshot, journal.journalRunId)
+                assertEquals("reconstruction: ${phases.last().name.lowercase().replace('_', ' ')}", output.last())
+                assertTrue(output.any { it.startsWith("reconstruction progress omitted ") })
+                AgentProgressJournal(root, "reconstruction").use { }
+                val restarted = assertNotNull(AgentProgressJournal.read(root))
+                assertEquals(lastSequence + 2, restarted.getValue("nextSequence").jsonPrimitive.long)
+                assertEquals(snapshot.getValue("queueDropped"), restarted.getValue("queueDropped"))
+                assertEquals(events.map { it.getValue("sequence") },
+                    restarted.getValue("events").jsonArray.dropLast(1).map { it.jsonObject.getValue("sequence") })
+            } finally {
+                release.countDown()
+                journal.close()
+                // Retain repository-local fixtures rather than deleting under an owned writer.
+            }
+        }
+    }
+
+    @Test
     fun `snapshot encoding releases producers and publishes one coherent loss boundary`(): Unit {
         val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-encoding").toAbsolutePath())
         val root = createTempDirectory(parent, "journal-")

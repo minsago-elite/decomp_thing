@@ -22,6 +22,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Bounded display projection of the workflow's separate authoritative invocation receipts.
  * Callbacks only normalize and enqueue; one owned writer publishes atomic snapshots. An overloaded
  * view drops records with explicit sequence gaps and counters, never backpressures protocol I/O.
+ * At most maximumQueuedEvents ordinary records plus one reserved overflow terminal record wait
+ * for the writer; replacement of that terminal record is also counted as explicit queue loss.
  */
 class AgentProgressJournal private constructor(
     private val reportsDirectory: Path,
@@ -47,6 +49,7 @@ class AgentProgressJournal private constructor(
 
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
+    private var overflowTerminal: JsonObject? = null
     private val retained = ArrayDeque<JsonObject>()
     private val redactor = ProgressRedactor(sensitiveValues)
     private val failure = AtomicReference<Throwable?>()
@@ -238,7 +241,7 @@ class AgentProgressJournal private constructor(
     override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
         require(acceptedRevisionSha256 == null || acceptedRevisionSha256.matches(Regex("[a-f0-9]{64}")))
         require(acceptedRevisionSha256 == null || phase == AgentWorkflowPhase.ACCEPTED)
-        enqueue("workflow_phase") {
+        enqueue("workflow_phase", preserveTerminal = phase in TERMINAL_PHASES) {
             put("phase", phase.name.lowercase())
             taskId?.let { put("taskId", redactor.text(it)); put("taskIdSha256", digest(it)) }
             acceptedRevisionSha256?.let { put("acceptedRevisionSha256", it) }
@@ -247,7 +250,7 @@ class AgentProgressJournal private constructor(
     }
 
     override fun runState(observation: AgentWorkflowRunObservation) {
-        enqueue("workflow_run_state") {
+        enqueue("workflow_run_state", preserveTerminal = observation.phase in TERMINAL_PHASES) {
             put("phase", observation.phase.name.lowercase())
             put("workflowRunId", redactor.text(observation.workflowRunId))
             put("workflowRunIdSha256", digest(observation.workflowRunId))
@@ -258,7 +261,7 @@ class AgentProgressJournal private constructor(
         onPhase(observation.phase)
     }
 
-    private fun enqueue(kind: String, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
+    private fun enqueue(kind: String, preserveTerminal: Boolean = false, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
         requireSequenceCapacity()
@@ -270,7 +273,12 @@ class AgentProgressJournal private constructor(
             put("kind", kind)
             body()
         }
-        if (queue.size >= maximumQueuedEvents) queueDropped++ else queue.add(record)
+        if (queue.size < maximumQueuedEvents) {
+            queue.add(record)
+        } else if (preserveTerminal) {
+            if (overflowTerminal != null) queueDropped++
+            overflowTerminal = record
+        } else queueDropped++
         dirty = true
         monitor.notifyAll()
     }
@@ -286,6 +294,10 @@ class AgentProgressJournal private constructor(
                     while (!dirty && !closed) monitor.wait()
                     if (!dirty && closed) return
                     while (queue.isNotEmpty()) retained.add(queue.removeFirst())
+                    // Overflow can exist only beside a full ordinary queue. Its last record is
+                    // newer than every queued record; drain both atomically in sequence order.
+                    overflowTerminal?.let { retained.add(it) }
+                    overflowTerminal = null
                     while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
                     dirty = false
                     SnapshotBoundary(sequence, queueDropped, historyDropped)
@@ -364,14 +376,21 @@ class AgentProgressJournal private constructor(
             beforeSnapshotEncode: () -> Unit,
             afterSnapshotWrite: () -> Unit,
             maximumSnapshotBytes: Int = 512 * 1024,
+            maximumQueuedEvents: Int = 128,
         ): AgentProgressJournal = AgentProgressJournal(
-            reportsDirectory, workflow, emptyList(), 256, 128, maximumSnapshotBytes, {},
+            reportsDirectory, workflow, emptyList(), 256, maximumQueuedEvents, maximumSnapshotBytes, {},
             afterSnapshotWrite, beforeSnapshotEncode,
         )
 
         const val FILE_NAME = "agent-progress.json"
         internal const val MAXIMUM_READ_BYTES = 2 * 1024 * 1024
         private const val MAXIMUM_MESSAGE_CHARACTERS = 8192
+        private val TERMINAL_PHASES = setOf(
+            AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED,
+            AgentWorkflowPhase.ACCEPTED, AgentWorkflowPhase.ROLLED_BACK, AgentWorkflowPhase.COMPILE_VALID,
+            AgentWorkflowPhase.REJECTED, AgentWorkflowPhase.EXHAUSTED, AgentWorkflowPhase.RESOURCE_EXHAUSTED,
+            AgentWorkflowPhase.CANCELLED, AgentWorkflowPhase.INTERRUPTED,
+        )
 
         fun read(reportsDirectory: Path): JsonObject? {
             val path = reportsDirectory.resolve(FILE_NAME)
