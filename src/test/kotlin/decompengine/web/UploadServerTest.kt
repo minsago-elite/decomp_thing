@@ -2070,6 +2070,83 @@ class UploadServerTest {
     }
 
     @Test
+    fun `ordinary report GET and HEAD require a session and enforce the complete download ceiling`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val record = dataDir.resolve("$jobId/job.json")
+            val before = record.readBytes()
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val report = reports.resolve("ordinary.json")
+            val payload = "{\"observation\":\"bounded report\"}".toByteArray()
+            report.writeBytes(payload)
+            val path = "/jobs/$jobId/artifacts/reports/ordinary.json"
+            val get = request(server, "GET", path)
+            assertEquals(200, get.status)
+            assertContentEquals(payload, get.body)
+            val head = request(server, "HEAD", path)
+            assertEquals(200, head.status)
+            assertTrue(head.body.isEmpty())
+            assertEquals(payload.size.toString(), head.contentLength)
+            assertEquals(get.contentLength, head.contentLength)
+            assertEquals(get.contentDisposition, head.contentDisposition)
+            for (method in listOf("GET", "HEAD")) {
+                val unauthenticated = directClient.send(java.net.http.HttpRequest.newBuilder(
+                    URI("http://127.0.0.1:${server.serverPort}$path"))
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .method(method, java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofByteArray())
+                assertEquals(401, unauthenticated.statusCode(), method)
+                assertTrue(!unauthenticated.body().decodeToString().contains("bounded report"))
+            }
+            Files.delete(report)
+            sparseFile(report, 64L * 1024 * 1024 + 1)
+            for (method in listOf("GET", "HEAD")) {
+                val refused = request(server, method, path)
+                assertEquals(400, refused.status, method)
+                assertTrue(!refused.body.decodeToString().contains(dataDir.toString()))
+            }
+            Files.delete(report)
+            report.writeBytes(payload)
+            assertContentEquals(payload, request(server, "GET", path).body)
+            assertContentEquals(before, record.readBytes())
+        }
+    }
+
+    @Test
+    fun `ordinary report GET and HEAD reject file parent and nonregular indirection without outside bytes`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val report = reports.resolve("ordinary.json")
+            val outside = dataDir.resolve("outside-report").createDirectories()
+            outside.resolve("ordinary.json").writeText("outside-boundary-marker")
+            val path = "/jobs/$jobId/artifacts/reports/ordinary.json"
+            fun refuse() {
+                for (method in listOf("GET", "HEAD")) {
+                    val response = request(server, method, path)
+                    assertRejectedWithoutMarker(response)
+                    assertTrue(!response.body.decodeToString().contains(dataDir.toString()))
+                }
+            }
+            Files.createSymbolicLink(report, outside.resolve("ordinary.json"))
+            refuse()
+            Files.delete(report)
+            val retained = reports.resolveSibling("retained-reports")
+            Files.move(reports, retained)
+            Files.createSymbolicLink(reports, outside)
+            refuse()
+            Files.delete(reports)
+            Files.move(retained, reports)
+            report.createDirectories()
+            refuse()
+            Files.delete(report)
+            report.writeText("ordinary inside report")
+            assertContentEquals("ordinary inside report".toByteArray(), request(server, "GET", path).body)
+            assertEquals("outside-boundary-marker", outside.resolve("ordinary.json").readBytes().decodeToString())
+        }
+    }
+
+    @Test
     fun `source rendering never reads linked or oversized provenance metadata`() {
         withServer { server, dataDir ->
             val jobId = uploadedJobId(server)
