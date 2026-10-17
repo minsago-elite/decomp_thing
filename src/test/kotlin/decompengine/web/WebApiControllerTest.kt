@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
 import decompengine.jobs.elfFixture
 import kotlinx.serialization.json.jsonArray
@@ -15,13 +18,13 @@ import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
-import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
@@ -523,7 +526,7 @@ class WebApiControllerTest {
     @Test
     fun `versioned uncertain upload retains reconciliation location and replays only after restart`() {
         val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-upload-uncertainty").toAbsolutePath())
-        val root = Files.createTempDirectory(temporaryRoot, "v1-")
+        val root = createTempDirectory(temporaryRoot, "v1-")
         val store = JobStore(root)
         val bytes = elfFixture()
         val prior = decompengine.jobs.WorkflowAttemptStore.open(root).use {
@@ -778,7 +781,7 @@ class WebApiControllerTest {
     private fun withServer(requestDiagnosticOutput: (String) -> Unit = System.err::println,
                            block: (UploadServer, JobStore, String) -> Unit) {
         val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-api").toAbsolutePath())
-        val root = Files.createTempDirectory(temporaryRoot, "web-api-")
+        val root = createTempDirectory(temporaryRoot, "web-api-")
         val store = JobStore(root)
         val binary = elfFixture().also { bytes -> repeat(8) { bytes[24 + it] = 0xff.toByte() } }
         val job = store.createFromUpload("synthetic.elf", binary)

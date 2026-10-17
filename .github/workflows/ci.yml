@@ -257,6 +257,9 @@ jobs:
       - name: Check CI partition routing and report ownership controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-ci-partitions.py
+      - name: Check recovery scenario coverage controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-web-job-recovery-inventory.py
       - name: Verify real Angr qualification selection and pin controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-angr-qualification-selection.py
@@ -320,6 +323,12 @@ jobs:
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
+      - name: Require every source-declared recovery scenario in core reports
+        if: always() && matrix.shard == 'core'
+        run: >-
+          python3 scripts/verify-web-job-recovery.py
+          --reports build/test-results/test
+          --output build/web-job-recovery-inventory.json
       - name: Retain Kotlin partition reports
         run: |
           mv build/test-results/test build/test-results/full-suite
@@ -359,6 +368,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated

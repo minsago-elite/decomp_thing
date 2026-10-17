@@ -1,9 +1,13 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import kotlin.io.path.*
 import kotlin.test.*
 import kotlinx.serialization.json.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class JobRecoveryAdmissionTest {
     @Test fun `legacy metadata that cannot encode recovery prevents every status write`() {
         val root = createTempDirectory("recovery-rewrite-limit-")

@@ -60,6 +60,39 @@ distinct. `kotlin-partition-inventory` retains counts and input hashes; routing 
 report-placement regression controls run in the core job. This placement check
 complements the complete original-inventory comparison above.
 
+Core also runs the authored source/XML controls in
+`scripts/test-web-job-recovery-inventory.py` and consumes its already executed
+JUnit reports with `scripts/verify-web-job-recovery.py --reports`. This guard
+requires every literal zero-argument `@Test` scenario in the 19 selected benign
+jobs/web classes, including nested source declarations that Jupiter would fail
+to discover. Missing, duplicate, unexpected, failed, erroneous or skipped cases
+refuse coverage; reported counts must match actual testcase outcomes. Other test
+declaration forms require an explicit extension and are refused by this corpus's
+declaration check. No additional Gradle/JVM test run is started by the guard.
+
+`web-job-recovery-inventory.json` is retained with the core reports. It binds case
+identities/results to XML hashes, declaration source hashes and a Git snapshot;
+the CI checkout/compilation join remains separate evidence. Every selected test
+also emits a bounded record from its existing JUnit JVM: Java runtime/vendor/VM,
+OS/kernel version and architecture, plus provider, filesystem type, block-size
+availability, read-only state and POSIX/Unix views for each created fixture root.
+The fixture factory keeps temporary roots inside the repository. Records contain
+test identities and root ordinals, without fixture paths, prefixes, environment
+values, process identifiers or exception messages.
+
+Missing, duplicated or mismatched records, unknown fields and inconsistent facts
+refuse configuration coverage. The selected source contract also refuses known
+direct temporary-root APIs or local bindings that bypass the recorded factory.
+Cases without fixture roots and unsupported
+block-size observations remain explicit. These are observed fixture facts;
+they do not authenticate an immutable host, a mount identity or execution
+authority. `fullMatrixQualified` remains false pending the complete supported
+matrix and integration evidence. No power-loss, external-process, provider/model
+or release qualification follows from these records.
+The standalone runner's manifest is version 2; its Java/kernel/temporary-filesystem
+fields describe the launcher, while testcase configuration comes from the JUnit
+records. The report-consumption inventory is version 3.
+
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.

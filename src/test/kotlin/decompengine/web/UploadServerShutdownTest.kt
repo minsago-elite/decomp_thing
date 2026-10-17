@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -8,13 +11,14 @@ import java.util.concurrent.TimeoutException
 import kotlin.test.*
 
 /** Controlled request-admission fixtures only; no workflow or external target executes. */
+@ExtendWith(RecoveryMatrixEvidence::class)
 class UploadServerShutdownTest {
     @Test fun `stop waits for an admitted handler and retains ownership until it leaves`() = checkDrain(false)
 
     @Test fun `interrupted stop still drains admitted handlers and restores the interrupt flag`() = checkDrain(true)
 
     private fun checkDrain(interrupted: Boolean) {
-        val root = Files.createTempDirectory("web-request-drain-")
+        val root = createTempDirectory("web-request-drain-")
         val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 3000)
         val executor = Executors.newFixedThreadPool(2)
         val entered = CountDownLatch(1); val release = CountDownLatch(1); val stopping = CountDownLatch(1)
@@ -46,7 +50,7 @@ class UploadServerShutdownTest {
     }
 
     @Test fun `request drain timeout preserves ownership and later cleanup permits retry`() {
-        val root = Files.createTempDirectory("web-request-drain-timeout-")
+        val root = createTempDirectory("web-request-drain-timeout-")
         val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100)
         val executor = Executors.newSingleThreadExecutor()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)

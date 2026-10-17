@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.elfFixture
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionAdapters
@@ -55,7 +58,6 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.Executor
 import kotlin.io.path.createDirectories
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeText
@@ -69,6 +71,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class UploadServerTest {
     private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
     private val followingClient = java.net.http.HttpClient.newBuilder().followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build()
@@ -925,7 +928,7 @@ class UploadServerTest {
 
     @Test
     fun `background diagnostics are redacted in storage and withheld from public rendering`() {
-        val dataDir = Files.createTempDirectory(
+        val dataDir = createTempDirectory(
             Files.createDirectories(Path.of("build", "progress-basic-authorization-tests")), "web-",
         )
         val configured = "configured-provider-credential"
@@ -970,7 +973,7 @@ class UploadServerTest {
 
     @Test
     fun `background diagnostics cannot persist sensitive omission markers`() {
-        val dataDir = Files.createTempDirectory(
+        val dataDir = createTempDirectory(
             Files.createDirectories(Path.of("build", "progress-redactor-fallback-tests")), "web-",
         )
         val secrets = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
@@ -1372,7 +1375,7 @@ class UploadServerTest {
     @Test
     fun `older trace history and case pages retain authorized evidence across restart and reject stale or corrupt captures`() {
         val parent = Path.of("build/test-tmp/recorded-paged-http").toAbsolutePath().createDirectories()
-        val dataDir = Files.createTempDirectory(parent, "case-")
+        val dataDir = createTempDirectory(parent, "case-")
         fun server() = UploadServer("127.0.0.1", 0, dataDir,
             JobAnalyzer { _, _ -> error("history read must not analyze") },
             JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
@@ -1473,7 +1476,7 @@ class UploadServerTest {
     @Test
     fun `actual trace guided rejection survives server restart with matching CLI and private safe HTTP history`() {
         val parent = Path.of("build/test-tmp/recorded-trace-http").toAbsolutePath().createDirectories()
-        val dataDir = Files.createTempDirectory(parent, "case-")
+        val dataDir = createTempDirectory(parent, "case-")
         fun server() = UploadServer("127.0.0.1", 0, dataDir,
             JobAnalyzer { _, _ -> error("history read must not analyze") },
             JobReconstructor { _, _ -> error("history read must not reconstruct") }, Executor(Runnable::run))
@@ -1562,7 +1565,7 @@ class UploadServerTest {
     @Test
     fun `actual restoration failure stays visible after recovery and HTTP server restart`() {
         val parent = Path.of("build/test-tmp/recorded-history-http").toAbsolutePath().createDirectories()
-        val dataDir = Files.createTempDirectory(parent, "restart-")
+        val dataDir = createTempDirectory(parent, "restart-")
         val initial = UploadServer("127.0.0.1", 0, dataDir, JobAnalyzer { _, _ -> error("read only") },
             JobReconstructor { _, _ -> error("read only") }, Executor(Runnable::run))
         var active: UploadServer? = initial
@@ -2565,7 +2568,7 @@ class UploadServerTest {
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val parent = Path.of("build/test-tmp/web-jobs").toAbsolutePath().createDirectories()
-        val dataDir = Files.createTempDirectory(parent, "case-")
+        val dataDir = createTempDirectory(parent, "case-")
         val directExecutor = Executor { command -> command.run() }
         val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
         server.start()

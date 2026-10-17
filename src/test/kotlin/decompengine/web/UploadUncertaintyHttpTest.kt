@@ -1,5 +1,8 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import com.sun.net.httpserver.HttpServer
 import decompengine.jobs.JobStore
 import decompengine.jobs.StagedJobUpload
@@ -15,7 +18,6 @@ import java.time.Duration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -24,6 +26,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class UploadUncertaintyHttpTest {
     @Test
     fun `HTTP upload uncertainty identifies the published job in JSON and HTML without retry hints`() {
