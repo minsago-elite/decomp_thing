@@ -14,9 +14,10 @@ class FullTreeElfLayoutTest {
     @Test
     fun `relocatable groups retain raw signatures flags and unique member headers in both ELF classes and byte orders`(): Unit =
         inControlTemporaryDirectory { directory ->
-            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true)) {
-                val fixture = GroupElfBytes(is64Bit, littleEndian)
-                val path = writeElf(directory.resolve("groups-$is64Bit-$littleEndian.o"), fixture.bytes)
+            for (is64Bit in listOf(false, true)) for (littleEndian in listOf(false, true))
+            for (alignment in listOf(0L, 1L, 4L, 8L)) {
+                val fixture = GroupElfBytes(is64Bit, littleEndian).apply { section(1, alignment = alignment) }
+                val path = writeElf(directory.resolve("groups-$is64Bit-$littleEndian-$alignment.o"), fixture.bytes)
                 val observed = readGroups(path)
                 assertEquals(if (is64Bit) 2 else 1, observed.elfClass)
                 assertEquals(if (littleEndian) 1 else 2, observed.byteOrder)
@@ -26,6 +27,10 @@ class FullTreeElfLayoutTest {
                 val first = observed.groups[0]
                 assertEquals(".group.first", first.name)
                 assertEquals(1L, first.flags)
+                assertEquals(0UL, first.address)
+                assertEquals(alignment.toULong(), first.alignment)
+                assertEquals(GroupElfBytes.FIRST_GROUP.toLong(), first.offset)
+                assertEquals(12UL, first.size)
                 assertTrue(first.isComdat)
                 assertEquals("signature", first.signature.name)
                 assertEquals(3, first.signature.symbolTableSectionIndex)
@@ -57,7 +62,8 @@ class FullTreeElfLayoutTest {
                 assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanFunctions(source, "linked") {} }
                 assertFailsWith<FullTreeControlException> { FullTreeElfLayout.scanObjects(source, "linked") {} }
             }
-            val linked = FullTreeElfTestBytes.build(TestElfVariant(true, true, false, false), emptyList())
+            val linked = FullTreeElfTestBytes.build(TestElfVariant(true, true, false, false),
+                listOf(TestElfSymbol("linked", 0x100UL)))
             val linkedPath = writeElf(directory.resolve("linked.elf"), linked)
             assertFailsWith<FullTreeControlException> { readGroups(linkedPath) }
             assertEquals(2, readGroups(path).groups.size)
@@ -107,6 +113,8 @@ class FullTreeElfLayoutTest {
         inControlTemporaryDirectory { directory ->
             val changes: List<(GroupElfBytes) -> Unit> = listOf(
                 { it.section(1, flags = 0x800) },
+                { it.section(1, address = 1) },
+                { it.section(1, alignment = 3) },
                 { it.section(1, size = 0) },
                 { it.section(1, size = 5) },
                 { it.section(1, entrySize = 8) },
@@ -1173,11 +1181,12 @@ private class GroupElfBytes(val is64Bit: Boolean = true, val littleEndian: Boole
     fun signatureSection(symbol: Int, section: Int) =
         half(SYMBOLS + symbol * symbolStride + if (is64Bit) 6 else 14, section)
 
-    fun section(index: Int, type: Long? = null, flags: Long? = null, offset: Long? = null,
+    fun section(index: Int, type: Long? = null, flags: Long? = null, address: Long? = null, offset: Long? = null,
                 size: Long? = null, link: Int? = null, info: Int? = null, alignment: Long? = null, entrySize: Long? = null) {
         val start = SECTION_TABLE + index * sectionStride
         type?.let { word(start + 4, it) }
         flags?.let { wide(start + 8, it) }
+        address?.let { wide(start + if (is64Bit) 16 else 12, it) }
         offset?.let { wide(start + if (is64Bit) 24 else 16, it) }
         size?.let { wide(start + if (is64Bit) 32 else 20, it) }
         link?.let { word(start + if (is64Bit) 40 else 24, it) }

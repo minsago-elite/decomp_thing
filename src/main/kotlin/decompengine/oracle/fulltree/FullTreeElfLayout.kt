@@ -180,6 +180,10 @@ internal class FullTreeElfSectionGroup(
     val sectionIndex: Int,
     val name: String,
     val flags: Long,
+    val address: ULong,
+    val alignment: ULong,
+    val offset: Long,
+    val size: ULong,
     val signature: FullTreeElfGroupSignature,
     members: List<FullTreeElfGroupMember>,
 ) {
@@ -390,8 +394,12 @@ private class ElfReader(
             step("section groups")
             if (section.type != SHT_GROUP) return@forEach
             if (candidates.size >= groupLimits.maximumGroups) fail("ELF section-group count exceeds its bound")
-            if (section.flags != 0UL || section.entrySize != 4UL || section.size < 4UL || section.size % 4UL != 0UL) {
-                fail("ELF section group has invalid flags, size or word width")
+            val alignment = section.alignment
+            if (section.flags != 0UL || section.address != 0UL ||
+                (alignment > 1UL && (alignment and (alignment - 1UL)) != 0UL) ||
+                section.entrySize != 4UL || section.size < 4UL || section.size % 4UL != 0UL
+            ) {
+                fail("ELF section group has invalid flags, address, alignment, size or word width")
             }
             if (section.link !in sections.indices || sections[section.link].type !in setOf(SHT_SYMTAB, SHT_DYNSYM)) {
                 fail("ELF section group has an invalid signature symbol table")
@@ -451,7 +459,8 @@ private class ElfReader(
                 FullTreeElfGroupMember(member.index, member.name, member.type, member.flags, member.address,
                     member.offset, member.size, member.link, member.info, member.alignment, member.entrySize)
             }
-            FullTreeElfSectionGroup(section.index, section.name, candidate.flags, signature, members)
+            FullTreeElfSectionGroup(section.index, section.name, candidate.flags, section.address,
+                section.alignment, section.offset, section.size, signature, members)
         }
         return FullTreeElfSectionGroupObservation(headers.elfClass, headers.byteOrder, headers.machine,
             headers.osAbi, headers.abiVersion, scanned, groups)
