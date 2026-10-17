@@ -18,6 +18,45 @@ import kotlin.test.assertTrue
 @ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
     @Test
+    fun `artifact reads enforce the selected byte bound and reject retained file or directory substitution`() {
+        val root = createTempDirectory("jobs-artifact-snapshot-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val reports = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val path = reports.resolve("ordinary.json")
+        val payload = "{\"observation\":\"bounded\"}".toByteArray()
+        java.nio.file.Files.write(path, payload)
+        val selected = store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong())
+        kotlin.test.assertContentEquals(payload, selected.bytes)
+        assertEquals(decompengine.project.sha256(payload), selected.sha256)
+        assertFailsWith<decompengine.repair.RepairBudgetExceededException> {
+            store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong() - 1)
+        }
+        val moved = reports.resolve("retained.json")
+        val replacedFile = assertFailsWith<IllegalArgumentException> {
+            decompengine.repair.readStableRegularFile(root, "${job.id}/reports/ordinary.json", payload.size.toLong(),
+                afterAuthorization = {
+                    java.nio.file.Files.move(path, moved)
+                    java.nio.file.Files.write(path, payload)
+                })
+        }
+        assertTrue(replacedFile.message.orEmpty().contains("target binding changed"))
+        java.nio.file.Files.delete(path)
+        java.nio.file.Files.move(moved, path)
+        val replacementReports = java.nio.file.Files.createDirectory(reports.resolveSibling("replacement-reports"))
+        java.nio.file.Files.write(replacementReports.resolve("ordinary.json"), payload)
+        val replacedDirectory = assertFailsWith<IllegalArgumentException> {
+            decompengine.repair.readStableRegularFile(root, "${job.id}/reports/ordinary.json", payload.size.toLong(),
+                afterRead = {
+                    java.nio.file.Files.move(reports, reports.resolveSibling("retained-reports"))
+                    java.nio.file.Files.move(replacementReports, reports)
+                })
+        }
+        assertTrue(replacedDirectory.message.orEmpty().contains("directory binding changed"))
+        kotlin.test.assertContentEquals(payload, store.readArtifact(job.id, "reports/ordinary.json", payload.size.toLong()).bytes)
+    }
+
+    @Test
     fun `upload admission reserves room for every supported status message`() {
         val root = createTempDirectory("jobs-status-reserve-")
         val store = JobStore(root)
