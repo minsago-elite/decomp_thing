@@ -28,6 +28,7 @@ class RecoveryMatrixEvidence : BeforeEachCallback, AfterEachCallback {
             val current = checkNotNull(active.get()) { "recovery fixture context is missing" }
             check(current.className == context.requiredTestClass.name &&
                 current.method == context.requiredTestMethod.name + "()") { "recovery fixture context changed test identity" }
+            check(!current.captureFailed) { "recovery fixture configuration capture failed" }
             println(RECOVERY_CONTEXT_PREFIX + current.snapshot())
         } finally {
             active.remove()
@@ -66,6 +67,9 @@ class RecoveryMatrixEvidence : BeforeEachCallback, AfterEachCallback {
                 }
                 return directory
             } catch (failure: Throwable) {
+                // A test may catch an expected application exception; failed observation
+                // must still refuse the case instead of emitting NOT_EXERCISED.
+                current.captureFailed = true
                 // Only delete the empty directory this call just created, never descendants.
                 try { Files.delete(directory) } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
                 throw failure
@@ -80,6 +84,7 @@ class RecoveryMatrixEvidence : BeforeEachCallback, AfterEachCallback {
             }
         }
         val roots = ArrayList<JsonObject>()
+        var captureFailed = false
         private val runtime = buildJsonObject {
             put("javaRuntimeVersion", publicFact(Runtime.version().toString(), 128))
             put("javaVendor", publicFact(System.getProperty("java.vendor"), 128))
