@@ -98,6 +98,7 @@ class RepairCliProgressTest {
         fun phase(sequence: Long, name: String) = JsonObject(event(sequence, name).toMutableMap().apply {
             put("workflow", JsonPrimitive("reconstruction"))
             put("kind", JsonPrimitive("workflow_phase"))
+            put("runId", JsonPrimitive("owned-run"))
         })
         val cursor = RepairCliProgressCursor(null, CliProgressWorkflow.RECONSTRUCTION)
         val records = (0L..49).map { phase(it, "build_validating") } + listOf(
@@ -106,17 +107,17 @@ class RepairCliProgressTest {
             phase(52, "private arbitrary phase"),
             JsonObject(phase(53, "completed").toMutableMap().apply { put("kind", JsonPrimitive("task_output")) }),
         )
-        val lines = cursor.advance(snapshot(54, records))
+        val lines = cursor.advance(snapshot(54, records), "owned-run")
         assertEquals(33, lines.size)
         assertEquals("reconstruction progress omitted 18 older phase update(s)", lines.first())
         assertTrue(lines.drop(1).all { it == "reconstruction: build validating" })
         assertFalse(lines.joinToString().contains("private"))
-        assertTrue(cursor.advance(snapshot(54, records)).isEmpty())
-        val restarted = cursor.advance(snapshot(1, listOf(phase(0, "analyzing"))))
+        assertTrue(cursor.advance(snapshot(54, records), "owned-run").isEmpty())
+        val restarted = cursor.advance(snapshot(1, listOf(phase(0, "analyzing"))), "owned-run")
         assertTrue(restarted.first().contains("history restarted"))
         assertEquals("reconstruction: analyzing", restarted.last())
         val retained = RepairCliProgressCursor(snapshot(54, records), CliProgressWorkflow.RECONSTRUCTION)
-        assertEquals(listOf("reconstruction: completed"), retained.advance(snapshot(55, listOf(phase(54, "completed")))))
+        assertEquals(listOf("reconstruction: completed"), retained.advance(snapshot(55, listOf(phase(54, "completed"))), "owned-run"))
     }
 
     @Test
@@ -127,6 +128,57 @@ class RepairCliProgressTest {
     @Test
     fun `reconstruction unavailable warning preserves workflow failure with a blocked console`() {
         assertReconstructionConsoleBackpressure(unavailable = true)
+    }
+
+    @Test
+    fun `reconstruction close drains terminal phases and an immediate unavailable warning`() {
+        val parent = Files.createDirectories(Path.of("build/test-tmp"))
+        for (phase in listOf(AgentWorkflowPhase.COMPLETED, AgentWorkflowPhase.UNRESOLVED, AgentWorkflowPhase.FAILED)) {
+            val root = Files.createTempDirectory(parent, "reconstruction-terminal-")
+            val bytes = ByteArrayOutputStream()
+            PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+                withReconstructionCliProgress(root, output = output) { progress ->
+                    progress.phase(phase)
+                    if (phase == AgentWorkflowPhase.FAILED) {
+                        progress.close()
+                        assertTrue(bytes.toString(Charsets.UTF_8).contains("reconstruction: failed"))
+                    }
+                }
+            }
+            assertTrue(bytes.toString(Charsets.UTF_8).contains("reconstruction: ${phase.name.lowercase()}"))
+        }
+        val root = Files.createTempDirectory(parent, "reconstruction-unavailable-")
+        val bytes = ByteArrayOutputStream()
+        AgentProgressJournal(root, "reconstruction").use {
+            PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+                withReconstructionCliProgress(root, output = output) { }
+            }
+        }
+        assertEquals(
+            listOf("Progress reporting is unavailable; workflow results remain authoritative."),
+            bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.toList(),
+        )
+    }
+
+    @Test
+    fun `reconstruction cursor requires the acquired journal run and ignores other invocations`() {
+        fun phase(sequence: Long, run: String, name: String) = buildJsonObject {
+            put("sequence", sequence); put("workflow", "reconstruction"); put("kind", "workflow_phase")
+            put("runId", run); put("phase", name); put("text", "private peer content")
+        }
+        val cursor = RepairCliProgressCursor(null, CliProgressWorkflow.RECONSTRUCTION)
+        val first = snapshot(3, listOf(
+            phase(0, "earlier-run", "failed"),
+            phase(1, "owned-run", "analyzing"),
+            phase(2, "other-run", "completed"),
+        ))
+        assertTrue(cursor.advance(first).isEmpty())
+        assertEquals(listOf("reconstruction: analyzing"), cursor.advance(first, "owned-run"))
+        assertTrue(cursor.advance(snapshot(4, listOf(phase(3, "other-run", "unresolved"))), "owned-run").isEmpty())
+        assertEquals(
+            listOf("reconstruction: completed"),
+            cursor.advance(snapshot(5, listOf(phase(4, "owned-run", "completed"))), "owned-run"),
+        )
     }
 
     private fun assertReconstructionConsoleBackpressure(unavailable: Boolean) {

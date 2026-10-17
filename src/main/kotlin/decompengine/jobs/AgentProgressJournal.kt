@@ -38,6 +38,7 @@ class AgentProgressJournal(
     private val redactor = ProgressRedactor(sensitiveValues)
     private val failure = AtomicReference<Throwable?>()
     private val runId = UUID.randomUUID().toString()
+    internal val journalRunId: String get() = runId
     private var sequence = 0L
     private var queueDropped = 0L
     private var historyDropped = 0L

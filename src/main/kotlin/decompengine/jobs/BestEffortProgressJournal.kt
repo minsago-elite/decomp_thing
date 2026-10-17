@@ -15,6 +15,7 @@ internal class BestEffortProgressJournal(
 ) : AgentWorkflowProgress, AutoCloseable {
     private var failed = false
     private var journal: AgentProgressJournal? = null
+    internal val journalRunId: String? get() = journal?.journalRunId
 
     init {
         observe { journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase) }
