@@ -8,6 +8,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.Properties
 import java.util.zip.ZipFile
@@ -142,6 +143,77 @@ val stageFrontend = tasks.register<Sync>("stageFrontend") {
 }
 
 sourceSets.main { resources.srcDir(stageFrontend) }
+
+// Offline synthetic class DATA only: keep application/test outputs and native oracles off this classpath.
+val snapshotCapsuleAuditAsm by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+dependencies {
+    add(snapshotCapsuleAuditAsm.name, "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.0")
+}
+val snapshotCapsuleAuditData = sourceSets.create("snapshotCapsuleAuditData") {
+    java.setSrcDirs(listOf("src/snapshotCapsuleAuditData/java"))
+    compileClasspath = files(snapshotCapsuleAuditAsm)
+    runtimeClasspath = output + compileClasspath
+}
+val verifySnapshotCapsuleAuditAsm = tasks.register("verifySnapshotCapsuleAuditAsm") {
+    group = "verification"
+    description = "Checks the exact shaded ASM artifact before isolated class-data compilation or execution"
+    inputs.files(snapshotCapsuleAuditAsm)
+    doLast {
+        val jar = snapshotCapsuleAuditAsm.singleFile
+        check(jar.name == "kotlin-compiler-embeddable-2.4.0.jar" && jar.length() == 60_351_320L) {
+            "snapshot capsule fixture ASM artifact differs"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        jar.inputStream().use { input ->
+            val buffer = ByteArray(65_536)
+            var remaining = 60_351_320L
+            while (remaining > 0) {
+                val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                check(read > 0) { "snapshot capsule fixture ASM artifact is truncated" }
+                digest.update(buffer, 0, read)
+                remaining -= read
+            }
+            check(input.read() == -1) { "snapshot capsule fixture ASM artifact exceeds its bound" }
+        }
+        check(digest.digest().joinToString("") { "%02x".format(it) } ==
+            "c2b25e8c1c93ec416ba4327f5e31eaec0f0c8847241b9353e294b8db9dce564f") {
+            "snapshot capsule fixture ASM artifact checksum differs"
+        }
+    }
+}
+tasks.named<JavaCompile>(snapshotCapsuleAuditData.compileJavaTaskName) {
+    dependsOn(verifySnapshotCapsuleAuditAsm)
+    classpath = files(snapshotCapsuleAuditAsm)
+    options.release.set(21)
+    options.compilerArgs.add("-proc:none")
+}
+val snapshotCapsuleAuditDataTest = tasks.register<JavaExec>("snapshotCapsuleAuditDataTest") {
+    group = "verification"
+    description = "Runs all 115 synthetic class-data controls without application classes or native oracle execution"
+    dependsOn(verifySnapshotCapsuleAuditAsm, tasks.named(snapshotCapsuleAuditData.classesTaskName))
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    classpath = files(snapshotCapsuleAuditData.output.classesDirs, snapshotCapsuleAuditAsm)
+    mainClass.set("SnapshotCapsuleAuditDataTest")
+    maxHeapSize = "256m"
+    timeout.set(Duration.ofMinutes(2))
+    jvmArgs("-XX:-UsePerfData")
+    doFirst {
+        check(classpath.files == snapshotCapsuleAuditData.output.classesDirs.files + snapshotCapsuleAuditAsm.files) {
+            "snapshot capsule fixture classpath differs"
+        }
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs()) { "snapshot capsule fixture temporary directory unavailable" }
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+}
+// Refuse isolated data-fixture failures before expensive Kotlin compilation in the same graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(snapshotCapsuleAuditDataTest) }
+}
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
@@ -1543,15 +1615,66 @@ private fun configureOracleTestRuntime(testTask: Test) {
     )
 }
 
+// This task is a required real-tool lane when selected, with no optional no-op or cached credit.
+tasks.register<Test>("realAngrQualification") {
+    group = "verification"
+    description = "Requires real Angr discovery on the authored argv/stdin fixture"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching("decompengine.exploration.AutomaticExplorationTest.real angr symbolically discovers branching argv and stdin when configured")
+        isFailOnNoMatchingTests = true
+    }
+    val python = providers.environmentVariable("ANGR_PYTHON").orElse("")
+    val evidenceRoot = layout.buildDirectory.dir("angr-qualification").get().asFile
+    val temporaryRoot = evidenceRoot.resolve("tmp")
+    environment = mapOf(
+        "ANGR_PYTHON" to python.get(),
+        "PATH" to "/usr/bin:/bin",
+        "LANG" to "C.UTF-8",
+        "LC_ALL" to "C.UTF-8",
+        "TMPDIR" to temporaryRoot.absolutePath,
+        "PYTHONDONTWRITEBYTECODE" to "1",
+        "PYTHONNOUSERSITE" to "1",
+    )
+    systemProperty("java.io.tmpdir", temporaryRoot.absolutePath)
+    systemProperty("decompengine.angr.evidenceRoot", evidenceRoot.absolutePath)
+    maxHeapSize = "512m"
+    maxParallelForks = 1
+    timeout.set(Duration.ofMinutes(3))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("Real Angr qualification requires fresh discovery") { false }
+    doFirst {
+        require(python.get().isNotBlank() && File(python.get()).isAbsolute && File(python.get()).canExecute()) {
+            "realAngrQualification requires an executable absolute ANGR_PYTHON"
+        }
+        Files.createDirectories(temporaryRoot.toPath())
+    }
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
         null -> useJUnitPlatform()
-        "core" -> useJUnitPlatform { excludeTags("ci-live") }
+        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    // A package and its complement partition future classes without a hand-maintained inventory.
+    when (shard) {
+        "core-main" -> filter {
+            includeTestsMatching("*")
+            excludeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        "core-oracle" -> filter {
+            includeTestsMatching("decompengine.oracle.*")
+            isFailOnNoMatchingTests = true
+        }
+        else -> Unit
     }
     if (isolateV3BoundaryTests.get() && shard != "live") {
         filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
@@ -1559,6 +1682,10 @@ tasks.test {
     if (shard != "live") {
         // Its production RSS monitor observes process-wide history, including earlier tests.
         filter { excludeTestsMatching(gccCompilerEnginePlanningTestClass) }
+    }
+    if (shard == null || shard == "core" || shard == "core-oracle") {
+        // These existing required gates have one owner in partitioned CI; full/core retain them.
+        dependsOn(snapshotCapsuleAuditDataTest)
         dependsOn("gccCompilerEnginePlanningIsolated")
     }
     configureOracleTestRuntime(this)
@@ -1580,7 +1707,7 @@ tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
     maxParallelForks = 1
     outputs.upToDateWhen { false }
     outputs.cacheIf("GCC planning tests must measure a fresh test JVM") { false }
-    onlyIf { providers.gradleProperty("ciTestShard").orNull != "live" }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle") }
     configureOracleTestRuntime(this)
     // Leave headroom below the unchanged 2 GiB production/fixture RSS cap, even with live env flags.
     maxHeapSize = "512m"
@@ -1599,7 +1726,8 @@ private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String)
         outputs.upToDateWhen { false }
         outputs.cacheIf("V3 boundary tests must measure a fresh test JVM") { false }
         onlyIf {
-            isolateV3BoundaryTests.get() && providers.gradleProperty("ciTestShard").orNull != "live"
+            isolateV3BoundaryTests.get() &&
+                providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-oracle")
         }
         configureOracleTestRuntime(this)
     }

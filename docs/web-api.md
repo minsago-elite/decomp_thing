@@ -30,8 +30,9 @@ artifact as JSON. JSON mutation bodies require
 `Content-Type: application/json`; upload requires `multipart/form-data` with exactly one `binary`
 part. No request to `/api/**` receives SPA HTML, including unknown routes, malformed requests,
 exceptions and unsupported methods. Unsupported methods return `405` plus `Allow`; unsupported
-`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` is permitted
-only for immutable artifact download metadata, where its headers equal GET without a body.
+`Accept` returns `406`, and unsupported request content type returns `415`. `HEAD` support is
+route-specific; permitted HEAD requests return the corresponding GET status and content headers
+without a response body.
 GET/HEAD never upload, queue, resume, cancel, accept, initialize Git, fetch or publish anything.
 
 Request fixtures wrap the actual body as `{apiVersion, kind, data}` only to select the schema;
@@ -46,6 +47,9 @@ unsupported/unknown state; it never maps to success or accepted. Invalid JSON or
 wrong types produce a decoder error, retain the previous snapshot as stale and disable dependent
 mutations. Bootstrap negotiates supported API versions and UI/application build IDs. An incompatible
 major produces a version recovery view; reloading cannot repeatedly replay a mutation.
+An unsupported bootstrap contract clears private session/instance observations and displays an
+explicit incompatible-version recovery message with a manual browser reload action. It offers
+no retry that can replay a sign-in mutation. An unsupported logout response remains unconfirmed.
 
 IDs are case-sensitive opaque strings. Clients must not parse their spelling or synthesize them.
 The existing 32-character lowercase hexadecimal `Job.id` remains a valid `jobId`; migration must
@@ -62,6 +66,43 @@ Small, explicitly bounded page limits, HTTP status, line numbers and schema vers
 Finite confidence ratios remain numbers in `[0,1]` with their meaning and denominator displayed.
 Binary payload snippets use lowercase hex, never implicit text decoding; strict UTF-8 text reads
 report decoding failure and still allow a bounded byte view/download.
+
+
+### Bootstrap build and listener identities
+
+The current bootstrap producer reports `apiVersions`, `applicationBuildId`, `uiBuildId`,
+configured upload/request/page limits, and explicit workflow capability states. Unavailable
+workflow adapters remain unavailable; reading bootstrap does not launch a tool or workflow.
+`applicationBuildId` identifies application bytes and `uiBuildId` identifies packaged UI bytes.
+Neither identifies a running server. Runtime shows a mismatched page/server UI build and asks
+for a reload; the decoder rejects an unsupported API major without replaying mutations.
+
+`serverInstanceId` is an opaque, non-secret identity generated once per listener lifetime.
+It remains stable across requests and browser sessions and changes when the server restarts,
+including a restart of the same application/UI build on the same job store. It is not an
+authorization token, durable job/run/revision identity, or proof that a tool is available.
+The property is optional in the v1 schema so older servers remain compatible; absence means
+unknown and is displayed as “Not reported”. Clients must not substitute a build hash for it.
+
+Each successfully checked bootstrap publishes a fresh page-local session generation. Private
+job, history, attempt/event and dashboard subtrees use that generation as their lifetime key,
+so an intermediate checking render being coalesced cannot keep an old private cache or event
+connection alive. A changed or unreported server instance also invalidates pending
+instance-bound upload observations. Durable upload tickets retain their explicit reconciliation
+path; the browser does not replay a mutation automatically. No identity enables workflow actions
+or changes their separate capability/authorization gates.
+
+### Unexpected internal API failures
+
+The HTTP matrix exercises unexpected exceptions inside real v1/legacy request dispatchers,
+including unknown v1 routes/majors and the shared versioned session/CSRF routes in legacy mode.
+It requires `500 INTERNAL_ERROR`, JSON, no-store caching, matching opaque response/header IDs and
+fixed messages without exception text or private values. A response already committed is closed;
+the server does not attempt to append a second error envelope. Each scenario recovers through
+a read under the original session, without changing stored job bytes, invoking a workflow or
+replaying an ambiguous session mutation. This covers controller routing separately from the
+direct error-renderer control; it does not establish live provider/tool behavior, complete
+legacy sunset migration or production-release qualification.
 
 ## Resource and authority identities
 
@@ -99,6 +140,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `DELETE /api/v1/session` | `204` | Authorized CSRF-protected logout; #161 |
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
+| `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -167,6 +209,19 @@ are never browser diagnostics.
 | `429` | `QUOTA_EXCEEDED` | Honor `Retry-After` without duplicating work |
 | `501` / `503` | `CAPABILITY_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `SERVER_DRAINING` | Explain reason and retain view |
 | `500` / `504` | `INTERNAL_ERROR`, `DEADLINE_EXCEEDED` | Show request ID; reconcile uncertain mutation outcome |
+
+An authorized streamed upload that reports a typed uncertain publication returns
+`409 RECOVERY_REQUIRED` with `Location: <basePath>api/v1/jobs/<jobId>`. The existing
+error envelope remains unchanged, with `retryable:false` and no `Retry-After`.
+The location identifies the retained job for an authenticated read; it is not an
+instruction to submit the upload again or an assertion that analysis completed.
+Private filesystem causes and paths are withheld.
+
+Until storage is reopened, the job read truthfully reports recovery is required.
+The service also refuses further uploads. That separate
+`503 RECOVERY_REQUIRED` refusal has no guessed job location. After explicit
+restart/reconciliation, an upload with the same idempotency key and intent can
+replay its retained publication receipt rather than create another job.
 
 The server advertises stricter configured limits at bootstrap. Contract defaults are 30 seconds
 for ordinary HTTP requests, 120 seconds for upload and 120 seconds download idle time; JSON bodies
@@ -397,8 +452,10 @@ Legacy event reads and v1 progress reads now use the same fixed-path service ope
 which validates job/attempt ownership and applies the retained-descriptor artifact reader's
 2 MiB ceiling. Legacy event reads no longer fabricate a zero-event snapshot when the journal
 is missing. Malformed and oversized journals also return `PROGRESS_UNAVAILABLE`; an actual
-persisted, valid zero-event journal still returns 200. This does not add cursor replay or v1
-session authorization to the legacy route, nor add a new event authority.
+persisted, valid zero-event journal still returns 200. Legacy event reads require the shared
+local session policy, including revocation, before this service read; this is the same
+LocalWebAccess boundary used by the versioned controller. The legacy payload still adds no
+cursor replay or new event authority.
 
 Legacy successful event JSON and initial HTML now share a closed metadata projection.
 Raw `text`, plan `entries`, `path` and unknown fields are withheld. Message prose is withheld
@@ -416,9 +473,10 @@ the SPA retains its activity-view restriction as well. See [the transport projec
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
 internal failures use the same response helper but are not fault-injected by that HTTP test.
-The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET only.
-Other methods return 405 with `Allow: GET` before storage reads; HEAD sends the same error
-headers without a body. Unknown routes retain 404. GET shares v1's bounded Accept policy:
+The two legacy JSON read routes (`/api/jobs/J` and `/api/jobs/J/events`) accept GET and HEAD.
+Other methods return 405 with `Allow: GET, HEAD` before storage reads. HEAD returns the same
+status and content headers as GET without a response body. Unknown routes retain 404.
+Both methods share v1's bounded Accept policy:
 a missing header allows JSON; explicit JSON, `application/*` and `*/*` ranges are supported;
 a more specific `q=0` exclusion overrides a broader wildcard. Nonmatching/malformed supported
 ranges yield 406. Repeated Accept headers or a value over 512 characters yield 400. Errors

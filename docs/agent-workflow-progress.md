@@ -9,6 +9,15 @@ is retried. Events bind the immutable request digest, task identity digest and m
 sequence. The terminal task record maps that turn to the session digest and final stop reason or
 failure classification. It explicitly records that validation is still pending. A workflow-owned
 accepted phase may subsequently reference an accepted source digest.
+Display identity/content hashing classifies the complete text before encoding. Valid strings stream
+through chunks of at most 4,096 UTF-16 units without splitting a surrogate pair; malformed strings
+stream the receipt domain marker and every raw UTF-16BE unit through an 8,192-byte buffer. This
+preserves the complete commitment while bounding temporary encoding buffers. Raw input length,
+whole hashing time and request-binding admission still need their separate operation budgets.
+Task identity digests and workflow-run display values are prepared once before queue admission.
+Later task records reuse those immutable values instead of rehashing raw task/run IDs or
+redacting the same run preview inside the producer monitor for every callback. Raw event and
+request admission and total callback cost still need their separate whole-operation bounds.
 
 `workflowRunId` and its digest correlate task events and `workflow_run_state` observations with a
 durable workflow run. They are separate from the journal writer's `runId`, which changes on restart.
@@ -20,7 +29,9 @@ keep display meanings distinct; they do not validate a graph or confer acceptanc
 
 One journal writer owns a filesystem lock. Producers normalize and enqueue without disk I/O;
 the writer forces a temporary file, atomically replaces the snapshot, and forces its directory.
-Defaults bound the queue to 128 events, retained history to 256 events and the snapshot to 512 KiB.
+Defaults bound the ordinary queue to 128 events with one reserved overflow terminal record,
+retained history to 256 events and the snapshot to 512 KiB. Superseding a pending overflow terminal
+counts the earlier terminal as queue loss; both ordinary and reserved records drain in order.
 Overflow is explicit through sequence gaps, queue/history omission counts and `truncated`. Readers
 accept at most 2 MiB and 1,024 ordered records. Closing drains the bounded queue and waits at most
 five seconds; persistence or cleanup failure is reported instead of claiming a complete projection.
@@ -33,10 +44,30 @@ prevents a configured secret split across chunks from leaking through separate p
 environment values and common credential formats are redacted before previews are bounded. Tool,
 plan and permission previews are also bounded. Opaque session/message/tool IDs remain digests.
 Redaction is a display precaution, not a claim that arbitrary unconfigured secrets can be identified.
+Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
+malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
+therefore cannot collapse through replacement encoding and merge separate message buffers.
+Configured literals reuse immutable prefix indexes for exact UTF-16 matching. Literal searches and
+non-overlapping replacements use prefix fallback instead of repeatedly retrying long shared prefixes.
+The same index checks final formatted hints and omission markers. The existing ordering, eight-pass
+policy and 16,384-character replacement limit stay in force; the replacement builder also stays
+within that limit. Index arrays require at most four bytes per admitted normalized code unit, plus
+per-literal object/array overhead. Overall callback deadlines, raw event/request admission and total
+shared-consumer resource qualification remain separate unfinished work.
 
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history
 from disk. CLI progress phases go to stderr; source/archive result paths remain on stdout.
+
+Reconstruction CLI phase callbacks from the owned journal adapter enter a separate 32-phase
+mailbox. The console worker reads only fixed phase enums from that mailbox; it does not read a
+snapshot during construction, observation or close. Slow retained-file reads therefore cannot
+suppress terminal console phases. The journal remains the browser/replay history, with its own
+full-event loss counts. Mailbox omissions count console phase updates only. Callback capture and
+run binding do not copy peer text or borrow another writer's observations. Close first attempts
+the owned journal flush, then drains the mailbox with the existing 200-millisecond observer join.
+A blocked console can still retain the one daemon or omit pending console lines on process exit;
+console display is optional and never replaces the separate typed workflow result.
 
 Repair runs now own a journal for their reports directory. Captured task events and final agent
 receipts carry the durable repair run ID; policy checking precedes candidate validation. Provisional,
@@ -46,6 +77,15 @@ graph head. The build phase encloses the provider call; the behavior phase marks
 report, not live per-case provider telemetry. A busy or failed journal is disabled with one fixed
 diagnostic and cannot change acceptance, consume another repair attempt or replace durable failure.
 Close retains the bounded journal drain and preserves thread interruption while releasing its lock.
+Ordinary exceptions from the fixed repair warning sink are contained; warning interruption is
+restored without replacing the original workflow failure or changing another journal owner's lease.
+The default web/journal and repair warnings publish only a fixed kind to one process-wide daemon.
+Its mailbox coalesces at most two pending kinds, retains no task/run values or exception, and never
+holds its monitor during output. A blocked stderr sink therefore does not hold a workflow caller
+or its journal lease. Warnings may be delayed or coalesced. The sole daemon can remain blocked until
+process exit; this is not a complete output-retirement or callback-latency guarantee. Explicitly
+injected warning callbacks still run synchronously and must remain prompt; their ordinary exception
+and interruption behavior is unchanged.
 
 The repair CLI consumes the whole-run outcome, prints at most 20 typed iteration dispositions, and
 returns a nonzero exit for unsuccessful or incomplete validation. It omits peer summaries, prompts

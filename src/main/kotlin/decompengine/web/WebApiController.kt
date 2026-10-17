@@ -23,6 +23,8 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    // The build hash is stable across restarts; this identity belongs to one listener lifetime.
+    private val serverInstanceId = UUID.randomUUID().toString()
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
@@ -42,7 +44,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events|/progress-pin)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events|/progress-pin)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -51,12 +53,21 @@ internal class WebApiController(
                 access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested API route is unavailable."))
             } catch (failure: WebAccessDenied) {
                 access.sendDenied(exchange, failure)
+            } catch (_: Exception) {
+                if (exchange.responseCode != -1) exchange.close()
+                else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
             }
             return true
         }
         try {
             when {
                 resource == "session" -> sessions.handle(exchange)
+                resource == "recovery" -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoWebApiQuery(exchange)
+                    requireJsonAccept(exchange)
+                    sendWebApiResponse(exchange, 200, "recovery", jobs.recoveryInventory().toJson())
+                }
                 resource == "jobs" && exchange.requestMethod == "POST" -> {
                     val mutation = jobMutations.authorizeUpload(exchange)
                     requireNoWebApiQuery(exchange)
@@ -208,9 +219,15 @@ internal class WebApiController(
         } catch (_: decompengine.jobs.InvalidUploadException) {
             access.sendDenied(exchange, WebAccessDenied(422, "INVALID_ELF", "Upload a supported ELF binary with a complete header."))
         } catch (failure: WebJobServiceException) {
-            val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
-            access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
-                publicWebDiagnosticMessage(failure.code)))
+            val uncertain = failure.cause as? decompengine.jobs.UploadPublicationUncertain
+            if (failure.code == "RECOVERY_REQUIRED" && uncertain != null && uncertain.jobId.matches(Regex("[a-f0-9]{32}"))) {
+                exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${uncertain.jobId}")
+                access.sendDenied(exchange, WebAccessDenied(409, "RECOVERY_REQUIRED", publicWebDiagnosticMessage(failure.code)))
+            } else {
+                val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
+                access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
+                    publicWebDiagnosticMessage(failure.code)))
+            }
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
@@ -224,6 +241,7 @@ internal class WebApiController(
         put("apiVersions", JsonArray(listOf(JsonPrimitive(1))))
         put("applicationBuildId", applicationBuildId)
         put("uiBuildId", assets.manifest.buildId)
+        put("serverInstanceId", serverInstanceId)
         put("basePath", assets.basePath)
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())

@@ -127,6 +127,28 @@ public final class SecureRepairRuntime {
         );
     }
 
+    /** Recovery-only read view; it cannot replace the registered profile or grant source writes. */
+    static ModuleRepairIndex loadRecoveryIndex(
+        Object authorityCandidate,
+        Path projectRoot,
+        RepairIndexProfile profile,
+        RepairResourceBudget budget,
+        RepairRecoverySourceView sourceView
+    ) {
+        GraphAuthority authority = checkedGraphAuthority(authorityCandidate);
+        if (authority.profile != profile) {
+            throw new SecurityException("repair recovery attempted to replace its registered profile");
+        }
+        return ModuleRepairIndex.Companion.loadRecoveryAuthorized(
+            RUNTIME_IDENTITY,
+            authority,
+            projectRoot,
+            profile,
+            budget,
+            Objects.requireNonNull(sourceView)
+        );
+    }
+
     /** Identity comparison used by each JVM-visible Kotlin bridge before it touches inputs. */
     static void requireRuntimeIdentity(Object candidate) {
         if (candidate != RUNTIME_IDENTITY) {

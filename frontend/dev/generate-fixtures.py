@@ -44,6 +44,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     bootstrap["data"]["basePath"] = base_path
     bootstrap["data"]["applicationBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
     bootstrap["data"]["uiBuildId"] = "SIMULATED_DEVELOPMENT_DATA"
+    bootstrap["data"]["serverInstanceId"] = "SIMULATED_DEVELOPMENT_INSTANCE"
     record(api + "/bootstrap", bootstrap)
     for name, state, description in [
         ("running", "running", "Simulated active attempt; no native process is running."),
@@ -92,6 +93,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
     page = source("jobs-page")
     page["data"]["items"] = jobs
     record(api + "/jobs", page)
+    record(api + "/recovery", source("recovery-empty"))
     download = "SIMULATED_DEVELOPMENT_DATA\nThis synthetic attachment is not execution evidence.\n"
     artifact = source("artifact")
     artifact["data"].update(artifactId="fixture_attachment", displayName="SIMULATED-evidence.txt",

@@ -36,6 +36,13 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       requireValue(items.every(item => item.jobId === jobId));
       break;
     }
+    case 'recovery': {
+      const inventory = document.data;
+      const candidates = inventory.retainedUploadStages + inventory.retainedMetadataFiles;
+      requireValue(candidates <= 128 && candidates <= inventory.scannedEntries);
+      requireValue(BigInt(inventory.observedBytes) <= 67108864n);
+      break;
+    }
     case 'jobs': {
       const { items, page } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map((item) => item.jobId)).size === items.length);

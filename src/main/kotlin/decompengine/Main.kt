@@ -21,7 +21,6 @@ import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
-import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2
 import decompengine.repair.RepairRuntimeConfiguration
@@ -41,6 +40,7 @@ fun main(args: Array<String>) {
         "patch" -> runPatch(args.drop(1))
         "runner" -> runRunner(args.drop(1))
         "repair" -> runRepair(args.drop(1))
+        "repair-history" -> runRecordedRepairHistory(args.drop(1))
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
@@ -55,6 +55,18 @@ fun main(args: Array<String>) {
             kotlin.system.exitProcess(2)
         }
     }
+}
+
+private fun runRecordedRepairHistory(args: List<String>) {
+    val options = runCatching { parseRecordedRepairHistoryArguments(args) }.getOrNull()
+    if (options == null) {
+        System.err.println("usage: llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]")
+        kotlin.system.exitProcess(2)
+    }
+    val presentation = presentRecordedRepairHistory(
+        decompengine.repair.readProjectRecordedRepairHistory(options.project), options.selection)
+    presentation.lines.forEach(::println)
+    if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
 }
 
 private fun runLlvmNativeRuntimeMeasurement(args: List<String>) {
@@ -167,10 +179,7 @@ private fun runReconstruct(args: List<String>) {
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
-    BestEffortProgressJournal(
-        output, "reconstruction", environment.values,
-        onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
-    ).use { progress ->
+    withReconstructionCliProgress(output, environment.values) { progress ->
         val strategy = try {
             selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
         } catch (e: IllegalArgumentException) {
@@ -589,6 +598,7 @@ private fun printHelp() {
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
+          llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>

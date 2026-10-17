@@ -48,6 +48,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
       </dl>
       <p>Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.</p>
       <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.</p>
+      <p>Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.</p>
       <a href={appPath(basePath, '/runtime')}>View reported workflow availability</a>
     </>}
   </>;
@@ -58,7 +59,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">Job overview</h1>
     <a href={appPath(basePath, '/')}>Return to jobs</a>
-    {state?.status === 'authenticated' ? <JobDetails key={jobId} jobId={jobId} basePath={basePath} />
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} />
       : <p>Connect a local session to view this job.</p>}
   </section>;
 }

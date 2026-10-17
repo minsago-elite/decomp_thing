@@ -189,7 +189,7 @@ internal class GccCompilerEngineProfileLoader(
     private val readArtifact: (Path, Int, String) -> decompengine.oracle.core.OracleArtifactSnapshot,
 ) {
     fun load(path: Path): GccCompilerEngineSuite {
-        val profileArtifact = readJsonArtifact(path, MAXIMUM_PROFILE_BYTES, "compiler-engine profile", "gcc/compiler-engines")
+        val profileArtifact = readJsonArtifact(path, MAXIMUM_PROFILE_BYTES, "compiler-engine profile", "gcc/compiler-engines-exporter13")
         val profile = profileArtifact.document
         val root = profileArtifact.path.parent
         val analysisDocument = profile.objectField("analysis")
@@ -281,7 +281,7 @@ internal class GccCompilerEngineProfileLoader(
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 11 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 13 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {

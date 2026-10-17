@@ -16,6 +16,182 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
+        var clock = 0L
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {
+            val elapsed = clock++
+            longArrayOf(elapsed, 100L - elapsed)
+        })
+        val prepare = RuntimeCopyStatistics()
+        prefix.retain(RuntimeCopyStatistics.Prefix.Owner.PREPARE, prepare)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+            prepare.copy.started(); prepare.copy.read(13); prepare.copy.written(13); prepare.copy.completed()
+        }
+        val validation = requireNotNull(prefix.statistics(RuntimeCopyStatistics.Prefix.Owner.VALIDATE))
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.VALIDATE) {
+            validation.hash.started(); validation.hash.read(7); validation.hash.completed()
+        }
+        val primary = IllegalStateException("authored action failure")
+        val caught = assertFailsWith<IllegalStateException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) {
+                prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING) {
+                    prefix.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+                    throw primary
+                }
+            }
+        }
+        assertTrue(caught === primary)
+        prefix.measure(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { Unit }
+        val mapped = mappedPrefixFailure(prefix, primary)
+        assertTrue(mapped.cause === primary)
+        assertTrue(mappedPrefixFailure(prefix, primary).suppressed.isEmpty())
+        assertTrue(primary.suppressed.isEmpty())
+        val summary = mapped.suppressed.single().message.orEmpty()
+        assertTrue(summary.contains("firstObservedFailure=LAUNCH_PINNING,kind=TIMEOUT"), summary)
+        assertTrue(summary.contains("failureElapsedNs=8,failureRemainingNs=92"), summary)
+        assertTrue(summary.contains("PREPARE:COPY[observed=true,supported=true,files=1/1,readBytes=13"), summary)
+        assertTrue(summary.contains("VALIDATE:COPY[observed=false"), summary)
+        assertTrue(summary.contains("HASH[observed=true,supported=true,files=1/1,readBytes=7"), summary)
+        assertTrue(summary.contains("LAUNCH:3") && summary.contains("inclusiveNs=unknown"), summary)
+        assertTrue(summary.contains("BOUNDARY_CLOSE:2"), summary)
+        assertTrue(summary.contains("inclusive-overlap-do-not-sum"), summary)
+    }
+
+    @Test
+    fun `unavailable diagnostic clock cannot change action result or primary failure`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { error("unavailable observation clock") })
+        var actions = 0
+        assertEquals(37, prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++; 37 })
+        assertEquals(1, actions)
+        val primary = IOException("authored primary")
+        assertTrue(assertFailsWith<IOException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { throw primary }
+        } === primary)
+        val mapped = mappedPrefixFailure(prefix, primary)
+        assertTrue(mapped.suppressed.single().message.orEmpty().contains("supported=false"))
+        assertTrue(primary.suppressed.isEmpty())
+        assertEquals("authored primary", primary.message)
+    }
+
+    @Test
+    fun `repeated phase observations remain bounded and never skip the action`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        var actions = 0
+        repeat(1000) { prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++ } }
+        assertEquals(1000, actions)
+        val primary = IOException("bounded diagnostic")
+        val mapped = mappedPrefixFailure(prefix, primary)
+        val summary = mapped.suppressed.single().message.orEmpty()
+        assertTrue(primary.suppressed.isEmpty())
+        assertTrue(RuntimeCopyStatistics.Prefix.Phase.entries.size <= 32)
+        assertTrue(summary.length <= 16 * 1024)
+        assertTrue(summary.contains("supported=false"))
+        assertFalse(summary.contains("bounded diagnostic"))
+    }
+
+    @Test
+    fun `fresh prefix mapping never inspects foreign causes or appends fallback records`() {
+        val cause = OpaquePrefixCause()
+        val existing = List(9) { IOException("existing foreign $it") }
+        existing.forEach(cause::addSuppressed)
+        val facts = decompengine.agent.AgentFailure(
+            decompengine.agent.AgentFailureKind.CONFIGURATION, "authored mapped failure",
+            retryable = true, details = mapOf("fixed" to "control"),
+        )
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        val first = mappedPrefixFailure(prefix, cause, facts)
+        assertTrue(first.failure === facts && first.cause === cause)
+        assertEquals(null, first.receipt)
+        assertEquals(facts.message, first.message)
+        assertEquals(1, first.suppressed.size)
+        assertFalse(first.suppressed.single().message.orEmpty().contains("foreign"))
+        assertTrue(mappedPrefixFailure(prefix, cause, facts).suppressed.isEmpty())
+        assertTrue(mappedPrefixFailure(null, cause, facts).suppressed.isEmpty())
+        val wrongOwner = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        wrongOwner.javaClass.getDeclaredField("ownerThread").apply { isAccessible = true }
+            .set(wrongOwner, Thread("unstarted-observation-owner")) // Never start a thread.
+        assertTrue(mappedPrefixFailure(wrongOwner, cause, facts).suppressed.isEmpty())
+        assertEquals(existing, cause.suppressed.toList())
+        assertTrue(RuntimeCopyStatistics.Prefix::class.java.declaredMethods.none { method ->
+            method.parameterTypes.any { Throwable::class.java.isAssignableFrom(it) }
+        }) // No caller-supplied carrier publication API remains.
+    }
+
+    @Test
+    fun `optional owner allocation failure does not skip or repeat the original action`() {
+        val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
+        var allocations = 0
+        val allocate: () -> RuntimeCopyStatistics = { allocations++; throw OutOfMemoryError("authored allocation failure") }
+        val statisticsWith = prefix.javaClass.getDeclaredMethod("statisticsWith",
+            RuntimeCopyStatistics.Prefix.Owner::class.java, Function0::class.java).apply { isAccessible = true }
+        val statistics = statisticsWith.invoke(prefix, RuntimeCopyStatistics.Prefix.Owner.PREPARE, allocate)
+        assertEquals(null, statistics)
+        assertEquals(1, allocations)
+        var actions = 0
+        assertEquals(37, prefix.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { actions++; 37 })
+        assertEquals(1, actions)
+        val original = IOException("authored product failure")
+        assertTrue(assertFailsWith<IOException> {
+            prefix.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { actions++; throw original }
+        } === original)
+        assertEquals(2, actions)
+        assertTrue(original.suppressed.isEmpty())
+        val summary = mappedPrefixFailure(prefix, original).suppressed.single().message.orEmpty()
+        assertTrue(summary.contains("supported=false"), summary)
+        assertTrue(summary.contains("PREPARE:unobserved"), summary)
+    }
+
+    @Test
+    fun `unavailable prefix entry argument preserves leaf action once and original failure`() {
+        var entries = 0
+        val unavailable = OutOfMemoryError("authored entry argument failure")
+        val budgetArgument: () -> ((Long) -> LongArray) = { throw unavailable }
+        val create: () -> RuntimeCopyStatistics.Prefix? = {
+            entries++
+            RuntimeCopyStatistics.Prefix.create(budgetArgument())
+        }
+        val entry = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+            .getDeclaredMethod("createOptionalPrelaunchObservation", Function0::class.java)
+            .apply { isAccessible = true }
+        assertNull(entry.invoke(null, create)) // Failure occurs before Prefix.create is entered.
+        assertEquals(1, entries)
+
+        val leaf = Class.forName("decompengine.acp.LinuxFilesystemSyscallsKt")
+            .getDeclaredMethod("measuredCopyOperation", RuntimeCopyStatistics.Bucket::class.java,
+                RuntimeCopyStatistics.Operation::class.java, Function0::class.java)
+            .apply { isAccessible = true }
+        fun invokeLeaf(bucket: RuntimeCopyStatistics.Bucket?, action: () -> Int): Any? = try {
+            leaf.invoke(null, bucket, RuntimeCopyStatistics.Operation.CHECK, action)
+        } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+        val statistics = RuntimeCopyStatistics()
+        val primary = IOException("authored leaf primary")
+        var actions = 0
+        for (bucket in listOf(null, statistics.copy)) {
+            assertEquals(37, invokeLeaf(bucket) { actions++; 37 })
+            assertTrue(assertFailsWith<IOException> {
+                invokeLeaf(bucket) { actions++; throw primary }
+            } === primary)
+        }
+        assertEquals(4, actions)
+        assertTrue(primary.suppressed.isEmpty())
+        assertTrue(statistics.copy.summary().contains("CHECK=2/"))
+    }
+
+    private class OpaquePrefixCause : IOException("foreign graph must remain opaque") {
+        override val cause: Throwable? get() = error("foreign cause graph was read")
+    }
+
+    private fun mappedPrefixFailure(
+        prefix: RuntimeCopyStatistics.Prefix?,
+        cause: Throwable,
+        failure: decompengine.agent.AgentFailure = decompengine.agent.AgentFailure(
+            decompengine.agent.AgentFailureKind.CONFIGURATION, "authored mapped failure"),
+    ): decompengine.agent.AgentExecutionException = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+        .getDeclaredMethod("mappedPrelaunchFailure", decompengine.agent.AgentFailure::class.java,
+            Throwable::class.java, RuntimeCopyStatistics.Prefix::class.java)
+        .apply { isAccessible = true }.invoke(null, failure, cause, prefix) as decompengine.agent.AgentExecutionException
+
+    @Test
     fun `owned statx scratch resets all bytes and retains fresh immutable identities across scopes`() {
         LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
             LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->
@@ -150,6 +326,270 @@ class LinuxFilesystemSyscallsTest {
             assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
             scratch.close()
         }
+    }
+
+    @Test
+    fun `owned statx pathname and statistics reset across interrupted retries without shared scope state`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { first ->
+            LinuxFilesystemSyscalls.StatxIdentityScratch().use { second ->
+                val field = first.javaClass.getDeclaredField("emptyPath").apply { isAccessible = true }
+                val firstPath = field.get(first) as ByteArray
+                val secondPath = field.get(second) as ByteArray
+                assertTrue(firstPath !== secondPath)
+                assertContentEquals(byteArrayOf(0), firstPath)
+                assertContentEquals(byteArrayOf(0), secondPath)
+                firstPath[0] = 65
+                secondPath[0] = 66
+                var calls = 0
+                val observed = scriptedStatx(first, query = { buffer ->
+                    assertTrue(Thread.holdsLock(first))
+                    assertTrue(firstPath === field.get(first))
+                    assertContentEquals(byteArrayOf(0), firstPath)
+                    assertContentEquals(ByteArray(256), buffer.getByteArray(0, 256))
+                    assertEquals(66.toByte(), secondPath.single())
+                    calls++
+                    if (calls == 1) {
+                        writeStatxIdentity(buffer, 70)
+                        buffer.setByte(255, 0x7f)
+                        firstPath[0] = 67
+                        com.sun.jna.Native.setLastError(4)
+                        -1L
+                    } else {
+                        writeStatxIdentity(buffer, 71)
+                        0L
+                    }
+                })
+                assertEquals(2, calls)
+                assertEquals(71L, observed.key.inode)
+                firstPath[0] = 68
+                val other = scriptedStatx(second, query = { buffer ->
+                    assertContentEquals(byteArrayOf(0), secondPath)
+                    assertEquals(68.toByte(), firstPath.single())
+                    writeStatxIdentity(buffer, 72)
+                    0L
+                })
+                assertEquals(72L, other.key.inode)
+                assertEquals(71L, observed.key.inode)
+                first.close()
+                var closedCalls = 0
+                assertFailsWith<IllegalStateException> {
+                    scriptedStatx(first, query = { closedCalls++; 0L })
+                }
+                assertEquals(0, closedCalls)
+                assertEquals(68.toByte(), firstPath.single()) // Closed admission refuses before touching storage.
+            }
+        }
+    }
+
+    @Test
+    fun `owned statx byte pathname observes actual unlinked and replacement descriptors without retaining identity`() {
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "statx-byte-path-").normalize()
+        try {
+            LinuxFilesystemSyscalls.requireSupported(path)
+            Files.writeString(path.resolve("record"), "first")
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "record")!!.use { original ->
+                    val scratch = LinuxFilesystemSyscalls.StatxIdentityScratch()
+                    try {
+                        assertEquals(LinuxFilesystemSyscalls.identity(directory.fd), scratch.identity(directory.fd))
+                        assertEquals(original.identity, scratch.identity(original.fd))
+                        Files.delete(path.resolve("record"))
+                        Files.writeString(path.resolve("record"), "replacement")
+                        val unlinked = LinuxFilesystemSyscalls.identity(original.fd)
+                        assertEquals(0, unlinked.linkCount)
+                        assertEquals(unlinked, scratch.identity(original.fd))
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "record")!!.use { replacement ->
+                            assertTrue(original.identity.key != replacement.identity.key)
+                            assertEquals(replacement.identity, scratch.identity(replacement.fd))
+                            assertEquals(unlinked, scratch.identity(original.fd))
+                        }
+                        val expectedFailure = assertFailsWith<IOException> { LinuxFilesystemSyscalls.identity(-1) }
+                        val actualFailure = assertFailsWith<IOException> { scratch.identity(-1) }
+                        assertEquals(expectedFailure::class, actualFailure::class)
+                        if (expectedFailure is LinuxSyscallException) {
+                            assertEquals(expectedFailure.errno, (actualFailure as LinuxSyscallException).errno)
+                        } else {
+                            assertEquals(expectedFailure.message, actualFailure.message)
+                        }
+                    } finally {
+                        scratch.close()
+                    }
+                    // Scratch owns no borrowed descriptor; both native query paths still observe it after close.
+                    assertEquals(0, LinuxFilesystemSyscalls.identity(original.fd).linkCount)
+                    assertFailsWith<IllegalStateException> { scratch.identity(original.fd) }
+                }
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `owned direct statx binds the real ABI and preserves immediate errno and successful observations`() {
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(),
+            "statx-direct-").normalize()
+        try {
+            LinuxFilesystemSyscalls.requireSupported(path)
+            LinuxFilesystemSyscalls.openRoot(path).use { directory ->
+                LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+                    assertEquals(LinuxFilesystemSyscalls.identity(directory.fd), scratch.identity(directory.fd))
+                    assertTrue(com.sun.jna.Native.registered(LinuxOwnedStatxDirect::class.java),
+                        "required native lane must exercise the direct binding, not silently qualify its proxy fallback")
+                    com.sun.jna.Memory(256).use { statistics ->
+                        val emptyPath = byteArrayOf(0)
+                        statistics.clear()
+                        com.sun.jna.Native.setLastError(123)
+                        val failed = LinuxOwnedStatxDirect.statx(-1, emptyPath, 0x1100, 0x17ff, statistics)
+                        val error = com.sun.jna.Native.getLastError()
+                        assertEquals(-1, failed)
+                        assertEquals(9, error)
+                        statistics.clear()
+                        com.sun.jna.Native.setLastError(117)
+                        val succeeded = LinuxOwnedStatxDirect.statx(directory.fd, emptyPath, 0x1100, 0x17ff, statistics)
+                        assertEquals(0, succeeded) // A stale errno must not become a LastErrorException on success.
+                        assertEquals(0x111f, statistics.getInt(0) and 0x111f)
+                        assertEquals(directory.identity.mountId, statistics.getLong(0x90))
+                    }
+                    assertEquals(directory.identity, scratch.identity(directory.fd))
+                }
+                assertEquals(directory.identity, LinuxFilesystemSyscalls.identity(directory.fd))
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `owned statx bulk decoding matches native field decoding with one reusable snapshot per scope`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+            val memory = BulkStatxMemory(scratch)
+            replaceStatxMemory(scratch, memory)
+            val retained = mutableListOf<LinuxFileIdentity>()
+            val modes = listOf(0x81a0, 0x41ed, 0xa1ff, 0, 0x61a0)
+            val majors = listOf(0, 8, -1, 0x12345678, Int.MIN_VALUE)
+            val minors = listOf(0, 1, -1, Int.MIN_VALUE, Int.MAX_VALUE)
+            modes.forEachIndexed { index, mode ->
+                var expected: LinuxFileIdentity? = null
+                val priorPrimitiveReads = memory.primitiveReads
+                val observed = scriptedStatx(scratch, query = { buffer ->
+                    writeStatxIdentity(buffer, if (index == 4) -1L else 100L + index)
+                    buffer.setInt(0x10, listOf(0, 1, -1, Int.MIN_VALUE, Int.MAX_VALUE)[index])
+                    buffer.setInt(0x14, Int.MIN_VALUE + index)
+                    buffer.setInt(0x18, Int.MAX_VALUE - index)
+                    buffer.setShort(0x1c, mode.toShort())
+                    buffer.setInt(0x88, majors[index]); buffer.setInt(0x8c, minors[index])
+                    buffer.setLong(0x90, if (index == 4) Long.MAX_VALUE else 1L + index)
+                    expected = genericStatxDecode(buffer)
+                    0L
+                })
+                assertEquals(expected, observed)
+                assertEquals(9, memory.primitiveReads - priorPrimitiveReads,
+                    "only the unmodified generic reference performs individual native field reads")
+                assertEquals(index + 1, memory.bulkReads)
+                retained.add(observed)
+            }
+            assertEquals(100L, retained.first().key.inode)
+            assertTrue(retained.zipWithNext().all { (first, second) -> first !== second })
+            LinuxFilesystemSyscalls.StatxIdentityScratch().use { other ->
+                val otherMemory = BulkStatxMemory(other)
+                replaceStatxMemory(other, otherMemory)
+                scriptedStatx(other, query = { buffer -> writeStatxIdentity(buffer, 55); 0L })
+                assertTrue(requireNotNull(memory.destination) !== requireNotNull(otherMemory.destination))
+            }
+            assertEquals(100L, retained.first().key.inode)
+            scratch.close(); scratch.close()
+            assertEquals(1, memory.closes)
+        }
+    }
+
+    @Test
+    fun `owned statx bulk copy follows successful queries and preserves retry fallback failure and closed refusal`() {
+        LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+            val memory = BulkStatxMemory(scratch)
+            replaceStatxMemory(scratch, memory)
+            val first = scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 61); 0L })
+            requireNotNull(memory.destination).fill(0x55)
+            var attempts = 0
+            val retried = scriptedStatx(scratch, query = { buffer ->
+                assertEquals(1, memory.bulkReads, "interrupted attempts cannot publish a copied result")
+                attempts++
+                writeStatxIdentity(buffer, 61L + attempts)
+                if (attempts == 1) { com.sun.jna.Native.setLastError(4); -1L } else 0L
+            })
+            assertEquals(2, attempts)
+            assertEquals(63L, retried.key.inode)
+            assertEquals(61L, first.key.inode)
+            assertEquals(2, memory.bulkReads)
+            val fallback = first.copy(key = LinuxFileKey(7, 99))
+            var fallbacks = 0
+            for (errno in listOf(1, 38, 95)) {
+                assertEquals(fallback, scriptedStatx(scratch, query = { buffer ->
+                    writeStatxIdentity(buffer, 64); com.sun.jna.Native.setLastError(errno); -1L
+                }, fallback = { fallbacks++; fallback }))
+                assertEquals(2, memory.bulkReads)
+            }
+            assertEquals(fallback, scriptedStatx(scratch,
+                query = { throw UnsatisfiedLinkError("authored unavailable backend") },
+                fallback = { fallbacks++; fallback }))
+            assertEquals(2, memory.bulkReads)
+            for (errno in listOf(5, 9, 13)) {
+                val failed = assertFailsWith<LinuxSyscallException> {
+                    scriptedStatx(scratch, query = { com.sun.jna.Native.setLastError(errno); -1L },
+                        fallback = { error("genuine errno cannot fall back") })
+                }
+                assertEquals(errno, failed.errno)
+                assertEquals(2, memory.bulkReads)
+            }
+            assertEquals(fallback, scriptedStatx(scratch, query = { buffer -> buffer.setInt(0, 0x11f); 0L },
+                fallback = { fallbacks++; fallback }))
+            assertEquals(5, fallbacks)
+            assertEquals(3, memory.bulkReads)
+            val copyFailure = IOException("authored bulk copy failure after data delivery")
+            memory.copyFailure = copyFailure
+            assertTrue(assertFailsWith<IOException> {
+                scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 65); 0L },
+                    fallback = { error("copy failure cannot become backend fallback") })
+            } === copyFailure)
+            assertEquals(4, memory.bulkReads)
+            memory.copyFailure = null
+            val next = scriptedStatx(scratch, query = { buffer -> writeStatxIdentity(buffer, 66); 0L })
+            assertEquals(66L, next.key.inode)
+            assertEquals(61L, first.key.inode)
+            assertEquals(5, memory.bulkReads)
+            assertEquals(0, memory.primitiveReads)
+            scratch.close(); scratch.close()
+            var closedQueries = 0
+            assertFailsWith<IllegalStateException> { scriptedStatx(scratch, query = { closedQueries++; 0L }) }
+            assertEquals(0, closedQueries)
+            assertEquals(5, memory.bulkReads)
+            assertEquals(1, memory.closes)
+        }
+    }
+
+    private fun genericStatxDecode(memory: com.sun.jna.Memory): LinuxFileIdentity? = try {
+        LinuxFilesystemSyscalls::class.java.getDeclaredMethod("decodeDescriptorStatxIdentity", com.sun.jna.Memory::class.java)
+            .apply { isAccessible = true }.invoke(LinuxFilesystemSyscalls, memory) as LinuxFileIdentity?
+    } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
+
+    private class BulkStatxMemory(private val owner: Any) : com.sun.jna.Memory(256) {
+        var bulkReads = 0
+        var primitiveReads = 0
+        var closes = 0
+        var destination: ByteArray? = null
+        var copyFailure: IOException? = null
+        override fun read(offset: Long, buffer: ByteArray, index: Int, length: Int) {
+            assertTrue(Thread.holdsLock(owner))
+            assertEquals(0L, offset); assertEquals(0, index); assertEquals(256, length)
+            destination?.let { assertTrue(it === buffer) } ?: run { destination = buffer }
+            bulkReads++
+            super.read(offset, buffer, index, length)
+            copyFailure?.let { throw it }
+        }
+        override fun getInt(offset: Long): Int { primitiveReads++; return super.getInt(offset) }
+        override fun getLong(offset: Long): Long { primitiveReads++; return super.getLong(offset) }
+        override fun getShort(offset: Long): Short { primitiveReads++; return super.getShort(offset) }
+        override fun close() { closes++; super.close() }
     }
 
     private fun writeStatxIdentity(buffer: com.sun.jna.Memory, inode: Long) {
@@ -315,6 +755,138 @@ class LinuxFilesystemSyscallsTest {
             assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
             scratch.close()
         }
+    }
+
+    @Test
+    fun `owned mount poll bulk reset reuses complete bytes and preserves raw observations`() {
+        val handle = scriptedMountHandle(-106)
+        val memory = BulkMountPollMemory()
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(handle).use { scratch ->
+            replaceMountPollMemory(scratch, memory)
+            var calls = 0
+            for ((result, events) in listOf(1 to 0x8002, 0 to 8, 1 to 0)) {
+                val observation = scriptedMountPoll(scratch) { buffer ->
+                    calls++
+                    assertEquals(calls, memory.writes)
+                    assertEquals(-106, buffer.getInt(0))
+                    assertEquals(10, buffer.getShort(4).toInt())
+                    assertEquals(0, buffer.getShort(6).toInt())
+                    buffer.setShort(6, events.toShort())
+                    result
+                }
+                assertEquals((result.toLong() shl 32) or events.toLong(), observation)
+                assertEquals(result > 0 && events and 10 != 0,
+                    LinuxFilesystemSyscalls.mountMetadataPollChanged(observation))
+            }
+            assertEquals(3, calls)
+        }
+        assertEquals(1, memory.closes)
+        assertEquals(-106, handle.whileOpen { it })
+    }
+
+    @Test
+    fun `owned mount poll bulk reset stays outside EINTR retries and refreshes the next query`() {
+        val memory = BulkMountPollMemory()
+        LinuxFilesystemSyscalls.MountMetadataPollScratch(scriptedMountHandle(-107)).use { scratch ->
+            replaceMountPollMemory(scratch, memory)
+            var attempts = 0
+            val observation = scriptedMountPoll(scratch) { buffer ->
+                attempts++
+                assertEquals(1, memory.writes)
+                if (attempts == 1) {
+                    assertEquals(0, buffer.getShort(6).toInt())
+                    buffer.setShort(6, 0x8002.toShort())
+                    com.sun.jna.Native.setLastError(4)
+                    -1
+                } else {
+                    assertEquals(0x8002, buffer.getShort(6).toInt() and 0xffff)
+                    1
+                }
+            }
+            assertEquals(2, attempts)
+            assertEquals((1L shl 32) or 0x8002L, observation)
+            assertEquals(0L, scriptedMountPoll(scratch) { buffer ->
+                assertEquals(2, memory.writes)
+                assertEquals(0, buffer.getShort(6).toInt())
+                0
+            })
+        }
+    }
+
+    @Test
+    fun `owned mount poll bulk copy failure preserves primary without a fabricated syscall observation`() {
+        val handle = scriptedMountHandle(-108)
+        val memory = BulkMountPollMemory()
+        val primary = IOException("authored pollfd copy failure")
+        val scratch = LinuxFilesystemSyscalls.MountMetadataPollScratch(handle)
+        replaceMountPollMemory(scratch, memory)
+        var queries = 0
+        try {
+            memory.copyFailure = primary
+            val caught = assertFailsWith<IOException> {
+                scriptedMountPoll(scratch) { queries++; 0 }
+            }
+            assertTrue(caught === primary)
+            assertTrue(caught.suppressed.isEmpty())
+            assertNull(scratch.claimFailureObservation(caught))
+            assertEquals(0, queries)
+            memory.copyFailure = null
+            assertEquals(0L, scriptedMountPoll(scratch) { queries++; 0 })
+            assertEquals(1, queries)
+        } finally {
+            scratch.close(); scratch.close()
+        }
+        assertEquals(1, memory.closes)
+        assertEquals(-108, handle.whileOpen { it })
+    }
+
+    @Test
+    fun `owned mount poll direct ABI preserves raw return immediate errno and stale errno success`() {
+        withLinuxDirectory("mount-poll-direct-") { _, directory ->
+            LinuxFilesystemSyscalls.MountMetadataPollScratch(directory).use { scratch ->
+                val owned = scratch.poll()
+                assertTrue(com.sun.jna.Native.registered(LinuxOwnedMountPollDirect::class.java),
+                    "required native lane must exercise the direct binding, not silently qualify its proxy fallback")
+                assertEquals(LinuxFilesystemSyscalls.mountMetadataChanged(directory),
+                    LinuxFilesystemSyscalls.mountMetadataPollChanged(owned))
+                val count = com.sun.jna.NativeLong(1)
+                com.sun.jna.Native.setLastError(123)
+                val failed = LinuxOwnedMountPollDirect.poll(com.sun.jna.Pointer.NULL, count, 0)
+                val error = com.sun.jna.Native.getLastError()
+                assertEquals(-1, failed)
+                assertEquals(14, error) // EFAULT: nfds=1 with a null pollfd pointer.
+                com.sun.jna.Memory(8).use { buffer ->
+                    buffer.setInt(0, -1) // Linux ignores negative descriptors, clearing their revents.
+                    buffer.setShort(4, 10)
+                    buffer.setShort(6, 0x7fff)
+                    com.sun.jna.Native.setLastError(117)
+                    assertEquals(0, LinuxOwnedMountPollDirect.poll(buffer, count, 0))
+                    assertEquals(0, buffer.getShort(6).toInt())
+                }
+                assertEquals(owned, scratch.poll())
+            }
+            assertEquals(directory.identity, LinuxFilesystemSyscalls.identity(directory.fd))
+        }
+    }
+
+    private class BulkMountPollMemory : com.sun.jna.Memory(8) {
+        var writes = 0
+        var closes = 0
+        var copyFailure: IOException? = null
+        private var input: ByteArray? = null
+
+        override fun write(offset: Long, bytes: ByteArray, index: Int, length: Int) {
+            assertEquals(0L, offset)
+            assertEquals(0, index)
+            assertEquals(8, length)
+            assertEquals(8, bytes.size)
+            if (input == null) input = bytes else assertTrue(input === bytes)
+            writes++
+            copyFailure?.let { throw it }
+            super.write(offset, bytes, index, length)
+        }
+
+        override fun close() { closes++; super.close() }
     }
 
     private fun scriptedMountHandle(fd: Int) = LinuxDescriptor(fd,

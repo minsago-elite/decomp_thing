@@ -70,7 +70,7 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
     <h1 id="history-title">Attempt history</h1>
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>Return to job overview</a>
-      {state?.status === 'authenticated' ? <History key={jobId} jobId={jobId} basePath={basePath} /> : <p>Connect a local session to view attempt history.</p>}
+      {state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} /> : <p>Connect a local session to view attempt history.</p>}
     </> : <p role="alert">The requested job identity is invalid.</p>}
   </section>;
 }

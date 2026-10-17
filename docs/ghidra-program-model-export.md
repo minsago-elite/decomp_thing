@@ -1,5 +1,7 @@
 # Resumable Ghidra program-model export
 
+Current exports use model schema 4 and exporter 13. See [referenced data byte evidence](referenced-data-byte-evidence.md) for the closed byte-window contract, bounds, historical compatibility and versioned active GCC profiles.
+
 Whole-program export is staged through durable records under
 `analysis/reports/program_model.json.export/`. Full recovery forces each accepted function to disk atomically only
 after its referenced global and type records are durable. Metadata-only planning amortizes that durability cost across
@@ -17,7 +19,7 @@ and future batches. It streams strictly address-ordered function records and ret
 record for each referenced global and type, plus one record for each function failure. Later references to an already
 owned identity are excluded exactly as they are from durable planning batches; contradictory records presented within
 the fingerprint boundary are rejected as ambiguous. Function names and prototypes, calls, strings,
-referenced-global sets, global names/types/initializers, and exported type declarations therefore all participate in
+referenced-global sets, global names/types/listing initializers, referenced byte windows, and exported type declarations therefore all participate in
 the binding. The same pass commits the exact bounded function/global/type/failure fragment bytes for every production
 batch. A completed checkpoint must match its freshly recomputed batch commitment before it counts as reused; a new
 batch must match before checkpoint publication and again after durable readback. Semantic drift between preflight and
@@ -68,7 +70,7 @@ full decompiled C bodies; those bodies belong to the later reconstruction phase:
 
 ```bash
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
-  --profile oracle/gcc/16.2.0/compiler-engines.json \
+  --profile oracle/gcc/16.2.0/compiler-engines-exporter13.json \
   --ghidra-archive /path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
   --output /path/to/cc1-plan
 ```

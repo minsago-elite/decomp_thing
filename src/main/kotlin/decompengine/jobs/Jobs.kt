@@ -12,6 +12,8 @@ import decompengine.oracle.core.StrictJsonException
 import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.RepairHistoryReadResult
+import decompengine.repair.readSelectedJobRecordedRepairHistory
 import java.io.IOException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -75,6 +77,11 @@ class JobStore internal constructor(
     private val root = root.toAbsolutePath().normalize()
     internal val storageRoot: Path get() = root
 
+    /** Caller holds store ownership; confirm newly created directories before recovery or upload. */
+    internal fun prepareStorageDirectories() {
+        storeDirectories.prepare(root)
+    }
+
     /** Bounded identities only; malformed records are inspected separately instead of disappearing. */
     internal fun jobIds(): List<String> {
         if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return emptyList()
@@ -99,7 +106,7 @@ class JobStore internal constructor(
             throw InvalidUploadException(exception.message ?: "uploaded file is not an ELF binary", exception)
         }
 
-        storeDirectories.prepare(root)
+        prepareStorageDirectories()
         val jobId = newJobId().also { require(it.matches(Regex("[a-f0-9]{32}"))) }
         val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
@@ -243,6 +250,13 @@ class JobStore internal constructor(
         }
         return artifact
     }
+
+    /** Fixed selected layout only; service authorization and H reconciliation remain separate. */
+    internal fun readRecordedRepairHistory(
+        jobId: String,
+        runId: String?,
+        cancel: () -> Unit = {},
+    ): RepairHistoryReadResult = readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel)
 
     internal fun readArtifact(
         jobId: String,

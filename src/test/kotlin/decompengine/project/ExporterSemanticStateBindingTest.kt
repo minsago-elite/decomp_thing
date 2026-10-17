@@ -144,7 +144,7 @@ class ExporterSemanticStateBindingTest {
     }
 
     @Test
-    fun `fingerprint framing rejects ambiguity unordered functions and byte overruns`() = withHarness { harness ->
+    fun `fingerprint framing rejects ambiguity unordered functions and byte overruns`(): Unit = withHarness { harness ->
         val outOfFunctionOrder = SemanticFixture(
             listOf(
                 Frame("function", FUNCTION_THREE, "function-three"),

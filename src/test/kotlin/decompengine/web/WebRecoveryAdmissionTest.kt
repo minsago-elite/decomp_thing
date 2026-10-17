@@ -1,18 +1,25 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
-import decompengine.jobs.JobStoreException
+import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.elfFixture
+import java.net.BindException
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.*
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebRecoveryAdmissionTest {
-    @Test fun `queued request cannot deadlock failed startup cleanup`() {
-        val root = createTempDirectory("web-recovery-queued-")
+    @Test fun `queued request cannot deadlock failed startup cleanup`() = withRoot { root ->
         val broken = root.resolve("a".repeat(32)).createDirectory()
         broken.resolve("job.json").writeText("invalid fixture")
         val server = UploadServer("127.0.0.1", 0, root)
@@ -35,8 +42,8 @@ class WebRecoveryAdmissionTest {
         try { replacement.start() } finally { replacement.stop(0) }
     }
 
-    @Test fun `rejected duplicate start does not shut down a running server`() {
-        val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-duplicate-start-"))
+    @Test fun `rejected duplicate start does not shut down a running server`() = withRoot { root ->
+        val server = UploadServer("127.0.0.1", 0, root)
         server.start()
         try {
             assertFailsWith<IllegalStateException> { server.start() }
@@ -46,9 +53,9 @@ class WebRecoveryAdmissionTest {
             response.readTimeout = 5000
             try { assertEquals(200, response.responseCode) } finally { response.disconnect() }
         } finally { server.stop(0) }
+    }
 
-    @Test fun `stop before startup preserves pending records and releases its listener`() {
-        val root = createTempDirectory("web-stop-before-recovery-")
+    @Test fun `stop before startup preserves pending records and releases its listener`() = withRoot { root ->
         val store = JobStore(root)
         val job = store.createFromUpload("fixture.elf", elfFixture())
         store.updateStatus(job.id, "queued")
@@ -66,36 +73,41 @@ class WebRecoveryAdmissionTest {
         } finally { replacement.stop() }
     }
 
-    @Test fun `incomplete startup recovery releases ownership and listener without changing statuses`() {
-        val root = createTempDirectory("web-recovery-admission-")
+    @Test fun `incomplete startup recovery releases ownership and listener without changing statuses`() = withRoot { root ->
         val store = JobStore(root)
         val job = store.createFromUpload("fixture.elf", elfFixture())
         store.updateStatus(job.id, "analyzing")
-        val broken = root.resolve("a".repeat(32)).createDirectory()
-        broken.resolve("job.json").writeText("private-invalid-record")
-        val server = UploadServer("127.0.0.1", 0, root)
-        val port = server.serverPort
-        try {
-            val failure = assertFailsWith<JobStoreException> { server.start() }
-            assertEquals("Job recovery inspection is incomplete; no recovery statuses were changed", failure.message)
-            assertEquals("analyzing", store.get(job.id).status)
-            assertEquals("private-invalid-record", broken.resolve("job.json").readText())
-        } finally { server.stop(0) }
-        // Explicitly retain the invalid fixture outside the published-job namespace.
+        val metadata = root.resolve(job.id).resolve("job.json")
+        val before = Files.readAllBytes(metadata)
+        // Corrupt legacy jobs are quarantined by the shared service; an unknown versioned
+        // upload stage is an actual initialization refusal before a listener may serve work.
+        val broken = Files.createDirectory(root.resolve(".upload-stream-v1-96901"),
+            java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))
+        broken.resolve("unexpected.txt").writeText("private-retained-data")
+        val port = unusedPort()
+        val failure = assertFailsWith<WorkflowStoreException> { UploadServer("127.0.0.1", port, root) }
+        assertEquals("UPLOAD_STAGING_RECOVERY_REQUIRED", failure.code)
+        assertEquals("analyzing", store.get(job.id).status)
+        assertContentEquals(before, Files.readAllBytes(metadata))
+        assertEquals("private-retained-data", broken.resolve("unexpected.txt").readText())
+        // Operator reconciliation retains the unknown data under an ordinary non-job name.
         Files.move(broken, root.resolve("retained-invalid"))
         val replacement = UploadServer("127.0.0.1", port, root)
         try {
             replacement.start()
-            assertEquals("failed", store.get(job.id).status)
-            assertEquals("private-invalid-record", root.resolve("retained-invalid/job.json").readText())
+            assertEquals("analyzing", store.get(job.id).status)
+            assertContentEquals(before, Files.readAllBytes(metadata))
+            assertEquals("private-retained-data", root.resolve("retained-invalid/unexpected.txt").readText())
         } finally { replacement.stop(0) }
     }
 
-    @Test fun `startup thread interruption prevents the listener from starting and preserves records`() {
-        val root = createTempDirectory("web-start-interruption-")
+    @Test fun `startup thread interruption prevents the listener from starting and preserves records`() = withRoot { root ->
         val store = JobStore(root)
         val job = store.createFromUpload("fixture.elf", elfFixture())
         store.updateStatus(job.id, "queued")
+        val metadata = root.resolve(job.id).resolve("job.json")
+        val before = Files.readAllBytes(metadata)
         val server = UploadServer("127.0.0.1", 0, root)
         val port = server.serverPort
         var failure: Throwable? = null
@@ -110,19 +122,20 @@ class WebRecoveryAdmissionTest {
         starter.join(15000)
         assertTrue(!starter.isAlive)
         val cancelled = assertIs<IllegalStateException>(failure)
-        assertEquals("Job recovery cancelled before status publication; no recovery statuses were changed", cancelled.message)
+        assertEquals("Web server startup cancelled", cancelled.message)
         assertTrue(exitedInterrupted)
         assertEquals("queued", store.get(job.id).status)
+        assertContentEquals(before, Files.readAllBytes(metadata))
         assertFalse(server.withActiveRequest { error("interrupted startup must not admit requests") })
         val replacement = UploadServer("127.0.0.1", port, root)
         try {
             replacement.start()
-            assertEquals("failed", store.get(job.id).status)
+            assertEquals("queued", store.get(job.id).status)
+            assertContentEquals(before, Files.readAllBytes(metadata))
         } finally { replacement.stop(0) }
     }
 
-    @Test fun `request admission racing the stop signal is refused once cancellation is observable`() {
-        val root = createTempDirectory("web-admission-fence-")
+    @Test fun `request admission racing the stop signal is refused once cancellation is observable`() = withRoot { root ->
         val server = UploadServer("127.0.0.1", 0, root)
         server.start()
         try {
@@ -138,6 +151,10 @@ class WebRecoveryAdmissionTest {
                             server.withActiveRequest { ran = true }
                             if (!ran) refused++
                         }
+                        // Also require every racer to observe refusal after the published stop
+                        // signal, even when shutdown finishes before it gets its first timeslice.
+                        check(!server.withActiveRequest { error("request ran after observable stop") })
+                        refused++
                         refusals.addAndGet(refused)
                     } catch (problem: Throwable) {
                         problems.set(problem)
@@ -157,5 +174,25 @@ class WebRecoveryAdmissionTest {
             assertFalse(server.withActiveRequest { error("stopped server admitted work") })
         } finally { runCatching { server.stop() } }
     }
-}
+
+    @Test fun `listener bind failure releases store ownership for a replacement server`() = withRoot { root ->
+        val occupied = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val port = occupied.localPort
+        try {
+            assertFailsWith<BindException> { UploadServer("127.0.0.1", port, root) }
+        } finally { occupied.close() }
+        val replacement = UploadServer("127.0.0.1", port, root)
+        try {
+            replacement.start()
+            assertTrue(replacement.withActiveRequest { })
+        } finally { replacement.stop(0) }
+    }
+
+    private fun unusedPort(): Int = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+
+    private fun withRoot(block: (Path) -> Unit) {
+        val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-recovery-admission").toAbsolutePath())
+        val root = createTempDirectory(temporaryRoot, "web-recovery-")
+        try { block(root) } finally { root.toFile().deleteRecursively() }
+    }
 }
