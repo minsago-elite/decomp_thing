@@ -29,6 +29,52 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `versioned recovery summary is private negotiated and never reclaims retained data`() = withServer { server, store, id ->
+        val root = store.storageRoot
+        val stage = Files.createDirectory(root.resolve(".upload-stream-v1-97001"),
+            java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))
+        val input = stage.resolve("input.elf")
+        Files.writeString(input, "PRIVATE-content")
+        val temporary = root.resolve(id).resolve(".job-metadata-PRIVATE-canary")
+        Files.writeString(temporary, "PRIVATE-metadata")
+        val metadata = Files.readAllBytes(root.resolve(id).resolve("job.json"))
+        val path = "/workbench/api/v1/recovery"
+        assertError(request(server, path), 401, "SESSION_REQUIRED")
+        val headers = mapOf("Cookie" to establish(server))
+        val summary = assertEnvelope(request(server, path, headers = headers), 200, "recovery")
+        assertEquals("1", summary.getValue("schemaVersion").toString())
+        assertEquals("true", summary.getValue("displayOnly").toString())
+        assertEquals("true", summary.getValue("inventoryComplete").toString())
+        assertEquals("1", summary.getValue("retainedUploadStages").toString())
+        assertEquals("1", summary.getValue("retainedMetadataFiles").toString())
+        assertEquals("31", summary.getValue("observedBytes").jsonPrimitive.content)
+        assertFalse(summary.toString().contains("PRIVATE") || summary.toString().contains("canary") || summary.toString().contains(root.toString()))
+        val head = request(server, path, "HEAD", headers = headers)
+        assertEquals(200, head.statusCode())
+        assertEquals("", head.body())
+        assertError(request(server, "$path?private=PRIVATE-query", headers = headers), 400, "VALIDATION_FAILED")
+        assertError(request(server, path, headers = headers + ("Accept" to "text/html")), 406, "NOT_ACCEPTABLE")
+        assertError(request(server, path, "POST", "{}", headers), 405, "METHOD_NOT_ALLOWED")
+        assertEquals("PRIVATE-content", Files.readString(input))
+        assertEquals("PRIVATE-metadata", Files.readString(temporary))
+        kotlin.test.assertContentEquals(metadata, Files.readAllBytes(root.resolve(id).resolve("job.json")))
+    }
+
+    @Test
+    fun `versioned recovery keeps an incomplete zero-count inspection distinct from empty storage`() = withServer { server, store, _ ->
+        val unknown = store.storageRoot.resolve(".upload-private-unknown")
+        Files.writeString(unknown, "PRIVATE-layout")
+        val summary = assertEnvelope(request(server, "/workbench/api/v1/recovery",
+            headers = mapOf("Cookie" to establish(server))), 200, "recovery")
+        assertEquals("false", summary.getValue("inventoryComplete").toString())
+        assertEquals("0", summary.getValue("retainedUploadStages").toString())
+        assertEquals("0", summary.getValue("retainedMetadataFiles").toString())
+        assertEquals("1", summary.getValue("uninspectedEntries").toString())
+        assertFalse(summary.toString().contains("PRIVATE"))
+        assertEquals("PRIVATE-layout", Files.readString(unknown))
+    }
+
+    @Test
     fun `legacy and v1 uploads remain equivalent through mode changes on the same store`() {
         val root = createTempDirectory("web-adapter-parity-")
         var executions = 0
@@ -399,6 +445,10 @@ class WebApiControllerTest {
         assertFalse(failure.body().contains("PRIVATE_CORRUPT"))
         assertFalse(failure.body().contains(record.toString()))
         assertEquals(200, request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)).statusCode())
+        val recovery = assertEnvelope(request(server, "/workbench/api/v1/recovery", headers = mapOf("Cookie" to cookie)), 200, "recovery")
+        assertEquals("true", recovery.getValue("displayOnly").toString())
+        assertFalse(recovery.toString().contains("PRIVATE_CORRUPT") || recovery.toString().contains(record.toString()))
+        assertError(request(server, "/workbench/api/v1/jobs", headers = mapOf("Cookie" to cookie)), 503, "CORRUPT_LEGACY_JOB")
         assertEquals("PRIVATE_CORRUPT_RECORD_SENTINEL {", Files.readString(record))
     }
 
@@ -471,6 +521,97 @@ class WebApiControllerTest {
         assertError(upload(server, elfFixture(), headers, filename = "renamed.elf"), 409, "IDEMPOTENCY_CONFLICT")
         assertEnvelope(upload(server, elfFixture(), headers + ("Idempotency-Key" to "fixture_different_key")), 201, "job")
         assertEquals(3, store.jobIds().size)
+    }
+
+    @Test
+    fun `versioned uncertain upload retains reconciliation location and replays only after restart`() {
+        val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-upload-uncertainty").toAbsolutePath())
+        val root = Files.createTempDirectory(temporaryRoot, "v1-")
+        val store = JobStore(root)
+        val bytes = elfFixture()
+        val prior = decompengine.jobs.WorkflowAttemptStore.open(root).use {
+            store.createFromUpload("prior.elf", bytes)
+        }
+        val priorMetadata = Files.readAllBytes(root.resolve(prior.id).resolve("job.json"))
+        val privateDiagnostic = "PRIVATE_UNCERTAIN_UPLOAD_FILESYSTEM_FAILURE"
+        var executions = 0
+        fun start() = UploadServer("127.0.0.1", 0, root,
+            JobAnalyzer { _, _ -> executions++; error("Unexpected analysis") },
+            JobReconstructor { _, _ -> executions++; error("Unexpected reconstruction") },
+            uiMode = WebUiMode.SPA, basePath = "/workbench/").also { it.start() }
+        fun headers(server: UploadServer): Map<String, String> {
+            val cookie = establish(server)
+            val bootstrap = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+            return mapOf("Cookie" to cookie, "X-CSRF-Token" to bootstrap.getValue("csrfToken").jsonPrimitive.content,
+                "Idempotency-Key" to "versioned_uncertain_upload_key")
+        }
+        fun priorUnchanged() {
+            kotlin.test.assertContentEquals(priorMetadata, Files.readAllBytes(root.resolve(prior.id).resolve("job.json")))
+            kotlin.test.assertContentEquals(bytes, Files.readAllBytes(prior.binaryPath))
+            assertEquals(0, executions)
+        }
+        var server = start()
+        try {
+            val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server) as WebJobService
+            service.uploadPublisher = decompengine.jobs.StagedJobUpload(root, fault = { point ->
+                if (point == decompengine.jobs.UploadPublishPoint.AFTER_RENAME) throw java.io.IOException(privateDiagnostic)
+            })
+            val firstHeaders = headers(server)
+            val response = upload(server, bytes, firstHeaders)
+            val problem = assertEnvelope(response, 409, "error")
+            assertEquals("RECOVERY_REQUIRED", problem.getValue("code").jsonPrimitive.content)
+            assertEquals("false", problem.getValue("retryable").toString())
+            assertEquals("null", problem.getValue("retryAfterMs").toString())
+            assertTrue(problem.getValue("details").jsonArray.isEmpty())
+            assertEquals(null, response.headers().firstValue("Retry-After").orElse(null))
+            val location = response.headers().firstValue("Location").orElseThrow()
+            val id = location.substringAfterLast('/')
+            assertTrue(id.matches(Regex("[a-f0-9]{32}")))
+            assertEquals("/workbench/api/v1/jobs/$id", location)
+            assertFalse(response.body().contains(privateDiagnostic))
+            assertFalse(response.body().contains(root.toString()))
+            assertEquals(setOf(prior.id, id), store.jobIds().toSet())
+            val published = store.get(id)
+            assertEquals("uploaded", published.status)
+            kotlin.test.assertContentEquals(bytes, Files.readAllBytes(published.binaryPath))
+            val publishedMetadata = Files.readAllBytes(root.resolve(id).resolve("job.json"))
+            priorUnchanged()
+
+            val denied = request(server, location)
+            assertError(denied, 401, "SESSION_REQUIRED")
+            assertFalse(denied.body().contains(id))
+            val pendingRead = request(server, location, headers = mapOf("Cookie" to firstHeaders.getValue("Cookie")))
+            assertError(pendingRead, 503, "RECOVERY_REQUIRED")
+            assertEquals(null, pendingRead.headers().firstValue("Location").orElse(null))
+            assertFalse(pendingRead.body().contains(privateDiagnostic))
+            assertFalse(pendingRead.body().contains(root.toString()))
+            val blocked = upload(server, bytes, firstHeaders)
+            assertError(blocked, 503, "RECOVERY_REQUIRED")
+            assertEquals(null, blocked.headers().firstValue("Location").orElse(null))
+            assertEquals(null, blocked.headers().firstValue("Retry-After").orElse(null))
+            assertEquals(setOf(prior.id, id), store.jobIds().toSet())
+            kotlin.test.assertContentEquals(publishedMetadata, Files.readAllBytes(root.resolve(id).resolve("job.json")))
+            priorUnchanged()
+
+            server.stop()
+            server = start()
+            val reopenedHeaders = headers(server)
+            val reconciled = assertEnvelope(request(server, location,
+                headers = mapOf("Cookie" to reopenedHeaders.getValue("Cookie"))), 200, "job")
+            assertEquals(id, reconciled.getValue("jobId").jsonPrimitive.content)
+            assertEquals("uploaded", reconciled.getValue("status").jsonPrimitive.content)
+            val replay = upload(server, bytes, reopenedHeaders)
+            assertEquals(id, assertEnvelope(replay, 201, "job").getValue("jobId").jsonPrimitive.content)
+            assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+            assertEquals(location, replay.headers().firstValue("Location").orElseThrow())
+            assertEquals(setOf(prior.id, id), store.jobIds().toSet())
+            kotlin.test.assertContentEquals(publishedMetadata, Files.readAllBytes(root.resolve(id).resolve("job.json")))
+            kotlin.test.assertContentEquals(bytes, Files.readAllBytes(published.binaryPath))
+            priorUnchanged()
+        } finally {
+            server.stop()
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test
@@ -639,7 +780,8 @@ class WebApiControllerTest {
 
     private fun withServer(requestDiagnosticOutput: (String) -> Unit = System.err::println,
                            block: (UploadServer, JobStore, String) -> Unit) {
-        val root = createTempDirectory("web-api-")
+        val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-api").toAbsolutePath())
+        val root = Files.createTempDirectory(temporaryRoot, "web-api-")
         val store = JobStore(root)
         val binary = elfFixture().also { bytes -> repeat(8) { bytes[24 + it] = 0xff.toByte() } }
         val job = store.createFromUpload("synthetic.elf", binary)

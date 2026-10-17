@@ -401,6 +401,33 @@
     {
       "file": "fixtures/invalid-retention-error.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/recovery-retained.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/recovery-incomplete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-recovery-complete.json",
+      "valid": false,
+      "reason": "Uninspected entries cannot assert a complete inspection."
+    },
+    {
+      "file": "fixtures/invalid-recovery-byte-bound.json",
+      "valid": false,
+      "reason": "Observed bytes cannot exceed the 64 MiB inspection ceiling."
+    },
+    {
+      "file": "fixtures/invalid-recovery-candidate-bound.json",
+      "valid": false,
+      "reason": "Combined retained candidates cannot exceed 128."
     }
   ]
 }

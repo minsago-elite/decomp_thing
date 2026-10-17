@@ -627,7 +627,7 @@ class UploadServer(
                 exchange.requestMethod in setOf("GET", "HEAD") && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
-                    exchange.sendJson(200, store.recoveryInventory().toJson().toString())
+                    exchange.sendJson(200, jobs.recoveryInventory().toJson().toString())
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods", "cancel") ->
                     handleAuthenticationCancellation(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
@@ -676,11 +676,11 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
-                "JOB_RECORD_UNAVAILABLE" -> publicWebDiagnosticMessage(code)
+                "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
             }, requestDiagnosticOutput) {
@@ -703,10 +703,15 @@ class UploadServer(
 
     private fun renderJobDashboard(exchange: HttpExchange) {
         val inspections = jobs.listInspections()
+        val recovery = try {
+            jobs.recoveryInventory()
+        } catch (failure: WebJobServiceException) {
+            if (failure.code == "RECOVERY_INSPECTION_BUSY") null else throw failure
+        }
         exchange.sendHtml(200, renderDashboardDocument(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
-            store.recoveryInventory(),
+            recovery,
         ))
     }
 

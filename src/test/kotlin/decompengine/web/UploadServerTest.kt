@@ -544,6 +544,73 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy recovery reads pause during an admitted streamed upload and resume after publication`() = withServer { server, root ->
+        val priorResponse = upload(server, "prior-recovery.elf", elfFixture(), acceptJson = true)
+        assertEquals(201, priorResponse.status)
+        val priorId = Json.parseToJsonElement(priorResponse.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+        val metadata = root.resolve(priorId).resolve("job.json")
+        val before = Files.readAllBytes(metadata)
+        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server) as WebJobService
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val caller = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val boundary = "legacy-recovery-overlap"
+        val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"active-recovery.elf\"\r\n\r\n".toByteArray() +
+            elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+        val input = object : java.io.FilterInputStream(body.inputStream()) {
+            private fun waitForRelease() {
+                entered.countDown()
+                check(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            }
+            override fun read(): Int { waitForRelease(); return super.read() }
+            override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                waitForRelease()
+                return super.read(bytes, offset, length)
+            }
+        }
+        try {
+            val publication = caller.submit<decompengine.jobs.Job> {
+                var uploaded: decompengine.jobs.Job? = null
+                assertTrue(server.withActiveRequest {
+                    uploaded = input.use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+                })
+                checkNotNull(uploaded)
+            }
+            assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val stage = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.toList().single() }
+            val stagedInput = Files.readAllBytes(stage.resolve("input.elf"))
+            val busy = request(server, "GET", "/api/recovery", headers = mapOf("Accept" to "application/json"))
+            assertEquals(503, busy.status)
+            assertTrue(busy.body.decodeToString().contains("RECOVERY_INSPECTION_BUSY"))
+            assertTrue(!busy.body.decodeToString().contains("retainedUploadStages"))
+            val page = request(server, "GET", "/")
+            assertEquals(200, page.status)
+            val html = page.body.decodeToString()
+            assertTrue(html.contains("Recovery inspection paused"))
+            assertTrue(html.contains("prior-recovery.elf"))
+            assertTrue(!html.contains("Retained recovery files"))
+            assertTrue(!html.contains("Observed 1 upload stages"))
+            kotlin.test.assertContentEquals(stagedInput, Files.readAllBytes(stage.resolve("input.elf")))
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+            release.countDown()
+            val uploaded = publication.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue(!Files.exists(stage))
+            val settled = request(server, "GET", "/api/recovery")
+            assertEquals(200, settled.status)
+            assertEquals("0", Json.parseToJsonElement(settled.body.decodeToString()).jsonObject.getValue("retainedUploadStages").toString())
+            val refreshed = request(server, "GET", "/").body.decodeToString()
+            assertTrue(!refreshed.contains("Recovery inspection paused"))
+            assertTrue(refreshed.contains("active-recovery.elf"))
+            assertEquals(setOf(priorId, uploaded.id), server.internalStore().list().map { it.id }.toSet())
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+        } finally {
+            release.countDown()
+            caller.shutdownNow()
+            assertTrue(caller.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
         val dataDir = createTempDirectory("web-caller-queue-")
         val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()

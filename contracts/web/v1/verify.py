@@ -89,6 +89,10 @@ def check_semantics(document: dict) -> None:
             raise ValueError("upload progress exceeds the request ceiling")
         if (data["state"] == "published") != (data["jobId"] is not None):
             raise ValueError("upload publication identity is inconsistent")
+    elif kind == "recovery":
+        candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
+        if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
+            raise ValueError("recovery inventory exceeds its bounded inspection")
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):
