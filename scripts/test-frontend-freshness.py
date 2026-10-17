@@ -981,9 +981,16 @@ class FreshnessControls(unittest.TestCase):
                 if when=='before':files.data[entry]+=b'changed'
                 def invoke(argv,cwd,env):
                     result=producer(argv,cwd,env)
-                    if when=='after' or (when=='final' and sum(a[-1]=='--check' for a,_ in producer.calls)==3):files.data[entry]+=b'changed'
+                    if when=='after':files.data[entry]+=b'changed'
                     return result
                 diagnostic.runner=invoke
+                if when=='final':
+                    original_baseline=diagnostic.baseline;baseline_calls=[]
+                    def final_baseline():
+                        value=original_baseline();baseline_calls.append(1)
+                        if len(baseline_calls)==2:files.data[entry]+=b'changed'
+                        return value
+                    diagnostic.baseline=final_baseline
                 with self.assertRaisesRegex(f.Refusal,'npm reviewed input'):diagnostic.run()
                 self.assertEqual(0 if when=='before' else (1 if when=='after' else 9),len(producer.calls))
                 if when=='final':self.assertEqual('PASSED',diagnostic.phases['drift']['status'])
