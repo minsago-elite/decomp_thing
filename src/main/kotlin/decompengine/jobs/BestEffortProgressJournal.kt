@@ -29,7 +29,12 @@ internal class BestEffortProgressJournal(
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             if (!failed) {
                 failed = true
-                onUnavailable()
+                // A warning sink is another display observer, never workflow authority.
+                try {
+                    onUnavailable()
+                } catch (warningFailure: Exception) {
+                    if (warningFailure is InterruptedException) Thread.currentThread().interrupt()
+                }
             }
         }
     }
