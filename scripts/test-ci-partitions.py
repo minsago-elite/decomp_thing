@@ -96,6 +96,32 @@ def check_browser_expiry_report(root):
     path = root / f"TEST-{BROWSER_EXPIRY_CLASS}.xml"
     if path.is_symlink() or not path.is_file():
         raise ValueError("missing or linked browser expiry report")
+    # Gradle also writes a small binary/ directory. Inventory the complete bounded tree,
+    # allowing those regular non-XML files but never a second or hidden XML input.
+    pending = [(root, 0)]
+    xml_reports = []
+    scanned_entries = 0
+    while pending:
+        directory, depth = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                scanned_entries += 1
+                if scanned_entries > 128:
+                    raise ValueError("browser report inventory exceeds its entry bound")
+                if entry.is_symlink():
+                    raise ValueError("linked browser expiry report input")
+                if entry.is_dir(follow_symlinks=False):
+                    if depth >= 8:
+                        raise ValueError("browser report inventory exceeds its depth bound")
+                    pending.append((Path(entry.path), depth + 1))
+                elif not entry.is_file(follow_symlinks=False):
+                    raise ValueError("nonregular browser expiry report input")
+                elif entry.name.lower().endswith(".xml"):
+                    xml_reports.append(Path(entry.path))
+                    if len(xml_reports) > 1:
+                        raise ValueError("unexpected or duplicate browser expiry XML report")
+    if xml_reports != [path]:
+        raise ValueError("unexpected or missing browser expiry XML report")
     with path.open("rb") as source:
         raw = source.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024:
@@ -121,6 +147,7 @@ def check_browser_expiry_report(root):
             raise ValueError("browser expiry suite counts differ")
     return {"schemaVersion": 1, "status": "passed", "scope": "packaged browser expiry JVM selection",
             "PASS": len(cases), "SKIP": 0, "className": BROWSER_EXPIRY_CLASS,
+            "xmlReports": [path.name], "scannedEntries": scanned_entries,
             "methods": sorted(names), "input": {"path": path.name, "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest()}}
 
@@ -443,6 +470,56 @@ class BrowserExpiryReportTest(unittest.TestCase):
         suite.tag = "testsuites"
         ET.ElementTree(suite).write(self.path, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "suite identity"):
+            check_browser_expiry_report(self.root)
+
+    def test_gradle_binary_directory_keeps_one_exact_xml_input(self):
+        binary = self.root / "binary"
+        binary.mkdir()
+        for name in ("output.bin", "output.bin.idx", "results.bin"):
+            (binary / name).write_bytes(b"synthetic fixture")
+        report = check_browser_expiry_report(self.root)
+        self.assertEqual([self.path.name], report["xmlReports"])
+        self.assertEqual(5, report["scannedEntries"])
+        self.assertEqual(3, report["PASS"])
+
+    def test_extra_foreign_and_duplicate_sibling_or_nested_xml_reports_refuse(self):
+        for relative in ("unexpected.xml", "unexpected.XML", "nested/unexpected.xml",
+                         f"nested/{self.path.name}"):
+            with self.subTest(relative=relative):
+                extra = self.root / relative
+                extra.parent.mkdir(exist_ok=True)
+                extra.write_bytes(self.path.read_bytes())
+                with self.assertRaisesRegex(ValueError, "unexpected or duplicate"):
+                    check_browser_expiry_report(self.root)
+                extra.unlink()
+
+    def test_linked_extra_report_and_linked_report_directory_refuse(self):
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                link = self.root / ("linked-directory" if directory else "linked.xml")
+                link.symlink_to(self.root if directory else self.path, target_is_directory=directory)
+                with self.assertRaisesRegex(ValueError, "linked browser expiry report input"):
+                    check_browser_expiry_report(self.root)
+                link.unlink()
+
+    def test_inventory_entry_and_depth_exact_and_one_over_bounds(self):
+        for index in range(127):
+            (self.root / f"binary-{index}.bin").write_bytes(b"")
+        self.assertEqual(128, check_browser_expiry_report(self.root)["scannedEntries"])
+        extra = self.root / "one-over.bin"
+        extra.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "entry bound"):
+            check_browser_expiry_report(self.root)
+        extra.unlink()
+        for index in range(127):
+            (self.root / f"binary-{index}.bin").unlink()
+        nested = self.root
+        for _ in range(8):
+            nested = nested / "nested"
+            nested.mkdir()
+        self.assertEqual(9, check_browser_expiry_report(self.root)["scannedEntries"])
+        (nested / "one-over").mkdir()
+        with self.assertRaisesRegex(ValueError, "depth bound"):
             check_browser_expiry_report(self.root)
 
     def test_empty_and_unnamed_case_reports_are_refused(self):

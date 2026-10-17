@@ -158,6 +158,16 @@ jobs:
           python3 scripts/test-ci-partitions.py
           --check-browser-reports build/test-results/test
           --output build/packaged-web-ci/browser-expiry-tests.json
+      - name: Retain focused browser expiry XML and gate receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-browser-expiry-test-reports
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
+            build/packaged-web-ci/browser-expiry-tests.json
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \
