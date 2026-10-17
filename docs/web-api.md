@@ -99,6 +99,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `DELETE /api/v1/session` | `204` | Authorized CSRF-protected logout; #161 |
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
+| `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
