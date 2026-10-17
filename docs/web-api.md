@@ -46,6 +46,9 @@ unsupported/unknown state; it never maps to success or accepted. Invalid JSON or
 wrong types produce a decoder error, retain the previous snapshot as stale and disable dependent
 mutations. Bootstrap negotiates supported API versions and UI/application build IDs. An incompatible
 major produces a version recovery view; reloading cannot repeatedly replay a mutation.
+An unsupported bootstrap contract clears private session/instance observations and displays an
+explicit incompatible-version recovery message with a manual browser reload action. It offers
+no retry that can replay a sign-in mutation. An unsupported logout response remains unconfirmed.
 
 IDs are case-sensitive opaque strings. Clients must not parse their spelling or synthesize them.
 The existing 32-character lowercase hexadecimal `Job.id` remains a valid `jobId`; migration must
@@ -62,6 +65,43 @@ Small, explicitly bounded page limits, HTTP status, line numbers and schema vers
 Finite confidence ratios remain numbers in `[0,1]` with their meaning and denominator displayed.
 Binary payload snippets use lowercase hex, never implicit text decoding; strict UTF-8 text reads
 report decoding failure and still allow a bounded byte view/download.
+
+
+### Bootstrap build and listener identities
+
+The current bootstrap producer reports `apiVersions`, `applicationBuildId`, `uiBuildId`,
+configured upload/request/page limits, and explicit workflow capability states. Unavailable
+workflow adapters remain unavailable; reading bootstrap does not launch a tool or workflow.
+`applicationBuildId` identifies application bytes and `uiBuildId` identifies packaged UI bytes.
+Neither identifies a running server. Runtime shows a mismatched page/server UI build and asks
+for a reload; the decoder rejects an unsupported API major without replaying mutations.
+
+`serverInstanceId` is an opaque, non-secret identity generated once per listener lifetime.
+It remains stable across requests and browser sessions and changes when the server restarts,
+including a restart of the same application/UI build on the same job store. It is not an
+authorization token, durable job/run/revision identity, or proof that a tool is available.
+The property is optional in the v1 schema so older servers remain compatible; absence means
+unknown and is displayed as “Not reported”. Clients must not substitute a build hash for it.
+
+Each successfully checked bootstrap publishes a fresh page-local session generation. Private
+job, history, attempt/event and dashboard subtrees use that generation as their lifetime key,
+so an intermediate checking render being coalesced cannot keep an old private cache or event
+connection alive. A changed or unreported server instance also invalidates pending
+instance-bound upload observations. Durable upload tickets retain their explicit reconciliation
+path; the browser does not replay a mutation automatically. No identity enables workflow actions
+or changes their separate capability/authorization gates.
+
+### Unexpected internal API failures
+
+The HTTP matrix exercises unexpected exceptions inside real v1/legacy request dispatchers,
+including unknown v1 routes/majors and the shared versioned session/CSRF routes in legacy mode.
+It requires `500 INTERNAL_ERROR`, JSON, no-store caching, matching opaque response/header IDs and
+fixed messages without exception text or private values. A response already committed is closed;
+the server does not attempt to append a second error envelope. Each scenario recovers through
+a read under the original session, without changing stored job bytes, invoking a workflow or
+replaying an ambiguous session mutation. This covers controller routing separately from the
+direct error-renderer control; it does not establish live provider/tool behavior, complete
+legacy sunset migration or production-release qualification.
 
 ## Resource and authority identities
 

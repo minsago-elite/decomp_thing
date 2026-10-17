@@ -259,6 +259,9 @@
         "uiBuildId": {
           "$ref": "#/definitions/id"
         },
+        "serverInstanceId": {
+          "$ref": "#/definitions/id"
+        },
         "basePath": {
           "type": "string",
           "pattern": "^/([^?#]+/)?$",

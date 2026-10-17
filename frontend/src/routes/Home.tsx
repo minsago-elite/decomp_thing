@@ -12,7 +12,7 @@ export default function Home({ basePath = '', session = null }: { basePath?: str
         Review reconstructed source, inspect validation evidence, and follow each revision.
       </p>
       {session && <Upload basePath={basePath} session={session} />}
-      {state?.status === 'authenticated' ? <Dashboard basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
+      {state?.status === 'authenticated' ? <Dashboard key={state.generation} basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
         <h2 id="availability-title">The workbench shell is ready</h2>
         <p>
           Connect a local session to browse uploaded jobs. The public shell does not
