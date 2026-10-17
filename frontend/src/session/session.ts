@@ -16,7 +16,7 @@ export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
   | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
-  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
+  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
 
 /** Session/CSRF material stays in this page's closure and never enters UI snapshots. */
 export function createBrowserSession(gateway: SessionGateway, basePath: string) {
@@ -69,7 +69,10 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required', ...reference });
     else if (code === 'BOOTSTRAP_EXPIRED') publish({ status: 'required', reason: 'bootstrap-expired', ...reference });
     else if (code === 'HOST_DENIED' || code === 'ORIGIN_DENIED') publish({ status: 'unavailable', reason: 'configuration', ...reference });
-    else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
+    else if (!logout && error instanceof ApiClientError && error.code === 'unsupported_contract') {
+      notifyInvalidated(false);
+      publish({ status: 'unavailable', reason: 'incompatible', ...reference });
+    } else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
   }
   function authenticated(bootstrap: Bootstrap) {
     if (disposed) return;

@@ -19,6 +19,7 @@ function explanation(state: SessionState): string {
       case 'configuration': return 'The browser address and application configuration do not match. Open the configured local address.';
       case 'removal-failed': return 'The sign-in link could not be cleared from this tab. Close it and open a fresh local link in a supported browser.';
       case 'connection': return 'The local session could not be checked. Confirm the application is running, then check the session.';
+      case 'incompatible': return 'This page and the local server use incompatible API formats. Copy any unsaved input, then use your browser’s Reload action to load a matching version.';
     }
   }
   return '';
@@ -43,9 +44,9 @@ export function SessionStatus({ session }: { session: BrowserSession }) {
       <button type="button" onClick={() => { void session.logout(); }}>Sign out</button>
     </aside>;
   }
-  const removalFailed = state.status === 'unavailable' && state.reason === 'removal-failed';
+  const canCheck = state.status !== 'unavailable' || !['removal-failed', 'incompatible'].includes(state.reason);
   return <aside class="session-notice notice" aria-label="Local session" role="status">
     <p>{explanation(state)}{'referenceId' in state && state.referenceId && <> Reference ID: <code>{state.referenceId}</code>.</>}</p>
-    {!removalFailed && <button type="button" onClick={() => { void session.refresh(); }}>Check session</button>}
+    {canCheck && <button type="button" onClick={() => { void session.refresh(); }}>Check session</button>}
   </aside>;
 }

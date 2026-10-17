@@ -85,6 +85,39 @@ describe('bootstrap fragment removal', () => {
 });
 
 describe('page-local session state', () => {
+  it('exposes an incompatible bootstrap while clearing private state and pending observations', async () => {
+    const { session, gateway, data } = setup();
+    await session.initialize({ kind: 'absent' });
+    const invalidated = vi.fn(() => { expect(session.csrf()).toBeNull(); });
+    session.onInvalidated(invalidated);
+    const oldFailure = session.observeRequestFailure();
+    gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+    await session.refresh();
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'incompatible' });
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledWith(false);
+    expect(session.csrf()).toBeNull();
+    expect(JSON.stringify(session.snapshot())).not.toContain(data.csrfToken);
+    oldFailure(denied('SESSION_EXPIRED'));
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'incompatible' });
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
+  it('keeps an unsupported logout response unconfirmed without retrying the mutation', async () => {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'absent' });
+    gateway.logout.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+    await session.logout();
+    await session.logout();
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'logout-unconfirmed' });
+    expect(session.csrf()).toBeNull();
+    expect(gateway.logout).toHaveBeenCalledOnce();
+    expect(gateway.bootstrap).toHaveBeenCalledOnce();
+    expect(gateway.exchange).not.toHaveBeenCalled();
+  });
+
   it('invalidates instance-bound state before exposing a restarted server without replay', async () => {
     const { gateway, session, data } = setup();
     await session.initialize({ kind: 'absent' });

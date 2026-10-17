@@ -46,6 +46,9 @@ unsupported/unknown state; it never maps to success or accepted. Invalid JSON or
 wrong types produce a decoder error, retain the previous snapshot as stale and disable dependent
 mutations. Bootstrap negotiates supported API versions and UI/application build IDs. An incompatible
 major produces a version recovery view; reloading cannot repeatedly replay a mutation.
+An unsupported bootstrap contract clears private session/instance observations and displays an
+explicit incompatible-version recovery message with a manual browser reload action. It offers
+no retry that can replay a sign-in mutation. An unsupported logout response remains unconfirmed.
 
 IDs are case-sensitive opaque strings. Clients must not parse their spelling or synthesize them.
 The existing 32-character lowercase hexadecimal `Job.id` remains a valid `jobId`; migration must
