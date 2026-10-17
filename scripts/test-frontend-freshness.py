@@ -206,7 +206,7 @@ class FreshnessControls(unittest.TestCase):
         class Stream(io.BytesIO):
             def fileno(self):return 42
         stream=Stream(raw)
-        info=SimpleNamespace(filename='decompengine/web/ui/asset-manifest.json',file_size=1024**2+1,external_attr=f.stat.S_IFREG<<16,is_dir=lambda:False)
+        info=SimpleNamespace(orig_filename='decompengine/web/ui/asset-manifest.json',filename='decompengine/web/ui/asset-manifest.json',file_size=1024**2+1,external_attr=f.stat.S_IFREG<<16,is_dir=lambda:False)
         archive=MagicMock();archive.__enter__.return_value=archive;archive.infolist.return_value=[info]
         with patch.object(files,'path',return_value=Path('/repo/app.jar')),patch.object(f.os,'open',return_value=42),patch.object(f.os,'fstat',return_value=SimpleNamespace(st_mode=f.stat.S_IFREG,st_size=len(raw))),patch.object(f.os,'fdopen',return_value=stream),patch.object(f.zipfile,'ZipFile',return_value=archive),patch.object(f.os,'close') as close:
             with self.assertRaisesRegex(f.Refusal,'private manifest'):files.jar_ui('/repo/app.jar')
@@ -377,7 +377,7 @@ class FreshnessControls(unittest.TestCase):
         self.assertEqual(f.sha(b'authored UI'),rows['index.html']['sha256'])
         self.assertTrue(stream.closed);close.assert_not_called()
 
-    def _inspect_metadata_jar(self, entries, *, refuse=False):
+    def _inspect_metadata_jar(self, entries, *, refuse=False, raw_names=None):
         data=io.BytesIO()
         with f.zipfile.ZipFile(data,'w',compression=f.zipfile.ZIP_STORED) as archive:
             for name,mode,payload in entries:
@@ -385,6 +385,14 @@ class FreshnessControls(unittest.TestCase):
                 info.create_system=3;info.external_attr=mode<<16
                 archive.writestr(info,payload)
         raw=data.getvalue()
+        if raw_names is not None:
+            before,after=raw_names
+            self.assertEqual(len(before),len(after));self.assertEqual(2,raw.count(before))
+            raw=raw.replace(before,after)
+            with f.zipfile.ZipFile(io.BytesIO(raw)) as check:
+                info=check.infolist()[0]
+                self.assertEqual(after.decode('ascii'),info.orig_filename)
+                self.assertEqual(after.decode('ascii').split(chr(0),1)[0],info.filename)
         class Stream(io.BytesIO):
             def fileno(self):return 42
         stream=Stream(raw)
@@ -419,6 +427,14 @@ class FreshnessControls(unittest.TestCase):
                 ('',f.stat.S_IFREG|0o644,b'')):
             with self.subTest(name=name,mode=mode):
                 self._inspect_metadata_jar([(name,mode,payload)],refuse=True)
+
+    def test_jar_ui_rejects_raw_names_changed_by_zip_parser(self):
+        for name,mode,payload in (
+                ('assets/X../outside/',f.stat.S_IFDIR|0o755,b''),
+                ('index.htmlX../outside',f.stat.S_IFREG|0o644,b'authored UI')):
+            with self.subTest(name=name):
+                before=('decompengine/web/ui/'+name).encode('ascii');after=before.replace(b'X',bytes((0,)))
+                self._inspect_metadata_jar([(name,mode,payload)],refuse=True,raw_names=(before,after))
 
     def test_jar_ui_genuine_directories_preserve_exact_regular_payloads(self):
         entries=[('',f.stat.S_IFDIR|0o755,b''),('assets/',f.stat.S_IFDIR|0o755,b''),

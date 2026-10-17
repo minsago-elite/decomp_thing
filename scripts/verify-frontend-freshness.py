@@ -242,6 +242,7 @@ class Files:
                     for info in archive.infolist():
                         self.ledger.check()
                         if not info.filename.startswith('decompengine/web/ui/'): continue
+                        if info.orig_filename!=info.filename: raise Refusal('JAR UI name changed during parsing')
                         name=info.filename[len('decompengine/web/ui/'):]
                         directory=info.is_dir()
                         relative=name[:-1] if directory else name
