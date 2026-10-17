@@ -9,6 +9,56 @@ import kotlin.test.*
 
 class AgentProgressJournalTest {
     @Test
+    fun `display commitments keep malformed UTF16 identities and interleaved messages distinct`(): Unit {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-identities").toAbsolutePath())
+        val root = createTempDirectory(parent, "journal-")
+        val identities = listOf(0xd800.toChar().toString(), 0xd801.toChar().toString(),
+            0xdc00.toChar().toString(), "?", 0xfffd.toChar().toString(),
+            charArrayOf(0xd83d.toChar(), 0xde00.toChar()).concatToString())
+        // Independent commitment vectors: malformed UTF-16 uses ff + its raw big-endian units;
+        // valid text keeps ordinary UTF-8, including literal question/replacement characters.
+        val encoded = listOf(
+            byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0x00),
+            byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0x01),
+            byteArrayOf(0xff.toByte(), 0xdc.toByte(), 0x00),
+            byteArrayOf(0x3f),
+            byteArrayOf(0xef.toByte(), 0xbf.toByte(), 0xbd.toByte()),
+            byteArrayOf(0xf0.toByte(), 0x9f.toByte(), 0x98.toByte(), 0x80.toByte()),
+        )
+        val commitments = encoded.map { bytes -> java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes).joinToString("") { "%02x".format(it) } }
+        assertEquals(identities.size, commitments.distinct().size)
+        AgentProgressJournal(root, "repair", maximumQueuedEvents = 1024).use { journal ->
+            val task = journal.beginTask("task", request(root))
+            identities.forEachIndexed { index, id ->
+                task.event(AgentMessageEvent(index.toLong(), id, AgentMessageRole.ASSISTANT, "message-$index"))
+            }
+            identities.forEachIndexed { index, id ->
+                task.event(AgentMessageEvent((identities.size + index).toLong(), id,
+                    AgentMessageRole.ASSISTANT, "-done", completed = true))
+            }
+            // Incomplete chunks publish only a commitment, never an invalid raw preview.
+            identities.forEachIndexed { index, text ->
+                task.event(AgentMessageEvent((2 * identities.size + index).toLong(), "content-$index",
+                    AgentMessageRole.THOUGHT, text))
+            }
+        }
+        val messages = assertNotNull(AgentProgressJournal.read(root)).getValue("events").jsonArray
+            .map { it.jsonObject }.filter { it["kind"]?.jsonPrimitive?.content == "message" }
+        assertEquals(3 * identities.size, messages.size)
+        identities.indices.forEach { index ->
+            assertEquals(commitments[index], messages[index].getValue("messageIdSha256").jsonPrimitive.content)
+            val completed = messages[identities.size + index]
+            assertEquals(commitments[index], completed.getValue("messageIdSha256").jsonPrimitive.content)
+            assertEquals("message-$index-done", completed.getValue("text").jsonPrimitive.content)
+            assertFalse(completed.getValue("textOmitted").jsonPrimitive.boolean)
+            val content = messages[2 * identities.size + index]
+            assertEquals(commitments[index], content.getValue("contentSha256").jsonPrimitive.content)
+            assertFalse("text" in content)
+        }
+    }
+
+    @Test
     fun `redaction bounds raw configuration and intermediate replacement work`(): Unit {
         val marker = "[oversized text omitted]"
         val redactor = ProgressRedactor(listOf("q"))

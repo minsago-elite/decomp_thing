@@ -35,6 +35,9 @@ prevents a configured secret split across chunks from leaking through separate p
 environment values and common credential formats are redacted before previews are bounded. Tool,
 plan and permission previews are also bounded. Opaque session/message/tool IDs remain digests.
 Redaction is a display precaution, not a claim that arbitrary unconfigured secrets can be identified.
+Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
+malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
+therefore cannot collapse through replacement encoding and merge separate message buffers.
 
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history

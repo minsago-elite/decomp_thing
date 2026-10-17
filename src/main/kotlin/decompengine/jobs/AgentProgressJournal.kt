@@ -536,7 +536,7 @@ class AgentProgressJournal private constructor(
         }
 
         private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")
-            .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            .digest(receiptCommitmentBytes(text)).joinToString("") { "%02x".format(it) }
     }
 }
 
