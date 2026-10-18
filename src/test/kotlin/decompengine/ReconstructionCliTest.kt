@@ -82,13 +82,13 @@ class ReconstructionCliTest {
         val bytes = ByteArrayOutputStream()
         var terminalObserved = false
         val console = object : PrintStream(bytes, true, Charsets.UTF_8) {
-            override fun println(line: String?) {
+            override fun print(line: String?) {
                 if (line?.startsWith("reconstruction failed:") == true) {
                     // Check ownership at emission, before the terminal boundary has returned.
                     AgentProgressJournal(root, "reconstruction").use { }
                     terminalObserved = true
                 }
-                super.println(line)
+                super.print(line)
             }
         }
         console.use {

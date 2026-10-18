@@ -1,6 +1,7 @@
 package decompengine
 
 import decompengine.mvp.MvpPatchException
+import decompengine.jobs.ProgressRedactor
 import decompengine.repair.RepairClientAgentHarness
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -14,6 +15,81 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class PatchCliTest {
+    @Test
+    fun `workflow terminal framing is masked together with raw failure detail`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val cases = listOf(
+                WorkflowCliCommand.PATCH to "patch failed",
+                WorkflowCliCommand.RECONSTRUCT to "reconstruction failed",
+                WorkflowCliCommand.REPAIR to "repair unavailable or failed",
+            )
+            for ((command, prefix) in cases) {
+                for (value in listOf("$prefix: visible", "$prefix: visible\n", prefix)) {
+                    val values = listOf(value)
+                    when (command) {
+                        WorkflowCliCommand.PATCH -> assertEquals(1, runPatchCliAction(values, output) {
+                            throw IOException("visible")
+                        })
+                        WorkflowCliCommand.RECONSTRUCT -> assertEquals(1, runReconstructionCliAction(values, output) {
+                            throw IOException("visible")
+                        })
+                        WorkflowCliCommand.REPAIR -> renderWorkflowFailure(command, "visible", ProgressRedactor(values), output)
+                    }
+                    assertFalse(bytes.toString(Charsets.UTF_8).contains(value), "framing exposed $value")
+                    assertTrue(bytes.toString(Charsets.UTF_8).contains("[redacted]"))
+                    bytes.reset()
+                }
+            }
+            assertEquals(2, runPatchCliAction(listOf("configuration error: visible"), output) {
+                throw IllegalArgumentException("visible")
+            })
+            assertEquals("[redacted]\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            val oversizedDetail = "z".repeat(16_370)
+            assertEquals(1, runReconstructionCliAction(listOf("reconstruction failed: $oversizedDetail"), output) {
+                throw IOException(oversizedDetail)
+            })
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("zzz"))
+            bytes.reset()
+            val longSecret = "reconstruction failed: " + "x".repeat(600)
+            assertEquals(1, runReconstructionCliAction(listOf(longSecret), output) {
+                throw IOException("x".repeat(600))
+            })
+            assertEquals("[redacted]\n", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
+    @Test
+    fun `every workflow usage masks complete constants boundaries and rejected inventories`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            for ((command, name) in listOf(WorkflowCliCommand.PATCH to "patch",
+                WorkflowCliCommand.RECONSTRUCT to "reconstruct", WorkflowCliCommand.REPAIR to "repair")) {
+                val prefix = "usage: llm_bin_patch $name"
+                assertEquals(2, renderWorkflowUsageError(command, "unexpected argument: private", listOf("private"), output))
+                assertTrue(bytes.toString(Charsets.UTF_8).startsWith("unexpected argument: [redacted]\n$prefix "))
+                assertFalse(bytes.toString(Charsets.UTF_8).contains("private"))
+                bytes.reset()
+                for (secret in listOf(prefix, "boundary\nusage:", "legacy-openai]\n")) {
+                    assertEquals(2, renderWorkflowUsageError(command, "boundary", listOf(secret), output))
+                    assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
+                    bytes.reset()
+                }
+                val tooMany = object : AbstractCollection<String>() {
+                    override val size: Int = 4097
+                    override fun iterator(): Iterator<String> = error("rejected inventory must not be iterated")
+                }
+                for (values in listOf(tooMany, listOf("x".repeat(1024 * 1024 + 1)))) {
+                    assertEquals(2, renderWorkflowUsageError(command, "PRIVATE_ARGUMENT", values, output))
+                    assertEquals("", bytes.toString(Charsets.UTF_8))
+                }
+                assertEquals(2, renderWorkflowUsageError(command, "x".repeat(16_385), emptyList(), output))
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+        }
+    }
+
     @Test
     fun `patch terminal diagnostics redact ordinary failures after cleanup with correct exit status`() {
         val configured = "synthetic-patch-configured-value"
@@ -29,9 +105,9 @@ class PatchCliTest {
             var closed = false
             val bytes = ByteArrayOutputStream()
             val console = object : PrintStream(bytes, true, Charsets.UTF_8) {
-                override fun println(line: String?) {
+                override fun print(line: String?) {
                     assertTrue(closed, "terminal output preceded action cleanup")
-                    super.println(line)
+                    super.print(line)
                 }
             }
             console.use {

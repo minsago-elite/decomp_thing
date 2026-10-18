@@ -226,7 +226,7 @@ internal fun runReconstructionCliAction(
         0
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
-        output.println("reconstruction failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        renderWorkflowFailure(WorkflowCliCommand.RECONSTRUCT, failure.message ?: failure.javaClass.simpleName, redactor, output)
         1
     }
 }
@@ -277,8 +277,7 @@ internal fun selectReconstructionStrategy(
 }
 
 private fun reconstructUsageError(message: String): Nothing {
-    cliDiagnosticRedactor(System.getenv().values)?.let { System.err.println(it.text(message)) }
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
+    renderWorkflowUsageError(WorkflowCliCommand.RECONSTRUCT, message, System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 
@@ -399,7 +398,7 @@ private fun runRepair(args: List<String>) {
     } catch (failure: IllegalArgumentException) {
         repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
     } catch (failure: Exception) {
-        System.err.println("repair unavailable or failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor)
         kotlin.system.exitProcess(1)
     }
     val presentation = presentRepairOutcome(result)
@@ -417,12 +416,47 @@ internal fun renderRepairUsageError(
     message: String,
     sensitiveValues: Collection<String>,
     output: PrintStream = System.err,
+): Int = renderWorkflowUsageError(WorkflowCliCommand.REPAIR, message, sensitiveValues, output)
+
+internal enum class WorkflowCliCommand(val usage: String, val failurePrefix: String) {
+    RECONSTRUCT(
+        "usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]",
+        "reconstruction failed",
+    ),
+    PATCH(
+        "usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]",
+        "patch failed",
+    ),
+    REPAIR(
+        "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]",
+        "repair unavailable or failed",
+    ),
+}
+
+internal fun renderWorkflowUsageError(
+    command: WorkflowCliCommand,
+    message: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
 ): Int {
     val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
-    val usage = "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]"
+    val usage = command.usage
     if (message.length > 16_384 - usage.length - 2) return 2
     output.print(redactor.text("$message\n$usage\n", 16_384))
     return 2
+}
+
+internal fun renderWorkflowFailure(
+    command: WorkflowCliCommand,
+    message: String,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.err,
+    configuration: Boolean = false,
+) {
+    val prefix = if (configuration) "configuration error" else command.failurePrefix
+    // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
+    val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
+    output.print(redactor.text("$prefix: $detail\n"))
 }
 
 private fun runPatch(args: List<String>) {
@@ -491,15 +525,14 @@ internal fun runPatchCliAction(
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
         val configuration = failure is IllegalArgumentException
-        val prefix = if (configuration) "configuration error" else "patch failed"
-        output.println("$prefix: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        renderWorkflowFailure(WorkflowCliCommand.PATCH, failure.message ?: failure.javaClass.simpleName,
+            redactor, output, configuration)
         if (configuration) 2 else 1
     }
 }
 
 private fun patchUsageError(message: String): Nothing {
-    cliDiagnosticRedactor(System.getenv().values)?.let { System.err.println(it.text(message)) }
-    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]")
+    renderWorkflowUsageError(WorkflowCliCommand.PATCH, message, System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 
