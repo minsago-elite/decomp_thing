@@ -695,6 +695,7 @@ class AcpAgentHarnessTest {
         val cause = AgentExecutionException(timeout, java.io.IOException(raw)).apply { addSuppressed(observation) }
         val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
             AgentExecutionOutcome.Failed(timeout), evidence, cause)
+        val retainedOutcome = receipt.outcome
         val context = safeStopFailureContext("stop-refusal", receipt)
         assertTrue(context.contains("prefix=supported=true,first=LAUNCH_PINNING,kind=TIMEOUT,elapsedNs=12,remainingNs=0,lastEntered=LAUNCH_PINNING,lastReturned=ENTRY"), context)
         assertTrue(context.contains("cleanup=UNVERIFIED"))
@@ -703,7 +704,8 @@ class AcpAgentHarnessTest {
         assertSame(cause, receipt.failureCause)
         assertSame(observation, cause.suppressed.single())
         assertEquals(original, observation.message)
-        assertEquals(AgentExecutionOutcome.Failed(timeout), receipt.outcome)
+        assertSame(retainedOutcome, receipt.outcome)
+        assertSame(timeout, assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure)
 
         var foreignMessageReads = 0
         val foreign = object : java.io.IOException() {
