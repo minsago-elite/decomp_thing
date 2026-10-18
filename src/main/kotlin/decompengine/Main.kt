@@ -380,21 +380,19 @@ private fun runRepair(args: List<String>) {
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val reportsDir = reports ?: project.resolve("reports")
+    val environment = System.getenv()
+    val redactor = cliDiagnosticRedactor(environment.values) ?: kotlin.system.exitProcess(1)
     val regressionInputs = if (exploreInputs) {
         val exploration = AutomaticExplorer().explore(
             original,
             listOf(CandidateInput("seed_default", CandidateSource.SEED)),
             reportsDir,
         )
-        println(
-            "exploration retained ${exploration.candidates.size} regression input(s) across " +
-                "${exploration.coverage.expandedSignatures.size} observed output signature(s)",
-        )
+        renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
         exploration.candidates.map(CandidateInput::toProcessInput)
     } else {
         listOf(ProcessInput("default"))
     }
-    val redactor = ProgressRedactor(System.getenv().values)
     val result = try {
         SecureRepairRuntime.open(
             RepairRuntimeConfiguration(
@@ -415,8 +413,41 @@ private fun runRepair(args: List<String>) {
         kotlin.system.exitProcess(1)
     }
     val presentation = presentRepairOutcome(result)
-    presentation.lines.forEach(::println)
-    if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
+    val exitCode = renderRepairPresentation(presentation, environment.values)
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** A refused display cannot expose a partial result or rewrite the durable typed outcome. */
+internal fun renderRepairPresentation(
+    presentation: RepairCliPresentation,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+): Int {
+    val text = try {
+        require(presentation.exitCode in 0..2 && presentation.lines.size <= 32)
+        MvpArtifactRedactor(sensitiveValues, 16_384L).project {
+            var count = 0
+            for (line in presentation.lines) {
+                require(count++ < 32)
+                append(line).append("\n")
+            }
+        }
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        return 1
+    }
+    output.print(text)
+    return presentation.exitCode
+}
+
+internal fun renderRepairExplorationSummary(
+    candidateCount: Int,
+    signatureCount: Int,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.out,
+) {
+    require(candidateCount >= 0 && signatureCount >= 0)
+    output.print(redactor.text("exploration retained $candidateCount regression input(s) across $signatureCount observed output signature(s)\n", 16_384))
 }
 
 private fun repairUsageError(message: String): Nothing {

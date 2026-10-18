@@ -2,6 +2,7 @@ package decompengine
 
 import decompengine.repair.*
 import decompengine.validation.*
+import decompengine.jobs.ProgressRedactor
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Path
@@ -10,6 +11,114 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class RepairCliPresentationTest {
+    @Test
+    fun `repair result projection preserves typed outcomes and masks complete private display frames`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            for (status in RepairRunStatus.entries) {
+                val result = outcome(status, report())
+                val shown = presentRepairOutcome(result)
+                val snapshot = shown.copy(lines = shown.lines.toList())
+                assertEquals(shown.exitCode, renderRepairPresentation(shown, emptyList(), output))
+                assertEquals(shown.lines.joinToString("") { "$it\n" }, bytes.toString(Charsets.UTF_8))
+                assertEquals(snapshot, shown)
+                assertEquals(status, result.runState.status)
+                bytes.reset()
+            }
+            val shown = presentRepairOutcome(outcome(RepairRunStatus.ITERATION_EXHAUSTED, null))
+            val snapshot = shown.copy(lines = shown.lines.toList())
+            val completion = "repair did not establish full acceptance; inspect durable repair state and retained reports"
+            assertEquals(1, renderRepairPresentation(shown, listOf(completion, "run_00000001"), output))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains(completion))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("run_00000001"))
+            assertTrue(bytes.toString(Charsets.UTF_8).contains("[REDACTED]"))
+            assertEquals(snapshot, shown)
+            bytes.reset()
+            assertEquals(2, renderRepairPresentation(RepairCliPresentation(2, listOf("first", "second", "last")),
+                listOf("first\nsecond"), output))
+            assertEquals("[REDACTED]\nlast\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            assertEquals(1, renderRepairPresentation(RepairCliPresentation(1,
+                listOf("Bearer synthetic-token", "Authorization: Basic c3ludGhldGlj", "password=synthetic-password")),
+                emptyList(), output))
+            listOf("synthetic-token", "c3ludGhldGlj", "synthetic-password").forEach {
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(it))
+            }
+        }
+    }
+
+    @Test
+    fun `repair result refusal emits no partial payload and preserves interruption and fatal errors`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val valid = RepairCliPresentation(0, listOf("PRIVATE_RESULT"))
+            val tooMany = object : AbstractCollection<String>() {
+                override val size: Int = 4097
+                override fun iterator(): Iterator<String> = error("rejected inventory must not be iterated")
+            }
+            val broken = object : AbstractCollection<String>() {
+                override val size: Int = 1
+                override fun iterator(): Iterator<String> = throw IllegalArgumentException("PRIVATE_INVENTORY_FAILURE")
+            }
+            for (values in listOf(tooMany, broken, listOf("x".repeat(1024 * 1024 + 1)))) {
+                assertEquals(1, renderRepairPresentation(valid, values, output))
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            val deceptiveLines = object : List<String> by listOf("") {
+                override fun iterator(): Iterator<String> = List(33) { "" }.iterator()
+            }
+            for (shown in listOf(RepairCliPresentation(0, List(33) { "" }),
+                RepairCliPresentation(0, deceptiveLines), RepairCliPresentation(-1, listOf("PRIVATE_STATUS")),
+                RepairCliPresentation(0, listOf("é".repeat(9000))))) {
+                assertEquals(1, renderRepairPresentation(shown, emptyList(), output))
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            assertEquals(1, renderRepairPresentation(RepairCliPresentation(0, listOf("xa".repeat(3000))), listOf("x"), output))
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            val initiallyInterrupted = Thread.interrupted()
+            try {
+                val interrupted = object : AbstractCollection<String>() {
+                    override val size: Int = 1
+                    override fun iterator(): Iterator<String> = throw InterruptedException("PRIVATE_INTERRUPTED_RESULT")
+                }
+                assertEquals(1, renderRepairPresentation(valid, interrupted, output))
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            } finally {
+                Thread.interrupted()
+                if (initiallyInterrupted) Thread.currentThread().interrupt()
+            }
+            val fatal = AssertionError("PRIVATE_FATAL_RESULT")
+            val fatalValues = object : AbstractCollection<String>() {
+                override val size: Int = 1
+                override fun iterator(): Iterator<String> = throw fatal
+            }
+            assertSame(fatal, assertFailsWith<AssertionError> { renderRepairPresentation(valid, fatalValues, output) })
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            assertEquals(0, renderRepairPresentation(RepairCliPresentation(0, List(32) { "line" }), emptyList(), output))
+            assertEquals("line\n".repeat(32), bytes.toString(Charsets.UTF_8))
+        }
+    }
+
+    @Test
+    fun `repair exploration projects the complete bounded count summary`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val expected = "exploration retained 3 regression input(s) across 7 observed output signature(s)\n"
+            renderRepairExplorationSummary(3, 7, ProgressRedactor(emptyList()), output)
+            assertEquals(expected, bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            for (value in listOf(expected, "exploration retained", "3 regression input(s) across 7")) {
+                renderRepairExplorationSummary(3, 7, ProgressRedactor(listOf(value)), output)
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
+                assertTrue(bytes.toString(Charsets.UTF_8).contains("[redacted]"))
+                bytes.reset()
+            }
+            assertFailsWith<IllegalArgumentException> { renderRepairExplorationSummary(-1, 0, ProgressRedactor(emptyList()), output) }
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
     @Test
     fun `repair usage diagnostics admit secrets before printing complete terminal framing`() {
         val usage = "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]"
