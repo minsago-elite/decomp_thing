@@ -683,6 +683,58 @@ class AcpAgentHarnessTest {
             assertTrue(context.contains("facts=NOT_AVAILABLE"))
             assertFalse(context.contains(raw))
         }
+
+        // Already-retained observations only: no process, filesystem or timing trial.
+        val prefix = assertNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(12L, 0L) })
+        prefix.start(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING)
+        prefix.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+        prefix.finish(RuntimeCopyStatistics.Prefix.Phase.LAUNCH_PINNING, false)
+        val observation = assertNotNull(prefix.failureDiagnostic())
+        val original = assertNotNull(observation.message)
+        val timeout = AgentFailure(AgentFailureKind.TIMEOUT, raw)
+        val cause = AgentExecutionException(timeout, java.io.IOException(raw)).apply { addSuppressed(observation) }
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+            AgentExecutionOutcome.Failed(timeout), evidence, cause)
+        val context = safeStopFailureContext("stop-refusal", receipt)
+        assertTrue(context.contains("prefix=supported=true,first=LAUNCH_PINNING,kind=TIMEOUT,elapsedNs=12,remainingNs=0,lastEntered=LAUNCH_PINNING,lastReturned=ENTRY"), context)
+        assertTrue(context.contains("cleanup=UNVERIFIED"))
+        assertTrue(context.length <= 3072)
+        assertFalse(context.contains(raw))
+        assertSame(cause, receipt.failureCause)
+        assertSame(observation, cause.suppressed.single())
+        assertEquals(original, observation.message)
+        assertEquals(AgentExecutionOutcome.Failed(timeout), receipt.outcome)
+
+        var foreignMessageReads = 0
+        val foreign = object : java.io.IOException() {
+            override val message: String get() { foreignMessageReads++; error(raw) }
+        }
+        for (diagnostics in listOf(
+            arrayOf(java.io.IOException(raw)),
+            arrayOf(java.io.IOException(original.replace("firstObservedFailure=LAUNCH_PINNING", "firstObservedFailure=$raw"))),
+            arrayOf(java.io.IOException(original.replace("failureElapsedNs=12", "failureElapsedNs=9223372036854775808"))),
+            arrayOf(java.io.IOException(original.replace("failureRemainingNs=0", "failureRemainingNs=00"))),
+            arrayOf(java.io.IOException("x".repeat(8193))),
+            arrayOf(IllegalStateException(original)),
+            arrayOf(foreign),
+            arrayOf(observation, java.io.IOException(original)),
+            Array(5) { java.io.IOException(original) },
+        )) {
+            val rejected = AgentExecutionException(timeout).apply { diagnostics.forEach(::addSuppressed) }
+            val untrusted = AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, rejected)
+            val rejectedContext = safeStopFailureContext("stop-refusal", untrusted)
+            assertTrue(rejectedContext.contains("prefix=NOT_AVAILABLE"), rejectedContext)
+            assertFalse(rejectedContext.contains(raw))
+        }
+        assertEquals(0, foreignMessageReads)
+        val nested = AgentExecutionException(timeout, java.io.IOException(raw).apply { addSuppressed(observation) })
+        assertTrue(safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, nested)).contains("prefix=NOT_AVAILABLE"))
+        val unregistered = java.io.IOException(raw).apply { addSuppressed(observation) }
+        assertTrue(safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, unregistered)).contains("prefix=NOT_AVAILABLE"))
+        val tailed = AgentExecutionException(timeout).apply { addSuppressed(java.io.IOException(original + raw)) }
+        val projected = safeStopFailureContext("stop-refusal", AgentExecutionReceipt(receipt.requestBinding, receipt.outcome, evidence, tailed))
+        assertTrue(projected.contains("prefix=supported=true,first=LAUNCH_PINNING"))
+        assertFalse(projected.contains(raw), "unselected phase/leaf text is never rendered")
     }
 
     private fun stdoutFactsCall(name: String, vararg arguments: Any?): Any? {
@@ -747,7 +799,8 @@ class AcpAgentHarnessTest {
             val directCause = (retainedCause as? AgentExecutionException)?.cause
             val fields = listOf("ACP_STOP_V1", "mode=$safeMode", "kind=${failure?.kind?.name ?: "NOT_FAILED"}",
                 "phase=${evidence?.phaseReached?.name ?: "UNKNOWN"}", "cleanup=${evidence?.cleanupDisposition?.name ?: "UNKNOWN"}",
-                "cause=${causeCode(retainedCause)}/${causeCode(directCause)}", "facts=$facts")
+                "cause=${causeCode(retainedCause)}/${causeCode(directCause)}", "facts=$facts",
+                "prefix=${retainedPrefixFailureContext(retainedCause as? AgentExecutionException)}")
             val output = StringBuilder(512)
             for ((index, field) in fields.withIndex()) {
                 if (field.any { it.code !in 32..126 } || output.length + field.length + (if (index == 0) 0 else 1) > 3072) return@runCatching "ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE"
@@ -757,6 +810,27 @@ class AcpAgentHarnessTest {
             output.toString()
         }.getOrDefault("ACP_STOP_V1 DIAGNOSTIC_UNAVAILABLE")
     }
+
+    /** Project only a closed header from an existing mapped wrapper; never traverse its cause graph,
+     * render phase/leaf payloads, resample a clock or interpret these observations as cleanup proof. */
+    private fun retainedPrefixFailureContext(mapped: AgentExecutionException?): String = runCatching {
+        val diagnostics = mapped?.suppressed ?: return@runCatching "NOT_AVAILABLE"
+        if (diagnostics.size > 4) return@runCatching "NOT_AVAILABLE"
+        val candidates = diagnostics.filter { it.javaClass == java.io.IOException::class.java }.mapNotNull {
+            it.message?.takeIf { text -> text.length <= 8192 && text.startsWith("acp-prelaunch-prefix-observation-v1;") }
+        }
+        if (candidates.size != 1) return@runCatching "NOT_AVAILABLE"
+        val phase = "(?:" + RuntimeCopyStatistics.Prefix.Phase.entries.joinToString("|") { it.name } + "|unobserved)"
+        val kind = "(?:" + RuntimeCopyStatistics.Prefix.Failure.entries.joinToString("|") { it.name } + "|unobserved)"
+        val number = "(?:-1|0|[1-9][0-9]{0,18})"
+        val header = Regex("\\Aacp-prelaunch-prefix-observation-v1;supported=(true|false);" +
+            "firstObservedFailure=($phase),kind=($kind),failureElapsedNs=($number),failureRemainingNs=($number);" +
+            "lastEntered=($phase);lastReturned=($phase);states=0-unseen/1-active/2-returned/3-threw;")
+        val fields = header.find(candidates.single())?.groupValues ?: return@runCatching "NOT_AVAILABLE"
+        if (fields[4].toLongOrNull() == null || fields[5].toLongOrNull() == null) return@runCatching "NOT_AVAILABLE"
+        "supported=${fields[1]},first=${fields[2]},kind=${fields[3]},elapsedNs=${fields[4]},remainingNs=${fields[5]}," +
+            "lastEntered=${fields[6]},lastReturned=${fields[7]}"
+    }.getOrDefault("NOT_AVAILABLE")
 
     private fun stdoutControlField(control: Pair<Class<*>, Any>, name: String): Any =
         control.first.getDeclaredField(name).apply { isAccessible = true }.get(control.second)
