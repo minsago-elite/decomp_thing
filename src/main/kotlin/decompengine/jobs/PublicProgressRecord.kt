@@ -13,6 +13,13 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Locale
 
+private fun replayOmissionCount(value: JsonElement): Int {
+    val primitive = value as? JsonPrimitive
+    val count = primitive?.takeIf { !it.isString }?.intOrNull
+    require(count != null && count >= 0) { "invalid replay omission count" }
+    return count
+}
+
 /** One classified public view shared by legacy and v1 progress adapters. */
 internal data class PublicProgressRecord(
     val writerId: String?,
@@ -71,10 +78,7 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
         for ((key, value) in record) when {
             key in metadata -> Unit
             key == "replayOmittedFields" -> {
-                val primitive = value as? JsonPrimitive
-                val count = primitive?.takeIf { !it.isString }?.intOrNull
-                require(count != null && count >= 0) { "invalid replay omission count" }
-                omitted = Math.addExact(omitted, count)
+                omitted = Math.addExact(omitted, replayOmissionCount(value))
             }
             key in privateLabels -> {
                 omit()
@@ -165,5 +169,24 @@ internal fun replayProgressRecord(record: JsonObject): JsonObject {
             put(key, if (key in numericFields) record.getValue(key) else value)
         }
         if (classified.omittedFieldCount > 0) put("replayOmittedFields", classified.omittedFieldCount)
+    }
+}
+
+/** Display-only projection of a snapshot already admitted by the bounded journal decoder. */
+internal fun replayProgressSnapshot(snapshot: JsonObject): JsonObject {
+    val rootFields = setOf("schemaVersion", "displayOnly", "nextSequence", "queueDropped", "historyDropped",
+        "truncated", "events", "omittedSequenceRanges", "retentionExpiredAt")
+    val records = snapshot.getValue("events").jsonArray
+    require(records.size <= 1024) { "progress snapshot exceeds the event limit" }
+    var omitted = snapshot["replayOmittedFields"]?.let(::replayOmissionCount) ?: 0
+    for (key in snapshot.keys) if (key !in rootFields && key != "replayOmittedFields") {
+        omitted = Math.addExact(omitted, 1)
+    }
+    return buildJsonObject {
+        for (key in rootFields) {
+            if (key == "events") put(key, JsonArray(records.map { replayProgressRecord(it.jsonObject) }))
+            else snapshot[key]?.let { put(key, it) }
+        }
+        if (omitted > 0) put("replayOmittedFields", omitted)
     }
 }

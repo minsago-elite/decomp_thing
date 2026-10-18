@@ -44,6 +44,11 @@ facts, application identities, commitments, record sequences and all event-loss 
 repeated replay; a removed text preview also sets `textOmitted`. Raw decoding and its byte/accounting
 checks stay separate. This cleanup reaches stored bytes only after the owning writer successfully
 publishes its new snapshot; unopened journals and failed publications still need separate maintenance.
+Authenticated legacy progress attachments apply the same display projection to their captured bytes,
+including unknown root fields. Only the exact legacy and admitted-run journal namespaces select it;
+source/receipt files sharing the basename keep their original bytes. Reads and bounded canonical JSON
+output use the journal's two-MiB ceiling. Invalid journals return a fixed unavailable error without
+raw parser causes. This protects downloaded display content without rewriting unopened stored files.
 
 Raw protocol frames and arbitrary exception messages do not enter this view. Message chunks retain
 content/identity commitments and counts. Up to 16 messages of 8,192 characters each can be accumulated
