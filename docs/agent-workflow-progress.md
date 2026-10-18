@@ -36,6 +36,14 @@ Overflow is explicit through sequence gaps, queue/history omission counts and `t
 accept at most 2 MiB and 1,024 ordered records. Closing drains the bounded queue and waits at most
 five seconds; persistence or cleanup failure is reported instead of claiming a complete projection.
 A new writer retains the prior snapshot and continues its sequence while starting a distinct run.
+Before republishing prior events, it applies the same strict field classifier as the web adapters.
+Historical prose, paths, producer labels, plan entries and unknown fields are withheld: an older
+formatter may already have erased the context needed to recognize a partial credential. Typed
+facts, application identities, commitments, record sequences and all event-loss counters remain.
+`replayOmittedFields` counts withheld fields separately from lost events and remains stable across
+repeated replay; a removed text preview also sets `textOmitted`. Raw decoding and its byte/accounting
+checks stay separate. This cleanup reaches stored bytes only after the owning writer successfully
+publishes its new snapshot; unopened journals and failed publications still need separate maintenance.
 
 Raw protocol frames and arbitrary exception messages do not enter this view. Message chunks retain
 content/identity commitments and counts. Up to 16 messages of 8,192 characters each can be accumulated

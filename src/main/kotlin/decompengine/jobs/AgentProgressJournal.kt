@@ -78,7 +78,7 @@ class AgentProgressJournal private constructor(
                 sequence = previous.getValue("nextSequence").jsonPrimitive.long
                 queueDropped = previous.getValue("queueDropped").jsonPrimitive.long
                 historyDropped = previous.getValue("historyDropped").jsonPrimitive.long
-                previous.getValue("events").jsonArray.forEach { retained.add(it.jsonObject) }
+                previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
             requireSequenceCapacity()

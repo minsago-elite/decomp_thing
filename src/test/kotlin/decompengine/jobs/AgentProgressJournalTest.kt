@@ -10,6 +10,88 @@ import kotlin.test.*
 class AgentProgressJournalTest {
 
     @Test
+    fun `historical replay withholds old prose while preserving typed facts and commitments`() {
+        val record = buildJsonObject {
+            put("sequence", 19); put("runId", "writer-1"); put("workflow", "repair")
+            put("time", "2026-10-18T00:00:00Z"); put("kind", "message"); put("agentSequence", 7)
+            put("taskId", "PRIVATE_TASK"); put("workflowRunId", "PRIVATE_RUN")
+            put("revisionId", "PRIVATE_REVISION"); put("path", "/PRIVATE_ROOT/input")
+            put("text", "Authorization: [redacted] old-private-tail")
+            put("entries", buildJsonArray { add(buildJsonObject { put("text", "PRIVATE_PLAN") }) })
+            put("future_PRIVATE_FIELD", "PRIVATE_VALUE")
+            put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
+            put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
+            put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("phase", "provisional"); put("role", "assistant"); put("completed", true)
+            put("validationPending", true); put("textOmitted", false); put("entriesTruncated", false)
+        }
+        val expected = buildJsonObject {
+            put("sequence", 19); put("runId", "writer-1"); put("workflow", "repair")
+            put("time", "2026-10-18T00:00:00Z"); put("kind", "message"); put("agentSequence", 7)
+            put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
+            put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
+            put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("phase", "provisional"); put("role", "assistant"); put("completed", true)
+            put("validationPending", true); put("textOmitted", true); put("entriesTruncated", false)
+            put("replayOmittedFields", 7)
+        }
+        val replay = replayProgressRecord(record)
+        assertEquals(expected, replay)
+        assertEquals(replay, replayProgressRecord(replay))
+        assertEquals(publicProgressRecord(record), publicProgressRecord(replay))
+        assertTrue(record.toString().contains("old-private-tail"))
+        for (privateText in listOf("PRIVATE_", "old-private-tail", "Authorization", "[redacted]")) {
+            assertFalse(replay.toString().contains(privateText))
+        }
+        assertFalse("acceptedRevisionSha256" in replay)
+    }
+
+    @Test
+    fun `historical replay bounds fields and omission counts without inventing legacy metadata`() {
+        val sparse = buildJsonObject { put("sequence", 0) }
+        assertEquals(sparse, replayProgressRecord(sparse))
+        val maximal = buildJsonObject {
+            put("sequence", 0)
+            repeat(127) { put("private-$it", "PRIVATE_VALUE") }
+        }
+        assertEquals(buildJsonObject { put("sequence", 0); put("replayOmittedFields", 127) }, replayProgressRecord(maximal))
+        assertFailsWith<IllegalArgumentException> {
+            replayProgressRecord(JsonObject(maximal + ("one-more" to JsonPrimitive("PRIVATE_VALUE"))))
+        }
+        val base = buildJsonObject { put("sequence", 0); put("kind", "message") }
+        for (invalid in listOf(JsonPrimitive(-1), JsonPrimitive("1"), JsonPrimitive(true), JsonObject(emptyMap()))) {
+            assertFailsWith<IllegalArgumentException> {
+                replayProgressRecord(JsonObject(base + ("replayOmittedFields" to invalid)))
+            }
+        }
+        val maximum = JsonObject(base + ("replayOmittedFields" to JsonPrimitive(Int.MAX_VALUE)))
+        assertEquals(maximum, replayProgressRecord(maximum))
+        assertEquals(maximum, replayProgressRecord(replayProgressRecord(maximum)))
+        for (record in listOf(JsonObject(maximum + ("text" to JsonPrimitive("PRIVATE_VALUE"))),
+            JsonObject(base + mapOf("text" to JsonPrimitive("PRIVATE_VALUE"), "replayOmittedFields" to JsonPrimitive(Int.MAX_VALUE))))) {
+            assertFailsWith<ArithmeticException> { replayProgressRecord(record) }
+        }
+        for ((key, value) in listOf("requestSha256" to JsonPrimitive("PRIVATE_INVALID_DIGEST"),
+            "inputTokens" to JsonPrimitive("1e3"), "completed" to JsonPrimitive("true"))) {
+            assertFailsWith<IllegalArgumentException> { replayProgressRecord(JsonObject(base + (key to value))) }
+        }
+        for (key in listOf("time", "wallClock")) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                replayProgressRecord(JsonObject(base + (key to JsonPrimitive("PRIVATE_INVALID_TIME"))))
+            }
+            assertFalse(failure.message.orEmpty().contains("PRIVATE_INVALID_TIME"))
+            assertNull(failure.cause)
+        }
+        val unknown = replayProgressRecord(JsonObject(base + mapOf(
+            "workflow" to JsonPrimitive("PRIVATE_WORKFLOW"), "kind" to JsonPrimitive("PRIVATE_KIND"),
+            "role" to JsonPrimitive("PRIVATE_ROLE"))))
+        assertEquals("unknown", unknown.getValue("workflow").jsonPrimitive.content)
+        assertEquals("unknown", unknown.getValue("kind").jsonPrimitive.content)
+        assertEquals(1, unknown.getValue("replayOmittedFields").jsonPrimitive.int)
+        assertFalse(unknown.toString().contains("PRIVATE"))
+    }
+
+    @Test
     fun `complete configured diagnostic secrets survive format matching only as masked coverage`() {
         for (secret in listOf("top secret", "top,secret", "top;secret", "top\nsecret", "top\u0001 secret")) {
             for (redactor in listOf(ProgressRedactor(listOf(secret)), ProgressRedactor(emptyList(), listOf(secret)))) {
@@ -660,7 +742,11 @@ class AgentProgressJournalTest {
                 "revision-2", "attempt-2", "a".repeat(64)))
         }
         val events = AgentProgressJournal.read(root)!!.getValue("events").jsonArray.map { it.jsonObject }
-        val firstRun = events.filter { it["workflowRunId"]?.jsonPrimitive?.content == "[redacted]" }
+        val commitment = java.security.MessageDigest.getInstance("SHA-256").digest("private-run".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val firstRun = events.filter { it["workflowRunIdSha256"]?.jsonPrimitive?.content == commitment }
+        assertEquals(5, firstRun.size)
+        assertTrue(firstRun.all { "workflowRunId" !in it && it.getValue("replayOmittedFields").jsonPrimitive.int > 0 })
         assertEquals(1, firstRun.map { it.getValue("workflowRunIdSha256") }.distinct().size)
         assertEquals(setOf("task_started", "plan", "agent_finished", "workflow_run_state"), firstRun.map { it.getValue("kind").jsonPrimitive.content }.toSet())
         assertEquals(listOf("provisional", "exhausted", "accepted"), events.filter {
