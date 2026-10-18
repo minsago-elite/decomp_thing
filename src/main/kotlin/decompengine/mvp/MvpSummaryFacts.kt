@@ -6,6 +6,16 @@ import java.util.Collections
 
 /** Reserved capacity for a complete bounded report over producer facts when private detail refuses. */
 internal const val MVP_SUMMARY_FACTS_BYTES = 16_384L
+internal const val MVP_SUMMARY_DETAILS_PATH = "evidence/summary-details.md"
+
+/** A commitment computed only after the producer writes the completely redacted detail artifact. */
+internal data class MvpSummaryDetailsFact(val sha256: String) {
+    init {
+        require(sha256.length == 64 && sha256.all { it in "0123456789abcdef" }) {
+            "invalid report detail commitment"
+        }
+    }
+}
 
 internal fun requireMvpSummaryCapacity(maximumBytes: Long) {
     require(maximumBytes in MVP_SUMMARY_FACTS_BYTES..MAXIMUM_REPAIR_PROJECTION_BYTES) {
@@ -122,6 +132,7 @@ internal class MvpSummaryFacts private constructor(
     val diffProduced: Boolean,
     val finalBinaryPresent: Boolean,
     val source: MvpSummarySourceFact?,
+    val details: MvpSummaryDetailsFact?,
     artifacts: Collection<MvpSummaryArtifactFact>,
     phases: Collection<MvpSummaryPhaseFact>,
     checks: Collection<MvpSummaryCheckFact>,
@@ -144,11 +155,13 @@ internal class MvpSummaryFacts private constructor(
         val document = MvpArtifactText(MVP_SUMMARY_FACTS_BYTES)
         with(document) {
             append("# MVP Patch Summary\n\n- Result: ").append(result.name)
-            append("\n- Report detail: withheld; only validated workflow facts are shown.")
+            append(if (details == null) "\n- Report detail: withheld; only validated workflow facts are shown."
+                else "\n- Report detail: redacted details retained; see the committed artifact below.")
             append("\n- Failure phase and reason: ")
             if (!failureRecorded && result != MvpSummaryResult.FAIL) append("none") else {
                 append(phases.lastOrNull { it.status == EvidenceStatus.FAIL }?.phase?.label ?: "unavailable")
-                append("; private failure detail withheld or unavailable")
+                append(if (details == null) "; private failure detail withheld or unavailable"
+                    else "; reason retained in the redacted report details")
             }
             append("\n- Approval decision: ").append(approval.label)
             append("\n- Execution isolation: private detail withheld; consult retained evidence")
@@ -159,7 +172,8 @@ internal class MvpSummaryFacts private constructor(
             append("\n- Verified final binary: ")
             append(if (result == MvpSummaryResult.PASS && finalBinaryPresent) "present; see artifact table" else "not published")
             append("\n\n## Executed Phases\n\n| Phase | Status | Evidence |\n|---|---|---|\n")
-            phases.forEach { append("| ").append(it.phase.label).append(" | ").append(it.status.name).append(" | detail withheld |\n") }
+            phases.forEach { append("| ").append(it.phase.label).append(" | ").append(it.status.name)
+                .append(if (details == null) " | detail withheld |\n" else " | see retained report details |\n") }
             if (phases.isEmpty()) append("| unavailable | NOT_RUN | no phase facts recorded |\n")
             append("\n## Artifact Hashes\n\n| Artifact | Path | SHA-256 |\n|---|---|---|\n")
             artifacts.forEach { fact ->
@@ -169,6 +183,10 @@ internal class MvpSummaryFacts private constructor(
                     append(" | `").appendSha256(fact.sha256).append("` |\n")
                 }
             }
+            if (details != null) {
+                append("| Redacted report details | `").append(MVP_SUMMARY_DETAILS_PATH)
+                    .append("` | `").appendSha256(details.sha256).append("` |\n")
+            }
             append("\n## CWE-787 Evidence and Source Mapping\n\n")
             if (source == null) append("Source mapping withheld or unavailable.") else {
                 append("Observed source mapping: `decompile/decompiled.c:").append(source.line.toString())
@@ -177,12 +195,18 @@ internal class MvpSummaryFacts private constructor(
             }
             append(" Sanitizer evidence availability and its safe retained link are in the artifact table. Reproduction and security outcomes are recorded separately below.")
             append("\n\n## Approved Source Change\n\nProposed diff: ").append(if (diffProduced) "produced; body withheld" else "not recorded")
-            append(". Explanation and private change detail withheld. Approval is recorded above; retained patch availability and commitment are in the artifact table.")
+            append(if (details == null) ". Explanation and private change detail withheld."
+                else ". Explanation is retained in the redacted report details; the diff body is retained in the patch artifact when available.")
+            append(" Approval is recorded above; retained patch availability and commitment are in the artifact table.")
             append("\n\n## Build and Validation Results\n\n| Check | Status | Evidence |\n|---|---|---|\n")
-            checks.forEach { append("| ").append(it.check.label).append(" | ").append(it.status.name).append(" | detail withheld |\n") }
+            checks.forEach { append("| ").append(it.check.label).append(" | ").append(it.status.name)
+                .append(if (details == null) " | detail withheld |\n" else " | see retained report details |\n") }
             if (checks.isEmpty()) append("| unavailable | NOT_RUN | no verification facts recorded |\n")
             append("\n## Output Paths\n\nSafe producer-owned paths are in the artifact table; other paths are withheld. Logs: `logs/`; retained evidence: `evidence/`.")
-            append("\n\n## Residual Risks\n\nDetailed text was withheld because a complete report could not be safely rendered. Validation covers retained observations; unobserved inputs and broader semantic equivalence remain unproven. Artifact commitments identify retained evidence. This report does not change source, receipts or publication decisions.\n")
+            append("\n\n## Residual Risks\n\n")
+            append(if (details == null) "Detailed text was withheld because a complete report could not be safely rendered. "
+                else "The full report could not be safely rendered; available redacted detail is retained separately. ")
+            append("Validation covers retained observations; unobserved inputs and broader semantic equivalence remain unproven. Artifact commitments identify retained evidence. This report does not change source, receipts or publication decisions.\n")
         }
         return document.build()
     }
@@ -194,6 +218,7 @@ internal class MvpSummaryFacts private constructor(
             finalBinaryPresent: Boolean,
             artifacts: Collection<MvpSummaryArtifactFact>,
             evidence: MvpRunEvidence,
+            details: MvpSummaryDetailsFact? = null,
         ): MvpSummaryFacts {
             val artifactCopy = snapshot(artifacts, MvpSummaryArtifact.entries.size)
             val phaseCopy = snapshot(evidence.phases.values, 32).map { MvpSummaryPhaseFact(MvpSummaryPhase.recognize(it.name), it.status) }
@@ -203,7 +228,7 @@ internal class MvpSummaryFacts private constructor(
                 MvpSummaryApproval.recognize(evidence.approvalDecision), failureRecorded, !evidence.patchDiff.isNullOrEmpty(),
                 finalBinaryPresent && artifactCopy.any { it.artifact == MvpSummaryArtifact.BINARY && it.sha256 != null },
                 evidence.findingSourceLocation.takeIf { artifactCopy.any { it.artifact == MvpSummaryArtifact.FINDING && it.sha256 != null } }
-                    .let { MvpSummarySourceFact.recognize(it) }, artifactCopy, phaseCopy, checkCopy)
+                    .let { MvpSummarySourceFact.recognize(it) }, details, artifactCopy, phaseCopy, checkCopy)
         }
 
         private fun <T> snapshot(values: Collection<T>, maximum: Int): List<T> {

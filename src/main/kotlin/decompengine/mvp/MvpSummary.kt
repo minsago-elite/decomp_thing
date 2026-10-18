@@ -2,9 +2,16 @@ package decompengine.mvp
 
 import decompengine.jobs.ProgressRedactor
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import kotlin.io.path.exists
+import kotlin.io.path.createDirectories
 import kotlin.io.path.inputStream
 import kotlin.io.path.writeText
 
@@ -179,10 +186,52 @@ internal fun writeMvpSummary(
             append("Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.\n")
         }
     } catch (_: MvpPatchException) {
-        MvpSummaryFacts.capture(result, failure != null, binary.exists() && result == "PASS", artifactFacts, evidence)
+        val details = retainMvpSummaryDetails(output, failure, evidence)
+        MvpSummaryFacts.capture(result, failure != null, binary.exists() && result == "PASS", artifactFacts, evidence, details)
             .render(evidence.maximumProjectionBytes)
     }
     summaryPath.writeText(summary)
+}
+
+/** No public hash fields enter this projection, so private prose can be retained independently. */
+private fun retainMvpSummaryDetails(output: Path, failure: String?, evidence: MvpRunEvidence): MvpSummaryDetailsFact? {
+    val detail = try {
+        evidence.artifactText {
+            append("# Redacted MVP Report Details\n\n")
+            append("The result, public commitments, retained diff and publication status are recorded in SUMMARY.md.\n\n")
+            append("- Failure phase and reason: ").append(evidence.redactDiagnostic(failure ?: "none"))
+            append("\n- Source-change explanation: ").append(evidence.redactDiagnostic(evidence.patchExplanation))
+            append("\n\n## Executed Phase Details\n\n| Phase | Status | Evidence |\n|---|---|---|\n")
+            var count = 0
+            for (phase in evidence.phases.values) {
+                require(count++ < 32)
+                append("| ").append(evidence.redactTableDiagnostic(MvpSummaryPhase.recognize(phase.name).label)).append(" | ").append(phase.status.name)
+                    .append(" | ").append(evidence.redactTableDiagnostic(phase.detail)).append(" |\n")
+            }
+            append("\n## Separate Validation Details\n\n| Check | Status | Evidence |\n|---|---|---|\n")
+            count = 0
+            for (check in evidence.verification) {
+                require(count++ < 32)
+                append("| ").append(evidence.redactTableDiagnostic(MvpSummaryCheck.recognize(check.name).label)).append(" | ").append(check.status.name)
+                    .append(" | ").append(evidence.redactTableDiagnostic(check.detail)).append(" |\n")
+            }
+        }
+    } catch (_: MvpPatchException) {
+        return null
+    }
+    val bytes = try {
+        val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(detail))
+        ByteArray(encoded.remaining()).also { encoded.get(it) }
+    } catch (_: CharacterCodingException) {
+        return null
+    }
+    if (Thread.currentThread().isInterrupted) throw InterruptedException("MVP report detail interrupted")
+    val path = output.resolve(MVP_SUMMARY_DETAILS_PATH)
+    path.parent.createDirectories()
+    Files.write(path, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+    return MvpSummaryDetailsFact(path.sha256())
 }
 
 private fun Path.relativeOrAbsolute(root: Path): String =

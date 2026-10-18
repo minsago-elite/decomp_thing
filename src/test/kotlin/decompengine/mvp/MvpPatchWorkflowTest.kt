@@ -29,6 +29,24 @@ import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
     @Test
+    fun `public refusal details retain only a validated producer commitment and fixed path`() {
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "1"), "PRIVATE_HARNESS", "PRIVATE_PROFILE", "a".repeat(64))
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, null, false) }
+        val details = MvpSummaryDetailsFact("1".repeat(64))
+        val text = MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence, details).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.contains("Report detail: redacted details retained"))
+        assertTrue(text.contains("| Redacted report details | `$MVP_SUMMARY_DETAILS_PATH` | `${details.sha256}` |"))
+        assertTrue(text.contains("Explanation is retained in the redacted report details"))
+        assertFalse(text.contains("PRIVATE"))
+        val withheld = MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(withheld.contains("Report detail: withheld"))
+        assertFalse(withheld.contains("| Redacted report details |"))
+        for (value in listOf("PRIVATE", "A".repeat(64), "a".repeat(65), "Bearer " + "a".repeat(64))) {
+            assertFailsWith<IllegalArgumentException> { MvpSummaryDetailsFact(value) }
+        }
+    }
+
+    @Test
     fun `public refusal facts retain producer categories and commitments without private prose or paths`() {
         val profile = MvpSummaryProfile.MAKE
         val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "PRIVATE_VALUE"), "Bearer PRIVATE_HARNESS",
@@ -117,11 +135,11 @@ class MvpPatchWorkflowTest {
         evidence.approvalDecision = "approved by --yes automation"
         evidence.patchDiff = "PRIVATE_DIFF"
         val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, "a".repeat(64), it.publicRelativePath != null) }
-        val facts = MvpSummaryFacts.capture("PASS", true, true, artifacts, evidence)
+        val facts = MvpSummaryFacts.capture("PASS", true, true, artifacts, evidence, MvpSummaryDetailsFact("a".repeat(64)))
         val text = facts.render(MVP_SUMMARY_FACTS_BYTES)
         assertTrue(text.toByteArray(Charsets.UTF_8).size <= MVP_SUMMARY_FACTS_BYTES)
         assertTrue(text.endsWith("publication decisions.\n"))
-        assertEquals(15, Regex("`" + "a".repeat(64) + "`").findAll(text).count())
+        assertEquals(16, Regex("`" + "a".repeat(64) + "`").findAll(text).count())
         assertTrue(text.contains("decompile/decompiled.c:2147483647:2147483647"))
         assertFalse(text.contains("PRIVATE") || text.contains("truncated"))
         assertFailsWith<IllegalArgumentException> { facts.render(MVP_SUMMARY_FACTS_BYTES - 1) }
@@ -757,24 +775,42 @@ class MvpPatchWorkflowTest {
             "PRIVATE_HARNESS", profile.id, profile.sha256)
         refused.patchDiff = full
         refused.patchDiffPath = evidence.patchDiffPath
-        refused.patchExplanation = privateValue
+        refused.patchExplanation = "public source-change explanation $privateValue"
         refused.approvalDecision = "approved interactively"
         refused.findingPath = source
         refused.findingSourceLocation = "decompiled.c:12:3"
         val retained = root.resolve("SUMMARY-refused-detail.md")
         for (result in listOf("PASS", "FAIL", "NON_RELEASE")) {
-            if (result == "FAIL") refused.failPhase("verify", privateValue) else refused.passPhase("verify", privateValue)
+            if (result == "FAIL") refused.failPhase("verify", "public phase detail $privateValue")
+            else refused.passPhase("verify", "public phase detail $privateValue")
+            refused.verification.clear()
+            refused.check("behavior validation", result != "FAIL", "public validation detail $privateValue")
             writeMvpSummary(retained, root, source, source, source, source, source, result,
-                privateValue.takeIf { result == "FAIL" }, refused)
+                "verify: public failure $privateValue".takeIf { result == "FAIL" }, refused)
             val fallback = retained.readText()
             assertTrue(fallback.contains("- Result: $result"))
-            assertTrue(fallback.contains("Report detail: withheld"))
+            assertTrue(fallback.contains("Report detail: redacted details retained"))
             assertTrue(fallback.contains("| Input ELF | withheld | `0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
             assertTrue(fallback.contains("Reconstruction profile: `${profile.id}` (`${profile.sha256}`)"))
             assertFalse(fallback.contains(privateValue) || fallback.contains("PRIVATE_HARNESS"))
+            val details = root.resolve(MVP_SUMMARY_DETAILS_PATH).readText()
+            val detailHash = java.security.MessageDigest.getInstance("SHA-256").digest(details.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            assertTrue(fallback.contains("| Redacted report details | `$MVP_SUMMARY_DETAILS_PATH` | `$detailHash` |"))
+            assertTrue(details.contains("public source-change explanation [redacted]"))
+            assertTrue(details.contains("public phase detail [redacted]"))
+            assertTrue(details.contains("public validation detail [redacted]"))
+            if (result == "FAIL") assertTrue(details.contains("verify: public failure [redacted]"))
+            assertFalse(details.contains(privateValue) || details.contains("PRIVATE_HARNESS") || details.contains(conflict))
             assertEquals("public code", source.readText())
             assertEquals(full, refused.patchDiffPath!!.readText())
         }
+        val retainedDetails = root.resolve(MVP_SUMMARY_DETAILS_PATH).readText()
+        refused.patchExplanation = "unpaired \uD800 detail"
+        writeMvpSummary(retained, root, source, source, source, source, source, "FAIL", "public failure", refused)
+        assertTrue(retained.readText().contains("Report detail: withheld"))
+        assertFalse(retained.readText().contains("| Redacted report details |"))
+        assertEquals(retainedDetails, root.resolve(MVP_SUMMARY_DETAILS_PATH).readText())
     }
 
     @Test

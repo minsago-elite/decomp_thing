@@ -325,6 +325,22 @@ are unchanged. These components still require exact-source Actions qualification
 stream collection, chunk/session privacy, cleanup and real-agent qualification
 remain separate open acceptance.
 
+MVP reporting requires at least 16,384 projection bytes before a run starts.
+If the complete summary projection refuses, `SUMMARY.md` retains bounded producer
+facts, exact artifact commitments, approval, mapping and separate validation
+outcomes. Available failure reasons, source-change explanations and phase/check
+details receive complete private projection in `evidence/summary-details.md`,
+using the same bounded diagnostic previews as the full report. The summary
+records that file's SHA-256 only after the projected file is written. The retained
+patch artifact supplies the diff body, with its approval and commitment recorded
+in the summary.
+
+Each detail projection obeys the configured projection ceiling. A privacy refusal
+withholds that detail artifact and its reference; the typed summary explains the
+omission. File I/O and interruption retain their distinct failure behavior.
+The report projections preserve authoritative source, receipts and publication
+decisions.
+
 
 ### MVP logger and interactive approval privacy
 
