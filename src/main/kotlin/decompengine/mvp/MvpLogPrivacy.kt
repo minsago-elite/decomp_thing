@@ -6,8 +6,20 @@ import java.util.concurrent.atomic.AtomicReference
 internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
     val maximumBytes: Long = artifact.maximumBytes
     private val projector = artifact.forLogLines()
+    private val controls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
 
     fun project(value: String): String = projector.text(value)
+
+    fun message(value: String, lines: Lines): String {
+        project(value) // Admit the complete raw and normalized input before rendering.
+        val normalized = value.replace(controls, "")
+        return MvpArtifactText(maximumBytes).apply {
+            normalized.lineSequence().forEachIndexed { index, line ->
+                if (index != 0) append("\n")
+                append(lines.next(line))
+            }
+        }.build()
+    }
 
     fun frame(message: String, error: Boolean, timestamp: String? = null): MvpLogFrame {
         val console = project(message)
@@ -25,9 +37,10 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
     inner class Lines internal constructor() {
         private var pending = Pending.NONE
 
-        fun next(line: String): String {
-            // Admit before looking at or copying a potentially large line.
-            val alreadySafe = project(line)
+        fun next(rawLine: String): String {
+            // Inspect normalized grammar before configured literals can erase its introducer.
+            val alreadySafe = project(rawLine)
+            val line = rawLine.replace(controls, "")
             var rendered = line
             var nextPending = pending
             if (pending != Pending.NONE) {

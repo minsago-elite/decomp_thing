@@ -29,7 +29,8 @@ class MvpPatchWorkflowTest {
 
     @Test
     fun `MVP log continuations conceal credential values across blank lines and independent pipes`() {
-        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SCHEME" to "Bearer", "PLAIN_HEADER" to "Authorization"),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
         val lines = evidence.logPrivacy.lines()
         val rendered = listOf("public start", "Authorization:", "", "Basic", "synthetic-basic; public suffix",
             "Bearer", "synthetic-bearer, public tail", "api_key=", "synthetic-key; after", "ghp_",
@@ -51,6 +52,19 @@ class MvpPatchWorkflowTest {
         val ordered = evidence.logPrivacy.lines()
         ordered.next("Bearer")
         assertFalse(ordered.next("synthetic-other-channel").contains("synthetic-other-channel"))
+        val normalized = evidence.logPrivacy.lines()
+        normalized.next("Bea\u0001rer")
+        assertFalse(normalized.next("synthetic-control-token").contains("synthetic-control-token"))
+        val messages = evidence.logPrivacy.lines()
+        evidence.logPrivacy.message("Bearer", messages)
+        assertFalse(evidence.logPrivacy.message("synthetic-message-token", messages).contains("synthetic-message-token"))
+        val captures = evidence.logPrivacy.lines()
+        val stdoutCapture = "Bearer"
+        val stderrCapture = "synthetic-binary-token"
+        evidence.logPrivacy.project(stdoutCapture)
+        evidence.logPrivacy.project(stderrCapture)
+        stdoutCapture.lineSequence().forEach { captures.next(it) }
+        assertFalse(stderrCapture.lineSequence().map { captures.next(it) }.joinToString().contains("synthetic-binary-token"))
     }
 
     @Test
@@ -83,7 +97,8 @@ class MvpPatchWorkflowTest {
     @Test
     fun `MVP logger admits console and retained records before output without launching a command`() {
         val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-log-privacy")), "records-")
-        val environment = mapOf("PLAIN_SETTING" to "plain-private", "PLAIN_MULTILINE" to "left-private\nright-private")
+        val environment = mapOf("PLAIN_SETTING" to "plain-private", "PLAIN_MULTILINE" to "left-private\nright-private",
+            "PLAIN_SCHEME" to "Bearer")
         val evidence = MvpRunEvidence(environment, "fixture-harness", "fixture-profile", "a".repeat(64))
         val refusal = MvpPatchException("synthetic display refusal")
         val latch = MvpLogFailure()
@@ -115,6 +130,8 @@ class MvpPatchWorkflowTest {
                     logger.phase("plain-private")
                     logger.info("Bearer")
                     logger.info("synthetic-unregistered")
+                    logger.info("Bea\u0001rer")
+                    logger.info("synthetic-control-unregistered")
                     logger.info("left-private")
                     logger.info("right-private")
                     logger.info("public output")
@@ -123,7 +140,7 @@ class MvpPatchWorkflowTest {
         }
         val console = output.toString(Charsets.UTF_8)
         val retained = root.resolve("events.log").readText()
-        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered")) {
+        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered", "synthetic-control-unregistered")) {
             assertFalse(console.contains(value))
             assertFalse(retained.contains(value))
         }

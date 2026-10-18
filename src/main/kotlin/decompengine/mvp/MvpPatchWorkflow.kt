@@ -656,13 +656,7 @@ class StreamingLogger private constructor(
 
     @Synchronized
     private fun emit(message: String, error: Boolean, stamp: String? = null) {
-        val complete = privacy.project(message)
-        val guarded = MvpArtifactText(privacy.maximumBytes).apply {
-            complete.lineSequence().forEachIndexed { index, line ->
-                if (index != 0) append("\n")
-                append(emittedLines.next(line))
-            }
-        }.build()
+        val guarded = privacy.message(message, emittedLines)
         val frame = privacy.frame(guarded, error, stamp)
         val console = if (frame.error) errors else output
         console.println(frame.console)
@@ -701,11 +695,11 @@ class StreamingLogger private constructor(
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
         val result = boundary.execute(executable, directory, environment)
         // Project whole captured streams before line splitting can cut a configured value.
-        val stdout = privacy.project(result.stdout)
-        val stderr = privacy.project(result.stderr)
+        privacy.project(result.stdout)
+        privacy.project(result.stderr)
         val lines = privacy.lines()
-        stdout.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), false) }
-        stderr.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), true) }
+        result.stdout.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), false) }
+        result.stderr.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), true) }
         info("$label exit_code=${result.exitCode} isolation=${result.isolation}")
         return result
     }
