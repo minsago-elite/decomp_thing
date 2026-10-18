@@ -50,6 +50,8 @@ jobs:
           } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
+      - name: Verify packaged upgrade and cache evidence controls
+        run: node scripts/test-packaged-browser-upgrade.mjs
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
       - name: Reject generated API contract drift
@@ -142,7 +144,6 @@ jobs:
           cp scripts/web-test-browser.json build/packaged-web-ci/browser-lock.json
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
-          node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
