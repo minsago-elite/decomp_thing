@@ -16,6 +16,31 @@ import kotlin.test.assertTrue
 
 class PatchCliTest {
     @Test
+    fun `usage preserves compiled profile syntax while masking dynamic values and restored boundary collisions`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            for (message in listOf("reconstruct requires an input binary and output directory",
+                "unsupported reconstruction profile: unknown-profile", "--profile requires a registered profile ID")) {
+                assertEquals(2, renderWorkflowUsageError(WorkflowCliCommand.RECONSTRUCT, message, listOf("1"), output))
+                val text = bytes.toString(Charsets.UTF_8)
+                assertTrue(text.startsWith("$message\n"))
+                assertTrue(text.contains("--profile generated-c-make-v1|generated-c-ninja-v1"))
+                bytes.reset()
+            }
+            for (command in WorkflowCliCommand.entries) {
+                assertEquals(2, renderWorkflowUsageError(command, "unexpected argument: PRIVATE_1", listOf("PRIVATE_1", "1"), output))
+                assertEquals("unexpected argument: [redacted]\n${command.usage}\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
+                val bridge = "[redacted]X\nusage:"
+                assertEquals(2, renderWorkflowUsageError(command, "plainX", listOf("plain", bridge, "usage:"), output))
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(bridge))
+                assertTrue(bytes.toString(Charsets.UTF_8).endsWith("${command.usage}\n"))
+                bytes.reset()
+            }
+        }
+    }
+
+    @Test
     fun `workflow provenance masks complete prefixes and evidence only framing`() {
         val bytes = ByteArrayOutputStream()
         PrintStream(bytes, true, Charsets.UTF_8).use { output ->
@@ -131,11 +156,14 @@ class PatchCliTest {
                 assertTrue(bytes.toString(Charsets.UTF_8).startsWith("unexpected argument: [redacted]\n$prefix "))
                 assertFalse(bytes.toString(Charsets.UTF_8).contains("private"))
                 bytes.reset()
-                for (secret in listOf(prefix, "boundary\nusage:", "legacy-openai]\n")) {
+                for (secret in listOf(prefix, "legacy-openai]\n")) {
                     assertEquals(2, renderWorkflowUsageError(command, "boundary", listOf(secret), output))
-                    assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
+                    assertEquals("boundary\n${command.usage}\n", bytes.toString(Charsets.UTF_8))
                     bytes.reset()
                 }
+                assertEquals(2, renderWorkflowUsageError(command, "boundary", listOf("boundary\nusage:"), output))
+                assertEquals("${command.usage}\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
                 val tooMany = object : AbstractCollection<String>() {
                     override val size: Int = 4097
                     override fun iterator(): Iterator<String> = error("rejected inventory must not be iterated")

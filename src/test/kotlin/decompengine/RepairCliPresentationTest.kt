@@ -144,11 +144,14 @@ class RepairCliPresentationTest {
             assertEquals(2, renderRepairUsageError("private\u000Cargument", listOf("privateargument"), output))
             assertEquals("[redacted]\n$usage\n", bytes.toString(Charsets.UTF_8))
             bytes.reset()
-            for (value in listOf("usage: llm_bin_patch repair", "boundary\nusage:", "legacy-openai]\n")) {
+            for (value in listOf("usage: llm_bin_patch repair", "legacy-openai]\n")) {
                 assertEquals(2, renderRepairUsageError("boundary", listOf(value), output))
-                assertFalse(bytes.toString(Charsets.UTF_8).contains(value), "terminal framing exposed $value")
+                assertEquals("boundary\n$usage\n", bytes.toString(Charsets.UTF_8))
                 bytes.reset()
             }
+            assertEquals(2, renderRepairUsageError("boundary", listOf("boundary\nusage:"), output))
+            assertEquals("$usage\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
             assertEquals(2, renderRepairUsageError("fooX", listOf("foo", "[redacted]X"), output))
             assertFalse(bytes.toString(Charsets.UTF_8).contains("foo"))
             assertFalse(bytes.toString(Charsets.UTF_8).contains("[redacted]X"))

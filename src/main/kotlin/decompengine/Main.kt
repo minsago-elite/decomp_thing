@@ -455,7 +455,7 @@ private fun repairUsageError(message: String): Nothing {
     kotlin.system.exitProcess(2)
 }
 
-/** Admit the inventory and mask the complete diagnostic, including its usage and line endings. */
+/** Admit the inventory and mask private diagnostics while retaining the compiled command grammar. */
 internal fun renderRepairUsageError(
     message: String,
     sensitiveValues: Collection<String>,
@@ -486,7 +486,24 @@ internal fun renderWorkflowUsageError(
     val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
     val usage = command.usage
     if (message.length > 16_384 - usage.length - 2) return 2
-    output.print(redactor.text("$message\n$usage\n", 16_384))
+    // The enum's compiled help is public syntax. Project the complete frame to conceal
+    // private diagnostic text and boundary matches, then restore only that known suffix.
+    // Confirm the private prefix is stable after restoration; otherwise withhold it.
+    val suffix = "\n$usage\n"
+    val projectedSuffix = redactor.text(suffix, 16_384)
+    var prefix = message
+    repeat(2) {
+        if (prefix.length > 16_384 - suffix.length) return@repeat
+        val projected = redactor.text(prefix + suffix, 16_384)
+        if (projectedSuffix.isEmpty() || !projected.endsWith(projectedSuffix)) return@repeat
+        val next = projected.dropLast(projectedSuffix.length)
+        if (next == prefix) {
+            output.print(next + suffix)
+            return 2
+        }
+        prefix = next
+    }
+    output.print("$usage\n")
     return 2
 }
 
