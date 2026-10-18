@@ -83,7 +83,18 @@ faults preserve uncertainty and require recovery before further mutations.
 Restart reconciliation, shutdown and replay do not dispatch work. Current
 candidate output remains separate from the prior accepted-reference pointer.
 
-The new service command is internal. The versioned HTTP start route and its
-shared session/Origin/CSRF capability are still pending; production durable
-adapters remain unregistered. A recorded receipt and an injected adapter are
-not production readiness, live provider execution or acceptance attestation.
+`WebWorkflowStartControllerTest` exercises the versioned route through a real
+local HTTP server with an injected inert service. It covers keyed replay after
+later work and restart with registrations removed, owned queue and per-job
+refusals, nullable harness identity, full unsigned limits, scheduler refusal and
+publication uncertainty. Direct memory exchanges observe zero body consumption
+for authorization/header/target refusals and bound oversized reads. Strict JSON
+controls reject malformed UTF-8, duplicate/unknown fields, fixture wrappers and
+command/path input. The benign recovery verifier requires this suite as well.
+
+The internal service command is reached through the shared session/Origin/CSRF
+capability. Production durable adapters remain unregistered; the existing default
+405 refusals and unavailable bootstrap claims remain. Runtime capability and
+accepted-publication integration still require their owning qualification. A
+recorded receipt and an injected adapter are not production readiness, live
+provider execution or acceptance attestation.

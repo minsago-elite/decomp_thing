@@ -555,6 +555,22 @@ class WebJobService(
         return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
     }
 
+    /** Transport availability is not runtime readiness. Existing receipts remain replayable
+     * after registrations are removed; default production registrations are still empty.
+     * Called only after the shared HTTP mutation boundary authorizes the request.
+     */
+    @Synchronized
+    internal fun durableStartRouteAvailable(jobId: String): Boolean {
+        requireInitializedRead()
+        requirePublicationAvailable()
+        if (registrations.isNotEmpty()) return true
+        val owner = attempts ?: return false
+        return when (val view = inspectStoredJob(owner, jobId)) {
+            is WorkflowJobInspection.Available -> view.snapshot.attempts.any { it.startReceipt != null }
+            is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(view.diagnostic.code, view.diagnostic.message)
+        }
+    }
+
     /** Caller must authorize the command before this service boundary. A replay is read-only;
      * a new command validates its public If-Match before using the separate storage CAS token.
      * Once admitted durably, a scheduler refusal retains that run rather than inviting re-execution.

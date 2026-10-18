@@ -2,6 +2,7 @@ package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
 import decompengine.jobs.PublishedJobUpload
+import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowPinActor
 import decompengine.jobs.WorkflowPinRequestResult
 import java.io.InputStream
@@ -30,6 +31,11 @@ internal class WebJobMutationBoundary(
         val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("PUT")))
         return AuthorizedWebProgressPin(session, jobs)
     }
+
+    fun authorizeDurableStart(exchange: HttpExchange): AuthorizedWebWorkflowStart {
+        checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebWorkflowStart(jobs)
+    }
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */
@@ -47,11 +53,18 @@ internal class AuthorizedWebJobUpload internal constructor(
     ): PublishedJobUpload = jobs.uploadMultipartReceipt(input, contentType, idempotencyKey, progress)
 }
 
-/** Legacy workflow-start capability; the versioned start operation remains intentionally absent. */
+/** Legacy workflow-start capability. */
 internal class AuthorizedLegacyWebJobStart internal constructor(
     private val jobs: WebJobService,
 ) {
     fun start(jobId: String, workflow: WebWorkflow): WebWorkflowAdmission = jobs.start(jobId, workflow)
+}
+
+/** Versioned start capability; caller input cannot select paths, adapters or commands. */
+internal class AuthorizedWebWorkflowStart internal constructor(private val jobs: WebJobService) {
+    fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
+        requestKey: String): DurableWebWorkflowStartResult =
+        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey)
 }
 
 /** Progress-retention capability whose actor identity can only come from authorization. */
