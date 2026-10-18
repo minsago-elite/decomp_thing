@@ -27,17 +27,32 @@ Hosted CI splits ordinary core tests into `core-main` (the complement of
 excluding `ci-live`. Gradle's [test-name filters](https://docs.gradle.org/current/javadoc/org/gradle/api/tasks/testing/TestFilter.html)
 select a package recursively and its complement; new classes enter their group
 automatically. Both selections fail if no tests match. The existing `kotlin-core`
-job runs `core-main`; `kotlin-oracle` runs `core-oracle`. `kotlin-live` retains its
-tag selection and preflights. The `kotlin` aggregate requires all three jobs.
+job runs `core-main`; `kotlin-oracle` runs `core-oracle`.
+
+Hosted live tests use `live-fulltree` for `decompengine.oracle.fulltree.*` and
+`live-rest` for its complement, both retaining the `ci-live` tag. Their Gradle
+property is accepted only with `ciTestShard=live`; unknown values fail. New live
+classes enter exactly one group, and both selections fail if no tests match.
+`kotlin-live` runs the complement and retains the existing Goose/Codex preflights;
+`kotlin-live-fulltree` runs the full-tree group. The original `live` shell/Gradle
+entry point still selects the complete tagged suite. The `kotlin` aggregate
+requires all four jobs.
+
+The completed [7b29 main run](https://github.com/minsago-elite/decomp_thing/actions/runs/39109611472)
+reported 62 live executions in three XML suites: 36 full-tree cases totaling
+716.947 case-seconds and 26 other cases totaling 775.577 case-seconds. The live
+job took 2,034 seconds; its JVM/Kotlin step took 1,635 seconds. These historical
+case timings motivate the two groups. Current-source runs must establish actual
+elapsed improvement and total runner cost; no speedup is inferred from the split.
 
 `core-oracle` owns the isolated GCC planning class, the three isolated V3 boundary
 methods and the 115 synthetic class-data controls. The class-data gate still runs
 before expensive Kotlin compilation in its owning task graph. The isolated
 workers keep their existing heaps, RSS bounds and fresh execution. `core-main`
 retains real Angr selection/qualification and the quota-backed repair snapshot
-follow-up. All three jobs retain their existing hosted runtime, sandbox, quota,
+follow-up. All four jobs retain their existing hosted runtime, sandbox, quota,
 scratch provisioning and unconditional cleanup. Each uploads its own
-`kotlin-core`, `kotlin-oracle` or `kotlin-live` test-report artifact.
+`kotlin-core`, `kotlin-oracle`, `kotlin-live` or `kotlin-live-fulltree` test-report artifact.
 The quota follow-up receives `core-main` in its nested test invocation, keeping
 the selected repair fixture while its host-side preparation remains unchanged.
 This prevents that follow-up from starting the isolated GCC/class-data gates
@@ -52,10 +67,12 @@ original inventory, preserving explicit skips and isolated executions. In
 particular, the quota snapshot method's full-suite skip and separately required
 pass are distinct executions. Job/step durations and total runner time describe
 different costs; the historical elapsed observations alone establish no speedup.
-The aggregate also downloads only the three standard Kotlin test-report artifacts
+The aggregate also downloads only the four standard Kotlin test-report artifacts
 into separate named directories. Its Python XML check requires nonempty reports,
-correct oracle/complement ownership, no failed cases and no test identity shared
-across partitions. Within one partition, the quota fixture's skip/pass pair stays
+correct oracle/complement and full-tree/complement ownership, no failed cases and
+no test identity shared across physical shards. Unexpected artifacts are rejected.
+Schema 2 retains logical `core`/`oracle`/`live` totals and adds physical `reportShards`
+plus each input's shard identity. Within core, the quota fixture's skip/pass pair stays
 distinct. `kotlin-partition-inventory` retains counts and input hashes; routing and
 report-placement regression controls run in the core job. This placement check
 complements the complete original-inventory comparison above.
@@ -219,7 +236,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | --- | --- | --- |
 | Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
 | Packaged web contracts and browser | Normal; browser-expiry JVM suite with positive report gate, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
-| Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
+| Kotlin core / oracle / live / live-fulltree / aggregate | Normal; complementary ordinary core/oracle namespaces and tagged full-tree/complement live groups run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Primary live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every shard to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
 | GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |

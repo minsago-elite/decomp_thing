@@ -1663,6 +1663,21 @@ tasks.test {
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
     }
+    val livePackagePartition = providers.gradleProperty("ciLivePackagePartition").orNull
+    if (livePackagePartition != null) {
+        require(shard == "live") { "ciLivePackagePartition requires ciTestShard=live" }
+        filter {
+            when (livePackagePartition) {
+                "fulltree" -> includeTestsMatching("decompengine.oracle.fulltree.*")
+                "rest" -> {
+                    includeTestsMatching("*")
+                    excludeTestsMatching("decompengine.oracle.fulltree.*")
+                }
+                else -> error("unsupported ciLivePackagePartition: $livePackagePartition")
+            }
+            isFailOnNoMatchingTests = true
+        }
+    }
     // A package and its complement partition future classes without a hand-maintained inventory.
     when (shard) {
         "core-main" -> filter {
