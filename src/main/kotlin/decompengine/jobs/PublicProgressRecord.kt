@@ -101,7 +101,7 @@ internal fun publicProgressRecord(record: JsonObject, allowMissingKind: Boolean 
                 put(key, duration.toString())
             }
             key == "reportedCostAmount" -> put(key, text(value, 64).also {
-                require(it.matches(Regex("(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?")) &&
+                require((it == "-0.0" || it.matches(Regex("(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?"))) &&
                     it.toDoubleOrNull()?.let { number -> number.isFinite() && number >= 0.0 } == true) {
                     "invalid observation cost"
                 }

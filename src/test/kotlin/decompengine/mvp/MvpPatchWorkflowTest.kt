@@ -97,6 +97,11 @@ class MvpPatchWorkflowTest {
         val authorization = captured("Bearer\npublic\nAuthorization:\npublic", "Basic synthetic-binary-basic; visible suffix")
         assertFalse(authorization.second.contains("synthetic-binary-basic"))
         assertEquals("public stdout" to "public stderr", captured("public stdout", "public stderr"))
+        for (separator in listOf('\u000b', '\u000c', '\r')) {
+            val state = evidence.logPrivacy.lines()
+            val rendered = evidence.logPrivacy.message("Bearer${separator}synthetic-control-separated-token", state)
+            assertFalse(rendered.contains("synthetic-control-separated-token"))
+        }
     }
 
     @Test
@@ -294,6 +299,13 @@ class MvpPatchWorkflowTest {
         assertTrue(text.contains("[REDACTED]"))
         assertFalse(evidence.redactDiagnostic(configured).contains(configured))
         assertTrue(evidence.redactDiagnostic("later-public-value").contains("later-public-value"))
+        for (separator in listOf('\u000b', '\u000c', '\r')) {
+            for (prefix in listOf("Bearer$separator", "Authorization:${separator}Basic$separator", "password=$separator")) {
+                val raw = "before; ${prefix}synthetic-separated-credential; public"
+                assertFalse(evidence.redact(raw).contains("synthetic-separated-credential"))
+                assertFalse(evidence.redactDiagnostic(raw).contains("synthetic-separated-credential"))
+            }
+        }
         val publicContent = "public complete code line;\n".repeat(2_000)
         assertTrue(publicContent.length > 16_384)
         assertEquals(publicContent, evidence.redact(publicContent))

@@ -591,9 +591,48 @@ class AgentProgressJournal private constructor(
     }
 }
 
+/** Shared normalization policy for previews, full artifacts and projected original spans. */
+internal object ProgressControlPolicy {
+    val removable = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+}
+
+/** Project ordered original format matches through control removal without an input-sized map. */
+internal class OriginalCredentialSpanCursor(original: String, pattern: Regex, private val retainPrefix: Boolean) {
+    private val matcher = pattern.toPattern().matcher(original)
+    private val controls = ProgressControlPolicy.removable.toPattern().matcher(original)
+    private var controlsStarted = false
+    private var nextControl = Int.MAX_VALUE
+    private var removed = 0
+    var start: Int = 0
+        private set
+    var end: Int = 0
+        private set
+
+    fun advance(): Boolean {
+        while (matcher.find()) {
+            start = project(if (retainPrefix) matcher.end(1) else matcher.start())
+            end = project(matcher.end())
+            if (start < end) return true
+        }
+        return false
+    }
+
+    private fun project(offset: Int): Int {
+        if (!controlsStarted) {
+            nextControl = if (controls.find()) controls.start() else Int.MAX_VALUE
+            controlsStarted = true
+        }
+        while (nextControl < offset) {
+            removed += controls.end() - controls.start()
+            nextControl = if (controls.find()) controls.start() else Int.MAX_VALUE
+        }
+        return offset - removed
+    }
+}
+
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
 internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
-    private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val removableControls = ProgressControlPolicy.removable
     private val secrets: List<ProgressLiteralSecret>
     init {
         // Bound supplied work before blank scanning and de-duplication, not only its result.
@@ -621,11 +660,13 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         // Do not take a raw prefix: that can expose a partial configured secret.
         if (value.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
         var safe = value.replace(removableControls, "")
+        var original: String? = value
         // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
         // "[redacted]X"); repeat replacement passes until the output is stable and omit
         // any result that still contains a secret.
         for (pass in 1..REDACTION_PASSES) {
-            val next = redact(safe) ?: return omission("[oversized text omitted]")
+            val next = redact(safe, original) ?: return omission("[oversized text omitted]")
+            original = null
             if (next == safe) break
             safe = next
             if (safe.length > MAXIMUM_REDACTION_CHARACTERS) return omission("[oversized text omitted]")
@@ -642,7 +683,7 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     // Fixed diagnostic text can itself be a configured secret; no fixed replacement is always safe.
     private fun omission(marker: String): String = if (leaks(marker)) "" else marker
 
-    private fun redact(source: String): String? {
+    private fun redact(source: String, original: String? = null): String? {
         val replacement = "[redacted]"
         var starts: IntArray? = null
         var ends: IntArray? = null
@@ -659,6 +700,14 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
                 allocate()
                 starts!![if (retainPrefix) matcher.end(1) else matcher.start()]++
                 ends!![matcher.end()]++
+            }
+        }
+        if (original != null) for ((pattern, retainPrefix) in FORMATS) {
+            val cursor = OriginalCredentialSpanCursor(original, pattern, retainPrefix)
+            while (cursor.advance()) {
+                allocate()
+                starts!![cursor.start]++
+                ends!![cursor.end]++
             }
         }
         // No-match calls need no coverage arrays or builder; keep the immutable KMP inventory.

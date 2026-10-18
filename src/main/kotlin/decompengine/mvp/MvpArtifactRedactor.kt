@@ -1,5 +1,7 @@
 package decompengine.mvp
 
+import decompengine.jobs.OriginalCredentialSpanCursor
+import decompengine.jobs.ProgressControlPolicy
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.util.Collections
 
@@ -15,7 +17,7 @@ internal class MvpArtifactRedactor private constructor(
         require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES)
     }
 
-    private val controls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val controls = ProgressControlPolicy.removable
     private val literals = MvpArtifactLiteralIndex(
         if (separateLines) {
             sensitiveValues.asSequence().flatMap { it.lineSequence() }.map { it.replace(controls, "") }
@@ -38,10 +40,12 @@ internal class MvpArtifactRedactor private constructor(
         var safe = value.replace(controls, "")
         MvpArtifactByteBudget(maximumBytes).charge(safe)
         var extraMask = normalizedMask
+        var original: String? = value
         repeat(8) {
             // All coverage refers to the same unchanged input, including delimiter-containing secrets.
-            val next = literals.replace(safe, maximumBytes, formats, extraMask)
+            val next = literals.replace(safe, maximumBytes, formats, extraMask, original)
             extraMask = null
+            original = null
             if (next == safe) return finish(next)
             safe = next
         }
@@ -213,13 +217,17 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
 
     fun replace(
         source: String, maximumBytes: Long, formats: List<Pair<Regex, Boolean>> = emptyList(),
-        normalizedMask: IntRange? = null,
+        normalizedMask: IntRange? = null, original: String? = null,
     ): String {
         MvpArtifactByteBudget(maximumBytes).charge(source)
         require(formats.size <= 4) { "artifact format inventory exceeds its limit" }
         val cursors = ArrayList<MvpMaskCursor>()
         cursors += LiteralCursor(source)
         for ((pattern, prefix) in formats) cursors += MvpRegexMaskCursor(pattern, source, prefix)
+        if (original != null) {
+            MvpArtifactByteBudget(maximumBytes).charge(original)
+            for ((pattern, prefix) in formats) cursors += MvpOriginalMaskCursor(pattern, original, prefix, source.length)
+        }
         if (normalizedMask != null) {
             require(!normalizedMask.isEmpty() && normalizedMask.first >= 0 && normalizedMask.last < source.length) {
                 "artifact mask exceeds admitted text"
@@ -283,6 +291,19 @@ private class MvpRegexMaskCursor(pattern: Regex, source: String, private val ret
         if (!matcher.find()) return false
         start = if (retainPrefix) matcher.end(1) else matcher.start()
         end = matcher.end()
+        return true
+    }
+}
+
+private class MvpOriginalMaskCursor(pattern: Regex, original: String, retainPrefix: Boolean,
+    private val normalizedLength: Int) : MvpMaskCursor {
+    private val cursor = OriginalCredentialSpanCursor(original, pattern, retainPrefix)
+    override val start: Int get() = cursor.start
+    override val end: Int get() = cursor.end
+    override fun advance(): Boolean {
+        artifactActive()
+        if (!cursor.advance()) return false
+        require(start >= 0 && end <= normalizedLength) { "original artifact mask exceeds admitted text" }
         return true
     }
 }

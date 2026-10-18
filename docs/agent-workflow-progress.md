@@ -70,6 +70,12 @@ policy and 16,384-character replacement limit stay in force; the replacement bui
 within that limit. Index arrays require at most four bytes per admitted normalized code unit, plus
 per-literal object/array overhead. Overall callback deadlines, raw event/request admission and total
 shared-consumer resource qualification remain separate unfinished work.
+Credential format coverage also observes the original text before control removal. Ordered cursors
+project those spans into normalized coordinates with the same control matcher, without allocating
+an input-sized coordinate map. This preserves both separator controls and normalized introducers;
+all coverage is united before replacement. Log grammar is planned from normalized raw lines while
+the final projection still receives their original controls. Reported cost accepts the producer's
+finite nonnegative negative-zero spelling `-0.0`, without admitting negative costs or nonfinite values.
 
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history

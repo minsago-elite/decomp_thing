@@ -22,6 +22,7 @@ class AgentProgressJournalTest {
             put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
             put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
             put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD")
             put("phase", "provisional"); put("role", "assistant"); put("completed", true)
             put("validationPending", true); put("textOmitted", false); put("entriesTruncated", false)
         }
@@ -31,6 +32,7 @@ class AgentProgressJournalTest {
             put("taskIdSha256", "a".repeat(64)); put("workflowRunIdSha256", "b".repeat(64))
             put("revisionIdSha256", "c".repeat(64)); put("requestSha256", "d".repeat(64))
             put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+            put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD")
             put("phase", "provisional"); put("role", "assistant"); put("completed", true)
             put("validationPending", true); put("textOmitted", true); put("entriesTruncated", false)
             put("replayOmittedFields", 7)
@@ -72,7 +74,9 @@ class AgentProgressJournalTest {
             assertFailsWith<ArithmeticException> { replayProgressRecord(record) }
         }
         for ((key, value) in listOf("requestSha256" to JsonPrimitive("PRIVATE_INVALID_DIGEST"),
-            "inputTokens" to JsonPrimitive("1e3"), "completed" to JsonPrimitive("true"))) {
+            "inputTokens" to JsonPrimitive("1e3"), "completed" to JsonPrimitive("true"),
+            "reportedCostAmount" to JsonPrimitive("-0.1"), "reportedCostAmount" to JsonPrimitive("NaN"),
+            "reportedCostAmount" to JsonPrimitive("Infinity"), "reportedCostAmount" to JsonPrimitive("-0.00"))) {
             assertFailsWith<IllegalArgumentException> { replayProgressRecord(JsonObject(base + (key to value))) }
         }
         for (key in listOf("time", "wallClock")) {
@@ -125,6 +129,22 @@ class AgentProgressJournalTest {
         assertFalse(safe.contains("top"))
         assertFalse(safe.contains("secret"))
         assertTrue(safe.contains("public"))
+        val token = "unconfigured-private-credential"
+        for (separator in listOf('\u000b', '\u000c', '\r')) {
+            for (prefix in listOf("Bearer$separator", "Authorization:${separator}Basic$separator", "password=$separator")) {
+                assertFalse(ProgressRedactor(emptyList()).text("before; $prefix$token; public").contains(token))
+            }
+        }
+        val raw = "Bearer\u000cfirst; Bearer\u000bsecond"
+        val cursor = OriginalCredentialSpanCursor(raw, Regex("(?i)(bearer\\s+)[^\\s,;]+"), true)
+        for (value in listOf("first", "second")) {
+            assertTrue(cursor.advance())
+            val rawStart = raw.indexOf(value)
+            val expectedStart = raw.substring(0, rawStart).replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "").length
+            assertEquals(expectedStart, cursor.start)
+            assertEquals(expectedStart + value.length, cursor.end)
+        }
+        assertFalse(cursor.advance())
     }
 
     @Test

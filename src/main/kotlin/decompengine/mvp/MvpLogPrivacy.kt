@@ -1,22 +1,23 @@
 package decompengine.mvp
 
+import decompengine.jobs.ProgressControlPolicy
 import java.util.concurrent.atomic.AtomicReference
 
 /** One immutable policy; each command pipe owns its own small credential-continuation state. */
 internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
     val maximumBytes: Long = artifact.maximumBytes
     private val projector = artifact.forLogLines()
-    private val controls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val controls = ProgressControlPolicy.removable
 
     fun project(value: String): String = projector.text(value)
 
     fun message(value: String, lines: Lines, pipe: Lines? = null): String {
         project(value) // Admit complete raw/normalized data before examining its line grammar.
-        val normalized = value.replace(controls, "")
         val ordered = lines.fork()
         val independent = pipe?.takeIf { it !== lines }?.fork()
         val rendered = MvpArtifactText(maximumBytes).apply {
-            normalized.lineSequence().forEachIndexed { index, line ->
+            value.splitToSequence('\n').forEachIndexed { index, rawLine ->
+                val line = rawLine.replace(controls, "")
                 if (index != 0) append("\n")
                 val sharedMask = ordered.plan(line)
                 val pipeMask = independent?.plan(line)
@@ -26,7 +27,7 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
                     else -> minOf(sharedMask.first, pipeMask.first)..maxOf(sharedMask.last, pipeMask.last)
                 }
                 // Both continuation scopes and all configured/format spans see the same raw line.
-                append(projector.text(line, mask))
+                append(projector.text(rawLine, mask))
                 ordered.commit()
                 independent?.commit()
             }
