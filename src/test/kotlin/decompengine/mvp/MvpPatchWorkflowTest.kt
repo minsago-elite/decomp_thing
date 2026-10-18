@@ -8,6 +8,7 @@ import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairClientInvocation
 import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
 import decompengine.validation.ProcessInput
@@ -23,9 +24,109 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+    @Test
+    fun `public refusal facts retain producer categories and commitments without private prose or paths`() {
+        val profile = MvpSummaryProfile.MAKE
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "PRIVATE_VALUE"), "Bearer PRIVATE_HARNESS",
+            profile.id, profile.sha256)
+        evidence.passPhase("verify", "PRIVATE_DETAIL")
+        evidence.passPhase("PRIVATE_PHASE", "PRIVATE_DETAIL")
+        evidence.check("behavior validation", true, "PRIVATE_DETAIL")
+        evidence.check("PRIVATE_CHECK", false, "PRIVATE_DETAIL")
+        evidence.approvalDecision = "approved interactively"
+        evidence.patchDiff = "PRIVATE_DIFF"
+        evidence.patchExplanation = "PRIVATE_EXPLANATION"
+        evidence.findingSourceLocation = "decompiled.c:12:3"
+        val artifacts = MvpSummaryArtifact.entries.map { kind ->
+            MvpSummaryArtifactFact(kind, "a".repeat(64), kind.publicRelativePath != null)
+        }.toMutableList()
+        val facts = MvpSummaryFacts.capture("PASS", false, true, artifacts, evidence)
+        val text = facts.render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.contains("- Result: PASS"))
+        assertTrue(text.contains("approved interactively"))
+        assertTrue(text.contains("| verify | PASS |"))
+        assertTrue(text.contains("| withheld phase label | PASS |"))
+        assertTrue(text.contains("| behavior validation | PASS |"))
+        assertTrue(text.contains("| withheld check label | FAIL |"))
+        assertTrue(text.contains("decompile/decompiled.c:12:3"))
+        assertTrue(text.contains("| Input ELF | withheld | `${"a".repeat(64)}` |"))
+        assertTrue(text.contains("Reconstruction profile: `${profile.id}` (`${profile.sha256}`)"))
+        assertFalse(text.contains("PRIVATE"))
+        for (heading in listOf("Executed Phases", "Artifact Hashes", "CWE-787 Evidence and Source Mapping",
+            "Approved Source Change", "Build and Validation Results", "Output Paths", "Residual Risks")) {
+            assertTrue(text.contains("## $heading"))
+        }
+        artifacts.clear()
+        evidence.phases.clear()
+        evidence.verification.clear()
+        assertEquals(text, facts.render(MVP_SUMMARY_FACTS_BYTES))
+        assertFailsWith<UnsupportedOperationException> { (facts.artifacts as MutableList<*>).clear() }
+        assertFailsWith<UnsupportedOperationException> { (facts.phases as MutableList<*>).clear() }
+        val unknown = MvpRunEvidence(emptyMap(), "PRIVATE_HARNESS", "PRIVATE_PROFILE", "f".repeat(64))
+        unknown.approvalDecision = "PRIVATE_APPROVAL"
+        unknown.findingSourceLocation = "/PRIVATE/decompiled.c:12"
+        val hidden = MvpSummaryFacts.capture("PRIVATE_RESULT", true, true, facts.artifacts, unknown).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(hidden.contains("- Result: UNAVAILABLE"))
+        assertTrue(hidden.contains("Verified final binary: not published"))
+        assertFalse(hidden.contains("PRIVATE"))
+        assertNull(MvpSummaryProfile.recognize(profile.id, "f".repeat(64)))
+        assertNull(MvpSummarySourceFact.recognize("decompiled.c:2147483648"))
+    }
+
+    @Test
+    fun `public refusal fact admission rejects forged hashes missing slots and oversized collections`() {
+        val evidence = MvpRunEvidence(emptyMap(), "fixture", "fixture", "a".repeat(64))
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, null, false) }
+        for (value in listOf("PRIVATE", "A".repeat(64), "a".repeat(65), "Bearer " + "a".repeat(64))) {
+            assertFailsWith<IllegalArgumentException> { MvpSummaryArtifactFact(MvpSummaryArtifact.INPUT, value, false) }
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryArtifactFact(MvpSummaryArtifact.INPUT, "a".repeat(64), true) }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, artifacts.dropLast(1), evidence) }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, List(15) { artifacts.first() }, evidence) }
+        val rejected = object : AbstractCollection<MvpSummaryArtifactFact>() {
+            override val size: Int = 16
+            override fun iterator(): Iterator<MvpSummaryArtifactFact> = error("oversized facts must not be iterated")
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, rejected, evidence) }
+        val deceptive = object : Collection<MvpSummaryArtifactFact> by artifacts {
+            override fun iterator(): Iterator<MvpSummaryArtifactFact> = (artifacts + artifacts.first()).iterator()
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, deceptive, evidence) }
+        repeat(33) { evidence.passPhase("phase-$it", "PRIVATE") }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence) }
+        for (capacity in listOf(0L, MVP_SUMMARY_FACTS_BYTES - 1, MAXIMUM_REPAIR_PROJECTION_BYTES + 1)) {
+            assertFailsWith<IllegalArgumentException> { requireMvpSummaryCapacity(capacity) }
+        }
+        requireMvpSummaryCapacity(MVP_SUMMARY_FACTS_BYTES)
+        requireMvpSummaryCapacity(MAXIMUM_REPAIR_PROJECTION_BYTES)
+    }
+
+    @Test
+    fun `complete public refusal envelope fits the reserved configured capacity without truncation`() {
+        val profile = MvpSummaryProfile.NINJA
+        val evidence = MvpRunEvidence(emptyMap(), "PRIVATE_HARNESS", profile.id, profile.sha256)
+        repeat(32) { index ->
+            evidence.phases["PRIVATE-$index"] = PhaseEvidence("PRIVATE_PHASE", if (index == 31) EvidenceStatus.FAIL else EvidenceStatus.NOT_RUN, "PRIVATE")
+            evidence.verification += VerificationEvidence(MvpSummaryCheck.RECONSTRUCTION.label, EvidenceStatus.NOT_RUN, "PRIVATE")
+        }
+        evidence.findingSourceLocation = "decompiled.c:2147483647:2147483647"
+        evidence.approvalDecision = "approved by --yes automation"
+        evidence.patchDiff = "PRIVATE_DIFF"
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, "a".repeat(64), it.publicRelativePath != null) }
+        val facts = MvpSummaryFacts.capture("PASS", true, true, artifacts, evidence)
+        val text = facts.render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.toByteArray(Charsets.UTF_8).size <= MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.endsWith("publication decisions.\n"))
+        assertEquals(15, Regex("`" + "a".repeat(64) + "`").findAll(text).count())
+        assertTrue(text.contains("decompile/decompiled.c:2147483647:2147483647"))
+        assertFalse(text.contains("PRIVATE") || text.contains("truncated"))
+        assertFailsWith<IllegalArgumentException> { facts.render(MVP_SUMMARY_FACTS_BYTES - 1) }
+    }
+
     @Test
     fun `public commitments preserve exact digits through normalization and repeated private masking`() {
         val digest = "0123456789abcdef".repeat(4)
@@ -650,6 +751,30 @@ class MvpPatchWorkflowTest {
             "`0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
         assertEquals("public code", source.readText())
         assertEquals(full, evidence.patchDiffPath!!.readText())
+        val profile = MvpSummaryProfile.MAKE
+        val conflict = profile.id + "` (`" + profile.sha256.take(4)
+        val refused = MvpRunEvidence(mapOf("PLAIN_SETTING" to conflict, "PRIVATE" to privateValue),
+            "PRIVATE_HARNESS", profile.id, profile.sha256)
+        refused.patchDiff = full
+        refused.patchDiffPath = evidence.patchDiffPath
+        refused.patchExplanation = privateValue
+        refused.approvalDecision = "approved interactively"
+        refused.findingPath = source
+        refused.findingSourceLocation = "decompiled.c:12:3"
+        val retained = root.resolve("SUMMARY-refused-detail.md")
+        for (result in listOf("PASS", "FAIL", "NON_RELEASE")) {
+            if (result == "FAIL") refused.failPhase("verify", privateValue) else refused.passPhase("verify", privateValue)
+            writeMvpSummary(retained, root, source, source, source, source, source, result,
+                privateValue.takeIf { result == "FAIL" }, refused)
+            val fallback = retained.readText()
+            assertTrue(fallback.contains("- Result: $result"))
+            assertTrue(fallback.contains("Report detail: withheld"))
+            assertTrue(fallback.contains("| Input ELF | withheld | `0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
+            assertTrue(fallback.contains("Reconstruction profile: `${profile.id}` (`${profile.sha256}`)"))
+            assertFalse(fallback.contains(privateValue) || fallback.contains("PRIVATE_HARNESS"))
+            assertEquals("public code", source.readText())
+            assertEquals(full, refused.patchDiffPath!!.readText())
+        }
     }
 
     @Test

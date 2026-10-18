@@ -72,6 +72,7 @@ class MvpPatchWorkflow(
         require(ReconstructionProfiles.builtIn.any { it.id == profile.id && it.sha256 == profile.sha256 }) {
             "MVP patch profile is not admitted by this application"
         }
+        requireMvpSummaryCapacity(resourceBudget.maximumProjectionBytes)
         val compilerPolicy = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
