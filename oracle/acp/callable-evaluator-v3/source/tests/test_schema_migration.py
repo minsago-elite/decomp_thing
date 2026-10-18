@@ -15,6 +15,19 @@ from test_process_results import receipt, observations
 from static_test_support import historical_namespace, static_temp
 
 
+def _toolchain_revalidator_fixture(root):
+    """Copy only reviewed public Python text into an owned static test root."""
+    import hashlib
+    original=Path(e.__file__).parent;paths={}
+    for relative,size,sha in f._SEAL_TOOLCHAIN_SOURCES:
+        raw=(original/relative).read_bytes()
+        if len(raw)!=size or hashlib.sha256(raw).hexdigest()!=sha:
+            raise AssertionError('test public revalidator generation differs')
+        path=root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+        paths[str(path)]=sha
+    return f.admit_files(paths,root=root)['files'],paths
+
+
 def report_fixture():
     rows=[e.scenario_entry(o,receipt(),True,'a'*64) for o in observations()]
     summary=e.summarize(rows,True);status=summary.pop('behaviorStatus')
@@ -270,13 +283,17 @@ class SchemaMigration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'trusted v3'):
             f.freeze(*([Path('/synthetic')]*7))
     def test_freeze_uses_full_toolchain_revalidation(self):
-        class Fake:
-            called=False
-            def revalidate_pin(self,pin,root):self.called=True;raise ValueError('selection drift')
-        fake=Fake()
-        with patch.object(f.importlib.util,'spec_from_file_location'),patch.object(f.importlib.util,'module_from_spec',return_value=fake):
-            with self.assertRaisesRegex(ValueError,'selection drift'):f.revalidate_toolchain({},Path('/synthetic'))
-        self.assertTrue(fake.called)
+        from test_link_inputs import LinkInputTests,pin
+        case=LinkInputTests('test_full_static_closure');case.setUp();self.addCleanup(case.doCleanups)
+        value=pin.collect_pin(case.manifest,case.root)
+        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+            root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
+            with patch.object(f,'BASE',root),patch.object(importlib.util,'spec_from_file_location',
+                    side_effect=AssertionError('mutable source loader used')):
+                self.assertEqual(value,f.revalidate_toolchain(value,case.root,sources=sources,checkpoint=checkpoint))
+                case.write('/gcc/lib/libgcc.a',b'!<arch>\nchanged recorded library')
+                with self.assertRaises(ValueError):
+                    f.revalidate_toolchain(value,case.root,sources=sources,checkpoint=checkpoint)
     def test_all_exchange_instances_validate_and_v2_refuses(self):
         sha='a'*64
         values={
@@ -1132,7 +1149,7 @@ class FreezeDependencyCapture(unittest.TestCase):
                 self.assertIs(module.summarize.__globals__,module.__dict__)
                 self.assertIs(module.worker_execution_complete,owner.modules['bounded_runtime'].worker_execution_complete)
                 for name,raw in originals.items():(root/(name+'.py')).write_bytes(raw)
-                with patch.object(f.importlib.util,'spec_from_file_location',side_effect=AssertionError('no pathname loader')):
+                with patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('no pathname loader')):
                     self.assertIs(validator,owner.validator())
                 self.assertEqual({'x':1},owner.modules['build_contract']._pairs([('x',1)]))
                 with self.assertRaisesRegex(ValueError,'duplicate contract key'):
@@ -1383,6 +1400,72 @@ class FreezeDependencyCapture(unittest.TestCase):
                 changed=deepcopy(sources);changed[str(root/(name+'.py'))]['identity']=(0,)*6
                 with self.subTest(name=name),self.assertRaisesRegex(ValueError,'original checkpoint join'):
                     owner.require_sources(changed,checkpoint)
+
+
+class SealerToolchainSources(unittest.TestCase):
+    def test_each_post_admission_source_mutation_refuses_before_compile(self):
+        for selected,_,_ in f._SEAL_TOOLCHAIN_SOURCES:
+            with self.subTest(source=selected),tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+                root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
+                path=root/selected;raw=path.read_bytes();path.write_bytes(bytes([raw[0]^1])+raw[1:])
+                with patch.object(f,'BASE',root),patch.object(f,'compile',create=True) as compiled:
+                    with self.assertRaises(ValueError):f._load_toolchain_revalidator(sources,checkpoint)
+                    compiled.assert_not_called()
+
+    def test_captured_closure_survives_later_path_changes_without_reopening(self):
+        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+            root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
+            original=f.read_admitted;calls=[]
+            def captured(record,maximum):
+                raw=original(record,maximum);calls.append(record['path'])
+                if len(calls)==3:
+                    path=root/'toolchain-001/pin_environment.py'
+                    path.write_text("raise AssertionError('replacement body executed')\n")
+                return raw
+            with patch.object(f,'BASE',root),patch.object(f,'read_admitted',side_effect=captured):
+                module=f._load_toolchain_revalidator(sources,checkpoint)
+            self.assertEqual([root/name for name,_,_ in f._SEAL_TOOLCHAIN_SOURCES],calls)
+            with patch.object(f,'read_admitted',side_effect=AssertionError('captured source reopened')):
+                with self.assertRaises(module.link_inputs.Refusal):module.revalidate_pin({},Path('/synthetic'))
+            with patch.object(f,'BASE',root),patch.object(f,'compile',create=True) as compiled:
+                with self.assertRaises(ValueError):f._load_toolchain_revalidator(sources,checkpoint)
+                compiled.assert_not_called()
+
+    def test_ambient_module_cache_and_path_loader_never_supply_revalidator_authority(self):
+        from types import ModuleType
+        poison=ModuleType('poison');poison.revalidate_pin=lambda *args: self.fail('ambient revalidator used')
+        names=('pin_environment','callable_v3_link_inputs','callable_v3_monitor_inputs',
+               '_v3_monitor_pin_environment','_v3_monitor_link_inputs','_v3_monitor_inputs')
+        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+            root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
+            with patch.object(f,'BASE',root),patch.dict(sys.modules,{name:poison for name in names}), \
+                    patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('path fallback')):
+                module=f._load_toolchain_revalidator(sources,checkpoint)
+                self.assertIsNot(module,poison);self.assertIsNot(module.link_inputs,poison)
+                self.assertIsNot(module.monitor_inputs,poison)
+                with self.assertRaises(module.link_inputs.Refusal):module.revalidate_pin({},Path('/synthetic'))
+                self.assertTrue(all(sys.modules[name] is poison for name in names))
+                with self.assertRaisesRegex(ValueError,'unreviewed sealer toolchain import'):
+                    module.__dict__['__builtins__']['__import__']('not_an_admitted_dependency')
+
+    def test_missing_link_metadata_checkpoint_and_forged_generation_refuse(self):
+        import hashlib
+        for defect in ('missing-record','checkpoint','record-size','symlink','forged-generation'):
+            with self.subTest(defect=defect),tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+                root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
+                path=root/'toolchain-001/pin_environment.py';key=str(path)
+                if defect=='missing-record':del sources[key]
+                elif defect=='checkpoint':checkpoint[key]='0'*64
+                elif defect=='record-size':sources[key]['size']+=1
+                elif defect=='symlink':
+                    retained=path.with_suffix('.retained');path.rename(retained);path.symlink_to(retained)
+                else:
+                    raw=path.read_bytes();raw=bytes([raw[0]^1])+raw[1:];path.write_bytes(raw)
+                    checkpoint[key]=hashlib.sha256(raw).hexdigest()
+                    sources=f.admit_files(checkpoint,root=root)['files']
+                with patch.object(f,'BASE',root),patch.object(f,'compile',create=True) as compiled:
+                    with self.assertRaises((OSError,ValueError)):f._load_toolchain_revalidator(sources,checkpoint)
+                    compiled.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

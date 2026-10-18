@@ -1,7 +1,6 @@
 """Seal a source-bound, independently reviewed preparation; never authorizes a trial."""
 import argparse
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
 import os
@@ -708,9 +707,72 @@ def verify_preservation(manifest):
         if records[str(normalized(path))]['sha256']!=sha:raise ValueError('historical source changed:'+path)
 
 
-def revalidate_toolchain(pin, filesystem_root):
-    spec=importlib.util.spec_from_file_location('v3_pin_environment',BASE/'toolchain-001/pin_environment.py')
-    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+# Independent reviewed executable expectations, also used by the runtime loader.
+# The sealer captures through ORIGINAL source-admission records, never a new path
+# admission or a caller-supplied module/cache identity.
+_SEAL_TOOLCHAIN_SOURCES = (
+    ('toolchain-001/pin_environment.py',10310,'3874bc92ba6befb9da9c71a08a21a509ac3c11dc089b3fc1d5ed356dcf7d84a2'),
+    ('toolchain-001/link_inputs.py',38357,'8e36065f38aed067c758cf7e6b0420228aa8074d023e4ebbf57b3b7ffbea7176'),
+    ('toolchain-001/monitor_inputs.py',14964,'0cab347a7874162840bdda8b0dc138782657ddaf592b8e3a51b3c59c731838d1'),
+)
+_SEAL_TOOLCHAIN_IMPORTS = frozenset((
+    'pathlib','argparse','importlib.util','json','os','stat','hashlib','io',
+    'posixpath','re','shlex','struct'))
+
+
+def _seal_toolchain_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if level or '*' in tuple(fromlist or ()) or name not in _SEAL_TOOLCHAIN_IMPORTS:
+        raise ValueError('unreviewed sealer toolchain import')
+    return _FREEZE_IMPORT(name,globals,locals,fromlist,level)
+
+
+def _load_toolchain_revalidator(sources, checkpoint):
+    root=_absolute(BASE)
+    if type(sources) is not dict or type(checkpoint) is not dict:
+        raise ValueError('original toolchain source admission required')
+    admitted={}
+    # Check the entire fixed metadata catalog before retaining any source body.
+    for relative,size,sha in _SEAL_TOOLCHAIN_SOURCES:
+        path=root/relative;coordinate=str(path);record=sources.get(coordinate)
+        if (type(record) is not dict or record.get('path')!=path or
+                record.get('size')!=size or record.get('sha256')!=sha or
+                checkpoint.get(coordinate)!=sha):
+            raise ValueError('sealer toolchain original source/checkpoint differs')
+        admitted[relative]=record
+    captured={}
+    for relative,size,sha in _SEAL_TOOLCHAIN_SOURCES:
+        raw=read_admitted(admitted[relative],size)
+        if type(raw) is not bytes or len(raw)!=size or hashlib.sha256(raw).hexdigest()!=sha:
+            raise ValueError('sealer toolchain captured source differs')
+        captured[relative]=raw
+    # Every dependency is authenticated before ANY compile or module body.
+    code={relative:compile(captured[relative],str(root/relative),'exec',dont_inherit=True,optimize=0)
+          for relative,_,_ in _SEAL_TOOLCHAIN_SOURCES}
+    modules={}
+    for key,alias in (('link_inputs','_v3_monitor_link_inputs'),
+                      ('monitor_inputs','_v3_monitor_inputs'),
+                      ('pin_environment','_v3_monitor_pin_environment')):
+        relative='toolchain-001/'+key+'.py'
+        module=ModuleType(alias)
+        module.__file__=str(root/relative);module.__package__=''
+        environment=dict(vars(builtins));environment['__import__']=_seal_toolchain_import
+        module.__dict__['__builtins__']=environment
+        if key=='pin_environment':
+            module._runtime_dependencies={name:modules[name] for name in ('link_inputs','monitor_inputs')}
+        exec(code[relative],module.__dict__)
+        if module.__file__!=str(root/relative):
+            raise ValueError('sealer toolchain defining source differs')
+        modules[key]=module
+    selected=modules['pin_environment']
+    if (selected.BASE!=root or selected.revalidate_pin.__globals__ is not selected.__dict__ or
+            selected.link_inputs is not modules['link_inputs'] or
+            selected.monitor_inputs is not modules['monitor_inputs']):
+        raise ValueError('sealer toolchain defining dependency graph differs')
+    return selected
+
+
+def revalidate_toolchain(pin, filesystem_root, *, sources, checkpoint):
+    module=_load_toolchain_revalidator(sources,checkpoint)
     return module.revalidate_pin(pin,filesystem_root)
 
 
@@ -781,7 +843,7 @@ def _freeze_admitted(preflight, review, output, toolchain_pin, acceptance, sourc
     inventory_hash=canonical_digest(before)
     pin=_read_admitted_json(extra(toolchain_pin),'toolchain-pin',maximum=8388608)
     require_qualified_pin(pin)  # Currently always refuses; Markdown cannot upgrade it.
-    revalidate_toolchain(pin,filesystem_root)
+    revalidate_toolchain(pin,filesystem_root,sources=sources,checkpoint=checkpoint['files'])
     pins=[extra(toolchain_pin)['sha256'],extra(source_checkpoint)['sha256'],bindings['helperCopySha256'],bindings['helperSchemaSha256'],sources[str(_absolute(BASE/'contracts/candidate-build-profile.json'))]['sha256']]
     qualification_text=read_admitted(extra(qualification),1048576).decode('utf8')
     if 'Native qualification: **QUALIFIED**' not in qualification_text or any(pin not in qualification_text for pin in pins):raise ValueError('native qualification binding missing')
@@ -807,7 +869,7 @@ def _freeze_admitted(preflight, review, output, toolchain_pin, acceptance, sourc
     if current['directories']!=tree['directories'] or current['files']!=tree['files']:raise ValueError('preflight changed while copying')
     if set(checkpoint['files'])!=execution_source_paths():raise ValueError('source population changed while copying')
     if admit_files(checkpoint['files'],root=BASE)['files']!=sources:raise ValueError('source changed while copying')
-    revalidate_toolchain(pin,filesystem_root);verify_preservation(preservation)
+    revalidate_toolchain(pin,filesystem_root,sources=sources,checkpoint=checkpoint['files']);verify_preservation(preservation)
     finish_deferred(plan,output,'freeze.json');seal_readonly(output)
     return {'freeze':str(output/'freeze.json'),'sha256':plan.hashes()['freeze.json'],'status':report['status']}
 
