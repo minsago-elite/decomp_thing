@@ -11,7 +11,7 @@ import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
+import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -225,10 +225,12 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+  assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
-  const state = { targetId, sessionId, cspProbe, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+  const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
   targets.push(state);
@@ -242,6 +244,7 @@ async function makeTarget({ cspProbe = false } = {}) {
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
     state.requests.push({ method: event.request.method, url, type });
+    if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
         route: new URL(url).pathname, method: event.request.method, status: null,
@@ -250,8 +253,13 @@ async function makeTarget({ cspProbe = false } = {}) {
       state.pendingDocumentRequests.set(event.requestId, request);
     }
   }, sessionId);
+  cdp.on('Network.requestServedFromCache', (event) => {
+    if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
+  }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
+      fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
       response.contentSecurityPolicy = responseHeader(event.response, 'content-security-policy');
       correlateDocumentResponse(state, event.requestId, event.response, 'responseReceived');
@@ -295,7 +303,7 @@ async function makeTarget({ cspProbe = false } = {}) {
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
   });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
   return state;
 }
@@ -501,12 +509,27 @@ try {
     const previousRuntime = previous.manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
     assert.ok(previousRuntime, 'Previous package must contain a Runtime lazy chunk');
     const previousRuntimeUrl = `${origin}/nested/assets/ui/${previousRuntime.path}`;
-    const tab = await makeTarget();
+    const tab = await makeTarget({ cacheEnabled: true });
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'previous packaged home');
     assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
     assert.equal(await evaluate(tab, `document.querySelector('meta[name="decomp-application-version"]')?.content`), previous.manifest.applicationVersion);
     assert.equal(tab.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Previous Runtime chunk was loaded before replacement');
+    // A second target uses the same owned browser profile and real HTTP cache.
+    // Keep the original old tab alive with its lazy Runtime still unrequested.
+    const cacheProbe = await makeTarget({ cacheEnabled: true });
+    await cdp.call('Page.navigate', { url: `${origin}/nested/` }, cacheProbe.sessionId);
+    await ready(cacheProbe, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'cached previous packaged home');
+    assert.equal(await evaluate(cacheProbe, `document.querySelector('meta[name="decomp-ui-build"]')?.content`), previous.manifest.buildId);
+    await delay(100); // Drain already-produced DevTools resource/cache events.
+    report.upgrade.cachedBootstrap = qualifyUpgradeCache(previous.manifest, `${origin}/nested/assets/ui/`, {
+      cacheEnabled: cacheProbe.cacheEnabled, coldResponses: tab.cacheResponses,
+      requests: cacheProbe.cacheRequests, responses: cacheProbe.cacheResponses,
+      cacheRequestIds: [...cacheProbe.cacheRequestIds],
+    });
+    assert.equal(cacheProbe.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Cache warm-up loaded the old lazy Runtime');
+    await cdp.call('Page.bringToFront', {}, tab.sessionId);
+    lastTarget = tab;
     await capture(tab, 'upgrade-previous-home.png');
 
     // The tab and its old entry module remain alive. Only the owned JVM and its
@@ -582,6 +605,9 @@ try {
     assert.ok(tab.responses.some((entry) => entry.url === `${origin}/nested/assets/ui/${pair.currentRuntime.path}` && entry.status === 200), 'Current Runtime chunk did not load successfully');
     assert.ok(tab.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Explicit reload sent a mutation');
     assert.ok(tab.requests.every((entry) => entry.url.startsWith(origin + '/')), 'Upgrade fetched an external dependency');
+    assert.ok(cacheProbe.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Cache warm-up tab sent a later mutation');
+    assert.ok(cacheProbe.requests.every((entry) => entry.url.startsWith(origin + '/')), 'Cache warm-up tab fetched an external dependency');
+    assert.deepEqual(cacheProbe.exceptions, []);
     assert.deepEqual(tab.exceptions, []);
     assert.equal(await fs.stat(installation.data).then(() => true, () => false), false, 'Current public browsing created job data');
     await capture(tab, 'upgrade-current-runtime.png');
@@ -590,6 +616,7 @@ try {
       automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1,
       recoveredCurrentBuild: true, mutationRequests: 0, noticeTitleWithinViewport: true, reloadControlWithinViewport: true });
     report.requests.upgrade = tab.requests;
+    report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
