@@ -287,3 +287,21 @@ transcript. Authoritative captured bytes, receipts, hashes and compilation input
 are unchanged. These components still require exact-source Actions qualification;
 stream collection, chunk/session privacy, cleanup and real-agent qualification
 remain separate open acceptance.
+
+
+### MVP logger and interactive approval privacy
+
+The workflow logger and default approval prompt reuse the admitted immutable
+privacy inventory. Log display also conceals private line fragments derived from
+that same bounded inventory and retains credential-value continuation state for
+each pipe and emitted record order. Complete console and retained prefixes are
+checked before either destination is written. Raw command/binary results and
+injected approval callback inputs remain validation data; the default prompt
+projects its complete summary and refuses an unsafe decision label before input.
+Command reader/display failures are latched privately and rethrown unchanged after
+the existing concurrent drains and wait, rather than accepting a partial capture
+or printing raw child-thread exceptions. This changes neither
+process launch/isolation recipes nor cleanup policy. Raw collector size, blocking
+I/O and bounded failure termination still require separate resource work; the
+binary boundary, unlike the command logger, still reads stdout/stderr sequentially.
+These source components require their own ordinary Actions qualification.

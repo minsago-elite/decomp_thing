@@ -27,10 +27,11 @@ internal class MvpRunEvidence(
     val harnessProvenance: String,
     val profileId: String,
     val profileSha256: String,
-    maximumProjectionBytes: Long = MAXIMUM_REPAIR_PROJECTION_BYTES,
+    val maximumProjectionBytes: Long = MAXIMUM_REPAIR_PROJECTION_BYTES,
 ) {
     private val artifactRedactor = MvpArtifactRedactor(environment.values, maximumProjectionBytes)
     private val diagnosticRedactor = ProgressRedactor(artifactRedactor.sensitiveValues)
+    internal val logPrivacy: MvpLogPrivacy by lazy { MvpLogPrivacy(artifactRedactor) }
     val phases = linkedMapOf<String, PhaseEvidence>()
     val verification = mutableListOf<VerificationEvidence>()
     var findingPath: Path? = null

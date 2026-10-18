@@ -4,16 +4,30 @@ import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.util.Collections
 
 /** Complete display projections only; authoritative source, receipts and hashes are untouched. */
-internal class MvpArtifactRedactor(values: Collection<String>, private val maximumBytes: Long) {
+internal class MvpArtifactRedactor private constructor(
+    val sensitiveValues: List<String>,
+    val maximumBytes: Long,
+    separateLines: Boolean,
+) {
+    constructor(values: Collection<String>, maximumBytes: Long) : this(snapshot(values), maximumBytes, false)
+
     init {
         require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES)
     }
 
-    val sensitiveValues: List<String> = snapshot(values)
     private val controls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
     private val literals = MvpArtifactLiteralIndex(
-        sensitiveValues.map { it.replace(controls, "") }.filter(String::isNotEmpty).distinct().sorted(),
+        if (separateLines) {
+            sensitiveValues.asSequence().flatMap { it.lineSequence() }.map { it.replace(controls, "") }
+                .filter(String::isNotBlank).distinct().sorted().toList()
+        } else {
+            sensitiveValues.map { it.replace(controls, "") }.filter(String::isNotEmpty).distinct().sorted()
+        },
+        // Splitting the same admitted inventory cannot add private units or raw entries.
+        maximumPatterns = if (separateLines) 1024 * 1024 else 4096,
     )
+
+    fun forLogLines(): MvpArtifactRedactor = MvpArtifactRedactor(sensitiveValues, maximumBytes, true)
 
     fun project(render: MvpArtifactText.() -> Unit): String = text(MvpArtifactText(maximumBytes).apply(render).build())
 
@@ -86,7 +100,7 @@ internal class MvpArtifactRedactor(values: Collection<String>, private val maxim
 }
 
 /** Sparse Aho-Corasick index. Packed sorted edges avoid a map/object per private character. */
-internal class MvpArtifactLiteralIndex(values: List<String>) {
+internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: Int = 4096) {
     private val offsets: IntArray
     private val labels: CharArray
     private val targets: IntArray
@@ -97,7 +111,9 @@ internal class MvpArtifactLiteralIndex(values: List<String>) {
         artifactActive()
         val sorted = values.filter(String::isNotEmpty).distinct().sorted()
         val units = sorted.sumOf { it.length.toLong() }
-        require(sorted.size <= 4096 && units <= 1024 * 1024) { "artifact literal index exceeds the configured limit" }
+        require(maximumPatterns in 1..1024 * 1024 && sorted.size <= maximumPatterns && units <= 1024 * 1024) {
+            "artifact literal index exceeds the configured limit"
+        }
         val maximumNodes = units.toInt() + 1
         failures = IntArray(maximumNodes) // Parents during construction, then failure links.
         longest = IntArray(maximumNodes)

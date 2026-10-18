@@ -28,6 +28,7 @@ import decompengine.repair.SourcePatch
 import decompengine.repair.writeRepairEvidenceAtomically
 import decompengine.validation.ProcessInput
 import java.io.BufferedWriter
+import java.io.PrintStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -54,7 +55,7 @@ enum class MvpPublicationMode { REQUIRE_ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 class MvpPatchWorkflow(
     private val harness: AgentHarness,
     private val environment: Map<String, String> = System.getenv(),
-    private val approve: (String) -> Boolean = ::promptForApproval,
+    private val approve: ((String) -> Boolean)? = null,
     private val decompiler: BinaryDecompiler = GhidraDecompiler(),
     private val binaryExecution: BinaryExecutionBoundary = BinaryExecutionBoundaryFactory.fromEnvironment(environment),
     private val harnessProvenance: String? = null,
@@ -90,7 +91,7 @@ class MvpPatchWorkflow(
         val raw = work.resolve("ghidra_decompiled.c")
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
-        val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
+        val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"), evidence)
         var phase = "inspect"
         var reconstructionAgentEvidence: AcpExecutionReceiptDocument? = null
         var reconstructionCandidate: ByteArray? = null
@@ -218,7 +219,8 @@ class MvpPatchWorkflow(
                 diffPath.writeText(evidence.redact(diff.stdout))
                 evidence.patchDiff = diff.stdout
                 evidence.patchDiffPath = diffPath
-                val approved = options.assumeYes || approve(evidence.patchExplanation)
+                val approved = options.assumeYes || (approve?.invoke(evidence.patchExplanation)
+                    ?: promptForApproval(evidence.patchExplanation, evidence))
                 evidence.approvalDecision = when {
                     !approved -> "rejected interactively"
                     options.assumeYes -> "approved by --yes automation"
@@ -632,12 +634,43 @@ data class CommandResult(val exitCode: Int, val stdout: String, val stderr: Stri
     val combined: String = stdout + stderr
 }
 
-class StreamingLogger(path: Path) : AutoCloseable {
+class StreamingLogger private constructor(
+    path: Path,
+    private val privacy: MvpLogPrivacy,
+    private val output: PrintStream,
+    private val errors: PrintStream,
+    private val timestamp: () -> String,
+) : AutoCloseable {
+    constructor(path: Path) : this(path, defaultPrivacy(), System.out, System.err, { Instant.now().toString() })
+
+    internal constructor(
+        path: Path, evidence: MvpRunEvidence, output: PrintStream = System.out, errors: PrintStream = System.err,
+        timestamp: () -> String = { Instant.now().toString() },
+    ) : this(path, evidence.logPrivacy, output, errors, timestamp)
+
     private val writer: BufferedWriter = Files.newBufferedWriter(path)
+    private val emittedLines = privacy.lines()
+
     fun phase(name: String) = info("==> $name")
-    fun info(message: String) {
-        println(message); System.out.flush(); writer.appendLine("[${Instant.now()}] $message"); writer.flush()
+    fun info(message: String) = emit(message, false, timestamp())
+
+    @Synchronized
+    private fun emit(message: String, error: Boolean, stamp: String? = null) {
+        val complete = privacy.project(message)
+        val guarded = MvpArtifactText(privacy.maximumBytes).apply {
+            complete.lineSequence().forEachIndexed { index, line ->
+                if (index != 0) append("\n")
+                append(emittedLines.next(line))
+            }
+        }.build()
+        val frame = privacy.frame(guarded, error, stamp)
+        val console = if (frame.error) errors else output
+        console.println(frame.console)
+        console.flush()
+        writer.appendLine(frame.retained)
+        writer.flush()
     }
+
     fun command(
         command: List<String>, directory: Path, label: String, requireSuccess: Boolean = true,
         environment: Map<String, String> = emptyMap(), accepted: Set<Int> = setOf(0),
@@ -647,10 +680,13 @@ class StreamingLogger(path: Path) : AutoCloseable {
             .apply { environment().putAll(environment) }.start()
         val stdout = StringBuilder()
         val stderr = StringBuilder()
-        val outThread = stream(process.inputStream, stdout, false)
-        val errThread = stream(process.errorStream, stderr, true)
+        val projectionFailure = MvpLogFailure()
+        val outThread = stream(process.inputStream, stdout, false, projectionFailure)
+        val errThread = stream(process.errorStream, stderr, true, projectionFailure)
         outThread.join(); errThread.join()
-        val code = process.waitFor(); info("$label exit_code=$code")
+        val code = process.waitFor()
+        projectionFailure.requireSuccess()
+        info("$label exit_code=$code")
         if (requireSuccess && code !in accepted) throw MvpPatchException("$label failed with exit code $code")
         return CommandResult(code, stdout.toString(), stderr.toString())
     }
@@ -664,27 +700,43 @@ class StreamingLogger(path: Path) : AutoCloseable {
     ): BinaryExecutionResult {
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
         val result = boundary.execute(executable, directory, environment)
-        synchronized(this) {
-            result.stdout.lineSequence().filter(String::isNotEmpty).forEach { line -> println(line); writer.appendLine(line) }
-            result.stderr.lineSequence().filter(String::isNotEmpty).forEach { line -> System.err.println(line); writer.appendLine("[stderr] $line") }
-            writer.flush()
-        }
+        // Project whole captured streams before line splitting can cut a configured value.
+        val stdout = privacy.project(result.stdout)
+        val stderr = privacy.project(result.stderr)
+        val lines = privacy.lines()
+        stdout.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), false) }
+        stderr.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), true) }
         info("$label exit_code=${result.exitCode} isolation=${result.isolation}")
         return result
     }
 
-    private fun stream(input: java.io.InputStream, capture: StringBuilder, error: Boolean): Thread =
-        Thread {
-            input.bufferedReader().useLines { lines -> lines.forEach { line ->
-                synchronized(this) {
+    private fun stream(
+        input: java.io.InputStream, capture: StringBuilder, error: Boolean,
+        projectionFailure: MvpLogFailure,
+    ): Thread {
+        val lines = privacy.lines()
+        return Thread {
+            try {
+                input.bufferedReader().useLines { incoming -> incoming.forEach { line ->
+                    // Capture stays raw for validation. Failed collection/display cannot be accepted.
                     capture.appendLine(line)
-                    if (error) System.err.println(line) else println(line)
-                    if (error) System.err.flush() else System.out.flush()
-                    writer.appendLine(if (error) "[stderr] $line" else line); writer.flush()
-                }
-            } }
+                    projectionFailure.attempt { emit(lines.next(line), error) }
+                } }
+            } catch (failure: Throwable) {
+                // Avoid the JVM's raw child-thread exception printer; caller rethrows unchanged.
+                projectionFailure.record(failure)
+            }
         }.also { it.start() }
+    }
+
     override fun close() = writer.close()
+
+    private companion object {
+        fun defaultPrivacy(): MvpLogPrivacy {
+            val maximum = decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
+            return MvpLogPrivacy(MvpArtifactRedactor(System.getenv().values, maximum))
+        }
+    }
 }
 
 private fun singleReplacement(patches: List<Pair<String, String>>, suffix: String): String {
@@ -937,7 +989,7 @@ private fun findSourceLocation(sanitizer: String): String? =
         ?.value
         ?.substringAfterLast('/')
 
-private fun promptForApproval(summary: String): Boolean {
-    println("Patch summary: $summary"); print("Apply this patch? [y/N] "); System.out.flush()
+private fun promptForApproval(summary: String, evidence: MvpRunEvidence): Boolean {
+    print(renderMvpApprovalPrompt(summary, evidence)); System.out.flush()
     return readlnOrNull()?.trim()?.lowercase() in setOf("y", "yes")
 }

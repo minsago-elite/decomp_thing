@@ -28,6 +28,148 @@ import kotlin.test.assertTrue
 class MvpPatchWorkflowTest {
 
     @Test
+    fun `MVP log continuations conceal credential values across blank lines and independent pipes`() {
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val lines = evidence.logPrivacy.lines()
+        val rendered = listOf("public start", "Authorization:", "", "Basic", "synthetic-basic; public suffix",
+            "Bearer", "synthetic-bearer, public tail", "api_key=", "synthetic-key; after", "ghp_",
+            "synthetic-prefix", "public end").joinToString("\n") { lines.next(it) }
+        for (value in listOf("synthetic-basic", "synthetic-bearer", "synthetic-key", "synthetic-prefix")) {
+            assertFalse(rendered.contains(value))
+        }
+        assertTrue(rendered.contains("public start"))
+        assertTrue(rendered.contains("public suffix"))
+        assertTrue(rendered.contains("public end"))
+        val stdout = evidence.logPrivacy.lines()
+        val stderr = evidence.logPrivacy.lines()
+        stdout.next("Bearer")
+        assertEquals("public unrelated", stderr.next("public unrelated"))
+        assertFalse(stdout.next("synthetic-next; public").contains("synthetic-next"))
+        stdout.next("password=")
+        assertEquals("; public remains", stdout.next("; public remains"))
+        assertEquals("public remains", stdout.next("public remains"))
+        val ordered = evidence.logPrivacy.lines()
+        ordered.next("Bearer")
+        assertFalse(ordered.next("synthetic-other-channel").contains("synthetic-other-channel"))
+    }
+
+    @Test
+    fun `MVP log projections mask derived private line fragments and complete destination prefixes`() {
+        val environment = mutableMapOf("PLAIN_MULTILINE" to "left-private\nright-private",
+            "PLAIN_CR" to "first-private\rsecond-private", "PLAIN_PREFIX" to "[stderr] public-payload",
+            "PLAIN_STAMP" to "[fixed-stamp] public-payload")
+        val evidence = MvpRunEvidence(environment, "fixture-harness", "fixture-profile", "a".repeat(64))
+        environment.clear()
+        for (fragment in listOf("left-private", "right-private", "first-private", "second-private")) {
+            assertFalse(evidence.logPrivacy.project("before $fragment after").contains(fragment))
+        }
+        val frame = evidence.logPrivacy.frame("public-payload", true)
+        assertTrue(frame.error)
+        assertEquals("public-payload", frame.console)
+        assertFalse(frame.retained.contains("[stderr] public-payload"))
+        val stamped = evidence.logPrivacy.frame("public-payload", false, "fixed-stamp")
+        assertFalse(stamped.retained.contains("[fixed-stamp] public-payload"))
+        val manyFragments = List(5000) { "private-fragment-$it" }.joinToString("\n")
+        val many = MvpRunEvidence(mapOf("PLAIN_MULTILINE" to manyFragments), "fixture-harness", "fixture-profile", "a".repeat(64))
+        assertFalse(many.logPrivacy.project("private-fragment-4999").contains("private-fragment-4999"))
+        assertFailsWith<IllegalArgumentException> {
+            MvpArtifactRedactor((0..4096).map { "private-$it" }, 1024)
+        }
+        val collision = MvpRunEvidence(mapOf("PLAIN_MULTILINE" to "other\n[REDACTED]"),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        assertFailsWith<MvpPatchException> { collision.logPrivacy.project("password=synthetic") }
+    }
+
+    @Test
+    fun `MVP logger admits console and retained records before output without launching a command`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-log-privacy")), "records-")
+        val environment = mapOf("PLAIN_SETTING" to "plain-private", "PLAIN_MULTILINE" to "left-private\nright-private")
+        val evidence = MvpRunEvidence(environment, "fixture-harness", "fixture-profile", "a".repeat(64))
+        val refusal = MvpPatchException("synthetic display refusal")
+        val latch = MvpLogFailure()
+        latch.attempt { throw refusal }
+        latch.attempt { error("refused display work must not continue") }
+        assertTrue(assertFailsWith<MvpPatchException> { latch.requireSuccess() } === refusal)
+        val ordinary = MvpLogFailure()
+        var admitted = 0
+        ordinary.attempt { admitted++ }
+        ordinary.requireSuccess()
+        assertEquals(1, admitted)
+        val interrupted = InterruptedException("synthetic interruption")
+        ordinary.attempt { throw interrupted }
+        assertTrue(assertFailsWith<InterruptedException> { ordinary.requireSuccess() } === interrupted)
+        val fatal = LinkageError("synthetic fatal failure")
+        val failed = MvpLogFailure()
+        failed.attempt { throw fatal }
+        assertTrue(assertFailsWith<LinkageError> { failed.requireSuccess() } === fatal)
+        val readFailure = java.io.IOException("synthetic private reader detail")
+        val reading = MvpLogFailure()
+        reading.record(readFailure)
+        reading.record(refusal)
+        assertTrue(assertFailsWith<java.io.IOException> { reading.requireSuccess() } === readFailure)
+        val output = java.io.ByteArrayOutputStream()
+        val errors = java.io.ByteArrayOutputStream()
+        java.io.PrintStream(output, true, Charsets.UTF_8).use { out ->
+            java.io.PrintStream(errors, true, Charsets.UTF_8).use { err ->
+                StreamingLogger(root.resolve("events.log"), evidence, out, err, { "fixed-stamp" }).use { logger ->
+                    logger.phase("plain-private")
+                    logger.info("Bearer")
+                    logger.info("synthetic-unregistered")
+                    logger.info("left-private")
+                    logger.info("right-private")
+                    logger.info("public output")
+                }
+            }
+        }
+        val console = output.toString(Charsets.UTF_8)
+        val retained = root.resolve("events.log").readText()
+        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered")) {
+            assertFalse(console.contains(value))
+            assertFalse(retained.contains(value))
+        }
+        assertTrue(console.contains("public output"))
+        assertTrue(retained.contains("[fixed-stamp] public output"))
+        assertEquals(0, errors.size())
+        for ((name, rejected) in listOf(
+            "prefix-budget" to MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64), 16),
+            "marker" to MvpRunEvidence(mapOf("PLAIN_SETTING" to "[REDACTED]"), "fixture-harness", "fixture-profile", "a".repeat(64)),
+        )) {
+            val withheld = java.io.ByteArrayOutputStream()
+            java.io.PrintStream(withheld, true, Charsets.UTF_8).use { out ->
+                StreamingLogger(root.resolve("$name.log"), rejected, out, out, { "fixed-stamp" }).use { logger ->
+                    assertFailsWith<MvpPatchException> {
+                        logger.info(if (name == "marker") "password=synthetic" else "public message")
+                    }
+                }
+            }
+            assertEquals(0, withheld.size())
+            assertEquals("", root.resolve("$name.log").readText())
+        }
+    }
+
+    @Test
+    fun `default MVP approval renders complete private safe content before reading a decision`() {
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "plain-private",
+            "PLAIN_MULTILINE" to "left-private\nright-private", "PLAIN_FORMAT" to "Patch summary: public-heading"),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        val complete = "public complete explanation line;\n".repeat(2000)
+        val summary = "public-heading; plain-private; Authorization: Basic synthetic-basic; left-private\nright-private;\n" + complete
+        val prompt = renderMvpApprovalPrompt(summary, evidence)
+        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-basic", "Patch summary: public-heading")) {
+            assertFalse(prompt.contains(value))
+        }
+        assertTrue(prompt.contains(complete))
+        assertTrue(prompt.endsWith("Apply this patch? [y/N] "))
+        assertTrue(summary.contains("plain-private"))
+        val privateQuestion = MvpRunEvidence(mapOf("PLAIN_SETTING" to "Apply this patch? [y/N] "),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        assertFailsWith<MvpPatchException> { renderMvpApprovalPrompt("public", privateQuestion) }
+        assertFailsWith<MvpPatchException> {
+            renderMvpApprovalPrompt("public", MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64), 16))
+        }
+    }
+
+    @Test
     fun `complete artifact literal index agrees with independent overlapping span coverage`() {
         fun expected(source: String, values: List<String>): String {
             val covered = BooleanArray(source.length)
