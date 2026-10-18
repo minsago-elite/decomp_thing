@@ -21,6 +21,101 @@ class WebProgressObservationTest {
             expected.getValue("cursor").jsonPrimitive.content, value)
     }
 
+    @Test fun `legacy progress attachments project root and records without losing event accounting`() {
+        val ranges = buildJsonArray {
+            for ((start, end) in listOf(0 to 1, 3 to 4, 5 to 6)) add(buildJsonObject {
+                put("startInclusive", start.toString()); put("endExclusive", end.toString())
+            })
+        }
+        val input = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 6)
+            put("queueDropped", 2); put("historyDropped", 1); put("truncated", true)
+            put("omittedSequenceRanges", ranges); put("PRIVATE_ROOT_FIELD", "PRIVATE_ROOT_VALUE")
+            put("events", buildJsonArray {
+                add(buildJsonObject {
+                    put("sequence", 1); put("kind", "message"); put("workflow", "repair"); put("runId", "writer-1")
+                    put("text", "Authorization: [redacted] PRIVATE_TAIL"); put("textOmitted", false)
+                    put("workflowRunId", "PRIVATE_RUN"); put("workflowRunIdSha256", "a".repeat(64))
+                    put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+                    put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD")
+                })
+                add(buildJsonObject {
+                    put("sequence", 2); put("kind", "plan"); put("entryCount", 1); put("entriesTruncated", false)
+                    put("entries", buildJsonArray { add(buildJsonObject { put("text", "PRIVATE_PLAN") }) })
+                })
+                add(buildJsonObject { put("sequence", 4); put("kind", "agent_finished"); put("stopReason", "completed"); put("validationPending", true) })
+            })
+        }
+        val expected = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 6)
+            put("queueDropped", 2); put("historyDropped", 1); put("truncated", true)
+            put("omittedSequenceRanges", ranges); put("replayOmittedFields", 1)
+            put("events", buildJsonArray {
+                add(buildJsonObject {
+                    put("sequence", 1); put("kind", "message"); put("workflow", "repair"); put("runId", "writer-1")
+                    put("textOmitted", true); put("workflowRunIdSha256", "a".repeat(64))
+                    put("inputTokens", 11); put("contextWindowTokens", "9007199254740993")
+                    put("reportedCostAmount", "-0.0"); put("reportedCostCurrency", "USD"); put("replayOmittedFields", 2)
+                })
+                add(buildJsonObject {
+                    put("sequence", 2); put("kind", "plan"); put("entryCount", 1); put("entriesTruncated", false)
+                    put("replayOmittedFields", 1)
+                })
+                add(buildJsonObject { put("sequence", 4); put("kind", "agent_finished"); put("stopReason", "completed"); put("validationPending", true) })
+            })
+        }
+        val raw = input.toString().toByteArray(Charsets.UTF_8)
+        for (path in listOf("reports/agent-progress.json", "reports/runs/attempt-1/agent-progress.json")) {
+            val projected = progressArtifactProjection(path, raw)
+            assertEquals(expected, AgentProgressJournal.decode(projected))
+            assertContentEquals(projected, progressArtifactProjection(path, projected))
+            assertTrue(projected.size <= AgentProgressJournal.MAXIMUM_READ_BYTES)
+            assertFalse(projected.toString(Charsets.UTF_8).contains("PRIVATE"))
+        }
+        assertEquals(input, AgentProgressJournal.decode(raw))
+        val expired = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 6)
+            put("queueDropped", 2); put("historyDropped", 4); put("truncated", true)
+            put("events", JsonArray(emptyList())); put("retentionExpiredAt", "2026-10-18T00:00:00Z")
+        }
+        assertEquals(expired, AgentProgressJournal.decode(progressArtifactProjection("reports/agent-progress.json",
+            expired.toString().toByteArray(Charsets.UTF_8))))
+    }
+
+    @Test fun `progress attachment namespaces and limits preserve unrelated bytes and withhold failures`() {
+        val arbitrary = byteArrayOf(0xff.toByte(), 0, 1)
+        for (path in listOf("reports/source-tree/agent-progress.json", "reports/receipts/agent-progress.json",
+            "reports/runs/attempt-1/source-tree/agent-progress.json", "reports/runs/attempt-1/receipts/agent-progress.json",
+            "reports/agent-progress.json.source")) {
+            assertFalse(isProgressJournalArtifact(path))
+            assertSame(arbitrary, progressArtifactProjection(path, arbitrary))
+        }
+        for (path in listOf("../reports/agent-progress.json", "/reports/agent-progress.json", "reports//agent-progress.json",
+            "reports/../agent-progress.json", "reports\\agent-progress.json", "reports/runs/-invalid/agent-progress.json")) {
+            assertFailsWith<IllegalArgumentException> { isProgressJournalArtifact(path) }
+        }
+        val base = buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 1)
+            put("queueDropped", 0); put("historyDropped", 0); put("truncated", false)
+            put("events", buildJsonArray { add(buildJsonObject { put("sequence", 0); put("kind", "run_started") }) })
+        }
+        val invalidRootCount = JsonObject(base + ("replayOmittedFields" to JsonPrimitive("PRIVATE_INVALID_COUNT")))
+        val overflowRootCount = JsonObject(base + mapOf("replayOmittedFields" to JsonPrimitive(Int.MAX_VALUE),
+            "PRIVATE_UNKNOWN_FIELD" to JsonPrimitive("PRIVATE_VALUE")))
+        for (bytes in listOf("PRIVATE_PARSER_INPUT".toByteArray(), arbitrary,
+            invalidRootCount.toString().toByteArray(), overflowRootCount.toString().toByteArray(),
+            ByteArray(AgentProgressJournal.MAXIMUM_READ_BYTES + 1))) {
+            val copy = bytes.copyOf()
+            val failure = assertFailsWith<WebJobServiceException> {
+                progressArtifactProjection("reports/agent-progress.json", bytes)
+            }
+            assertEquals("PROGRESS_UNAVAILABLE", failure.code)
+            assertEquals("The retained progress report is unavailable.", failure.message)
+            assertNull(failure.cause)
+            assertContentEquals(copy, bytes)
+        }
+    }
+
     @Test fun `projection matches the shared contract fixture without promoting reported acceptance`() {
         assertEquals(Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-public-metadata.json"))), project(record()))
     }

@@ -1,134 +1,42 @@
 package decompengine.web
 
-import decompengine.agent.AgentFailureKind
-import decompengine.agent.AgentFileChangeKind
-import decompengine.agent.AgentMessageRole
-import decompengine.agent.AgentPermissionDecision
-import decompengine.agent.AgentPlanStatus
-import decompengine.agent.AgentStopReason
-import decompengine.agent.AgentToolStatus
-import decompengine.agent.AgentWorkflowPhase
+import decompengine.jobs.PublicProgressRecord
+import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.publicProgressRecord
+import decompengine.jobs.replayProgressSnapshot
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
-import java.time.Duration
-import java.time.Instant
-import java.util.Locale
 
-/** One classified public view shared by legacy and v1 progress adapters. */
-internal data class WebPublicProgressRecord(
-    val writerId: String?,
-    val workflow: String?,
-    val observationKind: String,
-    val sequence: String,
-    val occurredAt: String?,
-    val agentSequence: String?,
-    val fields: JsonObject,
-    val omittedFieldCount: Int,
-)
+internal typealias WebPublicProgressRecord = PublicProgressRecord
 
-/**
- * Journal prose, paths, and producer-supplied labels are private even when old records retained
- * them. Public correlation uses application-issued writer/turn IDs and explicit SHA-256
- * commitments; typed categories and measurements are checked against their source domains.
- */
-internal fun publicWebProgressRecord(record: JsonObject): WebPublicProgressRecord {
-    require(record.size <= 128) { "observation field budget exceeded" }
-    val id = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-    fun text(value: JsonElement, maximum: Int): String {
-        val primitive = value as? JsonPrimitive
-        require(primitive != null && primitive.isString && primitive.content.length <= maximum) { "invalid observation text" }
-        return primitive.content
+/** The web adapters and owned historical replay use the same strict field classifier. */
+internal fun publicWebProgressRecord(record: JsonObject): WebPublicProgressRecord = publicProgressRecord(record)
+
+/** Exact display-journal namespaces only; a source/receipt basename confers no display policy. */
+internal fun isProgressJournalArtifact(relativePath: String): Boolean {
+    val parts = canonicalReportSegments(relativePath)
+    return (parts.size == 2 && parts[1] == AgentProgressJournal.FILE_NAME) ||
+        (parts.size == 4 && parts[1] == "runs" && parts[3] == AgentProgressJournal.FILE_NAME)
+}
+
+/** The caller must authorize and capture the selected artifact before projecting its display bytes. */
+internal fun progressArtifactProjection(relativePath: String, bytes: ByteArray): ByteArray {
+    if (!isProgressJournalArtifact(relativePath)) return bytes
+    return try {
+        val snapshot = replayProgressSnapshot(AgentProgressJournal.decode(bytes))
+        OracleJson.canonicalBytes(snapshot, StrictJsonLimits(
+            maximumInputBytes = AgentProgressJournal.MAXIMUM_READ_BYTES,
+            maximumCanonicalBytes = AgentProgressJournal.MAXIMUM_READ_BYTES,
+            maximumDepth = 32,
+            maximumNodes = 65_536,
+            maximumStringBytes = 16 * 1024,
+            maximumTotalStringBytes = AgentProgressJournal.MAXIMUM_READ_BYTES,
+        ))
+    } catch (failure: Exception) {
+        if (failure is InterruptedException || failure is java.util.concurrent.CancellationException) throw failure
+        throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress report is unavailable.")
     }
-    fun count(value: JsonElement): String {
-        val primitive = value as? JsonPrimitive
-        val content = primitive?.content.orEmpty()
-        require(content.matches(Regex("0|[1-9][0-9]{0,19}")) && content.toULongOrNull() != null) { "invalid observation count" }
-        return content
-    }
-    fun digest(value: JsonElement): String = text(value, 64).also {
-        require(it.matches(Regex("[a-f0-9]{64}"))) { "invalid observation commitment" }
-    }
-    fun enumValues(values: Array<out Enum<*>>) = values.map { it.name.lowercase(Locale.ROOT) }.toSet()
-    val categories = mapOf(
-        "phase" to enumValues(AgentWorkflowPhase.entries.toTypedArray()),
-        "status" to (enumValues(AgentPlanStatus.entries.toTypedArray()) +
-            enumValues(AgentToolStatus.entries.toTypedArray()) + "running"),
-        "stopReason" to enumValues(AgentStopReason.entries.toTypedArray()),
-        "failureKind" to enumValues(AgentFailureKind.entries.toTypedArray()),
-        "role" to enumValues(AgentMessageRole.entries.toTypedArray()),
-        "decision" to enumValues(AgentPermissionDecision.entries.toTypedArray()),
-        "change" to enumValues(AgentFileChangeKind.entries.toTypedArray()),
-    )
-    val metadata = setOf("runId", "workflow", "kind", "sequence", "time", "agentSequence")
-    val privateLabels = setOf("taskId", "workflowRunId", "revisionId", "path", "text")
-    val digests = setOf("taskIdSha256", "workflowRunIdSha256", "revisionIdSha256", "requestSha256", "sessionIdSha256",
-        "toolCallIdSha256", "permissionIdSha256", "messageIdSha256", "acceptedRevisionSha256", "contentSha256", "afterSha256")
-    val counts = setOf("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "contextUsedTokens", "contextWindowTokens", "chunkCharacters", "entryCount")
-    val booleans = setOf("completed", "validationPending", "sourceSequenceGap", "textOmitted", "messageTrackingExhausted", "entriesTruncated")
-    var omitted = 0
-    var withheldText = false
-    val fields = buildJsonObject {
-        for ((key, value) in record) when {
-            key in metadata -> Unit
-            key in privateLabels -> {
-                omitted++
-                if (key == "text") withheldText = true
-            }
-            key == "entries" -> {
-                omitted++
-            }
-            key in categories -> {
-                val category = text(value, 64)
-                if (category in categories.getValue(key)) put(key, category) else omitted++
-            }
-            key in digests -> put(key, digest(value))
-            key in counts -> put(key, count(value))
-            key in booleans -> {
-                val primitive = value as? JsonPrimitive
-                require(primitive != null && !primitive.isString && primitive.booleanOrNull != null) { "invalid observation flag" }
-                put(key, primitive.boolean)
-            }
-            key == "turnId" -> put(key, text(value, 128).also { require(it.matches(id)) { "invalid observation turn identity" } })
-            key == "wallClock" -> {
-                val duration = Duration.parse(text(value, 64))
-                require(!duration.isNegative) { "invalid observation duration" }
-                put(key, duration.toString())
-            }
-            key == "reportedCostAmount" -> put(key, text(value, 64).also {
-                require(it.matches(Regex("(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?")) &&
-                    it.toDoubleOrNull()?.let { number -> number.isFinite() && number >= 0.0 } == true) {
-                    "invalid observation cost"
-                }
-            })
-            key == "reportedCostCurrency" -> {
-                val currency = text(value, 64)
-                if (currency in setOf("AUD", "CAD", "CHF", "CNY", "EUR", "GBP", "JPY", "KRW", "USD")) put(key, currency) else omitted++
-            }
-            else -> omitted++
-        }
-        if (withheldText) put("textOmitted", true)
-    }
-    val writerId = record["runId"]?.let { text(it, 128).also { value -> require(value.matches(id)) { "invalid observation writer identity" } } }
-    val workflow = record["workflow"]?.let { value ->
-        text(value, 64).takeIf { it in setOf("build", "explore", "reconstruct", "reconstruction", "repair", "validate") } ?: "unknown"
-    }
-    val kindValue = text(record.getValue("kind"), 64)
-    val kind = kindValue.takeIf { it in setOf("run_started", "task_started", "context_usage", "message", "plan", "tool", "permission",
-        "file_change", "agent_finished", "workflow_phase", "workflow_run_state") } ?: "unknown"
-    val occurredAt = record["time"]?.let { value ->
-        Instant.parse(text(value, 40)).toString().also {
-            require(it.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z"))) { "observation date is outside the web range" }
-        }
-    }
-    return WebPublicProgressRecord(
-        writerId = writerId,
-        workflow = workflow,
-        observationKind = kind,
-        sequence = count(record.getValue("sequence")),
-        occurredAt = occurredAt,
-        agentSequence = record["agentSequence"]?.let(::count),
-        fields = fields,
-        omittedFieldCount = omitted,
-    )
 }
 
 /** Display projection only. The caller supplies an authenticated attempt binding and replay cursor. */

@@ -290,9 +290,26 @@ class WebApiControllerTest {
             val otherCookie = establish(server)
             assertError(request(server, "$path/events?cursor=$through", headers = mapOf("Cookie" to otherCookie)), 400, "INVALID_CURSOR")
             decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use { }
-            val appended = assertEnvelope(request(server, "$path/events?cursor=$through", headers = headers), 200, "events")
-            assertEquals("2", appended.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
-            val journal = Json.parseToJsonElement(Files.readString(journalFile)).jsonObject
+            // Owned replay removes the private fields, so the original byte-bound anchor changed.
+            val rewritten = request(server, "$path/events?cursor=$through", headers = headers)
+            assertError(rewritten, 410, "EVENT_GAP")
+            val rewrittenRecovery = Json.parseToJsonElement(rewritten.body()).jsonObject
+                .getValue("error").jsonObject.getValue("recovery").jsonObject
+            assertEquals(through, rewrittenRecovery.getValue("requestedCursor").jsonPrimitive.content)
+            assertEquals("$path/snapshot", rewrittenRecovery.getValue("snapshotHref").jsonPrimitive.content)
+            val refreshed = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
+            val replayFirst = assertEnvelope(request(server,
+                "$path/events?limit=1&cursor=${refreshed.getValue("oldestCursor").jsonPrimitive.content}", headers = headers), 200, "events")
+            assertEquals("0", replayFirst.getValue("items").jsonArray.single().jsonObject.getValue("sequence").jsonPrimitive.content)
+            val retainedFirstCursor = replayFirst.getValue("nextCursor").jsonPrimitive.content
+            val appended = assertEnvelope(request(server, "$path/events?cursor=$retainedFirstCursor", headers = headers), 200, "events")
+            assertEquals(listOf("1", "2"), appended.getValue("items").jsonArray.map {
+                it.jsonObject.getValue("sequence").jsonPrimitive.content
+            })
+            assertFalse((replayFirst.toString() + appended.toString()).contains("PRIVATE_HTTP_"))
+            val rewrittenBytes = Files.readString(journalFile)
+            assertFalse(rewrittenBytes.contains("PRIVATE_HTTP_"))
+            val journal = Json.parseToJsonElement(rewrittenBytes).jsonObject
             Files.writeString(journalFile, JsonObject(journal + mapOf(
                 "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true),
                 "events" to kotlinx.serialization.json.JsonArray(journal.getValue("events").jsonArray.drop(1)),
@@ -303,10 +320,10 @@ class WebApiControllerTest {
                     })
                 },
             )).toString())
-            val gapResponse = request(server, "$path/events?cursor=$firstCursor", headers = headers)
+            val gapResponse = request(server, "$path/events?cursor=$retainedFirstCursor", headers = headers)
             assertError(gapResponse, 410, "EVENT_GAP")
             val recovery = Json.parseToJsonElement(gapResponse.body()).jsonObject.getValue("error").jsonObject.getValue("recovery").jsonObject
-            assertEquals(firstCursor, recovery.getValue("requestedCursor").jsonPrimitive.content)
+            assertEquals(retainedFirstCursor, recovery.getValue("requestedCursor").jsonPrimitive.content)
             assertEquals("$path/snapshot", recovery.getValue("snapshotHref").jsonPrimitive.content)
             assertEquals(job.id, recovery.getValue("jobId").jsonPrimitive.content)
             val fresh = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")

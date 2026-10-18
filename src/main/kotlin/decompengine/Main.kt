@@ -4,7 +4,11 @@ import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.doctor.Doctor
+import decompengine.doctor.DoctorDiagnosticAdmissionException
+import decompengine.doctor.DoctorDiagnostics
+import decompengine.doctor.DoctorReport
 import decompengine.doctor.parseDoctorInvocation
+import decompengine.doctor.requireDoctorActive
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
@@ -547,26 +551,75 @@ private fun runDoctor(args: List<String>) {
     val invocation = try {
         parseDoctorInvocation(args, defaultOutput)
     } catch (failure: IllegalArgumentException) {
-        doctorUsageError(failure.message ?: "invalid doctor configuration")
+        doctorUsageError(failure.message ?: "invalid doctor configuration", "--tools-only" in args)
     }
-    val report = Doctor().inspect(invocation.options, invocation.profile)
+    val environment = System.getenv()
+    val sensitiveValues = if (invocation.options.toolsOnly) emptyList() else environment.values
+    val exitCode = runDoctorCliAction(sensitiveValues) {
+        Doctor(environment = environment, sensitiveValues = sensitiveValues).inspect(invocation.options, invocation.profile)
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Doctor reports and escaping ordinary failures share the admitted terminal redactor. */
+internal fun runDoctorCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+    diagnostic: PrintStream = System.err,
+    action: () -> DoctorReport,
+): Int {
+    val redactor = try {
+        DoctorDiagnostics(sensitiveValues)
+    } catch (_: DoctorDiagnosticAdmissionException) {
+        return 2
+    }
+    requireDoctorActive()
+    val report = try {
+        action()
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        if (failure is DoctorDiagnosticAdmissionException) return 2
+        val detail = redactor.text(failure.message ?: failure.javaClass.simpleName, 4096)
+        diagnostic.println(redactor.text("doctor failed: $detail", 4096))
+        return 1
+    }
+    requireDoctorActive()
     report.checks.forEach { check ->
-        val stream = if (check.passed) System.out else System.err
-        stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
+        requireDoctorActive()
+        val stream = if (check.passed) output else diagnostic
+        val name = redactor.text(check.name, 4096)
+        val detail = redactor.text(check.detail, 4096)
+        stream.println(redactor.text("[${if (check.passed) "ok" else "failed"}] $name: $detail", 4096))
         stream.flush()
     }
     if (!report.passed) {
-        System.err.println("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.")
-        kotlin.system.exitProcess(1)
+        diagnostic.println(redactor.text("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.", 4096))
+        return 1
     }
-    println("Environment check passed (${report.checks.size} checks)")
-    System.out.flush()
+    output.println(redactor.text("Environment check passed (${report.checks.size} checks)", 4096))
+    output.flush()
+    return 0
 }
 
-private fun doctorUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]")
-    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]")
+internal fun renderDoctorUsageError(
+    message: String,
+    toolsOnly: Boolean,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = try {
+        DoctorDiagnostics(if (toolsOnly) emptyList() else sensitiveValues)
+    } catch (_: DoctorDiagnosticAdmissionException) {
+        return 2
+    }
+    output.println(redactor.text(if (toolsOnly) "invalid doctor configuration; check the options below" else message, 4096))
+    output.println(redactor.text("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]", 4096))
+    output.println(redactor.text("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]", 4096))
+    return 2
+}
+
+private fun doctorUsageError(message: String, toolsOnly: Boolean): Nothing {
+    renderDoctorUsageError(message, toolsOnly, if (toolsOnly) emptyList() else System.getenv().values)
     kotlin.system.exitProcess(2)
 }
 

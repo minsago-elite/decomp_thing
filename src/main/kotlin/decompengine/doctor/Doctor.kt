@@ -5,8 +5,10 @@ import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpHarnessSelection
 import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
+import decompengine.acp.AuthenticationPreviewFragments
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
+import decompengine.jobs.ProgressRedactor
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionHostSafetyLimits
 import decompengine.project.ReconstructionProfile
@@ -66,6 +68,7 @@ class Doctor(
     private val environment: Map<String, String> = System.getenv(),
     private val commandProbe: CommandProbe = SystemCommandProbe,
     private val connectivityProbe: ConnectivityProbe = HttpConnectivityProbe(),
+    private val sensitiveValues: Collection<String> = emptyList(),
 ) {
     fun inspect(options: DoctorOptions): DoctorReport = inspect(options, ReconstructionProfiles.default)
 
@@ -75,6 +78,7 @@ class Doctor(
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): DoctorReport {
         requireDoctorActive()
+        val diagnostic = DoctorDiagnostics(sensitiveValues)
         hostSafetyLimits.requireAllows(profile.budgets)
         val diagnostics = ReconstructionAdapters.resolve(profile).diagnostics.prepare(profile)
         val hostProbeLimits = CommandProbeLimits()
@@ -122,13 +126,14 @@ class Doctor(
                 harnessSelection,
                 options.workflowOverride ?: AcpPreflightWorkflow.ALL,
                 options.showAuthMethods,
+                diagnostic,
             )
             if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
-                checks += llmChecks()
+                checks += llmChecks(diagnostic)
             }
         }
         requireDoctorActive()
-        return DoctorReport(checks)
+        return diagnostic.report(DoctorReport(checks))
     }
 
     private fun executableCheck(
@@ -164,6 +169,7 @@ class Doctor(
         selection: Result<AcpHarnessSelection>,
         workflow: AcpPreflightWorkflow,
         showAuthMethods: Boolean,
+        diagnostic: DoctorDiagnostics,
     ): List<DoctorCheck> = selection.fold(
         onSuccess = { resolved ->
             when (resolved.kind) {
@@ -182,7 +188,7 @@ class Doctor(
                             if (result.authentication.methods.isEmpty()) authChecks += DoctorCheck(
                                 "ACP authentication methods", true, "No authentication methods advertised; no login attempted.")
                             result.authentication.methods.forEachIndexed { index, method ->
-                                fun quoted(value: String) = quoteTerminalPreview(value)
+                                fun quoted(value: String) = quoteTerminalPreview(diagnostic.preview(value))
                                 authChecks += DoctorCheck("ACP authentication method ${index + 1}", true,
                                     "id preview=${quoted(method.idPreview)}; variant=${method.variant}; " +
                                         "name=${quoted(method.namePreview)}; " +
@@ -299,28 +305,32 @@ class Doctor(
         }
     }
 
-    private fun llmChecks(): List<DoctorCheck> {
-        val baseUrlText = environment["BASE_URL"].orEmpty().trim()
+    private fun llmChecks(diagnostic: DoctorDiagnostics): List<DoctorCheck> {
+        val rawBaseUrl = environment["BASE_URL"].orEmpty()
+        val baseUrlText = rawBaseUrl.trim()
         val apiKey = environment["API_KEY"].orEmpty()
-        val model = environment["MODEL"].orEmpty().trim()
+        diagnostic.include(apiKey)
+        val rawModel = environment["MODEL"].orEmpty()
+        val model = rawModel.trim()
         val baseUrl = runCatching { URI.create(baseUrlText) }.getOrNull()
         val validBaseUrl = baseUrl != null && baseUrl.scheme in setOf("http", "https") && !baseUrl.host.isNullOrBlank()
         val checks = mutableListOf(
-            DoctorCheck("LLM base URL", validBaseUrl, if (validBaseUrl) "configured for ${baseUrl.scheme}://${baseUrl.host}" else "Set BASE_URL to an absolute HTTP(S) OpenAI-compatible API URL."),
+            DoctorCheck("LLM base URL", validBaseUrl, if (validBaseUrl) "configured for ${diagnostic.projected(rawBaseUrl, "${baseUrl.scheme}://${baseUrl.host}")}" else "Set BASE_URL to an absolute HTTP(S) OpenAI-compatible API URL."),
             DoctorCheck("LLM API key", apiKey.isNotBlank(), if (apiKey.isNotBlank()) "configured (value redacted)" else "Set API_KEY; its value will not be printed or persisted."),
-            DoctorCheck("LLM model", model.isNotBlank(), if (model.isNotBlank()) "configured as $model" else "Set MODEL to an available model identifier."),
+            DoctorCheck("LLM model", model.isNotBlank(), if (model.isNotBlank()) "configured as ${diagnostic.projected(rawModel, model)}" else "Set MODEL to an available model identifier."),
         )
-        val reasoning = environment["REASONING_EFFORT"]?.trim().orEmpty()
+        val rawReasoning = environment["REASONING_EFFORT"].orEmpty()
+        val reasoning = rawReasoning.trim()
         if (reasoning.isNotEmpty()) {
             val supported = reasoning in setOf("none", "minimal", "low", "medium", "high", "xhigh")
-            checks += DoctorCheck("reasoning effort", supported, if (supported) "configured as $reasoning" else "Use none, minimal, low, medium, high, or xhigh.")
+            checks += DoctorCheck("reasoning effort", supported, if (supported) "configured as ${diagnostic.projected(rawReasoning, reasoning)}" else "Use none, minimal, low, medium, high, or xhigh.")
         }
         checks += if (validBaseUrl && apiKey.isNotBlank()) {
             runCatching { connectivityProbe.check(requireNotNull(baseUrl), apiKey) }.fold(
                 onSuccess = { DoctorCheck("LLM connectivity", true, it) },
-                onFailure = {
-                    requireDoctorActive(it)
-                    DoctorCheck("LLM connectivity", false, "Could not authenticate to ${baseUrl.host}: ${it.message}. Check BASE_URL, API_KEY, proxy, and network access.")
+                onFailure = { failure ->
+                    requireDoctorActive(failure)
+                    doctorConnectivityFailure(diagnostic.projected(rawBaseUrl, baseUrl.host), failure)
                 },
             )
         } else {
@@ -332,10 +342,69 @@ class Doctor(
 
 private object SystemCommandProbe : BudgetedCommandProbe by BoundedSystemCommandProbe()
 
-private fun requireDoctorActive(failure: Throwable? = null) {
+internal fun doctorConnectivityFailure(host: String?, failure: Throwable): DoctorCheck {
+    requireDoctorActive(failure)
+    // HTTP header-validation exceptions can contain the entire Authorization value.
+    return DoctorCheck("LLM connectivity", false,
+        "Could not authenticate to $host. Check BASE_URL, API_KEY, proxy, and network access.")
+}
+
+internal fun requireDoctorActive(failure: Throwable? = null) {
     if (failure is InterruptedException || failure is CancellationException || failure is Error) throw failure
     if (Thread.currentThread().isInterrupted) {
         throw InterruptedException("Doctor inspection cancelled").also { if (failure != null) it.initCause(failure) }
+    }
+}
+
+internal class DoctorDiagnosticAdmissionException : IllegalArgumentException("doctor diagnostic configuration is not admitted")
+
+/** The configuration map may be opaque; callers supply display secrets through a separate inventory. */
+internal class DoctorDiagnostics(values: Collection<String>) {
+    private var admitted = admit(values)
+    private var redactor = ProgressRedactor(admitted)
+    private var fragments = AuthenticationPreviewFragments(admitted)
+
+    fun include(value: String) {
+        requireDoctorActive()
+        if (value.length > 1024 * 1024) throw DoctorDiagnosticAdmissionException()
+        if (value.isBlank() || value in admitted) return
+        val next = admit(admitted + value)
+        val nextRedactor = ProgressRedactor(next)
+        val nextFragments = AuthenticationPreviewFragments(next)
+        admitted = next
+        redactor = nextRedactor
+        fragments = nextFragments
+    }
+
+    fun text(value: String, maximumCharacters: Int = 4096): String = redactor.text(value, maximumCharacters)
+
+    fun preview(value: String, maximumCharacters: Int = 4096): String = fragments.conceal(text(value, maximumCharacters))
+
+    /** Check raw configuration before whitespace normalization or extracting a destination host. */
+    fun projected(source: String, projected: String): String =
+        if (text(source, source.length) == source) preview(projected)
+        else text("[redacted]")
+
+    fun report(report: DoctorReport): DoctorReport = DoctorReport(report.checks.map { check ->
+        requireDoctorActive()
+        check.copy(name = preview(check.name), detail = preview(check.detail))
+    })
+
+    private fun admit(values: Collection<String>): List<String> = try {
+        requireDoctorActive()
+        require(values.size in 0..4096)
+        val snapshot = ArrayList<String>()
+        var characters = 0L
+        for (value in values) {
+            requireDoctorActive()
+            require(snapshot.size < 4096 && value.length.toLong() <= 1024 * 1024 - characters)
+            characters += value.length
+            snapshot += value
+        }
+        snapshot
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        throw DoctorDiagnosticAdmissionException()
     }
 }
 

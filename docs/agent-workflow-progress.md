@@ -36,6 +36,24 @@ Overflow is explicit through sequence gaps, queue/history omission counts and `t
 accept at most 2 MiB and 1,024 ordered records. Closing drains the bounded queue and waits at most
 five seconds; persistence or cleanup failure is reported instead of claiming a complete projection.
 A new writer retains the prior snapshot and continues its sequence while starting a distinct run.
+Before republishing prior events, it applies the same strict field classifier as the web adapters.
+Historical prose, paths, producer labels, plan entries and unknown fields are withheld: an older
+formatter may already have erased the context needed to recognize a partial credential. Typed
+facts, application identities, commitments, record sequences and all event-loss counters remain.
+`replayOmittedFields` counts withheld fields separately from lost events and remains stable across
+repeated replay; a removed text preview also sets `textOmitted`. Raw decoding and its byte/accounting
+checks stay separate. This cleanup reaches stored bytes only after the owning writer successfully
+publishes its new snapshot; unopened journals and failed publications still need separate maintenance.
+Authenticated legacy progress attachments apply the same display projection to their captured bytes,
+including unknown root fields. Only the exact legacy and admitted-run journal namespaces select it;
+source/receipt files sharing the basename keep their original bytes. Reads and bounded canonical JSON
+output use the journal's two-MiB ceiling. Invalid journals return a fixed unavailable error without
+raw parser causes. This protects downloaded display content without rewriting unopened stored files.
+An owned historical cleanup changes retained record bytes. Existing signed replay cursors bind
+those bytes, so a changed anchor still returns `EVENT_GAP` with its snapshot recovery route.
+Consumers take a fresh snapshot and resume from its retained boundary; cleanup does not weaken
+record-change detection or authenticate history. Append-only publication after that cutover keeps
+unchanged anchors usable, including when already-cleaned records are republished.
 
 Raw protocol frames and arbitrary exception messages do not enter this view. Message chunks retain
 content/identity commitments and counts. Up to 16 messages of 8,192 characters each can be accumulated
@@ -44,6 +62,19 @@ prevents a configured secret split across chunks from leaking through separate p
 environment values and common credential formats are redacted before previews are bounded. Tool,
 plan and permission previews are also bounded. Opaque session/message/tool IDs remain digests.
 Redaction is a display precaution, not a claim that arbitrary unconfigured secrets can be identified.
+MVP binary captures retain separate stdout and stderr strings without cross-stream emission order.
+Before displaying either string, the logger admits both and scans their raw normalized credential
+introducers at every possible earlier prefix, including inside a completed line. A peer introducer
+conservatively withholds every local record during replay: a credential could have arrived midway
+through that record, before the peer finished its line. Public content in the affected capture can
+also be withheld; raw binary results used for validation stay unchanged. Command readers likewise
+have no merged byte order. While a peer is open, the display emits coalesced captured-line/unit
+counts instead of exposing text before the peer's credential prefixes are known. Once the peer
+closes, its complete admitted capture supplies the same conservative policy: the local reader
+releases pending records and subsequent local lines with that policy. A final flush after both
+readers join releases remaining records once. Public diagnostics remain complete when the peer
+has no credential introducer; a peer introducer can withhold complete local records. These display
+counts and omissions are not ACP terminal completeness or resource/release qualification.
 Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
 malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
 therefore cannot collapse through replacement encoding and merge separate message buffers.
@@ -54,6 +85,12 @@ policy and 16,384-character replacement limit stay in force; the replacement bui
 within that limit. Index arrays require at most four bytes per admitted normalized code unit, plus
 per-literal object/array overhead. Overall callback deadlines, raw event/request admission and total
 shared-consumer resource qualification remain separate unfinished work.
+Credential format coverage also observes the original text before control removal. Ordered cursors
+project those spans into normalized coordinates with the same control matcher, without allocating
+an input-sized coordinate map. This preserves both separator controls and normalized introducers;
+all coverage is united before replacement. Log grammar is planned from normalized raw lines while
+the final projection still receives their original controls. Reported cost accepts the producer's
+finite nonnegative negative-zero spelling `-0.0`, without admitting negative costs or nonfinite values.
 
 The browser reads the same persisted snapshot at `GET /api/jobs/<job-id>/events`, updates at bounded
 polling intervals, and uses text nodes for peer-authored previews. Refresh renders the retained history
@@ -179,6 +216,48 @@ If a CLI redaction inventory is rejected, the workflow does not run: reconstruct
 patch exits 2 with no diagnostic payload from the unadmitted inventory. Admission interruption is
 preserved. Normal usage errors retain their command help and exit status 2.
 
+Captured MVP request transcripts admit their complete raw prompt, failure kind, file paths/content
+and regression identifiers before rendering Markdown. The unchanged agent objective is checked
+separately after trimming, and its admitted UTF-8 file bytes are reused for execution. Request
+content and initial staging retain their existing 4 MiB and 2 MiB default ceilings; oversized raw
+padding cannot bypass admission through a short normalized objective. File/regression entry limits
+also apply before retention. The staging authority still enforces its own path, directory and
+mutation rules.
+Regression IDs, arguments and stdin share the existing aggregate regression-byte ceiling, and
+argument counts share the aggregate argument ceiling. Argument lists and stdin are copied only
+after their admitted prefix fits; the complete admitted payload also counts against the raw
+request-content ceiling. Caller mutation cannot change the retained regression snapshot.
+
+Response admission checks the raw summary before trimming, the normalized/fallback summary, patch
+paths and complete replacements against the existing 16 MiB response and 2 MiB patch defaults.
+Rejection follows the existing rejected-assessment path after the immutable invocation receipt is
+persisted. The retention functions leave an existing transcript unchanged when admission fails. These are
+input-content budgets; Markdown framing and redaction output are not an asserted artifact-size cap.
+Complete permitted code and diffs retain their full formatter and are not diagnostic previews.
+Raw file reads, process stream collection, full artifact masking, host memory and verified cleanup
+remain separate requirements; transcript admission does not qualify those boundaries.
+
+Legacy Doctor connectivity failures report the destination host and fixed remediation without
+copying HTTP exception messages or cause chains: Java header-validation errors can include the
+complete Authorization value. This diagnostic path still propagates interruption, cancellation
+and fatal errors. Tools-only environment access, probe execution and profile budgets are unchanged.
+Other Doctor diagnostic fields and complete artifact privacy still require separate qualification.
+
+Doctor diagnostics accept a separate caller-owned secret inventory; the configuration map remains
+opaque in both ACP and tools-only modes. The inventory is copied and admitted before probing,
+with the shared limits of 4,096 values and 1,048,576 UTF-16 units. Only the explicit legacy transport path adds
+the API key it already resolves. Raw configuration is checked before trimming or projecting a host,
+and advertisement previews are checked before terminal quoting. Report names/details use bounded
+masking and the existing private-fragment concealment index; pass/fail values retain their meaning.
+
+The agent-enabled CLI supplies its process inventory and rechecks complete terminal lines after
+formatting. Ordinary escaping exceptions are rendered without raw cause chains. Diagnostic inventory
+rejection exits 2 without inspecting or emitting diagnostic payload; check/ordinary failures exit 1
+and success exits 0. Interruption, cancellation and fatal errors propagate. Tools-only mode keeps
+ambient/legacy configuration unenumerated, uses format-only masking and renders invalid usage with
+fixed guidance instead of echoing unknown arguments. These diagnostic changes do not qualify probes,
+provider execution, cleanup or the complete privacy/release scope.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
   --tests decompengine.jobs.BestEffortProgressJournalTest \
@@ -229,3 +308,80 @@ snapshot byte cap. Reads reject inconsistent ranges when supplied. Older schema-
 this field remain readable and acquire ranges on the next writer publication. Queue/history
 counters retain aggregate causes; individual ranges do not distinguish those causes. These ranges
 cannot account for events lost before an interrupted process published its snapshot.
+
+
+### Complete MVP artifact privacy projection
+
+MVP evidence snapshots one bounded environment-value inventory for diagnostics and
+complete artifact display. Complete projections apply the shared credential-format
+precedence and control-character policy, then use a packed sparse multi-pattern
+literal index; they do not apply the diagnostic preview cutoff to permitted code
+or diffs. Request filenames and complete rendered Markdown are checked as well.
+The existing `maximumProjectionBytes` bounds each builder and masking stage before
+growth; byte accounting includes surrogate pairs formed across append boundaries.
+Fixed-point/marker collisions or projection excess refuse before replacing a
+transcript. Authoritative captured bytes, receipts, hashes and compilation inputs
+are unchanged. These components still require exact-source Actions qualification;
+stream collection, chunk/session privacy, cleanup and real-agent qualification
+remain separate open acceptance.
+
+
+### MVP logger and interactive approval privacy
+
+The workflow logger and default approval prompt reuse the admitted immutable
+privacy inventory. Log display also conceals private line fragments derived from
+that same bounded inventory and retains credential-value continuation state for
+each pipe and emitted record order. Complete console and retained prefixes are
+checked before either destination is written. Raw command/binary results and
+injected approval callback inputs remain validation data; the default prompt
+projects its complete summary and refuses an unsafe decision label before input.
+Command reader/display failures are latched privately and rethrown unchanged after
+the existing concurrent drains and wait, rather than accepting a partial capture
+or printing raw child-thread exceptions. This changes neither
+process launch/isolation recipes nor cleanup policy. Command capture now decodes
+through fixed 4,096-character chunks. One per-command ceiling, shared by stdout
+and stderr, charges normalized UTF-8 content before builder growth, including
+cross-chunk surrogate pairs and the newline added to a final unterminated line.
+CR/LF/CRLF normalization retains the previous readLine/appendLine contract for
+admitted output. This is the existing complete-projection byte ceiling, not a raw
+OS-byte, elapsed-time, workflow-global or resident-memory limit. Builder capacity,
+decoder buffers and projection copies are additional memory. After a collection
+or display failure, readers keep draining fixed chunks without retaining more;
+the command cannot return a successful partial capture. Blocking
+I/O and bounded failure termination still require separate resource work; the
+binary boundary, unlike the command logger, still reads stdout/stderr sequentially.
+The command display keeps two small reader-owned states and atomically publishes
+only a completed peer's projection policy. It adds no raw display queue or second
+retained capture. Before a peer closes, progress totals are emitted at powers of
+two, plus a distinct final total: at most 32 notices per pipe under the existing
+StringBuilder size limit. Totals describe captured logical lines and UTF-16 units,
+not raw OS byte counts. Pending projection copies are length-checked before copy
+and admitted under the full byte ceiling before any batch record is emitted.
+An incomplete or refused peer cannot authorize a text flush. Public text can
+resume before local EOF once the peer is complete; ambiguous records remain
+explicitly masked. Neither this policy nor its pure metadata cases establish
+native scheduling, bounded collection, cleanup or full ACP progress acceptance.
+These source components require their own ordinary Actions qualification.
+
+
+### Combined coverage and rejected response display
+
+Credential-format, complete configured-literal and continuation spans are computed
+on the same normalized input and merged before replacement. Delimiters inside an
+admitted secret therefore cannot leave a tail after a generic field mask. Both
+pipe-local and emitted-order continuation scopes plan from raw normalized lines
+before either can conceal an introducer. Returned receipt/candidate bindings now
+precede response transcript projection, so a display refusal reaches the existing
+rejected-assessment path rather than leaving the captured turn pending. The
+immutable receipt, capture validation and assessment serialization remain intact.
+These review corrections require current-source ordinary Actions evidence.
+
+
+The bounded shared diagnostic redactor uses the same original-input coverage
+principle. It reuses its KMP tables, adds at most two input-length integer arrays
+only when a match exists, and admits exact output characters before allocating a
+builder. The 16 Ki-character input/intermediate ceiling, eight passes, primary
+4096/oneMiB inventory and separate130-value preference budget remain unchanged.
+This closes the same delimiter-tail source gap for journal/Doctor/error previews
+without applying full-artifact limits or allocating a large extra index there.
+Ordinary Actions must verify the new metadata regression and all preceding gates.
