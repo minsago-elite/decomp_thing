@@ -25,8 +25,16 @@ changes, actor/run/foreign-target guards, all five atomic publication fault
 points, and legacy/malformed receipt records. The recovery verifier requires the
 suite and captures repository-local fixture context.
 
-This is the storage layer. Persisted `cancelling` is not worker termination or
-cleanup proof. Owned-task coordination, once-only signalling, backend exit and
-completion races, shared HTTP authorization, the current API route/schema, browser
-controls and production-adapter qualification still need their owning integration.
-No service or production registration calls this new command yet.
+Fault outcomes follow the store's existing commit boundary. Failures after the
+temporary write or its fsync preserve known unchanged state. The pre-rename hook
+already enters conservative uncertainty and poisons ownership, although that
+injected failure leaves the old target without a receipt. A post-rename failure
+retains the receipt for recovery. An ordinary exception after directory fsync
+does not turn the committed acknowledgement into a failed admission.
+
+The [owned service coordinator](web-attempt-cancellation.md) calls this command
+before signalling an exact task and keeps running cancellation pending until its
+adapter exits. Persisted `cancelling` is not worker termination or native cleanup
+proof. Shared HTTP authorization, the current API route/schema, browser controls
+and production-adapter qualification still need integration. Production adapters
+remain unregistered.

@@ -2062,6 +2062,18 @@
       ],
       "additionalProperties": false
     },
+    "workflowCancel": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "cancel"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
     "recover": {
       "type": "object",
       "properties": {
@@ -3202,6 +3214,26 @@
         },
         "data": {
           "$ref": "#/definitions/workflowStart"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "workflowCancelRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/workflowCancel"
         }
       },
       "required": [

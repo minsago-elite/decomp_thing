@@ -150,7 +150,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
-| `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |
+| `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
 | `GET R/snapshot` | `200 snapshot`, ETag | Run state and consistent event watermark; #174 |
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
@@ -216,6 +216,30 @@ receipt keeps the route available for authenticated read-only replay after
 registrations are removed; it does not enable fresh work. Injected inert
 adapters qualify transport/storage behavior, not runtime readiness or upstream
 model/binary execution and accepted-publication integration.
+
+The reserved cancellation transport has a closed `workflowCancel` data object:
+exactly `{"action":"cancel"}`, bounded to 1024 bytes. The fixture wrapper is not
+the HTTP body. Job/run identity comes from the canonical route, the optimistic
+run guard from one strong `If-Match`, and replay identity from one 16–128 character
+`Idempotency-Key`. No query, other conditional header, caller-selected actor,
+command, path or execution target is accepted. The shared local
+session/Origin/JSON/CSRF mutation policy must succeed before body consumption or
+any service read. Duplicate keys, unknown fields and invalid UTF-8 are refused.
+
+Cancellation returns the current retained `run`, its strong ETag and canonical
+run `Location`. An originally nonterminal acknowledgement uses 202, even if a
+queued task has already become cancelled by response time. An acknowledgement
+recorded for an already terminal run uses 200. Replay preserves that original
+status with `Idempotency-Replayed: true` and returns current run state without a
+second signal or an old task version. The actor is derived only from the
+authorized session; actor and receipt internals are not response fields. Neither
+202 nor receipt replay asserts worker termination or promotes candidate output
+to an accepted revision.
+
+This cancellation schema and its generated types/fixtures prepare the reserved
+route. The HTTP handler, shared authorized capability and real HTTP/browser
+qualification remain unfinished; this contract addition does not enable an
+endpoint or advertise production cancellation readiness.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
@@ -384,6 +408,7 @@ sanitized derivatives have separate identity, digest and provenance.
 
 | DTO fields | Authoritative current source or explicit implementation owner |
 | --- | --- |
+| `workflowCancel.action` | Constant caller intent only. The route selects job/run, If-Match selects the run version, and the shared authorized session supplies the actor. No body field chooses an actor, command or execution target. HTTP integration remains owned by #485. |
 | `progressPin.jobId/runId/version/pinned` | Selected durable `WorkflowAttempt` for GET; atomic `WorkflowPinAuditEntry` original result for PUT/replay. No actor, key digest or receipt internals are public. |
 | `job.jobId`, display filename, timestamps | `Jobs.kt: Job.id/filename/createdAt/updatedAt`; never expose `binaryPath` |
 | `job.sizeBytes`, `binary.*` | `Job.sizeBytes` to decimal string; `ElfMetadata` names/format and unsigned `entryPoint` to hex. V1 must not reuse lossy/signed `Job.toJson()` numerics |

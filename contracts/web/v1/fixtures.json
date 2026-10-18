@@ -126,6 +126,18 @@
       "valid": true
     },
     {
+      "file": "fixtures/request-workflow-cancel.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-actor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-workflow-cancel-action.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/request-recover.json",
       "valid": true
     },

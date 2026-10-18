@@ -42,6 +42,27 @@ describe('bounded v1 fetch client', () => {
     await expect(client.put('progressPin', path, 'progressPinRequest', { pinned: false }, settings)).rejects.toMatchObject({ code: 'network_error' });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+  it('sends guarded cancellation intent once without retrying an ambiguous response', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('run-completed-unaccepted', 200))
+      .mockRejectedValueOnce(Error('private cancellation diagnostic'));
+    const client = createApiClient({ basePath: '/workbench/', fetch: fetcher });
+    const path = '/jobs/1234567890abcdef1234567890abcdef/runs/run_example_1/cancel';
+    const intent = { action: 'cancel' } as const;
+    await expect(client.post('run', path, 'workflowCancelRequest', intent)).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).not.toHaveBeenCalled();
+    const settings = { csrfToken: 'a'.repeat(43), idempotencyKey: 'cancel_intent_example_1', ifMatch: '"version_before"' };
+    await expect(client.post('run', path, 'workflowCancelRequest', intent, settings)).resolves.toHaveProperty('kind', 'run');
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(url).toBe('/workbench/api/v1' + path);
+    expect(init?.method).toBe('POST'); expect(init?.body).toBe('{"action":"cancel"}');
+    const headers = new Headers(init?.headers);
+    expect(headers.get('If-Match')).toBe(settings.ifMatch);
+    expect(headers.get('Idempotency-Key')).toBe(settings.idempotencyKey);
+    expect(headers.get('X-CSRF-Token')).toBe(settings.csrfToken);
+    expect(fetcher).toHaveBeenCalledOnce();
+    await expect(client.post('run', path, 'workflowCancelRequest', intent, settings)).rejects.toMatchObject({ code: 'network_error' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it('retains encoded queries through the shared API path helper', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('jobs-page'));
     const client = createApiClient({ basePath: '/tools/decomp/', fetch: fetcher });
