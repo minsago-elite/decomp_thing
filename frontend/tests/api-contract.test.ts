@@ -59,6 +59,14 @@ describe('generated v1 contract pipeline', () => {
     expect(encodeRequest(document.kind, document.data)).toBe(JSON.stringify(document.data));
     expect(() => encodeRequest(document.kind, { ...document.data, unknown: true } as typeof document.data)).toThrow(ApiClientError);
   });
+  it('encodes only cancellation intent and rejects caller-selected actors or targets', () => {
+    const document = decodeContract(fixture('request-workflow-cancel'));
+    if (document.kind !== 'workflowCancelRequest') throw Error('Unexpected shared fixture');
+    expect(encodeRequest(document.kind, document.data)).toBe('{"action":"cancel"}');
+    for (const extra of [{ actor: 'selected_actor' }, { runId: 'other_run' }, { command: 'terminate' }]) {
+      expect(() => encodeRequest(document.kind, { ...document.data, ...extra })).toThrow(ApiClientError);
+    }
+  });
   it('does not accept new kinds, versions, event variants or foreign report adapters', () => {
     const base = decodeResponse(fixture('session'), 'session');
     for (const value of [{ ...base, apiVersion: 2 }, { ...base, kind: 'new-kind' }]) {

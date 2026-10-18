@@ -1,5 +1,18 @@
 # D10 local access boundary audit
 
+## Cancellation boundary extension
+
+The POST run-cancel handler uses
+`WebJobMutationBoundary.authorizeCancellation`, which requires the same local
+session, Origin, JSON media type and CSRF policy before body consumption or
+service access. Its operation-specific capability derives actor attribution from
+that authorized session. The closed body cannot choose actors, targets, paths or
+commands. New inert HTTP methods cover denial without body consumption, actor
+isolation and revoked-session replay refusal; their own Actions qualification is
+pending. This extension does not qualify browser, remote proxy, production
+adapter or full-listener-restart actor continuity. The historical audit below
+retains its original evidence and scope.
+
 This audit reviews #161 at implementation checkpoint `4269c51`, with additional
 response-level CORS assertions in this PR. It establishes criteria 3 and 5 for the
 implemented routes. It does not complete #161 or D10, certify future handlers, or
