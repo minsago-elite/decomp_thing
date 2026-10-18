@@ -207,18 +207,31 @@ class WorkflowCancellationReceiptTest {
         for (point in WorkflowStoreFaultPoint.entries) fixture { root, job ->
             val armed = AtomicBoolean(false)
             lateinit var run: WorkflowAttempt
-            val uncertain = point in setOf(WorkflowStoreFaultPoint.AFTER_RENAME, WorkflowStoreFaultPoint.AFTER_DIRECTORY_FSYNC)
+            val uncertain = point in setOf(WorkflowStoreFaultPoint.BEFORE_RENAME, WorkflowStoreFaultPoint.AFTER_RENAME)
+            val receiptPublished = point in setOf(WorkflowStoreFaultPoint.AFTER_RENAME, WorkflowStoreFaultPoint.AFTER_DIRECTORY_FSYNC)
             WorkflowAttemptStore.open(root, Clock.systemUTC(), WorkflowStoreFaultInjector {
                 if (armed.get() && it == point) throw IOException("authored cancellation fault $point")
             }).use { store ->
                 run = store.create(job, store.snapshot(job).version, request).attempt
                 val before = root.resolve("$job/workflow-state.json").readBytes()
                 armed.set(true)
-                val failure = assertFailsWith<WorkflowStoreException> { store.requestCancellation(job, run.runId, run.version, actor, key) }
-                assertEquals(uncertain, failure.outcomeUnknown)
-                if (!uncertain) {
-                    assertTrue(store.snapshot(job).cancellationReceipts.entries.isEmpty())
-                    assertContentEquals(before, root.resolve("$job/workflow-state.json").readBytes())
+                if (point == WorkflowStoreFaultPoint.AFTER_DIRECTORY_FSYNC) {
+                    val result = store.requestCancellation(job, run.runId, run.version, actor, key)
+                    assertFalse(result.replayed)
+                    assertEquals(WorkflowRunState.CANCELLING, result.attempt.state)
+                    assertEquals(result.receipt, store.snapshot(job).cancellationReceipts.entries.single())
+                    val committedBytes = root.resolve("$job/workflow-state.json").readBytes()
+                    val replay = store.requestCancellation(job, run.runId, run.version, actor, key)
+                    assertTrue(replay.replayed); assertEquals(result, replay.copy(replayed = false))
+                    assertContentEquals(committedBytes, root.resolve("$job/workflow-state.json").readBytes())
+                } else {
+                    val failure = assertFailsWith<WorkflowStoreException> { store.requestCancellation(job, run.runId, run.version, actor, key) }
+                    assertEquals("PERSISTENCE_FAILED", failure.code)
+                    assertEquals(uncertain, failure.outcomeUnknown)
+                    if (uncertain) {
+                        assertEquals("RECOVERY_REQUIRED", assertFailsWith<WorkflowStoreException> { store.snapshot(job) }.code)
+                    } else assertTrue(store.snapshot(job).cancellationReceipts.entries.isEmpty())
+                    if (!receiptPublished) assertContentEquals(before, root.resolve("$job/workflow-state.json").readBytes())
                 }
             }
             WorkflowAttemptStore.open(root).use { store ->
@@ -226,7 +239,7 @@ class WorkflowCancellationReceiptTest {
                 val snapshot = store.snapshot(job)
                 assertEquals(WorkflowRunState.INTERRUPTED, snapshot.latestRun!!.state)
                 val before = root.resolve("$job/workflow-state.json").readBytes()
-                if (uncertain) {
+                if (receiptPublished) {
                     assertEquals(1, snapshot.cancellationReceipts.entries.size)
                     val replay = store.requestCancellation(job, run.runId, run.version, actor, key)
                     assertTrue(replay.replayed); assertEquals(WorkflowRunState.CANCELLING, replay.receipt.acknowledgedState)
