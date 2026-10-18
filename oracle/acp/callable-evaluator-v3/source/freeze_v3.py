@@ -228,7 +228,7 @@ def _admit_files(paths, budget=None, root=None, *, predicate_capture=None):
 _PREDICATE_MODULES = (
     ('prepare_v3.py',7056,'d7f0f5fc14295a1ce38871b4fd393c83f756662041913f3b1d76c9406e99f6a2'),
     ('generate_controls_v3.py',8873,'e2cdd7593a0e23b5bbd2cbf0d8a0ea5aec2ff1113be710be114e4852f22b4b30'),
-    ('evaluate_candidate_v3.py',49679,'1ba0dac58a2b2840f1ad958bad5622b37159da350409b39ff27b131545a63639'),
+    ('evaluate_candidate_v3.py',49702,'ee9a700de49d811c3774e08b82df0b835c01077c6f17fd84b166e6d089fe741f'),
 )
 
 
@@ -298,10 +298,10 @@ def _pairs(pairs):
 
 # Closed source selection only; interpreter/stdlib/coordinator origin remains unqualified.
 _FREEZE_DEPENDENCY_SOURCES = (
-    ('build_contract',21107,'f91ce0d818acde417312df33a3b64c62f2d9d2a923999656e44f6c2f22bb0833'),
+    ('build_contract',26463,'a54fb8b508ebf85a2f576972f5809095b50763c7ef3ef265ce1864a456ffeb6c'),
     ('bounded_runtime',134582,'e4843e676f9157e4f507a06c84c09fd18d26d5515a4b0b975d6e14015a8e0641'),
-    ('interface_gate_v3',35101,'8328523b337b4bdb9da4d37fe10b114793928db8019debc45f154183188768b3'),
-    ('evaluate_candidate_v3',49679,'1ba0dac58a2b2840f1ad958bad5622b37159da350409b39ff27b131545a63639'),
+    ('interface_gate_v3',34978,'5896370c03f4f683f0ad469bf347f09f9769bc0852fbff1513d67b6e0551d617'),
+    ('evaluate_candidate_v3',49702,'ee9a700de49d811c3774e08b82df0b835c01077c6f17fd84b166e6d089fe741f'),
 )
 _FREEZE_IMPORT_EDGES = {
     'build_contract': {},
@@ -310,7 +310,7 @@ _FREEZE_IMPORT_EDGES = {
     'interface_gate_v3': {
         'bounded_runtime': (('bounded_run','public_result','digest','contained_command',
                             'worker_execution_complete','_helper_execution_pin'),('_pin_files',)),
-        'build_contract': (('profile','load_profile','load_profile_with_digest','_bounded_json_snapshot'),)},
+        'build_contract': (('profile','load_profile','load_profile_with_digest','_bounded_json_snapshot','load_schema_validator'),)},
     'evaluate_candidate_v3': {
         'bounded_runtime': (('bounded_run','digest','private_directory','public_result','write_json',
                             'worker_execution_complete','contained_command'),
@@ -318,13 +318,13 @@ _FREEZE_IMPORT_EDGES = {
         'build_contract': (('profile','load_profile','load_profile_with_digest',
                            'verified_visible_snapshot','profile_scope','_read_json'),),
         'interface_gate_v3': (('compare_descriptors','probe','export_inventory','layout_assertions',
-                              'resolve_declaration','phase_remaining','revalidate_handoff','require_handoff_execution'),),
+                              'resolve_declaration','phase_remaining','revalidate_handoff','require_handoff_execution'),('fastjsonschema',)),
         'freeze_v3': (('read_regular',),('admit_files','TreeBudget')),},
 }
 _FREEZE_ORDINARY_IMPORTS = frozenset((
     '__future__','hashlib','json','os','stat','time','pathlib','re','contextlib','contextvars',
     'fcntl','errno','math','resource','selectors','shutil','signal','subprocess','sys','threading',
-    'uuid','tempfile','importlib.metadata','fastjsonschema','dataclasses','copy'))
+    'uuid','tempfile','dataclasses','copy','builtins','sysconfig','types'))
 _FREEZE_IMPORT = builtins.__import__
 _FREEZE_DEPENDENCY_SCOPE = ContextVar('freeze_dependency_owner',default=None)
 
@@ -378,7 +378,7 @@ class _FreezeDependencyOwner:
                            for name,size,sha in _FREEZE_DEPENDENCY_SOURCES}
             captured={}
             admission=_admit_files(specification,
-                TreeBudget(nodes=5,directories=1,files=4,bytes=240469,depth=1),root=self.root,
+                TreeBudget(nodes=5,directories=1,files=4,bytes=sum(size for _,size,_ in _FREEZE_DEPENDENCY_SOURCES),depth=1),root=self.root,
                 predicate_capture=(specification,captured))
             if captured.keys()!=specification.keys():raise ValueError('incomplete freeze dependency capture')
             raw={}

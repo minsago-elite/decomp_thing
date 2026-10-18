@@ -26,7 +26,7 @@ PHASES = ('preprocess','compile','link','exports','declarations','gccAssertions'
 
 def validate_exchange(name, value):
     """Pinned repository JSON-schema engine; no native tools or network resolution."""
-    import fastjsonschema
+    from interface_gate_v3 import fastjsonschema
     from freeze_v3 import read_regular
     schema = json.loads(read_regular(BASE / 'contracts' / (name + '-schema.json'),1048576))
     fastjsonschema.compile(schema)(value)

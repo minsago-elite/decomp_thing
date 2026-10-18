@@ -7,11 +7,10 @@ import os
 import shutil
 import tempfile
 import re
-from importlib.metadata import version
-import fastjsonschema
 from pathlib import Path
 from bounded_runtime import bounded_run, public_result, digest, contained_command, worker_execution_complete, _helper_execution_pin
-from build_contract import profile, load_profile, load_profile_with_digest, _bounded_json_snapshot
+from build_contract import profile, load_profile, load_profile_with_digest, _bounded_json_snapshot, load_schema_validator
+fastjsonschema = load_schema_validator()
 REQUIRED = {'acp_mix','acp_pair_scale','acp_update','acp_apply','acp_fold','acp_state'}
 # Stable Clang builtin kinds; width alone never identifies a C integer type.
 INTEGER_SPELLINGS = {
@@ -47,8 +46,6 @@ def _validate_raw_helper(value):
     schema_sha = hashlib.sha256(raw).hexdigest()
     compiled = _COMPILED_HELPER_SCHEMA
     if compiled is None or compiled[0] != schema_sha:
-        if version('fastjsonschema') != '2.22.2':
-            raise ValueError('unqualified helper schema validator version')
         schema = json.loads(raw)
         if schema.get('$schema') != 'http://json-schema.org/draft-07/schema#':
             raise ValueError('unqualified helper schema dialect')

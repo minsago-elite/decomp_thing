@@ -6,6 +6,9 @@ import json
 import os
 import stat
 import time
+import builtins
+import sysconfig
+from types import ModuleType
 from pathlib import Path
 import re
 from contextlib import contextmanager
@@ -15,6 +18,109 @@ BASE = Path(__file__).resolve().parent
 PROFILE_PATH = BASE / 'contracts/candidate-build-profile.json'
 MAXIMUM_PROFILE_BYTES = 65536
 MAXIMUM_VISIBLE_BYTES = 131072
+
+# PyPI fastjsonschema 2.22.2, wheel SHA-256
+# 0fb3915616adac85ccfdd737d26be1089845d2019819505b42d39888458f74d4.
+# Filled by the independently checked release-source inventory below. These pins
+# select executable bytes; installed version text and ambient module caches do not.
+_SCHEMA_SOURCES = (
+    ('__init__', 13066, 'a8c552ee3f3867050463a59d6bc7394caf7257f5215959487533d126a06c759d'),
+    ('__main__', 312, 'e217dddb7a6bcf199073c5632f47d4b1bb2bbef03bde02761c334f80b2c57402'),
+    ('draft04', 33750, '04afbc54245971d1da97e47cd67a98e66bbcce20dd93833c37e54fe89a13c01a'),
+    ('draft06', 8305, '29b2074e7c22a8fd6f8fc93e38df3ad453e30fac3e35d104ea59bcb3865e31be'),
+    ('draft07', 5064, '1290a35007a1a4af57ff0394408a394cd6aea7808d6f13b01eea6ff0e45f7d49'),
+    ('draft2019', 541, '28732d8a5b6866e3b86fd9c2a899b328c816d31c28f4f4ce291dd0670ca866a9'),
+    ('exceptions', 1859, 'da47b1f76f3b652279afdac7f5e7017d4a5a017a135ced4f8268744b1197eb43'),
+    ('generator', 16788, 'bb611052369d3fa5c42b600e0d81efffdb22bad6b05d1a20680896265caf5421'),
+    ('indent', 1603, '6c2aaac7022acab03838c691440ee042d8cf93dc1ce2906b804f49bdb2aae31b'),
+    ('ref_resolver', 6767, '08f89a3856dd509db520371ac8d7d2ba4c665aa37678170b3f1f8b7fe0850754'),
+    ('version', 19, '9460537427fadbc522d10b47be34addba8608635d950d725b288a9eed6515ad1'),
+)
+_SCHEMA_IMPORT = builtins.__import__
+_SCHEMA_STDLIB = frozenset(('functools', 'collections', 'contextlib', 'decimal',
+                          're', 'json', 'base64', 'sys', 'urllib', 'urllib.parse'))
+
+
+def _schema_package_root():
+    # A location selects bytes, never their expected identity. No sys.path search.
+    location = sysconfig.get_path('purelib')
+    if not isinstance(location, str) or not location:
+        raise ValueError('schema source location is unavailable')
+    return Path(location) / 'fastjsonschema'
+
+
+class _SchemaSources:
+    """One owned source image; no ambient package imports or module-cache writes."""
+    def __init__(self):
+        root = _schema_package_root()
+        raw = {}
+        for name, size, expected in _SCHEMA_SOURCES:
+            payload = _bounded_json_snapshot(root / (name + '.py'), size)
+            if len(payload) != size or hashlib.sha256(payload).hexdigest() != expected:
+                raise ValueError('schema executable source identity differs')
+            raw[name] = payload
+        # Authenticate the complete package before its first compile or body.
+        self.code = {name: compile(raw[name], str(root / (name + '.py')), 'exec',
+                                   dont_inherit=True, optimize=0)
+                     for name, _, _ in _SCHEMA_SOURCES}
+        self.modules = {}
+        self.loading = set()
+        self.ready = set()
+        self.prefix = '_v3_schema_' + format(id(self), 'x')
+        for name, _, _ in _SCHEMA_SOURCES:
+            alias = self.prefix if name == '__init__' else self.prefix + '.' + name
+            module = ModuleType(alias)
+            module.__file__ = str(root / (name + '.py'))
+            module.__package__ = self.prefix
+            if name == '__init__':
+                module.__path__ = ()
+            environment = dict(vars(builtins))
+            environment['__import__'] = self.importer
+            module.__dict__['__builtins__'] = environment
+            self.modules[name] = module
+
+    def load(self, name):
+        if name not in self.modules or name in self.loading:
+            raise ValueError('unsupported schema source edge or cycle')
+        if name not in self.ready:
+            self.loading.add(name)
+            try:
+                exec(self.code[name], self.modules[name].__dict__)
+                self.ready.add(name)
+                if name != '__init__':
+                    setattr(self.modules['__init__'], name, self.modules[name])
+            finally:
+                self.loading.remove(name)
+        return self.modules[name]
+
+    def importer(self, name, globals=None, locals=None, fromlist=(), level=0):
+        requested = tuple(fromlist or ())
+        if '*' in requested:
+            raise ValueError('unsupported schema wildcard import')
+        if level:
+            if level != 1:
+                raise ValueError('unsupported schema relative import')
+            return self.load(name or '__init__')
+        if name == 'fastjsonschema' or name.startswith('fastjsonschema.'):
+            selected = '__init__' if name == 'fastjsonschema' else name[len('fastjsonschema.'):]
+            module = self.load(selected)
+            return module if requested else self.load('__init__')
+        if name not in _SCHEMA_STDLIB or (name == 'urllib' and requested != ('parse',)):
+            # Closed local schemas need no remote-ref loader, plugin or file API.
+            raise ValueError('unsupported schema external import')
+        return _SCHEMA_IMPORT(name, globals, locals, fromlist, level)
+
+
+def load_schema_validator():
+    """Keep actual schema semantics, with all third-party code captured first.
+
+    Interpreter/stdlib/bootstrap identity is a separate qualification boundary.
+    No native preparation, model/provider call or release authority follows.
+    """
+    validator = _SchemaSources().load('__init__')
+    if validator.VERSION != '2.22.2':
+        raise ValueError('schema source version differs')
+    return validator
 
 # Reviewed immutable commands, environment, bounds and isolation. Dynamic toolchain pins are
 # separately authenticated by the preparation; native argv/flags are unchanged from aab1938d.

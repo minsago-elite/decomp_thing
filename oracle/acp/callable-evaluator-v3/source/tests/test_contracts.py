@@ -328,4 +328,103 @@ class ProfileCarry(unittest.TestCase):
             with self.subTest(raw=raw[:32]),self.assertRaises(ValueError):contract._ProfileSnapshot(raw)
 
 
+class ClosedSchemaSources(unittest.TestCase):
+    @contextmanager
+    def package(self):
+        import tempfile
+        scratch = Path(__file__).resolve().parents[5] / 'build/test-tmp/schema-source-controls'
+        scratch.mkdir(parents=True, exist_ok=True)
+        original = contract._schema_package_root()
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root = Path(directory)
+            for name, size, expected in contract._SCHEMA_SOURCES:
+                raw = contract._bounded_json_snapshot(original / (name + '.py'), size)
+                self.assertEqual(expected, hashlib.sha256(raw).hexdigest())
+                (root / (name + '.py')).write_bytes(raw)
+            with patch.object(contract, '_schema_package_root', return_value=root):
+                yield root
+
+    def test_actual_schema_semantics_ignore_ambient_package_and_source_shadow(self):
+        from types import ModuleType
+        with self.package() as root:
+            shadow = root / 'shadow'
+            shadow.mkdir()
+            (shadow / 'fastjsonschema.py').write_text("raise AssertionError('ambient schema source executed')\n")
+            poison = ModuleType('fastjsonschema')
+            poison.compile = lambda *args, **kwargs: self.fail('ambient schema cache used')
+            before = {name for name in sys.modules if name.startswith('_v3_schema_')}
+            with patch.dict(sys.modules, {'fastjsonschema': poison}), patch.object(sys, 'path', [str(shadow)] + sys.path):
+                validator = contract.load_schema_validator()
+                checked = validator.compile({'type': 'object', 'required': ['values'],
+                    'properties': {'values': {'type': 'array', 'items': {'$ref': '#/definitions/count'}}},
+                    'additionalProperties': False, 'definitions': {'count': {'type': 'integer', 'minimum': 1}}},
+                    use_default=False)
+                checked({'values': [1, 2]})
+                for invalid in ({}, {'values': [0]}, {'values': ['1']}, {'values': [1], 'extra': 2}):
+                    with self.subTest(invalid=invalid), self.assertRaises(validator.JsonSchemaException):
+                        checked(invalid)
+                self.assertEqual('2.22.2', validator.VERSION)
+            self.assertEqual(before, {name for name in sys.modules if name.startswith('_v3_schema_')})
+
+    def test_every_schema_source_is_authenticated_before_any_package_compile(self):
+        with self.package() as root:
+            for name, _, _ in contract._SCHEMA_SOURCES:
+                path = root / (name + '.py')
+                original = path.read_bytes()
+                path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                try:
+                    with self.subTest(name=name), patch('builtins.compile') as compiled:
+                        with self.assertRaisesRegex(ValueError, 'schema executable source identity'):
+                            contract.load_schema_validator()
+                        compiled.assert_not_called()
+                finally:
+                    path.write_bytes(original)
+
+    def test_captured_schema_image_is_not_reopened_after_namespace_changes(self):
+        with self.package() as root:
+            read = contract._bounded_json_snapshot
+            calls = []
+            def captured(path, maximum):
+                raw = read(path, maximum)
+                calls.append(path.name)
+                if len(calls) == len(contract._SCHEMA_SOURCES):
+                    prior = root / 'draft07.py'
+                    original = prior.read_bytes()
+                    prior.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                return raw
+            with patch.object(contract, '_bounded_json_snapshot', side_effect=captured):
+                validator = contract.load_schema_validator()
+            self.assertEqual([name + '.py' for name, _, _ in contract._SCHEMA_SOURCES], calls)
+            with patch.object(contract, '_bounded_json_snapshot', side_effect=AssertionError('captured image reopened')):
+                checked = validator.compile({'type': 'integer'}, use_default=False)
+                checked(1)
+                with self.assertRaises(validator.JsonSchemaException):
+                    checked('1')
+            with self.assertRaisesRegex(ValueError, 'schema executable source identity'):
+                contract.load_schema_validator()
+
+    def test_schema_missing_link_and_remote_reference_never_grant_external_work(self):
+        with self.package() as root:
+            selected = root / 'version.py'
+            original = selected.read_bytes()
+            selected.unlink()
+            for linked in (False, True):
+                if linked:
+                    target = root / 'not-a-schema-source'
+                    target.write_bytes(original)
+                    selected.symlink_to(target)
+                with self.subTest(linked=linked), patch('builtins.compile') as compiled:
+                    with self.assertRaises((OSError, ValueError)):
+                        contract.load_schema_validator()
+                    compiled.assert_not_called()
+                if linked:
+                    selected.unlink()
+            selected.write_bytes(original)
+            validator = contract.load_schema_validator()
+            with patch('urllib.request.urlopen', side_effect=AssertionError('remote reference opened')) as opened:
+                with self.assertRaises((ValueError, validator.JsonSchemaException)):
+                    validator.compile({'$ref': 'https://not-permitted.example/schema'}, use_default=False)
+                opened.assert_not_called()
+
+
 if __name__=='__main__':unittest.main()
