@@ -278,6 +278,20 @@ strict Clang warnings, proves the intentional uninitialized-use diagnostic,
 requires AddressSanitizer and UndefinedBehaviorSanitizer findings, and builds a
 generated multi-module project through an explicit `CC=clang` selection.
 
+The two existing sanitizer calls retain their original options and diagnostic
+checks. Before executing GNU `timeout`, `run-clang-sanitizer.py` sets a hard
+regular-file write limit of 1 MiB plus one overflow sentinel byte, disables core
+files, and refuses a smaller inherited limit. Both stdout and stderr must remain
+at or below 1 MiB; exactly that size is accepted, while the sentinel byte forces
+rejection even if an expected diagnostic was already printed. Timeout requests
+TERM after ten seconds and KILL one second later. Timeout, setup, invocation and
+file-limit signal statuses fail before diagnostic matching; status 137 supplies
+no process-absence fact. The temporary validation tree is beneath repository
+`build/`. Early Actions controls exercise the real script and limit launcher
+with authored fake compiler output and a fake Gradle command; they run no compiler,
+JVM or native vulnerability fixture. The existing Clang lane remains the actual
+compatibility integration gate.
+
 The repository workflow also runs the pinned Ghidra image against symbol-bearing and stripped large fixtures:
 
 ```bash
