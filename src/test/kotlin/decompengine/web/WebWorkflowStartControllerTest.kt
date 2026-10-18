@@ -265,11 +265,12 @@ class WebWorkflowStartControllerTest {
     @Test
     fun `publication failures cannot return success or leak private causes`() {
         for (point in listOf(WorkflowStoreFaultPoint.AFTER_TEMP_FSYNC, WorkflowStoreFaultPoint.AFTER_RENAME)) Fixture().use { f ->
+            val headers = f.headers()
             f.fault = point
-            val response = f.send()
+            val response = f.send(headers = headers)
             error(response, 503, if (point == WorkflowStoreFaultPoint.AFTER_RENAME) "RECOVERY_REQUIRED" else "PERSISTENCE_FAILED")
             assertTrue(response.headers().firstValue("Location").isEmpty); assertEquals(0, f.calls.get())
-            if (point == WorkflowStoreFaultPoint.AFTER_RENAME) error(f.send(), 503, "RECOVERY_REQUIRED")
+            if (point == WorkflowStoreFaultPoint.AFTER_RENAME) error(f.send(headers = headers), 503, "RECOVERY_REQUIRED")
         }
     }
 
