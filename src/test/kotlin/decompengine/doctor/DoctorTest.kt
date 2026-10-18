@@ -3,11 +3,59 @@ package decompengine.doctor
 import java.net.URI
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DoctorTest {
+    @Test
+    fun `connectivity failure diagnostics omit raw header credentials and exception chains`() {
+        val secret = "synthetic-private-token-Ā"
+        val cause = IllegalStateException("private provider body")
+        val failure = IllegalArgumentException("invalid header value: \"Bearer $secret\"", cause)
+        val check = doctorConnectivityFailure("models.example.test", failure)
+        assertEquals("LLM connectivity", check.name)
+        assertFalse(check.passed)
+        assertTrue(check.detail.contains("models.example.test"))
+        assertTrue(check.detail.contains("Check BASE_URL, API_KEY, proxy, and network access."))
+        for (privateText in listOf(secret, "Bearer", "invalid header value", cause.message.orEmpty())) {
+            assertFalse(check.detail.contains(privateText))
+        }
+        assertSame(cause, failure.cause)
+        assertTrue(failure.message.orEmpty().contains(secret))
+    }
+
+    @Test
+    fun `connectivity diagnostic failures preserve interruption cancellation and fatal errors`() {
+        val interrupted = InterruptedException("private interruption")
+        assertSame(interrupted, assertFailsWith<InterruptedException> {
+            doctorConnectivityFailure("models.example.test", interrupted)
+        })
+        val cancelled = java.util.concurrent.CancellationException("private cancellation")
+        assertSame(cancelled, assertFailsWith<java.util.concurrent.CancellationException> {
+            doctorConnectivityFailure("models.example.test", cancelled)
+        })
+        val fatal = AssertionError("private fatal error")
+        assertSame(fatal, assertFailsWith<AssertionError> {
+            doctorConnectivityFailure("models.example.test", fatal)
+        })
+        val wasInterrupted = Thread.interrupted()
+        try {
+            Thread.currentThread().interrupt()
+            val ordinary = IllegalArgumentException("private ordinary failure")
+            val propagated = assertFailsWith<InterruptedException> {
+                doctorConnectivityFailure("models.example.test", ordinary)
+            }
+            assertSame(ordinary, propagated.cause)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+            if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+    }
+
     @Test
     fun `authentication previews escape terminal controls and Unicode formatting`() {
         val text = "login\u009b31m\u202ePASS\u2066\u2028\u2029\u001b\n\"\\"

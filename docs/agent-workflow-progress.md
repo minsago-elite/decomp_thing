@@ -196,6 +196,12 @@ Complete permitted code and diffs retain their full formatter and are not diagno
 Raw file reads, process stream collection, full artifact masking, host memory and verified cleanup
 remain separate requirements; transcript admission does not qualify those boundaries.
 
+Legacy Doctor connectivity failures report the destination host and fixed remediation without
+copying HTTP exception messages or cause chains: Java header-validation errors can include the
+complete Authorization value. This diagnostic path still propagates interruption, cancellation
+and fatal errors. Tools-only environment access, probe execution and profile budgets are unchanged.
+Other Doctor diagnostic fields and complete artifact privacy still require separate qualification.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
   --tests decompengine.jobs.BestEffortProgressJournalTest \

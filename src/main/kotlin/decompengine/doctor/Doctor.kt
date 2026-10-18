@@ -318,10 +318,7 @@ class Doctor(
         checks += if (validBaseUrl && apiKey.isNotBlank()) {
             runCatching { connectivityProbe.check(requireNotNull(baseUrl), apiKey) }.fold(
                 onSuccess = { DoctorCheck("LLM connectivity", true, it) },
-                onFailure = {
-                    requireDoctorActive(it)
-                    DoctorCheck("LLM connectivity", false, "Could not authenticate to ${baseUrl.host}: ${it.message}. Check BASE_URL, API_KEY, proxy, and network access.")
-                },
+                onFailure = { doctorConnectivityFailure(baseUrl.host, it) },
             )
         } else {
             DoctorCheck("LLM connectivity", false, "Connectivity was not attempted because BASE_URL or API_KEY is invalid.")
@@ -331,6 +328,13 @@ class Doctor(
 }
 
 private object SystemCommandProbe : BudgetedCommandProbe by BoundedSystemCommandProbe()
+
+internal fun doctorConnectivityFailure(host: String?, failure: Throwable): DoctorCheck {
+    requireDoctorActive(failure)
+    // HTTP header-validation exceptions can contain the entire Authorization value.
+    return DoctorCheck("LLM connectivity", false,
+        "Could not authenticate to $host. Check BASE_URL, API_KEY, proxy, and network access.")
+}
 
 private fun requireDoctorActive(failure: Throwable? = null) {
     if (failure is InterruptedException || failure is CancellationException || failure is Error) throw failure
