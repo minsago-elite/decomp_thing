@@ -46,11 +46,12 @@ plan and permission previews are also bounded. Opaque session/message/tool IDs r
 Redaction is a display precaution, not a claim that arbitrary unconfigured secrets can be identified.
 MVP binary captures retain separate stdout and stderr strings without cross-stream emission order.
 Before displaying either string, the logger admits both and scans their raw normalized credential
-introducers. A peer introducer conservatively keeps possible continuation masking active for every
-local line during replay, including after intervening public records or separators. Authorization
-without a scheme also hides a following Basic/Bearer scheme and value. This can hide public leading
-tokens when ordering is ambiguous; raw binary results used for validation stay unchanged. Command
-logging still uses its existing synchronized emitted order plus independent per-pipe state.
+introducers at every possible earlier prefix, including inside a completed line. A peer introducer
+conservatively withholds every local record during replay: a credential could have arrived midway
+through that record, before the peer finished its line. Public content in the affected capture can
+also be withheld; raw binary results used for validation stay unchanged. Command logging still
+uses synchronized completed-line order plus independent per-pipe state. That order does not prove
+cross-pipe byte order; partial-line live-command privacy remains separate unfinished work.
 Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
 malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
 therefore cannot collapse through replacement encoding and merge separate message buffers.

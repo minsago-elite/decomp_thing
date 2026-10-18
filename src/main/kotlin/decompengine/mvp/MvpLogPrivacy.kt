@@ -49,44 +49,29 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
 
     fun lines(): Lines = Lines()
 
-    /** Captured pipes have no cross-stream order: any peer introducer can precede any local line. */
+    /** A completed peer line can hide an earlier introducer prefix and any local byte position. */
     fun linesWithUnorderedPeer(peerOutput: String): Lines {
         project(peerOutput)
-        var authorization = false
-        var value = false
-        peerOutput.replace(controls, "").lineSequence().forEach { line ->
-            val suffix = authorizationSuffix.find(line)
-            if (suffix != null) {
-                if (suffix.groupValues[1].isEmpty()) authorization = true else value = true
-            } else if (valueSuffix.containsMatchIn(line) || tokenSuffix.containsMatchIn(line)) {
-                value = true
-            }
-        }
-        return Lines(authorization, value)
+        val normalized = peerOutput.replace(controls, "")
+        return Lines(introducerPrefixes.any { it.containsMatchIn(normalized) })
     }
 
     inner class Lines internal constructor(
-        private val ambiguousAuthorization: Boolean = false,
-        private val ambiguousValue: Boolean = false,
+        private val ambiguousCapture: Boolean = false,
     ) {
         private var pending = Pending.NONE
         private var staged = Pending.NONE
 
         fun next(line: String): String = message(line, this)
 
-        internal fun fork(): Lines = Lines(ambiguousAuthorization, ambiguousValue).also { it.pending = pending }
+        internal fun fork(): Lines = Lines(ambiguousCapture).also { it.pending = pending }
         internal fun adopt(other: Lines) { pending = other.pending }
         internal fun commit() { pending = staged }
 
         internal fun plan(line: String): IntRange? {
             var mask: IntRange? = null
             var nextPending = pending
-            val effective = when {
-                pending == Pending.AUTHORIZATION || ambiguousAuthorization -> Pending.AUTHORIZATION
-                pending == Pending.VALUE || ambiguousValue -> Pending.VALUE
-                else -> Pending.NONE
-            }
-            if (effective != Pending.NONE) {
+            if (pending != Pending.NONE) {
                 val first = token.find(line)
                 val separator = line.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 }
                 if (separator != null && line[separator] in ",;") {
@@ -94,7 +79,7 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
                 } else if (first != null) {
                     var end = first.range.last + 1
                     nextPending = Pending.NONE
-                    if (effective == Pending.AUTHORIZATION &&
+                    if (pending == Pending.AUTHORIZATION &&
                         (first.value.equals("Basic", true) || first.value.equals("Bearer", true))
                     ) {
                         val second = token.find(line, end)
@@ -117,7 +102,8 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
                 nextPending = Pending.VALUE
             }
             staged = nextPending
-            return mask
+            // Without byte order, the next credential may start midway through a local line.
+            return if (ambiguousCapture && line.isNotEmpty()) line.indices else mask
         }
     }
 
@@ -128,6 +114,9 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
         val authorizationSuffix = Regex("(?i)\\b(?:proxy-)?authorization\\s*[:=]\\s*(?:(basic|bearer)\\s*)?$")
         val valueSuffix = Regex("(?i)(?:bearer|(?:api[_-]?key|access[_-]?token|password|secret)\\s*[:=])\\s*$")
         val tokenSuffix = Regex("(?:sk-|ghp_|github_pat_)$")
+        val introducerPrefixes = listOf(authorizationSuffix, valueSuffix, tokenSuffix).map {
+            Regex(it.pattern.removeSuffix("\$"), it.options)
+        }
     }
 }
 

@@ -81,15 +81,17 @@ class MvpPatchWorkflowTest {
                 .filter(String::isNotEmpty).joinToString("\n") { evidence.logPrivacy.message(it, captures, pipe) }
             return render(stdoutCapture, out) to render(stderrCapture, err)
         }
-        for (introducer in listOf("Bearer", "Authorization: Basic", "Authorization:", "password=", "ghp_", "Bea\u0001rer")) {
+        for (introducer in listOf("Bearer", "Authorization: Basic", "Authorization:", "password=", "ghp_", "Bea\u0001rer",
+            "Bearer public", "Authorization: Basic public", "Authorization: public", "password=public", "ghp_public", "Bea\u0001rer public")) {
             val source = "$introducer\npublic source line"
-            val peer = "synthetic-binary-early; visible suffix\n, public separator\nsynthetic-binary-late; visible suffix"
+            val peer = "public-prefix synthetic-binary-early; visible suffix\n, public separator\npublic-prefix synthetic-binary-late; visible suffix"
             for ((out, err) in listOf(captured(source, peer), captured(peer, source))) {
                 val text = "$out\n$err"
                 assertFalse(text.contains("synthetic-binary-early"))
                 assertFalse(text.contains("synthetic-binary-late"))
-                assertTrue(text.contains("visible suffix"))
-                assertTrue(text.contains("public separator"))
+                assertFalse(text.contains("visible suffix"))
+                assertFalse(text.contains("public separator"))
+                assertFalse(text.contains("public-prefix"))
             }
         }
         val authorization = captured("Bearer\npublic\nAuthorization:\npublic", "Basic synthetic-binary-basic; visible suffix")
@@ -177,8 +179,8 @@ class MvpPatchWorkflowTest {
                         stdout.lineSequence().forEach { logger.outputLine(it, false, capturedOut) }
                         stderr.lineSequence().forEach { logger.outputLine(it, true, capturedErr) }
                     }
-                    displayCaptures("Bearer\npublic replay", "synthetic-replay-early; suffix\n, separator\nsynthetic-replay-late; suffix")
-                    displayCaptures("synthetic-reverse-replay; suffix", "Authorization:\npublic replay")
+                    displayCaptures("Bearer public\npublic replay", "public-prefix synthetic-replay-early; suffix\n, separator\npublic-prefix synthetic-replay-late; suffix")
+                    displayCaptures("public-prefix synthetic-reverse-replay; suffix", "Authorization: Basic public\npublic replay")
                     logger.info("public output")
                 }
             }
