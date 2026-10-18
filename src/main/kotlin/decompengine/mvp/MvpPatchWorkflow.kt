@@ -678,8 +678,9 @@ class StreamingLogger private constructor(
         val stderr = StringBuilder()
         val projectionFailure = MvpLogFailure()
         val display = MvpLiveCommandDisplay(privacy) { line, error, pipe -> emit(line, error, pipe = pipe) }
-        val outThread = stream(process.inputStream, stdout, false, projectionFailure, display)
-        val errThread = stream(process.errorStream, stderr, true, projectionFailure, display)
+        val captureBudget = MvpCommandCaptureBudget(privacy.maximumBytes)
+        val outThread = stream(process.inputStream, stdout, false, projectionFailure, display, captureBudget)
+        val errThread = stream(process.errorStream, stderr, true, projectionFailure, display, captureBudget)
         outThread.join(); errThread.join()
         val code = process.waitFor()
         projectionFailure.requireSuccess()
@@ -711,14 +712,27 @@ class StreamingLogger private constructor(
     private fun stream(
         input: java.io.InputStream, capture: StringBuilder, error: Boolean,
         projectionFailure: MvpLogFailure, display: MvpLiveCommandDisplay,
+        captureBudget: MvpCommandCaptureBudget,
     ): Thread {
+        val collector = MvpCommandCapture(capture, captureBudget)
         return Thread {
             try {
-                input.bufferedReader().useLines { incoming -> incoming.forEach { line ->
-                    // Capture stays raw for validation. Failed collection/display cannot be accepted.
-                    capture.appendLine(line)
-                    projectionFailure.attempt { display.line(error, capture) }
-                } }
+                input.reader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(4096)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        // After the first collection/display failure, drain without retaining more.
+                        if (count > 0) projectionFailure.attempt {
+                            collector.feed(buffer, count) {
+                                projectionFailure.attempt { display.line(error, capture) }
+                            }
+                        }
+                    }
+                    projectionFailure.attempt {
+                        collector.finish { projectionFailure.attempt { display.line(error, capture) } }
+                    }
+                }
                 projectionFailure.attempt { display.complete(error, capture) }
             } catch (failure: Throwable) {
                 // Avoid the JVM's raw child-thread exception printer; caller rethrows unchanged.

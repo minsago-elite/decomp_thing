@@ -1,6 +1,7 @@
 package decompengine.mvp
 
 import decompengine.jobs.ProgressControlPolicy
+import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicReferenceArray
 
@@ -119,6 +120,101 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
         val introducerPrefixes = listOf(authorizationSuffix, valueSuffix, tokenSuffix).map {
             Regex(it.pattern.removeSuffix("\$"), it.options)
         }
+    }
+}
+
+/** One normalized UTF-8 capture ceiling for both pipes of one command. */
+internal class MvpCommandCaptureBudget(private val maximumBytes: Long) {
+    private var usedBytes = 0L
+    private var failure: MvpPatchException? = null
+
+    init { require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) }
+
+    @Synchronized
+    fun charge(bytes: Long) {
+        require(bytes >= 0) { "command capture byte charge is invalid" }
+        failure?.let { throw it }
+        if (bytes > maximumBytes - usedBytes) {
+            throw MvpPatchException("command captures exceed their normalized UTF-8 byte budget").also { failure = it }
+        }
+        usedBytes += bytes
+    }
+}
+
+/** Incremental equivalent of readLine plus appendLine, without an unbounded intermediate line. */
+internal class MvpCommandCapture(
+    private val capture: StringBuilder,
+    private val budget: MvpCommandCaptureBudget,
+) {
+    private var previousHigh = false
+    private var partialLine = false
+    private var skipLineFeed = false
+    private var finished = false
+
+    init { require(capture.isEmpty()) { "command capture must start empty" } }
+
+    fun feed(buffer: CharArray, count: Int, onLine: () -> Unit) {
+        check(!finished) { "command capture is already complete" }
+        require(count in 0..buffer.size) { "command capture chunk length is invalid" }
+        if (count == 0) return
+        var position = 0
+        if (skipLineFeed) {
+            skipLineFeed = false
+            if (buffer[0] == '\n') position++
+        }
+        var start = position
+        while (position < count) {
+            val unit = buffer[position]
+            if (unit == '\r' || unit == '\n') {
+                append(buffer, start, position)
+                newline(onLine)
+                position++
+                skipLineFeed = unit == '\r'
+                if (skipLineFeed && position < count) {
+                    skipLineFeed = false
+                    if (buffer[position] == '\n') position++
+                }
+                start = position
+            } else {
+                position++
+            }
+        }
+        append(buffer, start, count)
+    }
+
+    fun finish(onLine: () -> Unit) {
+        check(!finished) { "command capture is already complete" }
+        finished = true
+        if (partialLine) newline(onLine)
+    }
+
+    private fun append(buffer: CharArray, start: Int, end: Int) {
+        if (start == end) return
+        var high = previousHigh
+        var bytes = 0L
+        for (position in start until end) {
+            val unit = buffer[position]
+            bytes += when {
+                high && unit.isLowSurrogate() -> 3 // The preceding replacement byte becomes a pair.
+                unit.code < 0x80 -> 1
+                unit.code < 0x800 -> 2
+                unit.code in 0xD800..0xDFFF -> 1 // JVM UTF-8 replacement for an isolated surrogate.
+                else -> 3
+            }
+            high = unit.isHighSurrogate()
+        }
+        budget.charge(bytes) // Charge the entire fixed-size span before the builder can grow.
+        capture.append(buffer, start, end - start)
+        previousHigh = high
+        partialLine = true
+    }
+
+    private fun newline(onLine: () -> Unit) {
+        budget.charge(1)
+        capture.append('\n')
+        previousHigh = false
+        partialLine = false
+        onLine()
     }
 }
 

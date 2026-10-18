@@ -28,6 +28,117 @@ import kotlin.test.assertTrue
 class MvpPatchWorkflowTest {
 
     @Test
+    fun `incremental command capture matches the retained line contract across every split`() {
+        val inputs = listOf("", "\n", "\r", "\r\n", "\n\n", "\r\r\n\r", "public", "a\rb\nc\r\nd",
+            "\r\nfirst\r\n\r\nlast\r", "é中\uD83D\uDE00", "\uD83Dx\uDE00\uD83D\uD83D\uDE00",
+            "left\u0000\u000c\u0085\u2028right\r\nend")
+        for (input in inputs) {
+            val lines = input.reader().buffered().readLines() // Independent, in-memory old JDK contract.
+            val expected = if (lines.isEmpty()) "" else lines.joinToString("\n", postfix = "\n")
+            val prefixes = lines.indices.map { lines.take(it + 1).joinToString("\n", postfix = "\n") }
+            for (split in 0..input.length) {
+                val captured = StringBuilder()
+                val budget = MvpCommandCaptureBudget(maxOf(1, expected.toByteArray(Charsets.UTF_8).size).toLong())
+                val collector = MvpCommandCapture(captured, budget)
+                val published = mutableListOf<String>()
+                val chunks = listOf(input.substring(0, split), "", input.substring(split))
+                for (chunk in chunks) collector.feed(chunk.toCharArray(), chunk.length) { published += captured.toString() }
+                collector.finish { published += captured.toString() }
+                assertEquals(expected, captured.toString())
+                assertEquals(prefixes, published)
+                assertFailsWith<IllegalStateException> { collector.feed(charArrayOf('x'), 1) {} }
+                assertFailsWith<IllegalStateException> { collector.finish {} }
+            }
+        }
+    }
+
+    @Test
+    fun `command capture charges the aggregate normalized bytes before mutation and latches overflow`() {
+        assertFailsWith<IllegalArgumentException> { MvpCommandCaptureBudget(0) }
+        assertFailsWith<IllegalArgumentException> { MvpCommandCaptureBudget(Long.MAX_VALUE) }
+        val shared = MvpCommandCaptureBudget(6)
+        val stdout = StringBuilder()
+        val stderr = StringBuilder()
+        val out = MvpCommandCapture(stdout, shared)
+        val err = MvpCommandCapture(stderr, shared)
+        out.feed("abcd".toCharArray(), 4) {}
+        val overflow = assertFailsWith<MvpPatchException> { err.feed("efg".toCharArray(), 3) {} }
+        assertEquals("abcd", stdout.toString())
+        assertEquals("", stderr.toString())
+        assertTrue(assertFailsWith<MvpPatchException> { out.finish {} } === overflow)
+        assertEquals("abcd", stdout.toString()) // Even a smaller later charge cannot resume acceptance.
+
+        val pair = StringBuilder()
+        val surrogate = MvpCommandCapture(pair, MvpCommandCaptureBudget(3))
+        surrogate.feed(charArrayOf('\uD83D'), 1) {}
+        assertFailsWith<MvpPatchException> { surrogate.feed(charArrayOf('\uDE00'), 1) {} }
+        assertEquals("\uD83D", pair.toString())
+        val finalLine = StringBuilder()
+        val ending = MvpCommandCapture(finalLine, MvpCommandCaptureBudget(2))
+        ending.feed("é".toCharArray(), 1) {}
+        assertFailsWith<MvpPatchException> { ending.finish {} }
+        assertEquals("é", finalLine.toString()) // Charge the synthesized final newline too.
+
+        val pending = StringBuilder()
+        val bounded = MvpCommandCapture(pending, MvpCommandCaptureBudget(1024))
+        assertFailsWith<MvpPatchException> { bounded.feed(CharArray(4096) { 'x' }, 4096) {} }
+        assertEquals(0, pending.length) // No intermediate whole line or partial span was appended.
+        val invalid = MvpCommandCapture(StringBuilder(), MvpCommandCaptureBudget(16))
+        assertFailsWith<IllegalArgumentException> { invalid.feed(charArrayOf('a'), -1) {} }
+        assertFailsWith<IllegalArgumentException> { invalid.feed(charArrayOf('a'), 2) {} }
+        assertFailsWith<IllegalArgumentException> { MvpCommandCapture(StringBuilder("existing"), shared) }
+    }
+
+    @Test
+    fun `fixed command chunks preserve private display and cannot accept a failed partial capture`() {
+        val privacy = MvpLogPrivacy(MvpArtifactRedactor(emptyList(), 8192))
+        val captures = arrayOf(StringBuilder(), StringBuilder())
+        val budget = MvpCommandCaptureBudget(8192)
+        val collectors = captures.map { MvpCommandCapture(it, budget) }
+        val shared = privacy.lines()
+        val frames = mutableListOf<MvpLogFrame>()
+        val latch = MvpLogFailure()
+        val display = MvpLiveCommandDisplay(privacy) { value, error, pipe ->
+            frames += privacy.frame(privacy.message(value, shared, pipe), error)
+        }
+        fun feed(error: Boolean, text: String) {
+            val slot = if (error) 1 else 0
+            latch.attempt {
+                collectors[slot].feed(text.toCharArray(), text.length) {
+                    latch.attempt { display.line(error, captures[slot]) }
+                }
+            }
+        }
+        fun complete(error: Boolean) {
+            val slot = if (error) 1 else 0
+            latch.attempt { collectors[slot].finish { latch.attempt { display.line(error, captures[slot]) } } }
+            latch.attempt { display.complete(error, captures[slot]) }
+        }
+        feed(true, "Bearer ") // No completed line or display callback yet.
+        feed(false, "synthetic-chunk-private\r")
+        feed(false, "\npublic-after\n")
+        assertTrue(frames.none { it.console.contains("synthetic-chunk-private") })
+        complete(true)
+        complete(false)
+        latch.requireSuccess()
+        display.finish(captures[0], captures[1])
+        assertEquals("synthetic-chunk-private\npublic-after\n", captures[0].toString())
+        assertEquals("Bearer \n", captures[1].toString())
+        assertTrue(frames.none { it.console.contains("synthetic-chunk-private") || it.retained.contains("synthetic-chunk-private") })
+
+        val retained = StringBuilder()
+        val limited = MvpCommandCapture(retained, MvpCommandCaptureBudget(6))
+        val failed = MvpLogFailure()
+        failed.attempt { limited.feed("public".toCharArray(), 6) {} }
+        failed.attempt { limited.feed(charArrayOf('!'), 1) {} }
+        val original = assertFailsWith<MvpPatchException> { failed.requireSuccess() }
+        failed.attempt { limited.feed("unretained".toCharArray(), 10) { error("must not publish") } }
+        failed.attempt { limited.finish { error("must not publish") } }
+        assertEquals("public", retained.toString())
+        assertTrue(assertFailsWith<MvpPatchException> { failed.requireSuccess() } === original)
+    }
+
+    @Test
     fun `live command display waits for complete peer grammar in either reader order`() {
         for (prefix in listOf("Bearer ", "Authorization: Basic ", "password=", "ghp_",
             "public metadata; Bearer already-complete; public-tail")) {

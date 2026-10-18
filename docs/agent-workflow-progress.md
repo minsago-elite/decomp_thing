@@ -333,7 +333,16 @@ projects its complete summary and refuses an unsafe decision label before input.
 Command reader/display failures are latched privately and rethrown unchanged after
 the existing concurrent drains and wait, rather than accepting a partial capture
 or printing raw child-thread exceptions. This changes neither
-process launch/isolation recipes nor cleanup policy. Raw collector size, blocking
+process launch/isolation recipes nor cleanup policy. Command capture now decodes
+through fixed 4,096-character chunks. One per-command ceiling, shared by stdout
+and stderr, charges normalized UTF-8 content before builder growth, including
+cross-chunk surrogate pairs and the newline added to a final unterminated line.
+CR/LF/CRLF normalization retains the previous readLine/appendLine contract for
+admitted output. This is the existing complete-projection byte ceiling, not a raw
+OS-byte, elapsed-time, workflow-global or resident-memory limit. Builder capacity,
+decoder buffers and projection copies are additional memory. After a collection
+or display failure, readers keep draining fixed chunks without retaining more;
+the command cannot return a successful partial capture. Blocking
 I/O and bounded failure termination still require separate resource work; the
 binary boundary, unlike the command logger, still reads stdout/stderr sequentially.
 The command display keeps two small reader-owned states and atomically publishes
