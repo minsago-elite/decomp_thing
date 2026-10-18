@@ -25,6 +25,47 @@ import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
     @Test
+    fun `reconstruction redactor rejection returns failure without exposing configuration or running action`() {
+        var oversizedIterations = 0
+        val noIteration = object : AbstractCollection<String>() {
+            override val size: Int get() = 4097
+            override fun iterator(): Iterator<String> {
+                oversizedIterations++
+                error("oversized inventory must be rejected before iteration")
+            }
+        }
+        val brokenInventory = object : AbstractCollection<String>() {
+            override val size: Int get() = 1
+            override fun iterator(): Iterator<String> = error("PRIVATE_CONFIGURATION_SENTINEL")
+        }
+        val rejected = listOf(noIteration, brokenInventory, listOf("x".repeat(1024 * 1024 + 1)),
+            List(4097) { "[oversized text omitted]" })
+        val bytes = ByteArrayOutputStream()
+        var actions = 0
+        PrintStream(bytes, true, Charsets.UTF_8).use { console ->
+            rejected.forEach { inventory ->
+                assertEquals(1, runReconstructionCliAction(inventory, console) { actions++ })
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            val initiallyInterrupted = Thread.interrupted()
+            try {
+                val interruptedInventory = object : AbstractCollection<String>() {
+                    override val size: Int get() = 1
+                    override fun iterator(): Iterator<String> = throw InterruptedException("PRIVATE_CONFIGURATION_SENTINEL")
+                }
+                assertEquals(1, runReconstructionCliAction(interruptedInventory, console) { actions++ })
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            } finally {
+                Thread.interrupted()
+                if (initiallyInterrupted) Thread.currentThread().interrupt()
+            }
+        }
+        assertEquals(0, actions)
+        assertEquals(0, oversizedIterations)
+    }
+
+    @Test
     fun `reconstruction failure closes progress before emitting only a redacted terminal diagnostic`() {
         val root = Files.createTempDirectory(
             Files.createDirectories(Path.of("build/test-tmp/reconstruction-cli-diagnostics")), "journal-",

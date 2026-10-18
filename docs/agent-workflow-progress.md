@@ -165,8 +165,19 @@ The reconstruction command catches ordinary workflow failures after its progress
 prints a bounded redacted terminal diagnostic, and exits with status 1. It does not print the raw
 exception chain. Configuration diagnostics and harness provenance also use the shared redactor.
 The boundary preserves interruption and propagates fatal JVM errors; it does not change the
-workflow's typed failure, receipt or validation authority. Patch/doctor diagnostics and historical
-artifacts require their own privacy checks.
+workflow's typed failure, receipt or validation authority.
+
+Patch summary diagnostics use the same bounded redactor for failure reasons, phase/check details,
+explanations, approval/isolation text and harness provenance. All supplied environment values are
+included, independent of their key names. Redaction configuration is admitted before clearing output
+or opening the patch logger. Complete approved diffs and retained request/response code keep their existing
+artifact formatter and are not shortened by diagnostic preview limits. Their full privacy scope,
+doctor diagnostics, logs, paths and historical artifacts still require separate qualification.
+The patch CLI masks usage messages, provenance and ordinary failures; configuration failures exit 2,
+other ordinary failures exit 1, interruption is preserved and fatal errors propagate.
+If a CLI redaction inventory is rejected, the workflow does not run: reconstruction exits 1 and
+patch exits 2 with no diagnostic payload from the unadmitted inventory. Admission interruption is
+preserved. Normal usage errors retain their command help and exit status 2.
 
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
