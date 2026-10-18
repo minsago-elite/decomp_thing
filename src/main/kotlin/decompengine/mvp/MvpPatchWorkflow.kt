@@ -696,11 +696,10 @@ class StreamingLogger private constructor(
     ): BinaryExecutionResult {
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
         val result = boundary.execute(executable, directory, environment)
-        // Admit complete streams, retaining raw grammar until both continuation scopes have planned.
-        privacy.project(result.stdout)
-        privacy.project(result.stderr)
-        val stdoutLines = privacy.lines()
-        val stderrLines = privacy.lines()
+        // Admit both complete streams before output. The boundary does not retain cross-pipe order,
+        // so a peer introducer remains a possible continuation at every local line during replay.
+        val stdoutLines = privacy.linesWithUnorderedPeer(result.stderr)
+        val stderrLines = privacy.linesWithUnorderedPeer(result.stdout)
         result.stdout.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, false, stdoutLines) }
         result.stderr.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, true, stderrLines) }
         info("$label exit_code=${result.exitCode} isolation=${result.isolation}")

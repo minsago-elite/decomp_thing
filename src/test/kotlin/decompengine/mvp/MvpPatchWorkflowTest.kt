@@ -73,13 +73,28 @@ class MvpPatchWorkflowTest {
         assertFalse(phrase.contains("top"))
         assertFalse(phrase.contains("secret"))
         assertTrue(phrase.contains("public"))
-        val captures = evidence.logPrivacy.lines()
-        val stdoutCapture = "Bearer"
-        val stderrCapture = "synthetic-binary-token"
-        evidence.logPrivacy.project(stdoutCapture)
-        evidence.logPrivacy.project(stderrCapture)
-        stdoutCapture.lineSequence().forEach { captures.next(it) }
-        assertFalse(stderrCapture.lineSequence().map { captures.next(it) }.joinToString().contains("synthetic-binary-token"))
+        fun captured(stdoutCapture: String, stderrCapture: String): Pair<String, String> {
+            val captures = evidence.logPrivacy.lines()
+            val out = evidence.logPrivacy.linesWithUnorderedPeer(stderrCapture)
+            val err = evidence.logPrivacy.linesWithUnorderedPeer(stdoutCapture)
+            fun render(value: String, pipe: MvpLogPrivacy.Lines) = value.lineSequence()
+                .filter(String::isNotEmpty).joinToString("\n") { evidence.logPrivacy.message(it, captures, pipe) }
+            return render(stdoutCapture, out) to render(stderrCapture, err)
+        }
+        for (introducer in listOf("Bearer", "Authorization: Basic", "Authorization:", "password=", "ghp_", "Bea\u0001rer")) {
+            val source = "$introducer\npublic source line"
+            val peer = "synthetic-binary-early; visible suffix\n, public separator\nsynthetic-binary-late; visible suffix"
+            for ((out, err) in listOf(captured(source, peer), captured(peer, source))) {
+                val text = "$out\n$err"
+                assertFalse(text.contains("synthetic-binary-early"))
+                assertFalse(text.contains("synthetic-binary-late"))
+                assertTrue(text.contains("visible suffix"))
+                assertTrue(text.contains("public separator"))
+            }
+        }
+        val authorization = captured("Bearer\npublic\nAuthorization:\npublic", "Basic synthetic-binary-basic; visible suffix")
+        assertFalse(authorization.second.contains("synthetic-binary-basic"))
+        assertEquals("public stdout" to "public stderr", captured("public stdout", "public stderr"))
     }
 
     @Test
@@ -156,6 +171,14 @@ class MvpPatchWorkflowTest {
                     logger.outputLine("Bearer", false, outPipe)
                     logger.outputLine("public diagnostic", true, errPipe)
                     logger.outputLine("synthetic-original-pipe", false, outPipe)
+                    fun displayCaptures(stdout: String, stderr: String) {
+                        val capturedOut = evidence.logPrivacy.linesWithUnorderedPeer(stderr)
+                        val capturedErr = evidence.logPrivacy.linesWithUnorderedPeer(stdout)
+                        stdout.lineSequence().forEach { logger.outputLine(it, false, capturedOut) }
+                        stderr.lineSequence().forEach { logger.outputLine(it, true, capturedErr) }
+                    }
+                    displayCaptures("Bearer\npublic replay", "synthetic-replay-early; suffix\n, separator\nsynthetic-replay-late; suffix")
+                    displayCaptures("synthetic-reverse-replay; suffix", "Authorization:\npublic replay")
                     logger.info("public output")
                 }
             }
@@ -163,7 +186,7 @@ class MvpPatchWorkflowTest {
         val console = output.toString(Charsets.UTF_8)
         val retained = root.resolve("events.log").readText()
         for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered", "synthetic-control-unregistered",
-            "synthetic-cross-pipe", "synthetic-original-pipe")) {
+            "synthetic-cross-pipe", "synthetic-original-pipe", "synthetic-replay-early", "synthetic-replay-late", "synthetic-reverse-replay")) {
             assertFalse(console.contains(value))
             assertFalse(retained.contains(value))
             assertFalse(errors.toString(Charsets.UTF_8).contains(value))

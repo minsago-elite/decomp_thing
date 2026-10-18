@@ -49,20 +49,44 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
 
     fun lines(): Lines = Lines()
 
-    inner class Lines internal constructor() {
+    /** Captured pipes have no cross-stream order: any peer introducer can precede any local line. */
+    fun linesWithUnorderedPeer(peerOutput: String): Lines {
+        project(peerOutput)
+        var authorization = false
+        var value = false
+        peerOutput.replace(controls, "").lineSequence().forEach { line ->
+            val suffix = authorizationSuffix.find(line)
+            if (suffix != null) {
+                if (suffix.groupValues[1].isEmpty()) authorization = true else value = true
+            } else if (valueSuffix.containsMatchIn(line) || tokenSuffix.containsMatchIn(line)) {
+                value = true
+            }
+        }
+        return Lines(authorization, value)
+    }
+
+    inner class Lines internal constructor(
+        private val ambiguousAuthorization: Boolean = false,
+        private val ambiguousValue: Boolean = false,
+    ) {
         private var pending = Pending.NONE
         private var staged = Pending.NONE
 
         fun next(line: String): String = message(line, this)
 
-        internal fun fork(): Lines = Lines().also { it.pending = pending }
+        internal fun fork(): Lines = Lines(ambiguousAuthorization, ambiguousValue).also { it.pending = pending }
         internal fun adopt(other: Lines) { pending = other.pending }
         internal fun commit() { pending = staged }
 
         internal fun plan(line: String): IntRange? {
             var mask: IntRange? = null
             var nextPending = pending
-            if (pending != Pending.NONE) {
+            val effective = when {
+                pending == Pending.AUTHORIZATION || ambiguousAuthorization -> Pending.AUTHORIZATION
+                pending == Pending.VALUE || ambiguousValue -> Pending.VALUE
+                else -> Pending.NONE
+            }
+            if (effective != Pending.NONE) {
                 val first = token.find(line)
                 val separator = line.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 }
                 if (separator != null && line[separator] in ",;") {
@@ -70,7 +94,7 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
                 } else if (first != null) {
                     var end = first.range.last + 1
                     nextPending = Pending.NONE
-                    if (pending == Pending.AUTHORIZATION &&
+                    if (effective == Pending.AUTHORIZATION &&
                         (first.value.equals("Basic", true) || first.value.equals("Bearer", true))
                     ) {
                         val second = token.find(line, end)

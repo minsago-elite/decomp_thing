@@ -44,6 +44,13 @@ prevents a configured secret split across chunks from leaking through separate p
 environment values and common credential formats are redacted before previews are bounded. Tool,
 plan and permission previews are also bounded. Opaque session/message/tool IDs remain digests.
 Redaction is a display precaution, not a claim that arbitrary unconfigured secrets can be identified.
+MVP binary captures retain separate stdout and stderr strings without cross-stream emission order.
+Before displaying either string, the logger admits both and scans their raw normalized credential
+introducers. A peer introducer conservatively keeps possible continuation masking active for every
+local line during replay, including after intervening public records or separators. Authorization
+without a scheme also hides a following Basic/Bearer scheme and value. This can hide public leading
+tokens when ordering is ambiguous; raw binary results used for validation stay unchanged. Command
+logging still uses its existing synchronized emitted order plus independent per-pipe state.
 Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
 malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
 therefore cannot collapse through replacement encoding and merge separate message buffers.
