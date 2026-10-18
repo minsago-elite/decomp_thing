@@ -133,15 +133,15 @@ class MvpPatchWorkflow(
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
                     "reconstruction-turn",
                 )
-                retainMvpCapturedResponse(
-                    evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, resourceBudget, evidence,
-                )
                 val reconstructedSource = singleReplacement(
                     reconstruction.response.patches.map { it.relativePath to it.replacement },
                     "decompiled.c",
                 )
                 reconstructionAgentEvidence = reconstruction.agentExecutionEvidence
                 reconstructionCandidate = reconstructedSource.toByteArray(StandardCharsets.UTF_8)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, resourceBudget, evidence,
+                )
                 validateMeaningfulReconstruction(reconstructedSource)
                 reconstructed.writeText(reconstructedSource)
                 evidence.check("meaningful standalone reconstruction", true, "source has main, control/data behavior, and no generic placeholder shape")
@@ -201,9 +201,6 @@ class MvpPatchWorkflow(
                     evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
                     "patch-turn",
                 )
-                retainMvpCapturedResponse(
-                    evidenceDir.resolve("patch-response.md"), proposal.response, resourceBudget, evidence,
-                )
                 evidence.patchExplanation = proposal.response.summary
                 val proposedSource = patchedSourceDir.resolve("patched.c")
                 val proposedSourceText = singleReplacement(
@@ -212,6 +209,9 @@ class MvpPatchWorkflow(
                 )
                 patchAgentEvidence = proposal.agentExecutionEvidence
                 patchCandidate = proposedSourceText.toByteArray(StandardCharsets.UTF_8)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("patch-response.md"), proposal.response, resourceBudget, evidence,
+                )
                 proposedSource.writeText(proposedSourceText)
                 val diff = it.command(listOf("diff", "-u", reconstructed.pathString, proposedSource.pathString), work, "proposed patch", false, accepted = setOf(0, 1))
                 if (diff.exitCode == 0 || diff.stdout.isBlank()) throw MvpPatchException("proposed patch did not change reconstructed C")
@@ -655,8 +655,8 @@ class StreamingLogger private constructor(
     fun info(message: String) = emit(message, false, timestamp())
 
     @Synchronized
-    private fun emit(message: String, error: Boolean, stamp: String? = null) {
-        val guarded = privacy.message(message, emittedLines)
+    private fun emit(message: String, error: Boolean, stamp: String? = null, pipe: MvpLogPrivacy.Lines? = null) {
+        val guarded = privacy.message(message, emittedLines, pipe)
         val frame = privacy.frame(guarded, error, stamp)
         val console = if (frame.error) errors else output
         console.println(frame.console)
@@ -664,6 +664,8 @@ class StreamingLogger private constructor(
         writer.appendLine(frame.retained)
         writer.flush()
     }
+
+    internal fun outputLine(line: String, error: Boolean, pipe: MvpLogPrivacy.Lines) = emit(line, error, pipe = pipe)
 
     fun command(
         command: List<String>, directory: Path, label: String, requireSuccess: Boolean = true,
@@ -694,12 +696,13 @@ class StreamingLogger private constructor(
     ): BinaryExecutionResult {
         info("$ $label: isolated-exec ${executable.toAbsolutePath().normalize()}")
         val result = boundary.execute(executable, directory, environment)
-        // Project whole captured streams before line splitting can cut a configured value.
+        // Admit complete streams, retaining raw grammar until both continuation scopes have planned.
         privacy.project(result.stdout)
         privacy.project(result.stderr)
-        val lines = privacy.lines()
-        result.stdout.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), false) }
-        result.stderr.lineSequence().filter(String::isNotEmpty).forEach { emit(lines.next(it), true) }
+        val stdoutLines = privacy.lines()
+        val stderrLines = privacy.lines()
+        result.stdout.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, false, stdoutLines) }
+        result.stderr.lineSequence().filter(String::isNotEmpty).forEach { outputLine(it, true, stderrLines) }
         info("$label exit_code=${result.exitCode} isolation=${result.isolation}")
         return result
     }
@@ -714,7 +717,7 @@ class StreamingLogger private constructor(
                 input.bufferedReader().useLines { incoming -> incoming.forEach { line ->
                     // Capture stays raw for validation. Failed collection/display cannot be accepted.
                     capture.appendLine(line)
-                    projectionFailure.attempt { emit(lines.next(line), error) }
+                    projectionFailure.attempt { outputLine(line, error, lines) }
                 } }
             } catch (failure: Throwable) {
                 // Avoid the JVM's raw child-thread exception printer; caller rethrows unchanged.

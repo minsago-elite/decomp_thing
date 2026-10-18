@@ -305,3 +305,16 @@ process launch/isolation recipes nor cleanup policy. Raw collector size, blockin
 I/O and bounded failure termination still require separate resource work; the
 binary boundary, unlike the command logger, still reads stdout/stderr sequentially.
 These source components require their own ordinary Actions qualification.
+
+
+### Combined coverage and rejected response display
+
+Credential-format, complete configured-literal and continuation spans are computed
+on the same normalized input and merged before replacement. Delimiters inside an
+admitted secret therefore cannot leave a tail after a generic field mask. Both
+pipe-local and emitted-order continuation scopes plan from raw normalized lines
+before either can conceal an introducer. Returned receipt/candidate bindings now
+precede response transcript projection, so a display refusal reaches the existing
+rejected-assessment path rather than leaving the captured turn pending. The
+immutable receipt, capture validation and assessment serialization remain intact.
+These review corrections require current-source ordinary Actions evidence.

@@ -58,6 +58,21 @@ class MvpPatchWorkflowTest {
         val messages = evidence.logPrivacy.lines()
         evidence.logPrivacy.message("Bearer", messages)
         assertFalse(evidence.logPrivacy.message("synthetic-message-token", messages).contains("synthetic-message-token"))
+        val shared = evidence.logPrivacy.lines()
+        val outPipe = evidence.logPrivacy.lines()
+        val errPipe = evidence.logPrivacy.lines()
+        evidence.logPrivacy.message("Bearer", shared, outPipe)
+        assertFalse(evidence.logPrivacy.message("synthetic-cross-pipe", shared, errPipe).contains("synthetic-cross-pipe"))
+        evidence.logPrivacy.message("Bearer", shared, outPipe)
+        evidence.logPrivacy.message("public diagnostic", shared, errPipe)
+        assertFalse(evidence.logPrivacy.message("synthetic-original-pipe", shared, outPipe).contains("synthetic-original-pipe"))
+        val phrases = MvpRunEvidence(mapOf("PLAIN_PHRASE" to "top secret"), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val phraseLines = phrases.logPrivacy.lines()
+        phraseLines.next("password=")
+        val phrase = phraseLines.next("top secret; public")
+        assertFalse(phrase.contains("top"))
+        assertFalse(phrase.contains("secret"))
+        assertTrue(phrase.contains("public"))
         val captures = evidence.logPrivacy.lines()
         val stdoutCapture = "Bearer"
         val stderrCapture = "synthetic-binary-token"
@@ -134,19 +149,28 @@ class MvpPatchWorkflowTest {
                     logger.info("synthetic-control-unregistered")
                     logger.info("left-private")
                     logger.info("right-private")
+                    val outPipe = evidence.logPrivacy.lines()
+                    val errPipe = evidence.logPrivacy.lines()
+                    logger.outputLine("Bearer", false, outPipe)
+                    logger.outputLine("synthetic-cross-pipe", true, errPipe)
+                    logger.outputLine("Bearer", false, outPipe)
+                    logger.outputLine("public diagnostic", true, errPipe)
+                    logger.outputLine("synthetic-original-pipe", false, outPipe)
                     logger.info("public output")
                 }
             }
         }
         val console = output.toString(Charsets.UTF_8)
         val retained = root.resolve("events.log").readText()
-        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered", "synthetic-control-unregistered")) {
+        for (value in listOf("plain-private", "left-private", "right-private", "synthetic-unregistered", "synthetic-control-unregistered",
+            "synthetic-cross-pipe", "synthetic-original-pipe")) {
             assertFalse(console.contains(value))
             assertFalse(retained.contains(value))
+            assertFalse(errors.toString(Charsets.UTF_8).contains(value))
         }
         assertTrue(console.contains("public output"))
         assertTrue(retained.contains("[fixed-stamp] public output"))
-        assertEquals(0, errors.size())
+        assertTrue(errors.toString(Charsets.UTF_8).contains("[REDACTED]"))
         for ((name, rejected) in listOf(
             "prefix-budget" to MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64), 16),
             "marker" to MvpRunEvidence(mapOf("PLAIN_SETTING" to "[REDACTED]"), "fixture-harness", "fixture-profile", "a".repeat(64)),
@@ -248,6 +272,20 @@ class MvpPatchWorkflowTest {
         val publicContent = "public complete code line;\n".repeat(2_000)
         assertTrue(publicContent.length > 16_384)
         assertEquals(publicContent, evidence.redact(publicContent))
+        for (secret in listOf("top secret", "top,secret", "top;secret", "top\nsecret", "top\u0001 secret")) {
+            val policy = MvpArtifactRedactor(listOf(secret), 4096)
+            for (prefix in listOf("password=", "Bearer ", "Authorization: Basic ")) {
+                val masked = policy.text(prefix + secret + "; public tail")
+                assertFalse(masked.contains("top"))
+                assertFalse(masked.contains("secret"))
+                assertTrue(masked.contains("public tail"))
+            }
+        }
+        val forcedSource = "top secret; public"
+        val forced = MvpArtifactRedactor(listOf("top secret"), 4096).text(forcedSource, 0..2)
+        assertFalse(forced.contains("top"))
+        assertFalse(forced.contains("secret"))
+        assertTrue(forced.contains("public"))
     }
 
     @Test

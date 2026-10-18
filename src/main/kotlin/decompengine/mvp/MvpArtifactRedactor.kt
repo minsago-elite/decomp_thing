@@ -31,43 +31,27 @@ internal class MvpArtifactRedactor private constructor(
 
     fun project(render: MvpArtifactText.() -> Unit): String = text(MvpArtifactText(maximumBytes).apply(render).build())
 
-    fun text(value: String): String {
+    fun text(value: String, normalizedMask: IntRange? = null): String {
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
         // Use the diagnostic control policy, without taking a prefix of complete content.
         var safe = value.replace(controls, "")
         MvpArtifactByteBudget(maximumBytes).charge(safe)
+        var extraMask = normalizedMask
         repeat(8) {
-            var next = safe
-            next = maskFormats(next)
-            next = literals.replace(next, maximumBytes)
+            // All coverage refers to the same unchanged input, including delimiter-containing secrets.
+            val next = literals.replace(safe, maximumBytes, formats, extraMask)
+            extraMask = null
             if (next == safe) return finish(next)
             safe = next
         }
         return finish(safe)
     }
 
-    private fun maskFormats(value: String): String {
-        var next = value
-        for ((pattern, retainPrefix) in formats) {
-            val output = MvpArtifactText(maximumBytes)
-            var copied = 0
-            for (match in pattern.findAll(next)) {
-                artifactActive()
-                output.append(next, copied, match.range.first)
-                if (retainPrefix) output.append(match.groupValues[1])
-                output.append("[REDACTED]")
-                copied = match.range.last + 1
-            }
-            if (copied != 0) next = output.append(next, copied, next.length).build()
-        }
-        return next
-    }
-
     private fun finish(value: String): String {
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
-        if (literals.contains(value) || maskFormats(value) != value) {
+        if (literals.contains(value) || literals.replace(value, maximumBytes, formats) != value) {
             throw MvpPatchException("complete artifact masking could not produce a safe projection")
         }
         return value
@@ -204,18 +188,59 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
         return false
     }
 
-    fun replace(source: String, maximumBytes: Long): String {
+    private inner class LiteralCursor(private val source: String) : MvpMaskCursor {
+        override var start = 0
+            private set
+        override var end = 0
+            private set
+        private var position = 0
+        private var state = 0
+
+        override fun advance(): Boolean {
+            while (position < source.length) {
+                if ((position and 4095) == 0) artifactActive()
+                state = this@MvpArtifactLiteralIndex.advance(state, source[position++])
+                val length = longest[state]
+                if (length != 0) {
+                    start = position - length
+                    end = position
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    fun replace(
+        source: String, maximumBytes: Long, formats: List<Pair<Regex, Boolean>> = emptyList(),
+        normalizedMask: IntRange? = null,
+    ): String {
+        MvpArtifactByteBudget(maximumBytes).charge(source)
+        require(formats.size <= 4) { "artifact format inventory exceeds its limit" }
+        val cursors = ArrayList<MvpMaskCursor>()
+        cursors += LiteralCursor(source)
+        for ((pattern, prefix) in formats) cursors += MvpRegexMaskCursor(pattern, source, prefix)
+        if (normalizedMask != null) {
+            require(!normalizedMask.isEmpty() && normalizedMask.first >= 0 && normalizedMask.last < source.length) {
+                "artifact mask exceeds admitted text"
+            }
+            cursors += MvpFixedMaskCursor(normalizedMask)
+        }
+        val ready = BooleanArray(cursors.size) { cursors[it].advance() }
         var starts = IntArray(0)
         var ends = IntArray(0)
         var size = 0
-        var state = 0
-        for (position in source.indices) {
-            if ((position and 4095) == 0) artifactActive()
-            state = advance(state, source[position])
-            val length = longest[state]
-            if (length == 0) continue
-            var start = position + 1 - length
-            // Ends arrive in order. Merge backwards; each stored span is popped at most once.
+        while (true) {
+            artifactActive()
+            var selected = -1
+            for (index in cursors.indices) {
+                if (ready[index] && (selected < 0 || cursors[index].end < cursors[selected].end)) selected = index
+            }
+            if (selected < 0) break
+            val cursor = cursors[selected]
+            var start = cursor.start
+            val end = cursor.end
+            // Each cursor advances by end position; merge their ordered coverage before replacing.
             while (size > 0 && ends[size - 1] >= start) {
                 size--
                 start = minOf(start, starts[size])
@@ -226,7 +251,8 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
                 ends = ends.copyOf(capacity)
             }
             starts[size] = start
-            ends[size++] = position + 1
+            ends[size++] = end
+            ready[selected] = cursor.advance()
         }
         if (size == 0) return source
         val output = MvpArtifactText(maximumBytes)
@@ -237,6 +263,35 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
         }
         return output.append(source, copied, source.length).build()
     }
+
+}
+
+private interface MvpMaskCursor {
+    val start: Int
+    val end: Int
+    fun advance(): Boolean
+}
+
+private class MvpRegexMaskCursor(pattern: Regex, source: String, private val retainPrefix: Boolean) : MvpMaskCursor {
+    private val matcher = pattern.toPattern().matcher(source)
+    override var start = 0
+        private set
+    override var end = 0
+        private set
+
+    override fun advance(): Boolean {
+        if (!matcher.find()) return false
+        start = if (retainPrefix) matcher.end(1) else matcher.start()
+        end = matcher.end()
+        return true
+    }
+}
+
+private class MvpFixedMaskCursor(private val range: IntRange) : MvpMaskCursor {
+    private var pending = true
+    override val start: Int = range.first
+    override val end: Int = range.last + 1
+    override fun advance(): Boolean = pending.also { pending = false }
 }
 
 /** Admit bytes before a builder grows, including surrogate pairs formed across append calls. */

@@ -10,15 +10,30 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
 
     fun project(value: String): String = projector.text(value)
 
-    fun message(value: String, lines: Lines): String {
-        project(value) // Admit the complete raw and normalized input before rendering.
+    fun message(value: String, lines: Lines, pipe: Lines? = null): String {
+        project(value) // Admit complete raw/normalized data before examining its line grammar.
         val normalized = value.replace(controls, "")
-        return MvpArtifactText(maximumBytes).apply {
+        val ordered = lines.fork()
+        val independent = pipe?.takeIf { it !== lines }?.fork()
+        val rendered = MvpArtifactText(maximumBytes).apply {
             normalized.lineSequence().forEachIndexed { index, line ->
                 if (index != 0) append("\n")
-                append(lines.next(line))
+                val sharedMask = ordered.plan(line)
+                val pipeMask = independent?.plan(line)
+                val mask = when {
+                    sharedMask == null -> pipeMask
+                    pipeMask == null -> sharedMask
+                    else -> minOf(sharedMask.first, pipeMask.first)..maxOf(sharedMask.last, pipeMask.last)
+                }
+                // Both continuation scopes and all configured/format spans see the same raw line.
+                append(projector.text(line, mask))
+                ordered.commit()
+                independent?.commit()
             }
         }.build()
+        lines.adopt(ordered)
+        if (independent != null) pipe?.adopt(independent)
+        return rendered
     }
 
     fun frame(message: String, error: Boolean, timestamp: String? = null): MvpLogFrame {
@@ -36,12 +51,16 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
 
     inner class Lines internal constructor() {
         private var pending = Pending.NONE
+        private var staged = Pending.NONE
 
-        fun next(rawLine: String): String {
-            // Inspect normalized grammar before configured literals can erase its introducer.
-            val alreadySafe = project(rawLine)
-            val line = rawLine.replace(controls, "")
-            var rendered = line
+        fun next(line: String): String = message(line, this)
+
+        internal fun fork(): Lines = Lines().also { it.pending = pending }
+        internal fun adopt(other: Lines) { pending = other.pending }
+        internal fun commit() { pending = staged }
+
+        internal fun plan(line: String): IntRange? {
+            var mask: IntRange? = null
             var nextPending = pending
             if (pending != Pending.NONE) {
                 val first = token.find(line)
@@ -64,8 +83,7 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
                             nextPending = Pending.VALUE
                         }
                     }
-                    rendered = MvpArtifactText(maximumBytes).append(line, 0, first.range.first)
-                        .append("[REDACTED]").append(line, end, line.length).build()
+                    mask = first.range.first until end
                 }
             }
             val authorization = authorizationSuffix.find(line)
@@ -74,9 +92,8 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
             } else if (valueSuffix.containsMatchIn(line) || tokenSuffix.containsMatchIn(line)) {
                 nextPending = Pending.VALUE
             }
-            val safe = if (rendered === line) alreadySafe else project(rendered)
-            pending = nextPending
-            return safe
+            staged = nextPending
+            return mask
         }
     }
 
