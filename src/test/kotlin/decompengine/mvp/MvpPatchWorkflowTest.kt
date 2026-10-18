@@ -26,6 +26,46 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+    @Test
+    fun `public commitments preserve exact digits through normalization and repeated private masking`() {
+        val digest = "0123456789abcdef".repeat(4)
+        val reverse = digest.reversed()
+        val redactor = MvpArtifactRedactor(listOf("1", "private-value", "[REDACTED]X"), 4096)
+        val rendered = redactor.project {
+            append("\u0001private-value 1\n").appendSha256(digest)
+            append("\r\nprivate-valueX").appendSha256(reverse).append("\r\n1")
+        }
+        assertEquals("[REDACTED] [REDACTED]\n$digest\n[REDACTED]$reverse\n[REDACTED]", rendered)
+        assertEquals("[REDACTED]", redactor.text("1"))
+        assertEquals("[REDACTED]$digest[REDACTED]", redactor.project {
+            append("1").appendSha256(digest).append("1")
+        })
+        assertFailsWith<MvpPatchException> {
+            MvpArtifactRedactor(listOf("x" + digest.take(2)), 4096).project {
+                append("x").appendSha256(digest)
+            }
+        }
+        assertFailsWith<MvpPatchException> {
+            MvpArtifactRedactor(listOf(digest.takeLast(2) + "x"), 4096).project {
+                appendSha256(digest).append("x")
+            }
+        }
+        for (prefix in listOf("Bearer ", "Bearer\u000c")) {
+            assertFailsWith<MvpPatchException> {
+                MvpArtifactRedactor(emptyList(), 4096).project { append(prefix).appendSha256(digest) }
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            redactor.project { appendSha256("not a public digest") }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            redactor.project { repeat(33) { appendSha256(digest) } }
+        }
+        assertFailsWith<MvpPatchException> {
+            MvpArtifactRedactor(emptyList(), 64).project { appendSha256(digest).append("x") }
+        }
+    }
+
 
     @Test
     fun `incremental command capture matches the retained line contract across every split`() {
@@ -591,7 +631,7 @@ class MvpPatchWorkflowTest {
         val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-artifact-privacy")), "summary-")
         val privateValue = "private-segment"
         val source = root.resolve("$privateValue.c").also { it.writeText("public code") }
-        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to privateValue), "fixture-harness", privateValue, "a".repeat(64))
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to privateValue, "SHLVL" to "1"), "fixture-harness", privateValue, "a".repeat(64))
         evidence.passPhase(privateValue, "public success")
         evidence.check(privateValue, true, "public validation")
         evidence.findingSourceLocation = "$privateValue.c:12"
@@ -606,6 +646,8 @@ class MvpPatchWorkflowTest {
         assertTrue(text.contains("Result: PASS"))
         assertTrue(text.contains("| PASS | public success |"))
         assertTrue(text.contains(full.trimEnd()))
+        assertTrue(text.contains("| Input ELF | `[REDACTED].c` | " +
+            "`0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
         assertEquals("public code", source.readText())
         assertEquals(full, evidence.patchDiffPath!!.readText())
     }
