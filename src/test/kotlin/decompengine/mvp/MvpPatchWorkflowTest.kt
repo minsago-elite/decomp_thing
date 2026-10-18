@@ -299,6 +299,15 @@ class MvpPatchWorkflowTest {
         assertTrue(text.contains("[REDACTED]"))
         assertFalse(evidence.redactDiagnostic(configured).contains(configured))
         assertTrue(evidence.redactDiagnostic("later-public-value").contains("later-public-value"))
+        val prefixCredential = "synthetic-key-prefix"
+        val completeCredential = "$prefixCredential-private-suffix"
+        for (orderedCredentials in listOf(
+            linkedMapOf("API_KEY" to prefixCredential, "ACP_TOKEN" to completeCredential),
+            linkedMapOf("ACP_TOKEN" to completeCredential, "API_KEY" to prefixCredential),
+        )) {
+            val overlapping = MvpRunEvidence(orderedCredentials, "fixture-harness", "fixture-profile", "a".repeat(64))
+            assertEquals("before; [REDACTED]; after", overlapping.redact("before; $completeCredential; after"))
+        }
         for (separator in listOf('\u000b', '\u000c', '\r')) {
             for (prefix in listOf("Bearer$separator", "Authorization:${separator}Basic$separator", "password=$separator")) {
                 val raw = "before; ${prefix}synthetic-separated-credential; public"
