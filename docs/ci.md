@@ -4,15 +4,98 @@
 
 ## Project CI
 
-Run the same checks as the repository workflow:
+Run the shared JVM/Kotlin entry point:
 
 ```bash
 scripts/ci.sh
 ```
 
-That command runs:
+By default, this runs `verifyReconstructionNeutrality` and `test` through
+`./gradlew --no-daemon`, plus `v3BoundaryFinalStagingIsolated`,
+`v3BoundaryPublicationIsolated` and `v3BoundaryCensusIsolated` with
+`-PisolateV3BoundaryTests=true`. Those three RSS-sensitive methods run in fresh
+workers instead of the shared worker. The test task also requires the entire
+`GccCompilerEnginePlanningTest` class in a fresh, single-fork 512 MiB-heap worker;
+this does not raise its production/fixture RSS cap.
 
-- `./gradlew --no-daemon test`
+`DECOMP_CI_TEST_SHARD=core` selects tests excluding the `ci-live` tag and retains
+these isolated checks. `live` selects only that tag; the full default selects
+both. These existing entry points retain their full selections.
+
+Hosted CI splits ordinary core tests into `core-main` (the complement of
+`decompengine.oracle.*`) and `core-oracle` (that namespace recursively), each
+excluding `ci-live`. Gradle's [test-name filters](https://docs.gradle.org/current/javadoc/org/gradle/api/tasks/testing/TestFilter.html)
+select a package recursively and its complement; new classes enter their group
+automatically. Both selections fail if no tests match. The existing `kotlin-core`
+job runs `core-main`; `kotlin-oracle` runs `core-oracle`. `kotlin-live` retains its
+tag selection and preflights. The `kotlin` aggregate requires all three jobs.
+
+`core-oracle` owns the isolated GCC planning class, the three isolated V3 boundary
+methods and the 115 synthetic class-data controls. The class-data gate still runs
+before expensive Kotlin compilation in its owning task graph. The isolated
+workers keep their existing heaps, RSS bounds and fresh execution. `core-main`
+retains real Angr selection/qualification and the quota-backed repair snapshot
+follow-up. All three jobs retain their existing hosted runtime, sandbox, quota,
+scratch provisioning and unconditional cleanup. Each uploads its own
+`kotlin-core`, `kotlin-oracle` or `kotlin-live` test-report artifact.
+The quota follow-up receives `core-main` in its nested test invocation, keeping
+the selected repair fixture while its host-side preparation remains unchanged.
+This prevents that follow-up from starting the isolated GCC/class-data gates
+again. Nonowning or unknown CI selectors refuse before preparation; legacy
+combined and local invocations keep their original selection.
+
+`scripts/test-ci-partitions.py` exercises the actual shell entry point with an
+inert Gradle argument recorder, including full/legacy/live selections, each new
+partition and refusal before invocation for unsupported values. Before accepting
+the split, compare the complete current XML execution union against the qualified
+original inventory, preserving explicit skips and isolated executions. In
+particular, the quota snapshot method's full-suite skip and separately required
+pass are distinct executions. Job/step durations and total runner time describe
+different costs; the historical elapsed observations alone establish no speedup.
+The aggregate also downloads only the three standard Kotlin test-report artifacts
+into separate named directories. Its Python XML check requires nonempty reports,
+correct oracle/complement ownership, no failed cases and no test identity shared
+across partitions. Within one partition, the quota fixture's skip/pass pair stays
+distinct. `kotlin-partition-inventory` retains counts and input hashes; routing and
+report-placement regression controls run in the core job. This placement check
+complements the complete original-inventory comparison above.
+
+Core also runs the authored source/XML controls in
+`scripts/test-web-job-recovery-inventory.py` and consumes its already executed
+JUnit reports with `scripts/verify-web-job-recovery.py --reports`. This guard
+requires every literal zero-argument `@Test` scenario in the 19 selected benign
+jobs/web classes, including nested source declarations that Jupiter would fail
+to discover. Missing, duplicate, unexpected, failed, erroneous or skipped cases
+refuse coverage; reported counts must match actual testcase outcomes. Other test
+declaration forms require an explicit extension and are refused by this corpus's
+declaration check. No additional Gradle/JVM test run is started by the guard.
+
+`web-job-recovery-inventory.json` is retained with the core reports. It binds case
+identities/results to XML hashes, declaration source hashes and a Git snapshot;
+the CI checkout/compilation join remains separate evidence. Every selected test
+also emits a bounded record from its existing JUnit JVM: Java runtime/vendor/VM,
+OS/kernel version and architecture, plus provider, filesystem type, block-size
+availability, read-only state and POSIX/Unix views for each created fixture root.
+The fixture factory keeps temporary roots inside the repository. Records contain
+test identities and root ordinals, without fixture paths, prefixes, environment
+values, process identifiers or exception messages.
+
+Missing, duplicated or mismatched records, unknown fields and inconsistent facts
+refuse configuration coverage. The selected source contract also refuses known
+direct temporary-root APIs or local bindings that bypass the recorded factory.
+Cases without fixture roots and unsupported
+block-size observations remain explicit. These are observed fixture facts;
+they do not authenticate an immutable host, a mount identity or execution
+authority. `fullMatrixQualified` remains false pending the complete supported
+matrix and integration evidence. No power-loss, external-process, provider/model
+or release qualification follows from these records.
+The standalone runner's manifest is version 2; its Java/kernel/temporary-filesystem
+fields describe the launcher, while testcase configuration comes from the JUnit
+records. The report-consumption inventory is version 3.
+
+Hosted workflows additionally prepare fixtures and run credential-free
+preflights, frontend/browser jobs and separate contract/oracle workflows through
+the entry points below.
 
 Gradle also builds the embedded frontend. CI provisions the exact Node 24.20.0 /
 npm 11.19.0 distribution using `scripts/install-frontend-node.sh`; the installer
@@ -20,14 +103,21 @@ checks the reviewed official archive digest and repository version pins. Local
 builds need the same toolchain on PATH. Node is a build dependency and is absent
 from the application Docker runtime stage.
 
-The independent **Frontend contracts and bundle** job runs on every push and pull
-request. It uses a clean locked npm install, strict type checking, lint, component
+The independent **Frontend contracts and bundle** job runs on pull requests and
+pushes to master or tags. It uses a clean locked npm install, strict type checking, lint, component
 and state tests, the versioned web schema's positive/negative fixtures, a production
 bundle with size/dependency checks, and the manifest completeness/digest tests.
 It also rejects changes to checked frontend or contract inputs produced by those
 commands. CI restores npm's package-download cache keyed to the lockfile, while
 each job still installs clean `node_modules` and builds the current bundle. No
 generated bundle or `node_modules` tree is restored.
+Its existing deliberate contract-drift fixtures retain four
+`expected-web-api-rejection` records in `api-drift-tests.txt`: changed generated
+types, changed generated schema, changed source schema and an unsupported schema
+keyword. Each records exit 1 without a signal, a bounded rejection diagnostic
+with the fixture root redacted, and unchanged hashes for all four fixture inputs.
+The authored bad inputs are expected refusals within the passing test; this
+receipt supplies no clean/cache-hit or broader integration qualification.
 Gradle jobs restore the shared master dependency cache on pull requests; only
 master writes new Gradle cache entries, avoiding one large cache per pull request.
 
@@ -53,14 +143,41 @@ results, tool/lock/schema identities and bundle/manifest metadata as
 `frontend-verification` for 14 days, including after failures. It does not upload
 environment dumps, credentials, private source maps or generated job content.
 
-The **Packaged web contracts and browser** job also runs on every push and pull
-request. It builds the archives from the current checkout, runs the web/job JVM
-contracts, verifies relocated read-only ZIP/TAR HTTP serving and Ghidra native
+The **Packaged web contracts and browser** job also runs on pull requests and
+pushes to master or tags. It builds the archives from the current checkout, runs
+`BrowserSessionExpiryTest` with pinned Chrome/Node, verifies relocated read-only
+ZIP/TAR HTTP serving and Ghidra native
 permissions, and retains the existing ACP/LLVM/BOOT distribution checks. Pinned
 Chrome then checks the public shell, lazy Runtime route, explicit chunk recovery,
-session exchange/reload/logout, and the explicit Vite proxy against the same ZIP.
+session exchange/reload/logout, exact binary metadata, focused live updates,
+10,000-job paging and the explicit Vite proxy against the same ZIP.
 The application process has no Node/npm on PATH and starts from an unrelated
-directory; these preview journeys create no jobs or workflow execution.
+directory. Session/proxy journeys preserve empty job storage; metadata, live and
+scale journeys use authored inert job fixtures and start no workflow execution.
+The JVM web-contract step uses those same pinned Chrome/Node paths to require the
+existing real-browser session-expiry, private-read refusal and fresh operator-link
+exchange test. Its injected monotonic clock advances the session age without a
+wall-clock wait; ordinary hosts without Chrome retain the opt-in test behavior.
+
+All ordinary web/job JVM contracts remain in the automatic core namespace
+selection and its required aggregate; the packaged lane no longer repeats those
+hundreds of executions. It retains all methods in `BrowserSessionExpiryTest`,
+including HTTP-clock and process-cleanup controls, because the actual browser
+method is explicitly skipped on ordinary hosts without Chrome. A report gate
+requires that exact browser method once, valid suite/class/method identities,
+matching aggregate counts and no failed, errored or skipped case in its suite. The complete report directory is
+inventoried under 128-entry/eight-level limits and must contain exactly that one
+regular XML input, including nested/case-variant XML. Gradle's regular binary
+result files remain allowed; symlink files/directories and nonregular entries
+refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
+XML bytes/hash. Core runs the report gate's positive and negative controls.
+The focused `packaged-browser-expiry-test-reports` artifact retains the exact
+expiry XML and gate receipt for independent byte/hash checks without restoring
+browser journey payloads. The existing full packaged evidence upload is retained.
+Packaging, archive/helper/closure verification and every packaged browser journey
+keep their existing commands and current-source inputs. This scheduling change
+does not qualify an additional target/resource matrix or establish a measured
+speedup; compare actual job and runner costs after current Actions finish.
 
 `scripts/web-test-browser.json` pins Chrome for Testing 149.0.7827.55 for Linux
 x86-64 by exact URL, length, archive SHA-256 and expanded inventory. Its
@@ -90,6 +207,38 @@ that GitHub requires its result for merge.
 The existing Kotlin, ACP, Clang, archival and oracle jobs retain their checks;
 the manual LLVM source rebuild remains the optional expensive lane described below.
 
+### Lane ownership and explicit qualification
+
+The workflow/script paths below own scheduling and gate behavior. Normal runs
+mean pull requests and master/tag pushes; the oracle-model normal jobs explicitly
+exclude manual dispatch. Expensive scheduled checks remain part of normal CI.
+Optional means an explicit selection condition; selected jobs must still pass
+their checks. GitHub branch-protection requirements remain separate as noted above.
+
+| Lane | Scheduling and responsibility | Source |
+| --- | --- | --- |
+| Frontend contracts and bundle | Normal; locked install, schema/generated-input drift, type/lint/component/state, isolated Git fixtures and bundle checks. Frontend behavior remains owned by #223 and integration by #227. | [ci.yml](../.github/workflows/ci.yml), `frontend/package.json` |
+| Packaged web contracts and browser | Normal; browser-expiry JVM suite with positive report gate, current archives, helper/closure/BOOT distribution checks and packaged session/metadata/live/scale/proxy journeys. #224 owns JVM contracts, #225 packaged journeys and #227 integration. | [ci.yml](../.github/workflows/ci.yml), [web-packaging.md](web-packaging.md) |
+| Kotlin core / oracle / live / aggregate | Normal; complementary ordinary core and oracle namespaces plus tagged live tests run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every partition to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
+| Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
+| ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
+| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| Retained GCC driver DWARF interfaces | Explicit dispatch, or a triggered PR run already carrying `qualify:driver-dwarf-interfaces`. Applying the label alone is not a configured workflow trigger. | `driver-dwarf-interfaces` in [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml) |
+| LLVM native runtime measurement | Explicit dispatch with `qualification=native-runtime-measurement`; measurement does not approve a production runtime. | `native-runtime-measurement` in [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| LLVM oracle clean rebuild | Manual dispatch only; run when the locked source/toolchain/flags/artifact pair needs fresh rebuild evidence. | [llvm-oracle-rebuild.yml](../.github/workflows/llvm-oracle-rebuild.yml) |
+
+Core performs installed analysis-I/O verification and quota snapshot preparation
+in one invocation of `bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io`.
+The fixed mode includes `verifyAnalysisIoHelperInstalled` with the existing
+preparation targets, retains `build/analysis-native-installed-verification.txt`,
+and fails before fixture work if that Gradle pipeline fails. The combined
+invocation preserves this check. Live does not request this core-only mode.
+
+Capability acceptance remains with its existing owners. #215 owns
+Git synchronization/provider qualification; #223–#226 retain their component,
+JVM, packaged, accessibility/scale/adverse-condition requirements. #227 and this
+documentation slice #653 do not close those dependencies or supply a release claim.
+
 The test task first builds and verifies the same static ACP gate helper shipped by `installDist`; security-boundary
 tests do not compile private helper copies. Distribution jobs should additionally run
 `./gradlew --no-daemon verifyAcpGateHelperDistribution`.
@@ -111,6 +260,13 @@ scripted contract boundary; independent authenticated agents and full release
 acceptance have their separate issue #67/#72 requirements. Ordinary local tests may
 skip unavailable host integrations when the required-host flag is unset.
 
+The independent **Built-in core contract** invokes
+`python3 scripts/validate-builtin-contract.py`. It forces test execution with the
+required live host and checks its fixed required suite/case inventory with zero
+failures, errors or skips. It retains
+`build/builtin-contract-qualification/summary.json`; its real-provider and workflow
+release qualification fields remain false.
+
 Run the independent generated-C compatibility lane with LLVM/Clang:
 
 ```bash
@@ -129,6 +285,47 @@ scripts/validate-archival-docker.sh
 ```
 
 That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated rich and stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project. The explicit evidence-only policy retains every raw model entity and its planned ownership while compiling diagnostic inventory sources. It preserves unsupported display text as evidence, keeps implementation acceptance false, and does not claim that the diagnostic executable reproduces the input program's ABI or behavior. The ordinary generated-C declaration and implementation gates remain strict.
+
+### Real Angr proposal qualification
+
+The core partition selects `realAngrQualification` when the workflow, Docker
+production pin, Gradle build, Angr requirement/runner/selector, or exploration
+source/tests change. Pull requests compare against their event base SHA; pushes
+compare the complete update against the event's previous SHA, fetching that
+specific commit if needed. An absent/zero/unavailable base conservatively selects
+qualification. Authored local-Git fixtures in Actions cover multi-commit pushes,
+shallow history, production-pin changes, unrelated updates and missing bases.
+Unrelated changes reuse the deterministic adapter suite without installing Angr;
+selected runs cache package downloads without reusing prior qualification results.
+The shared `angr-compatibility.txt` constrains bitstring to 4.4.0 in both Docker and
+qualification: the unconstrained 5.0 release removed `ConstBitStream` used by this
+Angr version. Docker also checks that the installed Angr imports successfully.
+
+The selected lane requires matching Docker/default and requirements Angr pins
+(currently `9.2.213`) before installing into a workspace virtual environment and
+runs the existing branching argv/stdin fixture once. Its dedicated Gradle task
+requires an absolute executable `ANGR_PYTHON`, disables cached test credit, and gives
+the test JVM a small explicit environment without parent credentials. The ordinary
+optional test reports SKIP when the interpreter is absent. Missing configuration,
+no matching test, a skipped test, or a failed discovery cannot qualify the lane.
+
+`real-angr-qualification` retains the checkout/tree, source digests, pip install
+report and resolved package versions, interpreter/module identities, compiler
+version, exact Gradle command, compiled fixture and C source, candidate bytes,
+search diagnostics and JUnit result. The adapter's 60-second search bound and
+dedicated task's three-minute timeout sit inside an eight-minute Actions step.
+These results concern proposal discovery on the authored fixture; they establish
+neither equivalence nor production execution attestation.
+
+### Reporting skipped or unrun verification
+
+Record the source commit/ref, exact command and selected lane, required-host flags
+and prerequisites, actual test/failure/error/skip counts, reasons and retained
+artifacts. Distinguish reused task output from fresh execution. An optional lane
+not selected, or a phase blocked by setup/preflight failure before tests, is unrun;
+missing reports do not establish passing tests or verified cleanup. Ordinary local
+integration skips do not satisfy a required no-skip contract. Retain the original
+failure and any later repeat separately, and state which checks were not repeated.
 
 Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 
@@ -212,6 +409,22 @@ jobs:
 ```
 
 ## CI Artifacts
+
+### Pinned Goose archive acquisition
+
+The live lane rechecks the exact Goose 1.46.0 archive size and SHA-256 on every
+cache read. Its digest-keyed Actions cache retains only archive bytes, with no
+restore prefix or runtime evidence. Missing bytes use the canonical official
+release URL and then its immutable release-asset API endpoint, with one attempt
+per endpoint, HTTPS-only redirects, a 15-second connection bound, 120 seconds per
+transfer and the exact archive byte ceiling. Invalid successful responses and
+invalid/linked cache entries refuse; complete verified bytes publish atomically
+without replacing an existing entry. Acquisition precedes the application build.
+Transport-only controls use inert bytes and a fake curl. The unchanged archive
+layout, provisioning, runtime manifest, credential-free initialize and required
+outcome gate still apply; no agent invocation is retried and no failure is waived.
+The `--fetch-archive` mode only verifies/acquires bytes and performs no extraction
+or runtime execution. This cache is an optimization, not measured speedup evidence.
 
 Useful artifacts to retain:
 

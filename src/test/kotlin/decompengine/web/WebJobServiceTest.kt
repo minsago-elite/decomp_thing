@@ -1,6 +1,15 @@
 package decompengine.web
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
+import decompengine.jobs.AtomicUploadPublisher
+import decompengine.jobs.JobStoreDirectories
+import decompengine.jobs.WorkflowAttemptStore
+import decompengine.jobs.WorkflowStoreException
+import decompengine.jobs.forceJobStoreDirectory
+import decompengine.jobs.prepareJobStoreDirectories
 import decompengine.jobs.elfFixture
 import java.nio.file.Files
 import java.nio.file.Path
@@ -11,7 +20,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -19,7 +27,61 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test
+    fun `recovery inspection excludes a live multipart stage and resumes after publication`() = withStore { store, root ->
+        val boundary = "recovery-overlap"
+        val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"active.elf\"\r\n\r\n".toByteArray() +
+            elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val callers = Executors.newSingleThreadExecutor()
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            val input = object : java.io.FilterInputStream(body.inputStream()) {
+                private fun waitForRelease() {
+                    entered.countDown()
+                    check(release.await(10, TimeUnit.SECONDS))
+                }
+                override fun read(): Int { waitForRelease(); return super.read() }
+                override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                    waitForRelease()
+                    return super.read(bytes, offset, length)
+                }
+            }
+            try {
+                val uploaded = callers.submit<decompengine.jobs.Job> {
+                    input.use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+                }
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                val stage = Files.newDirectoryStream(root, ".upload-stream-v1-*").use { it.toList().single() }
+                val before = Files.readAllBytes(stage.resolve("input.elf"))
+                assertEquals(1, store.recoveryInventory().retainedUploadStages)
+                val failure = assertFailsWith<WebJobServiceException> { service.recoveryInventory() }
+                assertEquals("RECOVERY_INSPECTION_BUSY", failure.code)
+                assertEquals(failure.code, publicWebDiagnosticCode(failure.code))
+                assertEquals("Recovery inspection is paused while uploads are in progress. Refresh after uploads finish.",
+                    publicWebDiagnosticMessage(failure.code))
+                kotlin.test.assertContentEquals(before, Files.readAllBytes(stage.resolve("input.elf")))
+                assertTrue(Files.isDirectory(stage))
+                release.countDown()
+                val job = uploaded.get(10, TimeUnit.SECONDS)
+                assertEquals(job.id, service.get(job.id).id)
+                assertFalse(Files.exists(stage))
+                val settled = service.recoveryInventory()
+                assertTrue(settled.inventoryComplete)
+                assertEquals(0, settled.retainedUploadStages)
+                assertEquals(0, settled.retainedMetadataFiles)
+                assertEquals(0L, settled.observedBytes)
+            } finally {
+                release.countDown()
+                callers.shutdownNow()
+                assertTrue(callers.awaitTermination(10, TimeUnit.SECONDS))
+            }
+        }
+    }
+
     @Test fun `scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics`() = withStore { _, root ->
         val absent = root.resolve("absent")
         WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
@@ -262,6 +324,96 @@ class WebJobServiceTest {
         }
     }
 
+    @Test
+    fun `streamed upload confirms new store ancestors under ownership before publication`() = withStore { _, root ->
+        val storage = root.resolve("new-store/nested/jobs")
+        val confirmed = mutableListOf<Path>()
+        val store = JobStore(storage, AtomicUploadPublisher, storeDirectories = JobStoreDirectories { selected ->
+            decompengine.jobs.prepareJobStoreDirectories(selected) { directory ->
+                if (confirmed.isEmpty()) {
+                    assertEquals("OWNERSHIP_CONFLICT", assertFailsWith<WorkflowStoreException> {
+                        WorkflowAttemptStore.open(selected)
+                    }.code)
+                    assertFalse(Files.newDirectoryStream(selected, ".upload-*").use { it.iterator().hasNext() })
+                }
+                forceJobStoreDirectory(directory)
+                confirmed.add(directory)
+            }
+        })
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            assertFalse(Files.exists(storage))
+            val boundary = "directory-confirmation"
+            val binary = elfFixture()
+            val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"confirmed.elf\"\r\n\r\n".toByteArray() +
+                binary + "\r\n--$boundary--\r\n".toByteArray()
+            val job = body.inputStream().use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+            val chain = generateSequence(storage.toRealPath()) { it.parent }.toList()
+            assertEquals(chain, confirmed)
+            kotlin.test.assertContentEquals(binary, Files.readAllBytes(job.binaryPath))
+            assertEquals(listOf(job.id), service.list().map { it.id })
+            assertEquals(chain, confirmed, "reads must not repeat initialization maintenance")
+            println("job-store-directory-confirmation " + kotlinx.serialization.json.buildJsonObject {
+                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(1))
+                put("fixtureOnly", kotlinx.serialization.json.JsonPrimitive(true))
+                put("ancestorCount", kotlinx.serialization.json.JsonPrimitive(chain.size))
+                put("provider", kotlinx.serialization.json.JsonPrimitive(storage.fileSystem.provider().javaClass.name))
+                put("filesystemTypes", kotlinx.serialization.json.JsonArray(chain.map { Files.getFileStore(it).type() }
+                    .distinct().sorted().map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                for (name in listOf("java.runtime.version", "os.name", "os.arch")) {
+                    put(name, kotlinx.serialization.json.JsonPrimitive(System.getProperty(name, "unavailable").take(128)))
+                }
+                put("underOwnership", kotlinx.serialization.json.JsonPrimitive(true))
+                put("inputBytesPreserved", kotlinx.serialization.json.JsonPrimitive(true))
+            })
+        }
+    }
+
+    @Test
+    fun `directory confirmation refusal preserves jobs releases ownership and retries before upload bytes`() = withStore { ordinary, root ->
+        val prior = ordinary.createFromUpload("prior.elf", elfFixture())
+        val metadata = root.resolve(prior.id).resolve("job.json")
+        val before = Files.readAllBytes(metadata)
+        val input = Files.readAllBytes(prior.binaryPath)
+        val confirmed = mutableListOf<Path>()
+        var refuse = true
+        val store = JobStore(root, AtomicUploadPublisher, storeDirectories = JobStoreDirectories { selected ->
+            prepareJobStoreDirectories(selected) { directory ->
+                if (refuse && directory == root.toRealPath().parent) {
+                    throw UnsupportedOperationException("PRIVATE-directory-provider-canary")
+                }
+                forceJobStoreDirectory(directory)
+                confirmed.add(directory)
+            }
+        })
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            val unread = object : java.io.InputStream() {
+                override fun read(): Int = error("Directory refusal must precede request consumption")
+            }
+            val failure = assertFailsWith<WebJobServiceException> {
+                service.uploadMultipart(unread, "multipart/form-data; boundary=unread")
+            }
+            assertEquals("STORE_DURABILITY_UNAVAILABLE", failure.code)
+            assertEquals(failure.code, publicWebDiagnosticCode(failure.code))
+            assertEquals(failure.message, publicWebDiagnosticMessage(failure.code))
+            assertFalse(publicWebDiagnosticMessage(failure.code).contains("PRIVATE"))
+            assertEquals(listOf(root.toRealPath()), confirmed)
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+            kotlin.test.assertContentEquals(input, Files.readAllBytes(prior.binaryPath))
+            assertFalse(Files.newDirectoryStream(root, ".upload-*").use { it.iterator().hasNext() })
+            WorkflowAttemptStore.open(root).use { /* failed admission did not retain the root lease */ }
+            refuse = false
+            val boundary = "directory-retry"
+            val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"retry.elf\"\r\n\r\n".toByteArray() +
+                elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            val uploaded = body.inputStream().use { service.uploadMultipart(it, "multipart/form-data; boundary=$boundary") }
+            assertEquals(listOf(root.toRealPath()) + generateSequence(root.toRealPath()) { it.parent }.toList(), confirmed)
+            assertEquals(setOf(prior.id, uploaded.id), service.list().map { it.id }.toSet())
+            kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
+            kotlin.test.assertContentEquals(input, Files.readAllBytes(prior.binaryPath))
+        }
+    }
+
     private fun await(condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
@@ -269,7 +421,8 @@ class WebJobServiceTest {
     }
 
     private fun withStore(block: (JobStore, Path) -> Unit) {
-        val root = createTempDirectory("web-job-service-")
+        val temporaryRoot = Files.createDirectories(Path.of("build/test-tmp/web-job-service").toAbsolutePath())
+        val root = createTempDirectory(temporaryRoot, "web-job-service-")
         try {
             block(JobStore(root), root)
         } finally {

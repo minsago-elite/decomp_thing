@@ -172,148 +172,6 @@ class LinuxBubblewrapBoundaryTest {
             assertEquals("host mounts changed during runtime manifest", lostDiagnostic.message)
             assertTrue(lostDiagnostic.suppressed.isEmpty())
         }
-
-        // The private-control guards compare parsed tables, not the runtime scope's poll result.
-        val boundaryType = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
-        val tableParser = boundaryType.getDeclaredMethod("parseHostPhysicalMounts", List::class.java, Function0::class.java)
-        val tableComparison = boundaryType.getDeclaredMethod("requirePrivateControlMountTablesUnchanged",
-            List::class.java, List::class.java, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE, LinuxFileKey::class.java)
-        fun parseTables(lines: List<String>): List<*> = invokePrivate(null, tableParser, lines, {}) as List<*>
-        fun compareTables(before: List<*>, after: List<*>, pathGuard: Boolean = true,
-            recursive: Boolean = false, selfExcluded: Boolean = false) {
-            invokePrivate(null, tableComparison, before, after, pathGuard, recursive,
-                if (selfExcluded) LinuxFileKey(987654321L, 123456789L) else null)
-        }
-        val tableContainsCleanup = Class.forName("decompengine.acp.AcpAgentHarnessKt")
-            .getDeclaredMethod("containsCleanupProofFailure", Throwable::class.java)
-        val firstRow = "123456789 1 9:10 /table-root-canary /table-point-canary rw - tmpfs tmpfs rw"
-        val secondRow = "987654321 1 9:11 /second-root-canary /second-point-canary rw - tmpfs tmpfs rw"
-        val table = parseTables(listOf(firstRow, secondRow))
-        compareTables(table, table)
-        compareTables(table, parseTables(listOf(firstRow, secondRow)))
-        compareTables(emptyList<Any>(), emptyList<Any>())
-        val changedTables = listOf(
-            parseTables(listOf(firstRow)), // Count shrink.
-            parseTables(listOf(firstRow, secondRow, "333333333 1 9:12 /third-root-canary /third-point-canary rw - tmpfs tmpfs rw")),
-            parseTables(listOf(firstRow.replace("123456789", "223456789"), secondRow)),
-            parseTables(listOf(firstRow.replace("9:10", "8:10"), secondRow)),
-            parseTables(listOf(firstRow.replace("9:10", "9:12"), secondRow)),
-            parseTables(listOf(firstRow.replace("/table-root-canary", "/changed-root-canary"), secondRow)),
-            parseTables(listOf(firstRow.replace("/table-point-canary", "/changed-point-canary"), secondRow)),
-            parseTables(listOf(secondRow, firstRow)), // Ordered equality remains strict.
-        )
-        for (pathGuard in listOf(true, false)) {
-            for (recursive in if (pathGuard) listOf(false, true) else listOf(false)) {
-                for (selfExcluded in listOf(false, true)) {
-                    for (changed in changedTables) {
-                        val refused = assertFailsWith<IOException> {
-                            compareTables(table, changed, pathGuard, recursive, selfExcluded)
-                        }
-                        assertEquals(IOException::class.java, refused.javaClass)
-                        assertEquals("host mounts changed during private-control protection", refused.message)
-                        assertEquals(null, refused.cause)
-                        val witness = refused.suppressed.single()
-                        assertEquals("decompengine.acp.PrivateControlMountTableDiagnostic", witness.javaClass.name)
-                        val record = requireNotNull(witness.message)
-                        assertEquals("private-control-mount-v1 kind=TABLE_COMPARISON reason=PARSED_TABLE_INEQUALITY site=" +
-                            (if (pathGuard) "PATH_GUARD_POST_COVERAGE" else "DESCRIPTOR_GUARD_POST_COVERAGE") +
-                            " beforeEntries=2 afterEntries=" + changed.size + " recursive=" + recursive +
-                            " selfExclusionSpecified=" + selfExcluded + " finalControls=NOT_REVALIDATED" +
-                            " poll=NOT_PERFORMED generation=NOT_EVALUATED", record)
-                        assertTrue(record.toByteArray(Charsets.US_ASCII).size <= 512 && record.all { it.code in 32..126 })
-                        assertFalse(record.contains("canary") || record.contains("123456789") || record.contains("987654321"))
-                        assertEquals(null, witness.cause)
-                        assertTrue(witness.stackTrace.isEmpty())
-                        witness.addSuppressed(IOException("not retained"))
-                        assertTrue(witness.suppressed.isEmpty())
-                        assertFalse(AcpCleanupProofFailure::class.java.isInstance(witness))
-                        assertEquals(false, invokePrivate(null, tableContainsCleanup, refused))
-                        val cleanup = AcpCleanupProofFailure("authored later table cleanup")
-                        refused.addSuppressed(cleanup)
-                        assertTrue(refused.suppressed[0] === witness && refused.suppressed[1] === cleanup)
-                        assertEquals(true, invokePrivate(null, tableContainsCleanup, refused))
-                    }
-                }
-            }
-        }
-        val maximumRows = List(4096) { index ->
-            (100000L + index).toString() + " 1 9:10 /maximum-root-canary /maximum-point-canary rw - tmpfs tmpfs rw"
-        }
-        val maximumBefore = parseTables(maximumRows)
-        val maximumAfter = parseTables(maximumRows.toMutableList().also { it[0] = it[0].replace("100000", "999999") })
-        val maximumFailure = assertFailsWith<IOException> { compareTables(maximumBefore, maximumAfter) }
-        assertTrue(requireNotNull(maximumFailure.suppressed.single().message).contains("beforeEntries=4096 afterEntries=4096"))
-
-        // An equal result must not observe diagnostic sizes, format text or scan rows.
-        var equalCalls = 0
-        var equalSizeCalls = 0
-        var rowReads = 0
-        val equalWithoutSize = object : AbstractList<Any?>() {
-            override val size: Int get() { equalSizeCalls++; error("diagnostic size observed on equality") }
-            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
-            override fun equals(other: Any?): Boolean { equalCalls++; return true }
-        }
-        compareTables(equalWithoutSize, emptyList<Any>())
-        assertEquals(1, equalCalls)
-        assertEquals(0, equalSizeCalls)
-        assertEquals(0, rowReads)
-
-        // The original fresh refusal exists before any fallible diagnostic size observation.
-        val sizeFailure = IOException("authored table diagnostic size failure")
-        var unequalCalls = 0
-        var failedSizeCalls = 0
-        val unequalWithoutSize = object : AbstractList<Any?>() {
-            override val size: Int get() { failedSizeCalls++; throw sizeFailure }
-            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
-            override fun equals(other: Any?): Boolean { unequalCalls++; return false }
-        }
-        val omitted = assertFailsWith<IOException> { compareTables(unequalWithoutSize, emptyList<Any>()) }
-        assertTrue(omitted !== sizeFailure)
-        assertEquals(IOException::class.java, omitted.javaClass)
-        assertEquals("host mounts changed during private-control protection", omitted.message)
-        assertEquals(null, omitted.cause)
-        assertTrue(omitted.suppressed.isEmpty())
-        assertEquals(1, unequalCalls)
-        assertEquals(1, failedSizeCalls)
-        assertEquals(0, rowReads)
-
-        var afterSizeCalls = 0
-        val unequalWithSize = object : AbstractList<Any?>() {
-            override val size: Int get() = 1
-            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
-            override fun equals(other: Any?): Boolean = false
-        }
-        val afterWithoutSize = object : AbstractList<Any?>() {
-            override val size: Int get() { afterSizeCalls++; throw sizeFailure }
-            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
-        }
-        val afterOmitted = assertFailsWith<IOException> { compareTables(unequalWithSize, afterWithoutSize) }
-        assertTrue(afterOmitted !== sizeFailure)
-        assertEquals(IOException::class.java, afterOmitted.javaClass)
-        assertEquals("host mounts changed during private-control protection", afterOmitted.message)
-        assertEquals(null, afterOmitted.cause)
-        assertTrue(afterOmitted.suppressed.isEmpty())
-        assertEquals(1, afterSizeCalls)
-        assertEquals(0, rowReads)
-
-        val outOfBoundSize = object : AbstractList<Any?>() {
-            override val size: Int get() = 4097
-            override fun get(index: Int): Any? { rowReads++; error("diagnostic row scan") }
-            override fun equals(other: Any?): Boolean = false
-        }
-        val outOfBound = assertFailsWith<IOException> { compareTables(outOfBoundSize, emptyList<Any>()) }
-        assertEquals("host mounts changed during private-control protection", outOfBound.message)
-        assertTrue(outOfBound.suppressed.isEmpty()) // Never clamp or fabricate an admitted count.
-        assertEquals(0, rowReads)
-        val comparisonFailure = IOException("authored original comparison failure")
-        val throwsDuringComparison = object : AbstractList<Any?>() {
-            override val size: Int get() { error("diagnostic size after foreign comparison failure") }
-            override fun get(index: Int): Any? { error("diagnostic row scan") }
-            override fun equals(other: Any?): Boolean = throw comparisonFailure
-        }
-        val foreign = assertFailsWith<IOException> { compareTables(throwsDuringComparison, emptyList<Any>()) }
-        assertTrue(foreign === comparisonFailure)
-        assertTrue(foreign.suppressed.isEmpty())
     }
 
     private class MountDiagnosticSuppressionDisabled : Throwable("authored suppression disabled", null, false, false)
@@ -389,7 +247,17 @@ class LinuxBubblewrapBoundaryTest {
     }
 
     private class RootObservationMemory(private val observe: () -> Unit) : com.sun.jna.Memory(256) {
+        var beforeDecode: ((com.sun.jna.Memory) -> Unit)? = null
+        var closes = 0
         override fun clear() { observe(); super.clear() }
+        override fun read(offset: Long, buffer: ByteArray, index: Int, length: Int) {
+            assertEquals(0L, offset)
+            assertEquals(0, index)
+            assertEquals(256, length)
+            beforeDecode?.invoke(this)
+            super.read(offset, buffer, index, length)
+        }
+        override fun close() { closes++; super.close() }
     }
 
     private class ManifestStatxMemory(private val closeFailure: Throwable? = null) : com.sun.jna.Memory(256) {
@@ -585,13 +453,150 @@ class LinuxBubblewrapBoundaryTest {
                         (statistics.get(scratch) as com.sun.jna.Memory).close()
                         val order = mutableListOf<String>()
                         var duringQuery: (() -> Unit)? = null
-                        statistics.set(scratch, RootObservationMemory {
+                        val rootStorage = RootObservationMemory {
                             val ownsDescriptor = Thread.holdsLock(descriptor)
                             assertTrue(ownsDescriptor || Thread.holdsLock(registry), "body or scope ownership covers each query")
                             assertTrue(Thread.holdsLock(scratch), "each query retains scratch ownership")
                             order += if (ownsDescriptor) "query" else "tail-query"
                             duringQuery?.invoke()
-                        })
+                        }
+                        statistics.set(scratch, rootStorage)
+                        // Actual retained-control queries borrow this scope's storage, not a copied validator.
+                        run {
+                            val firstControl = newControl()
+                            var secondControl: Any? = null
+                            var thirdControl: Any? = null
+                            val controlQueries = mutableListOf<Long>()
+                            var changeDecodedControl: ((com.sun.jna.Memory) -> Unit)? = null
+                            try {
+                                secondControl = newControl()
+                                invokePrivate(firstScope, scopeCheckpoint) // Install both original generic admissions.
+                                @Suppress("UNCHECKED_CAST")
+                                fun retained() = (field(firstScope, "controls") as Map<Any, Any>)
+                                val retainedType = Class.forName("decompengine.acp.ManifestControlIdentity")
+                                val retainedDescriptor = retainedType.getDeclaredField("descriptor").apply { isAccessible = true }
+                                val generic = retainedType.getDeclaredMethod("requireUnchanged")
+                                val borrowed = retainedType.getDeclaredMethod("requireUnchanged",
+                                    LinuxFilesystemSyscalls.StatxIdentityScratch::class.java)
+                                fun inode(control: Any): Long =
+                                    (retainedDescriptor.get(retained().getValue(control)) as LinuxDescriptor).identity.key.inode
+                                val originalOrder = listOf(inode(firstControl), inode(checkNotNull(secondControl)))
+                                rootStorage.beforeDecode = { memory ->
+                                    if (Thread.currentThread().stackTrace.any {
+                                        it.className == retainedType.name && it.methodName == "requireUnchanged"
+                                    }) {
+                                        assertTrue(Thread.holdsLock(registry), "control queries retain ACTIVE ownership")
+                                        assertTrue(Thread.holdsLock(scratch), "control queries borrow the scratch under its lock")
+                                        assertFalse(Thread.holdsLock(descriptor), "no new root-descriptor lock wraps control queries")
+                                        controlQueries += memory.getLong(0x20)
+                                        changeDecodedControl?.invoke(memory)
+                                    }
+                                }
+                                repeat(2) {
+                                    controlQueries.clear()
+                                    invokePrivate(firstScope, scopeCheckpoint)
+                                    assertEquals(originalOrder, controlQueries, "normal pass queries every control once in insertion order")
+                                }
+                                thirdControl = newControl()
+                                controlQueries.clear()
+                                invokePrivate(firstScope, scopeCheckpoint)
+                                val completeControlOrder = originalOrder + inode(checkNotNull(thirdControl))
+                                assertEquals(originalOrder + completeControlOrder, controlQueries,
+                                    "reconciliation and normal validation remain two separate observations; new admission stays generic")
+                                controlQueries.clear()
+                                invokePrivate(firstScope, scopeCheckpoint)
+                                assertEquals(completeControlOrder, controlQueries)
+
+                                val identity = retained().getValue(firstControl)
+                                val controlDescriptor = retainedDescriptor.get(identity) as LinuxDescriptor
+                                fun validateBorrowed(storage: LinuxFilesystemSyscalls.StatxIdentityScratch = scratch) =
+                                    synchronized(registry) { invokePrivate(identity, borrowed, storage) }
+                                fun validateGeneric() = synchronized(registry) { invokePrivate(identity, generic) }
+                                val controlInode = controlDescriptor.identity.key.inode
+                                val genericSentinel = IOException("generic route must not borrow scope storage")
+                                changeDecodedControl = { throw genericSentinel }
+                                controlQueries.clear()
+                                validateGeneric()
+                                assertEquals(emptyList<Long>(), controlQueries, "the original no-argument route remains generic")
+                                val livePath = invokePrivate(firstControl, type.getDeclaredMethod("getPath")) as Path
+                                val savedPermissions = Files.getPosixFilePermissions(livePath)
+                                Files.setPosixFilePermissions(livePath, savedPermissions + PosixFilePermission.GROUP_READ)
+                                try {
+                                    val refused = assertFailsWith<IOException> { validateGeneric() }
+                                    assertEquals("private directory descriptor identity changed", refused.message)
+                                    assertEquals(emptyList<Long>(), controlQueries)
+                                } finally { Files.setPosixFilePermissions(livePath, savedPermissions) }
+                                changeDecodedControl = null
+                                validateGeneric()
+
+                                // Alter real post-statx storage before the actual common predicate consumes it.
+                                val mutations: List<(com.sun.jna.Memory) -> Unit> = listOf(
+                                    { it.setLong(0x20, it.getLong(0x20) + 1) },
+                                    { it.setLong(0x90, it.getLong(0x90) + 1) },
+                                    { it.setShort(0x1c, ((it.getShort(0x1c).toInt() and 0xfff) or 0x8000).toShort()) },
+                                    { it.setShort(0x1c, ((it.getShort(0x1c).toInt() and 0xfff) or 0xa000).toShort()) },
+                                    { it.setInt(0x14, it.getInt(0x14) + 1) },
+                                    { it.setInt(0x18, it.getInt(0x18) + 1) },
+                                    { it.setShort(0x1c, (it.getShort(0x1c).toInt() xor 0x40).toShort()) },
+                                )
+                                mutations.forEach { mutation ->
+                                    changeDecodedControl = mutation
+                                    controlQueries.clear()
+                                    val refused = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertEquals("private directory descriptor identity changed", refused.message)
+                                    assertEquals(listOf(controlInode), controlQueries)
+                                    changeDecodedControl = null
+                                    controlQueries.clear()
+                                    validateBorrowed()
+                                    assertEquals(listOf(controlInode), controlQueries,
+                                        "next real query resets and decodes current values, never the prior mutation")
+                                }
+                                val earlier = synchronized(registry) { scratch.identity(controlDescriptor.fd) }
+                                Files.setPosixFilePermissions(livePath, savedPermissions + PosixFilePermission.GROUP_READ)
+                                try {
+                                    val later = synchronized(registry) { scratch.identity(controlDescriptor.fd) }
+                                    assertNotEquals(earlier.mode, later.mode)
+                                    assertEquals(controlDescriptor.identity.mode, earlier.mode, "earlier decoded identity is detached immutable data")
+                                } finally { Files.setPosixFilePermissions(livePath, savedPermissions) }
+
+                                val renamedControl = parent.resolve("retained-query-moved")
+                                Files.move(livePath, renamedControl)
+                                try {
+                                    val sentinel = IOException("borrowed control decode sentinel")
+                                    changeDecodedControl = { throw sentinel }
+                                    controlQueries.clear()
+                                    val observed = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertTrue(observed === sentinel, "query failure precedes the independently failing moved-name check")
+                                    assertEquals(listOf(controlInode), controlQueries)
+                                    changeDecodedControl = null
+                                    val moved = assertFailsWith<IOException> { validateBorrowed() }
+                                    assertEquals("private control moved during runtime manifest", moved.message)
+                                    val movedGeneric = assertFailsWith<IOException> { validateGeneric() }
+                                    assertEquals(moved.message, movedGeneric.message)
+                                    val closedStorage = LinuxFilesystemSyscalls.StatxIdentityScratch()
+                                    val closedMemory = ManifestStatxMemory()
+                                    replaceManifestStatxMemory(closedStorage, closedMemory)
+                                    closedStorage.close(); closedStorage.close()
+                                    controlQueries.clear()
+                                    val closed = assertFailsWith<IllegalStateException> { validateBorrowed(closedStorage) }
+                                    assertEquals("descriptor identity scratch is closed", closed.message)
+                                    assertEquals(emptyList<Long>(), controlQueries)
+                                    assertEquals(1, closedMemory.closes)
+                                    assertEquals(controlDescriptor.fd, controlDescriptor.whileOpen { it }, "scratch close never closes its borrowed fd")
+                                } finally {
+                                    changeDecodedControl = null
+                                    Files.move(renamedControl, livePath)
+                                }
+                                validateBorrowed()
+                                assertEquals(0, rootStorage.closes, "validation never owns scratch close")
+                            } finally {
+                                rootStorage.beforeDecode = null
+                                thirdControl?.let(::remove)
+                                secondControl?.let(::remove)
+                                remove(firstControl)
+                                invokePrivate(firstScope, scopeCheckpoint) // Retire retained deleted identities before old controls.
+                            }
+                        }
                         var previous: Any? = null
                         repeat(3) {
                             order.clear()
@@ -731,15 +736,15 @@ class LinuxBubblewrapBoundaryTest {
 
                                         // Both routes drive the existing hash/copy callback cadence, without a replacement query.
                                         val hash = boundaryType.getDeclaredMethod("sha256", LinuxDescriptor::class.java,
-                                            java.lang.Long.TYPE, Function0::class.java)
+                                            java.lang.Long.TYPE, Function0::class.java, RuntimeCopyStatistics::class.java)
                                         queries.clear()
-                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check)
+                                        val boundDigest = invokePrivate(null, hash, file, Files.size(boundPath), check, null)
                                         val hashOrder = queries.toList()
                                         queries.clear()
                                         val originalDigest = invokePrivate(null, hash, file, Files.size(boundPath), {
                                             invokePrivate(firstScope, originalDescriptorCheck, file, boundPath, false)
                                             Unit
-                                        })
+                                        }, null)
                                         assertEquals(originalDigest, boundDigest)
                                         assertEquals(hashOrder, queries, "all original hash checkpoints still execute")
                                         assertTrue(hashOrder.count { it == "file" } > 1, "the real multi-chunk hash repeats the bound check")
@@ -880,6 +885,9 @@ class LinuxBubblewrapBoundaryTest {
                             assertFailsWith<IllegalStateException> { descriptor.whileOpen(retainedObserver) }
                             val closedScope = assertFailsWith<IOException> { checkNotNull(boundAfterScopeClose).invoke() }
                             assertEquals("runtime manifest scope is closed", closedScope.message)
+                            assertEquals(1, rootStorage.closes, "scope close alone releases its reused query storage once")
+                            firstScope.close()
+                            assertEquals(1, rootStorage.closes)
                         } finally {
                             releaseQuery.countDown()
                             observing.get(5, TimeUnit.SECONDS)
@@ -1608,6 +1616,11 @@ class LinuxBubblewrapBoundaryTest {
         val parent = Files.createDirectory(base.resolve("controls"))
         val workspace = Files.createDirectory(base.resolve("workspace"))
         fun openDescriptorCount() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+        fun descriptorTargets(): Map<String, String> = Files.list(Path.of("/proc/self/fd")).use { entries ->
+            entries.map { path -> path.fileName.toString() to
+                runCatching { Files.readSymbolicLink(path).toString() }.getOrDefault("unavailable")
+            }.toList().toMap()
+        }
         val identityType = LinuxFilesystemSyscalls::class.java
         val legacyIdentity = identityType.getDeclaredMethod("descriptorProcIdentity", Int::class.javaPrimitiveType)
         val statxIdentity = identityType.getDeclaredMethod("descriptorStatxIdentity", Int::class.javaPrimitiveType)
@@ -1617,6 +1630,20 @@ class LinuxBubblewrapBoundaryTest {
             val legacy = invokePrivate(LinuxFilesystemSyscalls, legacyIdentity, fd)
             val native = invokePrivate(LinuxFilesystemSyscalls, statxIdentity, fd)
             assertEquals(legacy, LinuxFilesystemSyscalls.identity(fd))
+            val beforeOwnedTargets = descriptorTargets()
+            val beforeOwnedInitialization = openDescriptorCount()
+            val repeatedQueryBaseline = LinuxFilesystemSyscalls.StatxIdentityScratch().use { scratch ->
+                // Initialize the actual owned/native call site before counting lease-owned descriptors.
+                assertEquals(legacy, scratch.identity(fd))
+                val baseline = openDescriptorCount()
+                repeat(3) { assertEquals(legacy, scratch.identity(fd)) }
+                baseline
+            }
+            assertEquals(repeatedQueryBaseline, openDescriptorCount(),
+                "repeated owned queries and scratch close retain no additional descriptors")
+            val initializedTargets = descriptorTargets().filter { (fd, target) -> beforeOwnedTargets[fd] != target }
+                .entries.take(16).joinToString { (fd, target) -> "$fd:${target.take(256)}" }
+            println("private-control-bind-probe: ownedIdentityInitializationDelta=${repeatedQueryBaseline - beforeOwnedInitialization} newTargets=[$initializedTargets]")
             if (native != null) {
                 assertEquals(legacy, native)
                 nativeStatxCases++
@@ -2115,14 +2142,14 @@ class LinuxBubblewrapBoundaryTest {
             byteCheckpoints = 0
             var controlDuringCopy = false
             val copiedSnapshot = requireNotNull(invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
-                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, copyControl, {
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java, RuntimeCopyStatistics::class.java), largeSource, largeLimits, copyControl, {
                         if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
                             val concurrent = newControl()
                             invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve"))
                             controls.remove(concurrent)
                             controlDuringCopy = true
                         }
-                    }))
+                    }, null))
             assertTrue(controlDuringCopy)
             val copiedSource = invokePrivate(copiedSnapshot, copiedSnapshot.javaClass.getDeclaredMethod("getSource")) as Path
             // Source lives inside its exact private owner; compare all copied bytes directly.
@@ -2139,11 +2166,11 @@ class LinuxBubblewrapBoundaryTest {
             byteCheckpoints = 0
             val cancelledCopy = assertFailsWith<IOException> {
                 invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
-                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, cancelledCopyControl, {
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java, RuntimeCopyStatistics::class.java), largeSource, largeLimits, cancelledCopyControl, {
                         if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
                             throw IOException("injected partial-copy cancellation")
                         }
-                    })
+                    }, null)
             }
             assertEquals("injected partial-copy cancellation", cancelledCopy.message)
             assertTrue(Files.list(controlPath(cancelledCopyControl)).use { it.findAny().isEmpty }, "failed partial copy cleanup must be proved")

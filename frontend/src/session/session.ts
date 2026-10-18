@@ -10,13 +10,13 @@ export type SessionGateway = {
   logout: (csrfToken: string, signal: AbortSignal) => Promise<void>;
 };
 
-export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId' | 'readiness' | 'capabilities' | 'limits' | 'runtime'>;
+export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId' | 'serverInstanceId' | 'readiness' | 'capabilities' | 'limits' | 'runtime'>;
 
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
+  | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
-  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
+  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
 
 /** Session/CSRF material stays in this page's closure and never enters UI snapshots. */
 export function createBrowserSession(gateway: SessionGateway, basePath: string) {
@@ -32,6 +32,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let queuedBootstrapToken: string | null = null;
   let queuedConnection: Promise<void> | null = null;
   let generation = 0;
+  let previousInstanceId: string | null | undefined;
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<(state: SessionState) => void>();
@@ -68,7 +69,10 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required', ...reference });
     else if (code === 'BOOTSTRAP_EXPIRED') publish({ status: 'required', reason: 'bootstrap-expired', ...reference });
     else if (code === 'HOST_DENIED' || code === 'ORIGIN_DENIED') publish({ status: 'unavailable', reason: 'configuration', ...reference });
-    else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
+    else if (!logout && error instanceof ApiClientError && error.code === 'unsupported_contract') {
+      notifyInvalidated(false);
+      publish({ status: 'unavailable', reason: 'incompatible', ...reference });
+    } else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
   }
   function authenticated(bootstrap: Bootstrap) {
     if (disposed) return;
@@ -81,14 +85,20 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'required', reason: 'expired' });
     } else {
       forget();
+      const instanceId = bootstrap.serverInstanceId ?? null;
+      // Missing older-server metadata is unknown; never reuse instance-bound state on that basis.
+      if (previousInstanceId !== undefined && (instanceId === null || previousInstanceId !== instanceId)) notifyInvalidated(false);
+      previousInstanceId = instanceId;
       csrfToken = bootstrap.csrfToken;
       // Explicit projection prevents session credentials from entering observable UI state.
       const runtime: RuntimeSnapshot = {
         applicationBuildId: bootstrap.applicationBuildId, uiBuildId: bootstrap.uiBuildId,
+        ...(bootstrap.serverInstanceId === undefined ? {} : { serverInstanceId: bootstrap.serverInstanceId }),
         readiness: bootstrap.readiness, capabilities: structuredClone(bootstrap.capabilities),
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime });
+      // A new bootstrap generation replaces private views even when intermediate renders coalesce.
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime });
       expiry = setTimeout(() => {
         forget();
         publish({ status: 'required', reason: 'expired' });

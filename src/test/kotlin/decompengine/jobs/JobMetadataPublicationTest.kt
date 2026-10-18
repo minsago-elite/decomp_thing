@@ -1,9 +1,11 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -11,6 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class JobMetadataPublicationTest {
     @Test fun `failure before write preserves prior metadata`() = verify(Fault.BEFORE_WRITE)
     @Test fun `partial private write preserves prior metadata`() = verify(Fault.PARTIAL_WRITE)

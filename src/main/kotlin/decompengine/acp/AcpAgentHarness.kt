@@ -253,6 +253,9 @@ class AcpAgentHarness(
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
+        val prefixObservation = createOptionalPrelaunchObservation {
+            RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
+        }
         val binding = AgentExecutionRequestBinding.capture(request)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
         var schedulingPermit: AcpExecutionScheduler.Permit? = null
@@ -296,6 +299,7 @@ class AcpAgentHarness(
                     wallDeadline,
                     sessionJournal,
                     authenticationInventory,
+                    prefixObservation,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -370,6 +374,7 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         sessionJournal: AgentSessionJournal?,
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
+        prefixObservation: RuntimeCopyStatistics.Prefix?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -464,6 +469,7 @@ class AcpAgentHarness(
                 request,
                 translator.activity,
                 wallDeadline,
+                prefixObservation,
             )
         } catch (cancelled: RequestedAcpCancellation) {
             return AgentExecutionResult(
@@ -711,16 +717,23 @@ class AcpAgentHarness(
                 unresolvedCleanupFailure.compareAndSet(null, cleanup)
                 fatal.addSuppressed(cleanup)
             }
+            running.attachStdoutShutdownFacts(fatal)
             throw fatal
         }
         if (fatalCleanup != null) {
             primaryFailure?.let(fatalCleanup::addSuppressed)
-            unresolvedCleanupFailure.compareAndSet(null, fatalCleanup)
-            throw requireNotNull(unresolvedCleanupFailure.get())
+            val attachOwnedFacts: ((Throwable) -> Unit)? = try {
+                running::attachStdoutShutdownFacts
+            } catch (_: Throwable) {
+                null // Diagnostic preparation cannot replace or prevent sticky publication.
+            }
+            throw publishFatalCleanup(fatalCleanup, attachOwnedFacts)
         }
         val completedPrimaryFailure = primaryFailure
         if (completedPrimaryFailure != null) {
-            throw mapFailure(completedPrimaryFailure, running, translator.sessionReference())
+            val original = mapFailure(completedPrimaryFailure, running, translator.sessionReference())
+            running.attachStdoutShutdownFacts(original)
+            throw original
         }
 
         val finished = requireNotNull(outcome)
@@ -1603,6 +1616,21 @@ class AcpAgentHarness(
         }
     }
 
+    private fun publishFatalCleanup(
+        fatalCleanup: AgentExecutionException,
+        attachOwnedFacts: ((Throwable) -> Unit)?,
+    ): AgentExecutionException {
+        // This execution owns fatalCleanup. Finish its facts before another execution can
+        // observe publication; a losing publisher must never modify the selected failure.
+        try {
+            attachOwnedFacts?.invoke(fatalCleanup)
+        } catch (_: Throwable) {
+            // Diagnostics are best effort; the original failure still must be published.
+        }
+        unresolvedCleanupFailure.compareAndSet(null, fatalCleanup)
+        return requireNotNull(unresolvedCleanupFailure.get())
+    }
+
     private fun mapFailure(
         failure: Throwable,
         running: RunningAcpProcess,
@@ -1670,7 +1698,10 @@ class AcpAgentHarness(
                     AgentFailureKind.RESOURCE_EXHAUSTED,
                     failure.message ?: "ACP stdout limit exceeded",
                     session = session,
-                    details = mapOf("pid" to running.process.pid().toString()),
+                    details = buildMap {
+                        put("pid", running.process.pid().toString())
+                        running.stdoutShutdownFailureFacts()?.let { put(STDOUT_SHUTDOWN_FACTS_KEY, it) }
+                    },
                 ),
                 failure,
             )
@@ -1885,14 +1916,27 @@ private class ProductionAcpSandboxExecution(
     request: AgentExecutionRequest,
     activity: ProtocolActivity,
     wallDeadline: MonotonicDeadline,
+    private val prefixObservation: RuntimeCopyStatistics.Prefix?,
 ) : AutoCloseable {
     private val boundary: LinuxBubblewrapBoundary
     private val executionCheck: () -> Unit = {
-        if (request.cancellation.isCancellationRequested()) {
-            throw RequestedAcpCancellation("sandbox launch")
+        try {
+            if (request.cancellation.isCancellationRequested()) {
+                throw RequestedAcpCancellation("sandbox launch")
+            }
+            if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
+        } catch (failure: Throwable) {
+            prefixObservation?.failureCurrent(when (failure) {
+                is AcpPhaseTimeout -> RuntimeCopyStatistics.Prefix.Failure.TIMEOUT
+                is RequestedAcpCancellation -> RuntimeCopyStatistics.Prefix.Failure.CANCELLED
+                is Error -> RuntimeCopyStatistics.Prefix.Failure.ERROR
+                else -> RuntimeCopyStatistics.Prefix.Failure.OTHER
+            })
+            throw failure
         }
-        if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
     }
+    private inline fun <T> observePrefix(phase: RuntimeCopyStatistics.Prefix.Phase, action: () -> T): T =
+        if (prefixObservation == null) action() else prefixObservation.measure(phase, action)
     val running: RunningAcpProcess
     val networkIsolated: Boolean get() = boundary.networkIsolated
 
@@ -1913,39 +1957,45 @@ private class ProductionAcpSandboxExecution(
             ),
         )
         boundary = try {
-            LinuxBubblewrapBoundary.prepare(
-                sandboxConfiguration,
-                cancellationCheck = executionCheck,
-            )
+            observePrefix(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+                LinuxBubblewrapBoundary.prepare(
+                    sandboxConfiguration,
+                    cancellationCheck = executionCheck,
+                    prefixObservation = prefixObservation,
+                )
+            }
         } catch (failure: Exception) {
             if (failure is RequestedAcpCancellation) throw failure
             if (failure is AcpPhaseTimeout) {
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.TIMEOUT,
                         failure.message ?: "ACP execution exceeded its wall-clock timeout during sandbox preparation",
                         retryable = true,
                     ),
                     failure,
+                    prefixObservation,
                 )
             }
             if (failure is AgentExecutionException) throw failure
             if (failure.containsCleanupProofFailure()) {
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.INTERNAL,
                         "ACP sandbox preparation failed and cleanup was not proven",
                     ),
                     failure,
+                    prefixObservation,
                 )
             }
-            throw AgentExecutionException(
+            throw mappedPrelaunchFailure(
                 AgentFailure(
                     AgentFailureKind.CONFIGURATION,
                     "ACP process sandbox boundary is unavailable or could not be verified",
                     details = mapOf("provider" to "bubblewrap+systemd-cgroup-v2"),
                 ),
                 failure,
+                prefixObservation,
             )
         }
         running = try {
@@ -1954,7 +2004,7 @@ private class ProductionAcpSandboxExecution(
                 configuration.executable,
                 configuration.expectedExecutableManifestSha256,
             )
-            val sandboxed = boundary.launch(
+            val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
                     command = configuration.command(),
                     environment = configuration.environmentValues(),
@@ -1968,7 +2018,9 @@ private class ProductionAcpSandboxExecution(
                 ),
                 mergeError = false,
                 cancellationCheck = executionCheck,
-            )
+            ) }
+            // Retain completed owner statistics without mixing later broker launches.
+            boundary.finishPrelaunchObservation()
             RunningAcpProcess(
                 process = sandboxed.process,
                 sandboxed = sandboxed,
@@ -1979,7 +2031,7 @@ private class ProductionAcpSandboxExecution(
             )
         } catch (failure: Throwable) {
             val cleanupFailure = try {
-                boundary.close()
+                observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
                 null
             } catch (cleanup: Throwable) {
                 cleanup
@@ -1994,12 +2046,13 @@ private class ProductionAcpSandboxExecution(
             }
             if (cleanupFailure != null) {
                 cleanupFailure.addSuppressed(failure)
-                throw AgentExecutionException(
+                throw mappedPrelaunchFailure(
                     AgentFailure(
                         AgentFailureKind.INTERNAL,
                         "ACP launch failed and sandbox cleanup was not proven",
                     ),
                     cleanupFailure,
+                    prefixObservation,
                 )
             }
             throw mapLaunchFailure(failure)
@@ -2032,46 +2085,70 @@ private class ProductionAcpSandboxExecution(
         executionCheck,
     )
 
-    override fun close() = boundary.close()
+    override fun close() = observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
 
     private fun mapLaunchFailure(failure: Throwable): Throwable = when (failure) {
         is RequestedAcpCancellation, is AgentExecutionException -> failure
-        is AcpPhaseTimeout -> AgentExecutionException(
+        is AcpPhaseTimeout -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.TIMEOUT,
                 failure.message ?: "ACP execution exceeded its wall-clock timeout during sandbox launch",
                 retryable = true,
             ),
             failure,
+            prefixObservation,
         )
-        is AcpCleanupProofFailure -> AgentExecutionException(
+        is AcpCleanupProofFailure -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.INTERNAL,
                 "ACP launch failed and sandbox cleanup was not proven",
             ),
             failure,
+            prefixObservation,
         )
-        is IOException -> AgentExecutionException(
+        is IOException -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
                 "failed to launch configured ACP executable: ${configuration.executable}",
                 details = mapOf("executable" to configuration.executable.toString()),
             ),
             failure,
+            prefixObservation,
         )
-        is IllegalArgumentException -> AgentExecutionException(
+        is IllegalArgumentException -> mappedPrelaunchFailure(
             AgentFailure(AgentFailureKind.CONFIGURATION, "configured ACP sandbox authority is invalid"),
             failure,
+            prefixObservation,
         )
-        is IllegalStateException -> AgentExecutionException(
+        is IllegalStateException -> mappedPrelaunchFailure(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
                 "configured ACP sandbox authority changed before launch",
             ),
             failure,
+            prefixObservation,
         )
         else -> failure
     }
+}
+
+/** Inlined diagnostic-only guard includes construction of the bound budget argument. */
+private inline fun createOptionalPrelaunchObservation(
+    create: () -> RuntimeCopyStatistics.Prefix?,
+): RuntimeCopyStatistics.Prefix? = try { create() } catch (_: Throwable) { null }
+
+/** Only an existing mapping's freshly constructed typed exception can receive this record. */
+private fun mappedPrelaunchFailure(
+    failure: AgentFailure,
+    cause: Throwable,
+    observation: RuntimeCopyStatistics.Prefix?,
+): AgentExecutionException {
+    val mapped = AgentExecutionException(failure, cause)
+    try {
+        val diagnostic = observation?.failureDiagnostic()
+        if (diagnostic != null) mapped.addSuppressed(diagnostic)
+    } catch (_: Throwable) { /* Diagnostic failure never replaces the mapped result. */ }
+    return mapped
 }
 
 private class RunningAcpProcess(
@@ -2096,6 +2173,16 @@ private class RunningAcpProcess(
     private val stdoutDrainFinished = CompletableFuture<Unit>()
     private val stdoutClosedForUnblocking = AtomicBoolean(false)
     private val stdoutReadLock = ReentrantLock()
+    // Failure-only owned facts; never EOF, accounting, timing or cleanup authority.
+    private val stdoutFirstIOException = AtomicReference(StdoutIOException.NONE)
+    private var stdoutShutdownFirst: StdoutShutdownSnapshot? = null
+    private var stdoutShutdownFallback: StdoutShutdownSnapshot? = null
+    private var stdoutShutdownRefusal: StdoutShutdownSnapshot? = null
+    private var stdoutFirstWaitMillis: Long? = null
+    private var stdoutFinalWaitMillis: Long? = null
+    private var stdoutSnapshotUnavailable = false
+    @Volatile private var stdoutShutdownFacts: String? = null
+    private val stdoutFactsAttached = AtomicBoolean(false)
     // Production never installs an observer. Reflection-only controls may hold this exact
     // post-read boundary without replacing native reads, bytes, clocks or process authority.
     private var stdoutEofPublicationObserver: (() -> Unit)? = null
@@ -2314,17 +2401,23 @@ private class RunningAcpProcess(
 
         startShutdownStdoutDrain()
         val stdoutMillis = minOf(sliceMillis, shutdownDeadline.remainingMillis())
+        stdoutFirstWaitMillis = stdoutMillis
         if (stdoutMillis > 0) {
             withContext(Dispatchers.IO) {
-                runCatching { stdoutDrainFinished.get(stdoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                val waited = runCatching { stdoutDrainFinished.get(stdoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                recordStdoutShutdownSnapshot(0, StdoutShutdownFacts.waitOperation(waited.exceptionOrNull()))
             }
+        } else {
+            recordStdoutShutdownSnapshot(0, StdoutShutdownOperation.WAIT_SKIPPED)
         }
         if (!stdoutDrainFinished.isDone) {
             // Never close or invalidate a read that still owns the stream, including the
             // interval after read() returned EOF but before that owner publishes its proof.
-            runCatching { tryCloseStdout() }
+            val closed = runCatching { tryCloseStdout() }
+            recordStdoutShutdownSnapshot(1, StdoutShutdownFacts.closeOperation(closed.getOrNull(), closed.exceptionOrNull()))
             startShutdownStdoutDrain()
             val finalStdoutMillis = minOf(sliceMillis, shutdownDeadline.remainingMillis())
+            stdoutFinalWaitMillis = finalStdoutMillis
             if (finalStdoutMillis > 0) {
                 withContext(Dispatchers.IO) {
                     runCatching {
@@ -2334,7 +2427,11 @@ private class RunningAcpProcess(
             }
         }
         runCatching { tryCloseStdout() }
-        if (!stdoutDrainFinished.isDone || !stdoutNaturallyDrained.get()) {
+        // The diagnostic decision has exactly the original short-circuit operand reads.
+        val stdoutRefusal = stdoutShutdownRefusalDecision()
+        if (stdoutRefusal != null) {
+            recordStdoutShutdownSnapshot(2, stdoutRefusal)
+            freezeStdoutShutdownFacts()
             fail(
                 AcpOutputLimitFailure(
                     "ACP stdout shutdown drain did not complete; produced-output accounting is indeterminate",
@@ -2399,18 +2496,74 @@ private class RunningAcpProcess(
             AgentFailure(
                 AgentFailureKind.INTERNAL,
                 "ACP stdout reader remained owned after the shutdown deadline",
-                details = mapOf("phase" to "stdout-drain", "reason" to "readerUnfinished"),
+                details = buildMap {
+                    put("phase", "stdout-drain")
+                    put("reason", "readerUnfinished")
+                    stdoutShutdownFacts?.let { put(STDOUT_SHUTDOWN_FACTS_KEY, it) }
+                },
             ),
         )
+    }
+
+    private fun stdoutShutdownRefusalDecision(): StdoutShutdownOperation? =
+        if (!stdoutDrainFinished.isDone) StdoutShutdownOperation.FINISHED_FALSE_EOF_NOT_READ
+        else if (!stdoutNaturallyDrained.get()) StdoutShutdownOperation.NATURAL_EOF_FALSE else null
+
+    private fun recordStdoutShutdownSnapshot(slot: Int, operation: StdoutShutdownOperation) {
+        try {
+            val sample = StdoutShutdownSnapshot(
+                operation, stdoutOwnership.get(), stdoutDrainFinished.isDone, stdoutNaturallyDrained.get(),
+                stdoutClosedForUnblocking.get(), stdoutFirstIOException.get(), producedOutput.observedBytes(),
+                producedOutput.maximumBytes, producedOutput.exceeded(),
+            )
+            when (slot) {
+                0 -> stdoutShutdownFirst = sample
+                1 -> stdoutShutdownFallback = sample
+                2 -> stdoutShutdownRefusal = sample
+                else -> stdoutSnapshotUnavailable = true
+            }
+        } catch (_: Throwable) {
+            stdoutSnapshotUnavailable = true
+        }
+    }
+
+    private fun freezeStdoutShutdownFacts() {
+        if (stdoutShutdownFacts != null) return
+        stdoutShutdownFacts = try {
+            if (stdoutSnapshotUnavailable) StdoutShutdownFacts.UNAVAILABLE else StdoutShutdownFacts.render(
+                stdoutFirstWaitMillis, stdoutFinalWaitMillis,
+                stdoutShutdownFirst, stdoutShutdownFallback, stdoutShutdownRefusal,
+            )
+        } catch (_: Throwable) {
+            StdoutShutdownFacts.UNAVAILABLE
+        }
+    }
+
+    fun stdoutShutdownFailureFacts(): String? = stdoutShutdownFacts
+
+    fun attachStdoutShutdownFacts(original: Throwable) {
+        val facts = stdoutShutdownFacts ?: return
+        if (!stdoutFactsAttached.compareAndSet(false, true)) return
+        // No graph walk, formatting, re-sampling or replacement of the original failure.
+        runCatching { original.addSuppressed(StdoutShutdownDiagnostic(facts)) }
     }
 
     private inline fun readStdout(read: () -> Int): Int {
         // Only one reader owns stdout. Closure may race its next read, but neither side waits
         // for this lock: an unfinished read is retained instead of forced closed at deadline.
-        if (!stdoutReadLock.tryLock()) throw IOException("ACP stdout descriptor closure is active")
+        if (!stdoutReadLock.tryLock()) {
+            stdoutFirstIOException.compareAndSet(StdoutIOException.NONE, StdoutIOException.READ_LOCK_BUSY)
+            throw IOException("ACP stdout descriptor closure is active")
+        }
         try {
-            if (stdoutClosedForUnblocking.get()) throw IOException("ACP stdout was closed without EOF proof")
-            val count = read()
+            if (stdoutClosedForUnblocking.get()) {
+                stdoutFirstIOException.compareAndSet(StdoutIOException.NONE, StdoutIOException.FORCED_CLOSED_GUARD)
+                throw IOException("ACP stdout was closed without EOF proof")
+            }
+            val count = try { read() } catch (io: IOException) {
+                stdoutFirstIOException.compareAndSet(StdoutIOException.NONE, StdoutIOException.READ_IO)
+                throw io
+            }
             if (count < 0) {
                 stdoutEofPublicationObserver?.invoke()
                 recordStdoutEof()
@@ -2425,7 +2578,10 @@ private class RunningAcpProcess(
         if (stdoutReadLock.isHeldByCurrentThread || !stdoutReadLock.tryLock()) return false
         try {
             if (!stdoutNaturallyDrained.get()) stdoutClosedForUnblocking.set(true)
-            stdoutInput.close()
+            try { stdoutInput.close() } catch (io: IOException) {
+                stdoutFirstIOException.compareAndSet(StdoutIOException.NONE, StdoutIOException.CLOSE_IO)
+                throw io
+            }
             return true
         } finally {
             stdoutReadLock.unlock()
@@ -2561,6 +2717,101 @@ private class RunningAcpProcess(
             networkIsolated = containment == AcpProcessContainment.LINUX_BUBBLEWRAP_CGROUP_V2,
             sandboxCleanupVerified = sandboxCleanupVerified,
         )
+}
+
+private const val STDOUT_SHUTDOWN_FACTS_KEY = "stdoutShutdownV1"
+
+private enum class StdoutIOException { NONE, READ_LOCK_BUSY, FORCED_CLOSED_GUARD, READ_IO, CLOSE_IO }
+private enum class StdoutShutdownOperation {
+    WAIT_SKIPPED, WAIT_COMPLETED, WAIT_TIMEOUT, WAIT_INTERRUPTED, WAIT_EXECUTION_ERROR, WAIT_OTHER_ERROR,
+    CLOSE_CLOSED, CLOSE_NOT_ACQUIRED, CLOSE_IO_ERROR, CLOSE_OTHER_ERROR,
+    FINISHED_FALSE_EOF_NOT_READ, NATURAL_EOF_FALSE,
+}
+
+private data class StdoutShutdownSnapshot(
+    val operation: StdoutShutdownOperation,
+    val owner: StdoutOwnership,
+    val finished: Boolean,
+    val eof: Boolean,
+    val forced: Boolean,
+    val io: StdoutIOException,
+    val produced: Long,
+    val maximum: Long,
+    val exceeded: Boolean,
+)
+
+private class StdoutShutdownDiagnostic(facts: String) : RuntimeException(facts, null, false, false)
+
+/** Closed ASCII facts only; no event history, elapsed clock, process query or payload. */
+private object StdoutShutdownFacts {
+    const val PREFIX = "ACP_STDOUT_SHUTDOWN_V1"
+    const val UNAVAILABLE = "$PREFIX DIAGNOSTIC_UNAVAILABLE"
+    private const val MAXIMUM = 2048
+    private val waitOps = setOf("WAIT_SKIPPED", "WAIT_COMPLETED", "WAIT_TIMEOUT", "WAIT_INTERRUPTED", "WAIT_EXECUTION_ERROR", "WAIT_OTHER_ERROR")
+    private val closeOps = setOf("CLOSE_CLOSED", "CLOSE_NOT_ACQUIRED", "CLOSE_IO_ERROR", "CLOSE_OTHER_ERROR")
+    private val refusalOps = setOf("FINISHED_FALSE_EOF_NOT_READ", "NATURAL_EOF_FALSE")
+
+    fun waitOperation(failure: Throwable?): StdoutShutdownOperation = when (failure) {
+        null -> StdoutShutdownOperation.WAIT_COMPLETED
+        is java.util.concurrent.TimeoutException -> StdoutShutdownOperation.WAIT_TIMEOUT
+        is InterruptedException -> StdoutShutdownOperation.WAIT_INTERRUPTED
+        is java.util.concurrent.ExecutionException -> StdoutShutdownOperation.WAIT_EXECUTION_ERROR
+        else -> StdoutShutdownOperation.WAIT_OTHER_ERROR
+    }
+
+    fun closeOperation(closed: Boolean?, failure: Throwable?): StdoutShutdownOperation = when {
+        failure is IOException -> StdoutShutdownOperation.CLOSE_IO_ERROR
+        failure != null -> StdoutShutdownOperation.CLOSE_OTHER_ERROR
+        closed == true -> StdoutShutdownOperation.CLOSE_CLOSED
+        else -> StdoutShutdownOperation.CLOSE_NOT_ACQUIRED
+    }
+
+    fun render(firstMillis: Long?, finalMillis: Long?, first: StdoutShutdownSnapshot?, fallback: StdoutShutdownSnapshot?, refusal: StdoutShutdownSnapshot?): String {
+        if (first == null || refusal == null) return UNAVAILABLE
+        val output = StringBuilder(512)
+        fun append(value: String) {
+            if (value.any { it.code !in 32..126 } || output.length + value.length > MAXIMUM) throw IllegalArgumentException("bounded diagnostic unavailable")
+            output.append(value)
+        }
+        fun sample(value: StdoutShutdownSnapshot?) {
+            if (value == null) { append("NOT_REACHED"); return }
+            val tokens = listOf(value.operation.name, value.owner.name, value.finished.toString(), value.eof.toString(), value.forced.toString(), value.io.name,
+                value.produced.toString(), value.maximum.toString(), value.exceeded.toString())
+            tokens.forEachIndexed { index, token -> if (index > 0) append("/"); append(token) }
+        }
+        append(PREFIX); append(" firstMs="); append(firstMillis?.toString() ?: "NOT_ALLOCATED")
+        append(" finalMs="); append(finalMillis?.toString() ?: "NOT_ALLOCATED")
+        append(" s1="); sample(first); append(" s2="); sample(fallback); append(" s3="); sample(refusal)
+        return validated(output.toString()) ?: UNAVAILABLE
+    }
+
+    fun validated(value: String?): String? {
+        if (value == null || value.length > MAXIMUM || value.any { it.code !in 32..126 }) return null
+        if (value == UNAVAILABLE) return value
+        val parts = value.split(' ')
+        if (parts.size != 6 || parts[0] != PREFIX || parts.joinToString(" ") != value) return null
+        fun number(text: String, positive: Boolean = false): Boolean {
+            val parsed = text.toLongOrNull() ?: return false
+            return parsed.toString() == text && if (positive) parsed > 0 else parsed >= 0
+        }
+        if (!parts[1].startsWith("firstMs=") || !number(parts[1].removePrefix("firstMs="))) return null
+        if (!parts[2].startsWith("finalMs=")) return null
+        val final = parts[2].removePrefix("finalMs=")
+        if (final != "NOT_ALLOCATED" && !number(final)) return null
+        val owners = setOf("UNCLAIMED", "FRAME_CONSUMER", "SHUTDOWN_DRAIN")
+        val ioCodes = setOf("NONE", "READ_LOCK_BUSY", "FORCED_CLOSED_GUARD", "READ_IO", "CLOSE_IO")
+        fun sample(part: String, prefix: String, operations: Set<String>, optional: Boolean): Boolean {
+            if (!part.startsWith(prefix)) return false
+            val text = part.removePrefix(prefix)
+            if (optional && text == "NOT_REACHED") return true
+            val tokens = text.split('/')
+            return tokens.size == 9 && tokens.joinToString("/") == text && tokens[0] in operations && tokens[1] in owners &&
+                listOf(2, 3, 4, 8).all { tokens[it] == "true" || tokens[it] == "false" } &&
+                tokens[5] in ioCodes && number(tokens[6]) && number(tokens[7], positive = true)
+        }
+        if (!sample(parts[3], "s1=", waitOps, false) || !sample(parts[4], "s2=", closeOps, true) || !sample(parts[5], "s3=", refusalOps, false)) return null
+        return value
+    }
 }
 
 private enum class StdoutOwnership { UNCLAIMED, FRAME_CONSUMER, SHUTDOWN_DRAIN }
@@ -3476,6 +3727,12 @@ internal class MonotonicDeadline(timeout: Duration) {
     fun remainingMillis(now: Long = System.nanoTime()): Long {
         val remaining = (timeoutNanos - elapsedNanos(now)).coerceAtLeast(0)
         return remaining / NANOS_PER_MILLI + if (remaining % NANOS_PER_MILLI == 0L) 0 else 1
+    }
+
+    /** Observation only, using this original deadline; never a fresh budget. */
+    fun observationSample(now: Long): LongArray {
+        val elapsed = elapsedNanos(now)
+        return longArrayOf(elapsed, (timeoutNanos - elapsed).coerceAtLeast(0))
     }
 
     private fun elapsedNanos(now: Long): Long = (now - startedAt).coerceAtLeast(0)

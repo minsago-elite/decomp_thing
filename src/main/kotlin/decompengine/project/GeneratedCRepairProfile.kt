@@ -76,8 +76,30 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         budget: RepairResourceBudget,
     ): Boolean = sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)
 
-    override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
-        val sourcePaths = discoverSourcePaths(projectRoot, budget)
+    override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout =
+        resolveLayout(projectRoot, budget, discoverSourcePaths(projectRoot, budget), null)
+
+    override fun resolveForRecovery(
+        projectRoot: Path,
+        budget: RepairResourceBudget,
+        sourcePaths: List<String>,
+        editablePaths: List<String>,
+        readSource: (String) -> ByteArray,
+    ): RepairIndexLayout {
+        require(sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)) {
+            "generated C recovery source view is not authorized"
+        }
+        return resolveLayout(projectRoot, budget, sourcePaths, readSource).also {
+            require(it.editablePaths == editablePaths)
+        }
+    }
+
+    private fun resolveLayout(
+        projectRoot: Path,
+        budget: RepairResourceBudget,
+        sourcePaths: List<String>,
+        readSource: ((String) -> ByteArray)?,
+    ): RepairIndexLayout {
         val editable = sourcePaths.filterTo(TreeSet()) {
             sourcePolicy.isEditable(it)
         }
@@ -138,7 +160,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             entities = entities,
             sharedContextPaths = shared,
             sharedInvalidationPaths = shared.filter { it in editable },
-            pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget),
+            pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget, readSource),
             fallbackModuleIdsByPath = fallbackModules,
             behaviorRootModuleIds = fallbackModules
                 .filterKeys { it.endsWith(".c") }
@@ -269,10 +291,12 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             )
         }
 
-        val modelRoot = Json.parseToJsonElement(decodeGeneratedCText(requireNotNull(modelBytes), modelRelative)).jsonObject
+        // Share canonical model admission: bounded chunks/depth, strict duplicate keys and
+        // eager evidence budgets before retaining subsequent globals or oversized payloads.
+        val modelRoot = parseCheckpointedProgramModelJson(requireNotNull(modelBytes).inputStream()) { }
         modelRoot.requireExactKeys(MODEL_ROOT_KEYS, modelRelative)
         val modelSchemaVersion = modelRoot.requiredInt("schemaVersion", modelRelative)
-        require(modelSchemaVersion in 1..2) {
+        require(modelSchemaVersion in 1..4) {
             "unsupported generated C program-model schemaVersion"
         }
         fun modelKeys(legacyKeys: Set<String>): Set<String> = if (modelSchemaVersion == 1) legacyKeys
@@ -281,7 +305,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             val field = if (modelSchemaVersion == 1) "status" else "extractionStatus"
             require(requiredBoundedString(field, modelRelative, evidenceIdentifierLimit(budget)) in
                 setOf("recovered", "partial", "failed", "synthetic")) { "unsupported model extraction status" }
-            if (modelSchemaVersion == 2) {
+            if (modelSchemaVersion >= 2) {
                 require(requiredBoundedString("recoveryAssessment", modelRelative, evidenceIdentifierLimit(budget)) == "unassessed") {
                     "extracted model cannot supply a scored recovery assessment"
                 }
@@ -374,9 +398,14 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             strings.preflightStringElements(modelRelative, textLimit, allowBlank = true)
             function.requireNullableBoundedString("decompiledC", modelRelative, textLimit, allowBlank = true)
         }
+        val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
         globalElements.forEach { element ->
             val global = element.jsonObject
-            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS), "$modelRelative global")
+            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS) +
+                if (modelSchemaVersion >= 3) setOf("byteEvidence") else emptySet(), "$modelRelative global")
+            if (modelSchemaVersion >= 3) {
+                ReferencedDataByteEvidenceJson.parseForModel(global.getValue("byteEvidence"), modelSchemaVersion, byteEvidenceBudget)
+            }
             global.requiredBoundedString("id", modelRelative, identifierLimit)
             global.requiredBoundedString("name", modelRelative, identifierLimit)
             global.requiredBoundedString("address", modelRelative, identifierLimit)
@@ -740,11 +769,14 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         root: Path,
         sourcePaths: Set<String>,
         budget: RepairResourceBudget,
+        readSource: ((String) -> ByteArray)? = null,
     ): Map<String, List<String>> {
         val result = TreeMap<String, List<String>>()
         var count = 0L
         sourcePaths.filter { it.endsWith(".c") || it.endsWith(".h") }.sorted().forEach { relative ->
-            val bytes = readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes
+            val bytes = readSource?.invoke(relative)
+                ?: readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes
+            require(bytes.size.toLong() <= budget.maximumSourceFileBytes)
             validateSourceContent(relative, bytes)
             val text = decodeGeneratedCText(bytes, relative)
             val dependencies = INCLUDE_DIRECTIVE.findAll(text).mapNotNull { match ->

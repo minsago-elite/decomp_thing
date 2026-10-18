@@ -472,8 +472,8 @@ private fun CandidateObservation.toJson(): String = """
 }
 """.trimIndent()
 
-private fun CandidateInput.contentKey(): String =
-    args.joinToString("\u0000") + "\u0001" + stdin.toHex()
+private fun CandidateInput.contentKey(): Pair<List<String>, String> =
+    args.toList() to stdin.toHex()
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
@@ -497,7 +497,10 @@ private fun String.escapeJson(): String =
                 '\n' -> append("\\n")
                 '\r' -> append("\\r")
                 '\t' -> append("\\t")
-                else -> append(char)
+                else -> if (char.code < 0x20) {
+                    append("\\u")
+                    append(char.code.toString(16).padStart(4, '0'))
+                } else append(char)
             }
         }
     }

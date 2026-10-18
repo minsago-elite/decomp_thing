@@ -1,0 +1,73 @@
+{
+  "issue": 1506,
+  "status": "current schema4/exporter13 source/profile bindings; static identity checks only, not a new execution qualification",
+  "recordKind": "current-static-source-and-profile-bindings",
+  "parentGeneration": "f1f1216c7f31c95a8ef507fe107765ceab8a483a",
+  "scope": "Current schema4/exporter13/evidence2 byte-evidence implementation and active GCC controls; documentation profile selection and unsupported-schema test correction. Historical exporter12 execution results remain in the exact predecessor only.",
+  "files": {
+    "docs/gcc-cc1-source-archive.md": "eba115643ec03a624697f6f96151acb883fa833dea64fe3a03ede52461148bdf",
+    "docs/referenced-data-byte-evidence.md": "ca1e2de7c1c5e51e683cc7aad95662504d484694f50b449cbab0e5af1a243dd6",
+    "oracle/gcc/16.2.0/compiler-engines-exporter13.json": "0d2c6f571b1ee7a977b2baf496823186da3fa95c97ede358e2c4ef75403927ca",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter13.json": "1075cd580b0a5bc872149633c1aa95a30b08b9da2f2e9feb689352571032b615",
+    "oracle/gcc/historical/issue1506-direct-arithmetic-exporter12-ffaf4088b5a3bcf0-validation.json": "ffaf4088b5a3bcf0d4cf04cb57dbba2b79a0693fba1fb61aea89a9b328ad66eb",
+    "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfile.kt": "b011aef1ae7b80b0b875102174693a0b2fd007b9fb515c3c56e5cd0a2c2f2053",
+    "src/main/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfile.kt": "4aea2857720ed3f0a6825b4ef192c2f41dbf40e9e58c28ec46d0a2ef8814b787",
+    "src/main/kotlin/decompengine/project/ProgramModel.kt": "bef8a5329ded5869e4199f5c75e6a4004e6138bd605e24af35b6ba37029ee3e7",
+    "src/main/kotlin/decompengine/project/ReferencedByteEvidenceAdmission.kt": "850d3e8e7829e4d0403d5dd02273d997d8cc48a1741e3ce8cdba16bed1bf6f32",
+    "src/main/kotlin/decompengine/project/ReferencedDataByteEvidence.kt": "1bb4d0deab70c19097c328e2d534593ace5db4a2982573655eb8a18bb0dac645",
+    "src/main/resources/ghidra_scripts/ExportProgramModel.java": "a607b41b7c0cb7d871ca5c92c674b42602284d9d12570746054b38382603d265",
+    "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfileTest.kt": "f3f11ea81320163e81d18fc97a91a06d90d87fa39ab155c743210b31fda0f6cf",
+    "src/test/kotlin/decompengine/oracle/gcc/GccDriverStructuralProfileTest.kt": "1d2b495e38758aedc4f827073ecffcbe6c06109ee3aab86e4bae4227639877d3",
+    "src/test/kotlin/decompengine/project/GeneratedCByteEvidencePromptTest.kt": "d63e49fa38b9fbe31700d47a89cb2bde57632f15a301b6a34fa6731f431caa4e",
+    "src/test/kotlin/decompengine/project/GhidraReferencedBytesExporterTest.kt": "664d42792bc6e841e7ec7d456c4ceec7ff9e46f0f498fc59345e86fcf029f223",
+    "src/test/kotlin/decompengine/project/ProgramModelTest.kt": "d6454e5a4ecf5779659db916f6fe765eb5068961f140227e9a34b6c54683e3f4",
+    "src/test/kotlin/decompengine/project/ReferencedByteEvidenceAdmissionTest.kt": "6dd5eb0261b3a01b74f36ee50cfd3083ae6d40651fc36dffeed0c94daa685d7d",
+    "src/test/resources/ghidra/ControlledByteListingProbe.java": "514c46474ed7a0f948ede56e5dfa3482250999a4a295db19ca94b8ff71ad8e24",
+    "src/test/resources/ghidra/ReferencedBytesProbe.java": "b3826e8d609ce47049d1f5604681e864b98160fbadc6ba3d8f1aa50e7e4bf473"
+  },
+  "historicalReceipt": {
+    "path": "oracle/gcc/historical/issue1506-direct-arithmetic-exporter12-ffaf4088b5a3bcf0-validation.json",
+    "sha256": "ffaf4088b5a3bcf0d4cf04cb57dbba2b79a0693fba1fb61aea89a9b328ad66eb",
+    "meaning": "Exact previous active record retained byte for byte. Its exporter12/schema3 source hashes, commands, 34-test pass and evidence hashes describe that historical execution only; they do not qualify exporter13 or these current source bytes."
+  },
+  "currentIdentity": {
+    "programModelSchemaVersion": 4,
+    "exporterVersion": 13,
+    "byteEvidenceVersion": 2,
+    "compilerEngineProfile": "oracle/gcc/16.2.0/compiler-engines-exporter13.json",
+    "structuralFullExportProfile": "oracle/gcc/16.2.0/structural-full-export-profile-exporter13.json",
+    "exporterSource": "src/main/resources/ghidra_scripts/ExportProgramModel.java"
+  },
+  "verification": {
+    "scope": "Static JSON/hash/source/documentation checks only. No compiler, JVM, bundled-Ghidra, native target, original-input, provider or model execution for this record. No newly passing Kotlin test result is claimed.",
+    "checks": [
+      "every files entry matches current bytes",
+      "exporter13 compiler-engine profile source digest equals current exporter source digest",
+      "structural full-export profile binds the current exporter13 compiler-engine profile and exporter source",
+      "historical predecessor equals the previous active record byte for byte",
+      "archive example selects the active exporter13 profile and uses repository-contained output/temp paths",
+      "ProgramModelTest rejects unsupported schema5; missing-array and other controls remain unchanged"
+    ],
+    "executionResults": "No current execution results in this static record. The predecessor owns its historical commands, counts and results. Hosted CI must verify the proposed correction."
+  },
+  "unchangedHistoricalProfiles": {
+    "oracle/gcc/16.2.0/compiler-engines.json": "d32c73335a8639c335c8e04d822a51256aee79dc889de1c9bfe999d584610732",
+    "oracle/gcc/16.2.0/structural-full-export-profile.json": "e3f74c9329c2124be0d123525d10ac59928097570f028afdf40ce5f8363539e4",
+    "oracle/gcc/16.2.0/compiler-engines-exporter12.json": "f8a487df5b35168a1a1212a95c9f40e84a299969005e1a9ffd7383a1db26ed19",
+    "oracle/gcc/16.2.0/structural-full-export-profile-exporter12.json": "011f49895f66c4af2692eeaac6bb514a96761ed864f2b0051b533bda3fead06f"
+  },
+  "remainingGates": [
+    "independent review and root checkpoint of the exact proposed source freeze",
+    "hosted CI and review for current source bytes; historical passes are not substituted",
+    "separate original-input replay and later experiment evidence remain outside this static record"
+  ],
+  "authority": {
+    "originalInputExecution": false,
+    "candidateExecution": false,
+    "authOrModelCall": false,
+    "oracle": false,
+    "abi": false,
+    "productionQualification": false
+  },
+  "identityNote": "Self digest and future commit identity omitted; external source freeze/root checkpoint bind this receipt. The parent generation is context, not a claim that the modified files already exist in that commit."
+}

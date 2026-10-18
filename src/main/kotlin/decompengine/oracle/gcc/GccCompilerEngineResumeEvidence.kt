@@ -1,5 +1,7 @@
 package decompengine.oracle.gcc
 
+import decompengine.project.ReferencedDataByteEvidenceJson
+
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -11,6 +13,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 class GccCompilerEngineResumeEvidenceException(message: String, cause: Throwable? = null) :
     IllegalStateException(message, cause)
@@ -624,7 +627,7 @@ private fun verifyAssembledModel(
     requireSha256(inputSha256, "assembled program-model input")
     val verifier = ExactByteVerifier(actual, "completed program model", limits.assembledModelBytes)
     verifier.accept(
-        "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
+        "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
     )
     verifier.acceptRecordArray(functions.map { it.bytes })
     verifier.accept("  ],\n  \"globals\": [\n")
@@ -816,6 +819,7 @@ private fun validateInterruptedPrefix(
         failed = exactAdd("interrupted-prefix failed count", failed, batch.failed)
         batches += batch
     }
+    validateGlobalByteEvidenceBudget(globals)
     if (nextStart != progress.completed ||
         progress.partial != partial || progress.failed != failed ||
         exactAdd("interrupted-prefix progress counts", partial, failed) != progress.completed
@@ -937,6 +941,7 @@ private fun validateCompletedRun(
     if (recomputedCommitment != state.batchCommitmentSha256) {
         resumeValidationFailure("planning batch commitment is not reproducible")
     }
+    validateGlobalByteEvidenceBudget(globals)
     val semantic = semanticFingerprint(functions, failures, globals, types)
     if (semantic.canonicalBytes != state.canonicalBytes || semantic.sha256 != state.semanticSha256) {
         resumeValidationFailure("planning semantic fingerprint is not reproducible")
@@ -1267,6 +1272,26 @@ private fun parseFunctionFragment(
     )
 }
 
+private fun renderValidatedByteEvidence(root: JsonObject): String = try {
+    ReferencedDataByteEvidenceJson.render(requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4)) {
+        "eligible bundled exporter global lacks supplied byte evidence schema 2"
+    })
+} catch (failure: Exception) {
+    throw GccCompilerEngineResumeEvidenceException("global byte evidence is invalid", failure)
+}
+
+private fun validateGlobalByteEvidenceBudget(globals: Map<String, BoundRecord>) = try {
+    val budget = ReferencedDataByteEvidenceJson.Budget()
+    globals.values.forEach { record ->
+        val root = strictRecordObject(record.bytes, MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES, "global record")
+        requireNotNull(ReferencedDataByteEvidenceJson.parseForModel(root.getValue("byteEvidence"), 4, budget)) {
+            "eligible bundled exporter global lacks supplied byte evidence schema 2"
+        }
+    }
+} catch (failure: Exception) {
+    throw GccCompilerEngineResumeEvidenceException("global byte evidence exceeds its model budget", failure)
+}
+
 private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): ParsedFragment {
     val records = splitCanonicalRecords(
         bytes,
@@ -1282,7 +1307,7 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
         if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
             resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
         }
-        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment"), "global record")
+        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "byteEvidence", "extractionStatus", "recoveryAssessment"), "global record")
         val id = root.stringValue("id", "global record")
         if (!id.matches(GLOBAL_ID)) resumeValidationFailure("global record has an invalid identity")
         if (id != expectedIds[index]) resumeValidationFailure("global fragment embedded identity differs from checkpoint")
@@ -1304,7 +1329,7 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
         if (root.stringValue("extractionStatus", "global record") != "recovered") {
             resumeValidationFailure("global record status is not recovered")
         }
-        requireExactBytes(record.bytes, renderGlobalRecord(id, name, address, type, initializer), "global record")
+        requireExactBytes(record.bytes, renderGlobalRecord(id, name, address, type, initializer, renderValidatedByteEvidence(root)), "global record")
         ids += id
     }
     requireStrictlyOrderedIds(ids, "global fragment")
@@ -1477,7 +1502,7 @@ private fun renderFunctionRecord(
     append("    }")
 }
 
-private fun renderGlobalRecord(id: String, name: String, address: String, type: String, initializer: String?): String =
+private fun renderGlobalRecord(id: String, name: String, address: String, type: String, initializer: String?, byteEvidence: String): String =
     buildString {
         append("    {\n")
         append("      \"id\": ").append(exporterJsonString(id)).append(",\n")
@@ -1485,6 +1510,7 @@ private fun renderGlobalRecord(id: String, name: String, address: String, type: 
         append("      \"address\": ").append(exporterJsonString(address)).append(",\n")
         append("      \"type\": ").append(exporterJsonString(type)).append(",\n")
         append("      \"initializer\": ").append(initializer?.let(::exporterJsonString) ?: "null").append(",\n")
+        append("      \"byteEvidence\": ").append(byteEvidence).append(",\n")
         append("      \"extractionStatus\": \"recovered\",\n")
         append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
@@ -1800,7 +1826,7 @@ private const val MAXIMUM_RECORD_STRING_BYTES = 1024 * 1024
 private const val MAXIMUM_RECORD_JSON_NODES = 1_000_000
 private const val MAXIMUM_RECORD_ARRAY_ENTRIES = 1_000_000
 private const val MAXIMUM_IDENTITY_CHARACTERS = 256
-private const val SUPPORTED_EXPORTER_VERSION = 11
+private const val SUPPORTED_EXPORTER_VERSION = 13
 private const val FUNCTION_RECORD_TAG: Byte = 1
 private const val GLOBAL_RECORD_TAG: Byte = 2
 private const val TYPE_RECORD_TAG: Byte = 3

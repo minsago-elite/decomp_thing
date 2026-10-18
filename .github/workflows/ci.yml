@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   frontend:
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Frontend contracts and bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -34,8 +36,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Record toolchain and install locked dependencies
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-ci"
@@ -75,6 +77,9 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Check frontend freshness diagnostic controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-frontend-freshness.py --verbose
       - name: Type-check frontend source and tests
         run: npm --prefix frontend run typecheck
       - name: Lint frontend source and tests
@@ -109,6 +114,9 @@ jobs:
             build/frontend/bundle-composition.json
 
   web-packaged:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -130,8 +138,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -154,9 +162,12 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node scripts/test-packaged-browser-upgrade.mjs
           node --check scripts/check-packaged-web-browser.mjs
-      - name: Build archives and verify JVM web contracts and distribution contents
+      - name: Build archives and verify browser expiry and distribution contents
+        env:
+          DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
+          DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.web.*' --tests 'decompengine.jobs.*' \
+          ./gradlew --no-daemon test --tests 'decompengine.web.BrowserSessionExpiryTest' \
             installDist distZip distTar verifyPackagedWeb verifyGhidraDistributionArchives \
             verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
             verifyKotlinBootClasspathDistribution
@@ -164,12 +175,45 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Require positive real-browser expiry evidence
+        run: >-
+          python3 scripts/test-ci-partitions.py
+          --check-browser-reports build/test-results/test
+          --output build/packaged-web-ci/browser-expiry-tests.json
+      - name: Retain focused browser expiry XML and gate receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-browser-expiry-test-reports
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
+            build/packaged-web-ci/browser-expiry-tests.json
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode session --no-sandbox
+      - name: Exercise exact packaged binary metadata and malformed-response recovery
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Preserve focused dashboard rows during actual background updates
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode live --no-sandbox
+      - name: Verify bounded dashboard paging with ten thousand persisted jobs
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -192,16 +236,26 @@ jobs:
             build/test-results/test
 
   kotlin-suite:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: kotlin-${{ matrix.shard }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, live]
+        include:
+          - shard: core
+            test-shard: core-main
+          - shard: oracle
+            test-shard: core-oracle
+          - shard: live
+            test-shard: live
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          fetch-depth: 2
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -213,8 +267,8 @@ jobs:
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
-          path: ~/.npm
-          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -238,6 +292,24 @@ jobs:
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
       - name: Check runtime provisioning with isolated inert fixtures
         run: python3 scripts/test-ci-bundled-runtime.py
+      - name: Check CI partition routing and report ownership controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-ci-partitions.py
+      - name: Check pinned Goose archive acquisition controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-goose-archive-download.py
+      - name: Check recovery scenario coverage controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-web-job-recovery-inventory.py
+      - name: Verify real Angr qualification selection and pin controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-angr-qualification-selection.py
+      - name: Select relevant real Angr qualification
+        id: angr-changes
+        if: matrix.shard == 'core'
+        env:
+          ANGR_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/select-angr-qualification.sh
       - name: Prepare root-owned oracle JVM and system libraries
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
@@ -254,28 +326,70 @@ jobs:
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
-      - name: Qualify pinned credential-free third-party ACP initialize
+      - name: Cache verified pinned Goose archive
+        uses: actions/cache@v6
         if: matrix.shard == 'live'
+        with:
+          path: ${{ github.workspace }}/build/acp-compatibility/download-cache/goose-x86_64-unknown-linux-gnu.tar.bz2
+          key: goose-acp-archive-v1-${{ runner.os }}-${{ runner.arch }}-a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b
+      - name: Qualify pinned credential-free third-party ACP initialize
+        id: goose-initialize
+        if: matrix.shard == 'live'
+        continue-on-error: true
         run: scripts/ci-qualify-goose-acp.sh
       - name: Qualify pinned credential-free codex-acp authentication boundary
-        if: matrix.shard == 'live'
+        if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
         run: scripts/ci-qualify-codex-acp.sh
+      - name: Cache real Angr package downloads
+        uses: actions/cache@v6
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        with:
+          path: ${{ github.workspace }}/build/pip-download-cache
+          key: angr-pip-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements/angr-qualification.txt', 'requirements/angr-compatibility.txt') }}
+      - name: Install real Angr qualification prerequisite
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        run: sudo apt-get install -y --no-install-recommends python3-venv
+      - name: Require real Angr argv and stdin discovery
+        if: matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        timeout-minutes: 8
+        run: bash scripts/ci-qualify-angr.sh
+      - name: Retain real Angr fixture and tool evidence
+        uses: actions/upload-artifact@v7
+        if: always() && matrix.shard == 'core' && steps.angr-changes.outputs.required == 'true'
+        with:
+          name: real-angr-qualification
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/angr-qualification
+            build/test-results/realAngrQualification
+            build/reports/tests/realAngrQualification
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
-          DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
+      - name: Require every source-declared recovery scenario in core reports
+        if: always() && matrix.shard == 'core'
+        run: >-
+          python3 scripts/verify-web-job-recovery.py
+          --reports build/test-results/test
+          --output build/web-job-recovery-inventory.json
       - name: Retain Kotlin partition reports
         run: |
           mv build/test-results/test build/test-results/full-suite
           mv build/reports/tests/test build/reports/tests/full-suite
-      - name: Verify installed native analysis I/O
-        if: matrix.shard == 'core'
-        run: ./gradlew --no-daemon verifyAnalysisIoHelperInstalled | tee build/analysis-native-installed-verification.txt
       - name: Verify quota-backed repair snapshot layouts
         if: matrix.shard == 'core'
-        run: bash scripts/test-repair-validation-snapshot.sh
+        env:
+          DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
+        run: bash scripts/test-repair-validation-snapshot.sh --ci-verify-installed-analysis-io
+      - name: Require third-party ACP initialize qualification
+        if: always() && matrix.shard == 'live'
+        env:
+          GOOSE_INITIALIZE_OUTCOME: ${{ steps.goose-initialize.outcome }}
+        run: test "$GOOSE_INITIALIZE_OUTCOME" = success
       - name: Release root-owned application-bundled Ghidra
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
@@ -301,6 +415,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated
@@ -331,15 +446,40 @@ jobs:
 
   kotlin:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     needs: kotlin-suite
     if: ${{ !cancelled() }}
     steps:
-      - name: Require both Kotlin test partitions
+      - name: Require all Kotlin test partitions
         env:
           SHARD_RESULT: ${{ needs.kotlin-suite.result }}
         run: test "$SHARD_RESULT" = success
+      - uses: actions/checkout@v7
+      - name: Download only standard Kotlin test reports in separate artifact directories
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: kotlin-*-test-reports
+          merge-multiple: false
+          path: build/ci-partition-reports
+          digest-mismatch: error
+      - name: Require report ownership and reject cross-partition duplicate tests
+        run: |
+          python3 scripts/test-ci-partitions.py --check-reports build/ci-partition-reports \
+            --output build/ci-partition-inventory.json
+      - name: Retain partition inventory result
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kotlin-partition-inventory
+          if-no-files-found: warn
+          path: build/ci-partition-inventory.json
 
   bundled-ghidra:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -351,6 +491,11 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -365,6 +510,8 @@ jobs:
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
+            --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
+            --tests decompengine.project.GhidraReferencedBytesExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
             --tests decompengine.project.NativeCallCollectorRealTest \
             --tests decompengine.project.NativeCallObservationsV1Test \
@@ -383,6 +530,7 @@ jobs:
             build/test-results/test
 
   archival-ghidra:
+    needs: frontend
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -392,6 +540,9 @@ jobs:
       - run: scripts/validate-archival-docker.sh
 
   clang:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -405,6 +556,11 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"

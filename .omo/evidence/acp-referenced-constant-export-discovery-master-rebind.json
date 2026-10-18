@@ -1,0 +1,79 @@
+{
+  "frozenAttempt13": {
+    "declaredExporterSha256": "2bbf9f50ff10fb8e6effd0d2777bc6de6949e4bad9623f461e30e068e6bdec6e",
+    "freezePath": "/home/june/decomp_thing/build/acp-decomp-effectiveness/callable-library-v1/preparation-attempt-13/freeze.json",
+    "freezeSha256": "56e0040e4d8aa8dbea5b61bd3977437f886dd9152a14b02f99471e50a565e93e",
+    "matchesMasterExporter": true,
+    "stagedExporterSha256": "2bbf9f50ff10fb8e6effd0d2777bc6de6949e4bad9623f461e30e068e6bdec6e"
+  },
+  "master": {
+    "commit": "05b073fc8378bd2faaf0ee4163cf055ba61e11da",
+    "expectedCommitPrefix": "05b",
+    "files": [
+      {
+        "bytes": 107158,
+        "gitObject": "7b9f046fb7e47957e84244cb0d260c1f275a695e",
+        "path": "src/main/resources/ghidra_scripts/ExportProgramModel.java",
+        "sha256": "2bbf9f50ff10fb8e6effd0d2777bc6de6949e4bad9623f461e30e068e6bdec6e"
+      },
+      {
+        "bytes": 16644,
+        "gitObject": "0ade663902b2e25c32c3eb20b012855c34d88a5d",
+        "path": "src/main/kotlin/decompengine/project/ProgramModel.kt",
+        "sha256": "807af24fe746ec75e41fa5ca7051bc7c65862e5cdce3b7a99015bcd0f750a870"
+      },
+      {
+        "bytes": 3056,
+        "gitObject": "f3f22cef599cf3961b4efb5787b23a0536ed9a94",
+        "path": "src/main/kotlin/decompengine/project/GeneratedCModulePrompt.kt",
+        "sha256": "3ec32974a8fdd714fe08f31ee79ec1cf36258376a3c1d890fca9a5224c34d45a"
+      },
+      {
+        "bytes": 28589,
+        "gitObject": "829922aa534402a3395d6e8da79cbe0fb0c44e91",
+        "path": "src/main/kotlin/decompengine/oracle/structural/CanonicalProgramModelStreaming.kt",
+        "sha256": "92e82201f268f3cdc927b91bf1e236cd05b9cf8645f859bc79ee11e69a2b7254"
+      },
+      {
+        "bytes": 51630,
+        "gitObject": "8f83192af12f4d293df854f328d83ce8cb64ae69",
+        "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledFullExportCapture.kt",
+        "sha256": "72f6998f71d899bf8c60651f89dc037e0684f20d37ab0d2a3f969916a19df7d1"
+      },
+      {
+        "bytes": 83258,
+        "gitObject": "67e4f6a76a78ee9bea1816eaf2ec4edf9c3bf1ec",
+        "path": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidence.kt",
+        "sha256": "87de01f307cbcc49d8115d649c11beafb877f74da62711278523c02bf4f0a99d"
+      }
+    ]
+  },
+  "minimumSurface": [
+    "ExportProgramModel GlobalEvidence/globalAt/renderGlobal plus exporter/schema version and semantic fingerprint",
+    "RecoveredGlobal and canonical ProgramModel parser/serializer",
+    "CanonicalProgramModelStreaming exact-field reader/writer and limits",
+    "GccBundledFullExportCapture exact global keys/pretty record validator",
+    "GccCompilerEngineResumeEvidence exact keys, bounds, canonical renderer and resume binding",
+    "GeneratedCModulePrompt bounded recovered-byte rendering",
+    "focused exporter/model/capture/resume/prompt and negative bound/availability tests"
+  ],
+  "minimumSurfaceStillValid": true,
+  "mutations": [
+    "new superseding evidence receipt only; no experiment, source, Git, GitHub, auth, or model mutation"
+  ],
+  "reasoning": [
+    "The exact master capture and resume files still enforce the same initializer-only closed global record, so their different bytes do not remove them from the change surface.",
+    "The generic model, canonical streaming reader, and prompt match the prior checkout and remain initializer-only.",
+    "The exact frozen attempt13 exporter equals master and independently confirms the measured prompt omission came from this contract."
+  ],
+  "roadmapRecommendation": "Create a focused A10 issue for bounded referenced-object raw byte evidence through the generic Ghidra exporter/model/capture/resume/prompt pipeline. Do not expand measurement issue 1504. Treat open A13 issues 909 and 912 as oracle-authority and aggregate-boundary references rather than implementation owners.",
+  "roadmapRecommendationStillValid": true,
+  "schema": "acp-referenced-constant-export-discovery-master-rebind-v1",
+  "status": "supersedes-stale-worktree-source-bindings",
+  "supersedes": {
+    "path": "/home/june/decomp_thing/.omo/evidence/acp-referenced-constant-export-discovery.json",
+    "reason": "prior source hashes were taken from a stale shared checkout rather than git show master:path",
+    "sha256": "1925a84038a87c73102f0ab691f3790fd113b217093c1fa66d6824e5105d2165"
+  },
+  "verifiedFinding": "Exact master exporter GlobalEvidence contains initializer but no raw byte field; globalAt uses data.getDefaultValueRepresentation(); renderGlobal emits initializer only. Exact master model, canonical streaming reader, full capture validator, resume validator, and prompt likewise admit/render initializer only."
+}

@@ -200,7 +200,9 @@ class AcpOperatorSurfaceContractTest {
 
         assertTrue(gooseScript.contains("GOOSE_VERSION=\"1.46.0\""))
         assertTrue(gooseScript.contains("a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b"))
-        assertTrue(gooseScript.contains("https://github.com/block/goose/releases/download/"))
+        assertTrue(gooseScript.contains("https://github.com/aaif-goose/goose/releases/download/"))
+        assertTrue(gooseScript.contains("https://api.github.com/repos/aaif-goose/goose/releases/assets/511784069"))
+        assertTrue(gooseScript.contains("GOOSE_ARCHIVE_BYTES=\"84957951\""))
         assertTrue(gooseScript.contains("AcpCompatibilityProvisioner"))
         assertTrue(gooseScript.contains("AcpCompatibilityPreflight"))
         assertTrue(gooseScript.contains("argv=goose acp"))

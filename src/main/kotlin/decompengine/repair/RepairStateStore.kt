@@ -7,6 +7,8 @@ import decompengine.acp.LinuxSyscallException
 import decompengine.acp.permissions
 import java.io.IOException
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * Descriptor-owned durable state for one repair project.
@@ -67,6 +69,37 @@ internal class RepairStateStore private constructor(
             require(readRequiredStable(revisions, revisionsPath, name, maximumBytes, "legacy repair state").bytes.contentEquals(bytes))
         } else {
             writeAtomically(revisions, name, bytes, "legacy-repair-state", requireAbsent = true)
+        }
+    }
+
+    /** Declared compatibility inputs, not authenticated chronology. Every name/body is bounded. */
+    fun forEachDeclaredLegacyGraph(budget: RepairResourceBudget, consume: (String, ByteArray) -> Unit) {
+        checkOpen()
+        val names = LinuxFilesystemSyscalls.directoryEntryNames(revisions, repairRevisionDirectoryEntryLimit(budget))
+        require(names.count { it.matches(LEGACY_GRAPH_NAME) } <= budget.maximumStateDirectoryEntries) {
+            "declared legacy graph candidate count exceeds its entry budget"
+        }
+        var remaining = budget.maximumIndexEvidenceBytes
+        names.sorted().filter { it.matches(LEGACY_GRAPH_NAME) }.forEach { name ->
+            val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(revisions.fd, name)) {
+                "declared legacy graph disappeared"
+            }
+            opened.use { descriptor ->
+                requireManagedRegularFile(descriptor.identity, revisions.identity, "declared legacy graph")
+                val admitted = Files.readAttributes(LinuxFilesystemSyscalls.descriptorPath(descriptor),
+                    BasicFileAttributes::class.java).size()
+                if (admitted !in 1..minOf(budget.maximumGraphBytes, remaining)) {
+                    throw RepairBudgetExceededException("declared legacy graph exceeds its remaining evidence budget")
+                }
+                remaining -= admitted
+                // Forward EXACT admitted size; growth is fatal, not a skip to another source.
+                // The existing reader may consume one final 64KiB chunk on rejected growth.
+                val observed = readRequiredStable(revisions, revisionsPath, name, admitted, "declared legacy graph")
+                require(observed.identity == descriptor.identity && observed.bytes.size.toLong() == admitted) {
+                    "declared legacy graph identity or size changed"
+                }
+                consume(name, observed.bytes)
+            }
         }
     }
 
@@ -564,3 +597,5 @@ private const val GROUP_OR_OTHER_WRITE = 0x12 // 0022
 private val SHA256_NAME = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_NAME = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val BLOB_CLEANUP_NAME = Regex("([0-9a-f]{64})\\.cleanup")
+
+private val LEGACY_GRAPH_NAME = Regex("legacy-graph-([0-9a-f]{64})\\.json")

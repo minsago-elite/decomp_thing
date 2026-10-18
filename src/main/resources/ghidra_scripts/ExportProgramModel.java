@@ -42,6 +42,10 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.ReferenceIterator;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.Varnode;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Symbol;
 
 // SEMANTIC_FINGERPRINT_TEST_BEGIN
@@ -412,7 +416,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 11;
+    private static final int EXPORTER_VERSION = 13;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final long MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64L * 1024 * 1024;
     private static final int PLANNING_BATCH_FUNCTIONS = 512;
@@ -431,6 +435,7 @@ public class ExportProgramModel extends GhidraScript {
 
     private static final class GlobalEvidence {
         final String id, name, type, initializer;
+        String byteEvidence;
         final Address address;
 
         GlobalEvidence(String id, String name, Address address, String type, String initializer) {
@@ -834,8 +839,12 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private void rethrowInfrastructureFailure(Exception failure) throws Exception {
+        if (failure instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+            throw failure;
+        }
         if (
-            monitor.isCancelled() || failure instanceof IOException ||
+            monitor.isCancelled() || Thread.currentThread().isInterrupted() || failure instanceof IOException ||
             failure instanceof PlanningIntegrityException
         ) throw failure;
     }
@@ -871,14 +880,300 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
-    private GlobalEvidence globalAt(Address address) {
+    private static final int MAXIMUM_REFERENCE_CANDIDATES = 65536;
+    private static final int MAXIMUM_BYTE_WINDOWS = 4096;
+    private static final int MAXIMUM_WINDOWS_PER_GLOBAL = 32;
+    private static final int MAXIMUM_WINDOW_BYTES = 256;
+    private static final long MAXIMUM_REQUESTED_BYTES = 65536;
+    private final Map<String, String> referencedByteEvidence = new TreeMap<>();
+    // Set only by the collector's first genuinely unadmitted batch/window, never by a lookup miss.
+    private String referenceCollectionCutoff;
+
+    private static final class GlobalByteWindows {
+        final List<ByteWindow> windows = new ArrayList<>();
+        boolean globalLimit;
+    }
+
+    private static final class ByteSortCancelled extends RuntimeException {}
+
+    private String byteAddress(Address address) {
+        if (!address.isMemoryAddress() || address.getAddressSpace().getSize() > 64 ||
+            !address.getAddressSpace().equals(currentProgram.getAddressFactory().getDefaultAddressSpace())) {
+            throw new PlanningIntegrityException("unrepresentable reference byte-evidence address");
+        }
+        return String.format("0x%x", address.getOffset());
+    }
+
+    private void checkByteCancellation() throws Exception {
+        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("reference byte-evidence export was cancelled");
+        }
+    }
+
+    private static final class ByteWindow {
+        final Address target, instruction;
+        final int operand, width;
+        final String basis, record;
+        ByteWindow(Address target, Address instruction, int operand, int width, String basis, String record) {
+            this.target = target; this.instruction = instruction; this.operand = operand;
+            this.width = width; this.basis = basis; this.record = record;
+        }
+    }
+
+    private boolean referencesMemory(Varnode value, Address target) {
+        return value != null && value.getAddress().isMemoryAddress() && value.getAddress().equals(target);
+    }
+
+    // Finite direct-value read policy: binary floating add/multiply consume both inputs.
+    // Other arithmetic/control-flow operations remain unsupported until separately reviewed.
+    private boolean supportsDirectValueRead(int opcode) {
+        return opcode == PcodeOp.FLOAT_ADD || opcode == PcodeOp.FLOAT_MULT;
+    }
+
+    // Width comes only from an exact LOAD/STORE pointer or a supported direct RAM value.
+    // Control-flow addresses, unsupported operations, dynamic pointers and multiple associations stay unknown.
+    private int[] referenceWidth(Instruction instruction, Reference reference) {
+        int width = 0, basis = 0, matches = 0;
+        Address target = reference.getToAddress();
+        for (PcodeOp operation : instruction.getPcode()) {
+            int opcode = operation.getOpcode();
+            if (opcode == PcodeOp.LOAD || opcode == PcodeOp.STORE) {
+                Varnode pointer = operation.getInput(1);
+                Varnode space = operation.getInput(0);
+                if (!pointer.isConstant() || !space.isConstant()) return new int[] {0, 0};
+                if (space.getOffset() != target.getAddressSpace().getSpaceID() || pointer.getOffset() != target.getOffset()) continue;
+                matches++;
+                width = opcode == PcodeOp.LOAD ? operation.getOutput().getSize() : operation.getInput(2).getSize();
+                basis = opcode == PcodeOp.LOAD ? 1 : 2;
+            } else if (opcode == PcodeOp.COPY && operation.getNumInputs() == 1 && operation.getOutput() != null) {
+                Varnode input = operation.getInput(0), output = operation.getOutput();
+                if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                if (referencesMemory(output, target)) { matches++; width = output.getSize(); basis = 4; }
+                if (input.getSize() != output.getSize()) return new int[] {0, 0};
+            } else if (supportsDirectValueRead(opcode) && operation.getNumInputs() == 2 && operation.getOutput() != null) {
+                Varnode output = operation.getOutput();
+                if (referencesMemory(output, target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) {
+                    if (input.getSize() != output.getSize()) return new int[] {0, 0};
+                    if (referencesMemory(input, target)) { matches++; width = input.getSize(); basis = 3; }
+                }
+            } else {
+                if (referencesMemory(operation.getOutput(), target)) return new int[] {0, 0};
+                for (Varnode input : operation.getInputs()) if (referencesMemory(input, target)) return new int[] {0, 0};
+            }
+        }
+        return matches == 1 && width > 0 ? new int[] {width, basis} : new int[] {0, 0};
+    }
+
+    private String readByteSegments(Address target, int width) throws Exception {
+        StringBuilder segments = new StringBuilder("[");
+        int start = 0;
+        String previousReason = null;
+        StringBuilder hex = new StringBuilder();
+        int available = 0;
+        for (int offset = 0; offset <= width; offset++) {
+            checkByteCancellation();
+            String reason = null;
+            int value = -1;
+            if (offset < width) {
+                Address address = target.addNoWrap(offset);
+                MemoryBlock block = currentProgram.getMemory().getBlock(address);
+                if (block == null) reason = "unmapped";
+                else if (!block.isRead()) reason = "unreadable";
+                else if (!block.isInitialized()) reason = "uninitialized";
+                else {
+                    byte[] one = new byte[1];
+                    try {
+                        if (currentProgram.getMemory().getBytes(address, one) != 1) reason = "read_failed";
+                        else { value = one[0] & 255; available++; }
+                    } catch (ghidra.program.model.mem.MemoryAccessException failure) { reason = "read_failed"; }
+                }
+            }
+            if (offset > start && (offset == width || !java.util.Objects.equals(reason, previousReason))) {
+                if (start > 0) segments.append(',');
+                segments.append("{\"offset\":").append(start).append(",\"length\":").append(offset - start)
+                    .append(",\"availability\":").append(json(previousReason == null ? "available" : "unavailable"))
+                    .append(",\"hex\":").append(previousReason == null ? json(hex.toString()) : "null")
+                    .append(",\"reason\":").append(json(previousReason)).append('}');
+                start = offset; hex.setLength(0);
+            }
+            if (value >= 0) hex.append(String.format("%02x", value));
+            previousReason = reason;
+        }
+        segments.append(']');
+        String availability = available == width ? "available" : available == 0 ? "unavailable" : "partial";
+        return "\"availability\":" + json(availability) + ",\"segments\":" + segments;
+    }
+
+    private void checkByteSortCancellation() {
+        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new ByteSortCancelled();
+    }
+
+    // ReferenceIterator is streaming; retain at most the remaining work allowance and inspect
+    // one nonretained lookahead. A whole oversized instruction batch is left unadmitted.
+    private List<Reference> referenceBatch(Instruction instruction, int remaining) throws Exception {
+        List<Reference> batch = new ArrayList<>();
+        ReferenceIterator references = currentProgram.getReferenceManager().getReferenceIterator(instruction.getAddress());
+        while (references.hasNext()) {
+            checkByteCancellation();
+            Reference reference = references.next();
+            if (!reference.getFromAddress().equals(instruction.getAddress())) break;
+            if (batch.size() == remaining) {
+                referenceCollectionCutoff = "reference_work_limit";
+                return null;
+            }
+            batch.add(reference);
+        }
+        checkByteCancellation();
+        try {
+            batch.sort((left, right) -> {
+                checkByteSortCancellation();
+                int order = left.getToAddress().compareTo(right.getToAddress());
+                if (order == 0) order = Integer.compare(Math.max(-1, left.getOperandIndex()), Math.max(-1, right.getOperandIndex()));
+                if (order == 0) order = Byte.compare(left.getReferenceType().getValue(), right.getReferenceType().getValue());
+                return order;
+            });
+        } catch (ByteSortCancelled cancelled) {
+            throw new InterruptedException("reference byte-evidence export was cancelled");
+        }
+        checkByteCancellation();
+        return batch;
+    }
+
+    private String renderByteEvidence(GlobalByteWindows global) throws Exception {
+        checkByteCancellation();
+        StringBuilder records = new StringBuilder();
+        boolean unknown = false;
+        if (global != null) {
+            try {
+                global.windows.sort((left, right) -> {
+                    checkByteSortCancellation();
+                    int order = left.target.compareTo(right.target);
+                    if (order == 0) order = left.instruction.compareTo(right.instruction);
+                    if (order == 0) order = Integer.compare(left.operand, right.operand);
+                    if (order == 0) order = left.basis.compareTo(right.basis);
+                    if (order == 0) order = Integer.compare(left.width, right.width);
+                    return order;
+                });
+            } catch (ByteSortCancelled cancelled) {
+                throw new InterruptedException("reference byte-evidence export was cancelled");
+            }
+            for (ByteWindow window : global.windows) {
+                checkByteCancellation();
+                unknown |= window.width == 0;
+                if (records.length() > 0) records.append(',');
+                records.append(window.record);
+            }
+        }
+        String local = global != null && global.globalLimit ? json("global_window_limit") : "";
+        String cutoff = referenceCollectionCutoff == null ? "" : json(referenceCollectionCutoff);
+        checkByteCancellation();
+        return "{\"schemaVersion\":2,\"windows\":[" + records +
+            "],\"omissionReason\":" + (unknown ? json("unknown_access_width") : "null") +
+            ",\"collectionOmissions\":[" + local + (!local.isEmpty() && !cutoff.isEmpty() ? "," : "") + cutoff + "]}";
+    }
+
+    private void collectReferencedByteEvidence(List<Function> functions) throws Exception {
+        Map<String, GlobalByteWindows> globals = new TreeMap<>();
+        int candidates = 0, windowCount = 0;
+        long requestedBytes = 0;
+        referencedByteEvidence.clear();
+        referenceCollectionCutoff = null;
+        collection:
+        for (Function function : functions) {
+            InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
+            while (instructions.hasNext()) {
+                checkByteCancellation();
+                Instruction instruction = instructions.next();
+                byteAddress(instruction.getAddress());
+                List<Reference> batch = referenceBatch(instruction, MAXIMUM_REFERENCE_CANDIDATES - candidates);
+                if (batch == null) break collection;
+                // Raw memory-reference entries, including duplicates and filtered references, charge work.
+                candidates += batch.size();
+                for (Reference reference : batch) {
+                    checkByteCancellation();
+                    if (!reference.getReferenceType().isData()) continue;
+                    Address target = reference.getToAddress();
+                    if (!target.isMemoryAddress()) continue;
+                    byteAddress(target);
+                    Data data = currentProgram.getListing().getDataContaining(target);
+                    if (data != null && data.hasStringValue() && data.getValue() != null) continue;
+                    if (currentProgram.getFunctionManager().getFunctionContaining(target) != null) continue;
+                    Address base = data == null ? target : data.getAddress();
+                    byteAddress(base);
+                    String id = globalId(base);
+                    GlobalByteWindows global = globals.get(id);
+                    int[] association = referenceWidth(instruction, reference);
+                    int width = association[0];
+                    if (width > MAXIMUM_WINDOW_BYTES) throw new PlanningIntegrityException("reference window requested-byte bound exceeded");
+                    if (width > 0) target.addNoWrap(width - 1L);
+                    String basis = association[1] == 1 ? "pcode_load" : association[1] == 2 ? "pcode_store" : association[1] == 3 ? "pcode_direct_read" : association[1] == 4 ? "pcode_direct_write" : "unknown_width";
+                    int operand = Math.max(-1, reference.getOperandIndex());
+                    boolean duplicate = false;
+                    if (global != null) {
+                        for (ByteWindow retained : global.windows) {
+                            checkByteCancellation();
+                            if (retained.target.equals(target) && retained.instruction.equals(instruction.getAddress()) && retained.operand == operand) {
+                                if (retained.width != width || !retained.basis.equals(basis))
+                                    throw new PlanningIntegrityException("conflicting reference byte-evidence origin: " + id);
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (duplicate) continue;
+                    if (global != null && global.windows.size() == MAXIMUM_WINDOWS_PER_GLOBAL) {
+                        global.globalLimit = true;
+                        continue;
+                    }
+                    if (windowCount == MAXIMUM_BYTE_WINDOWS) {
+                        referenceCollectionCutoff = "model_window_limit";
+                        break collection;
+                    }
+                    if (width > MAXIMUM_REQUESTED_BYTES - requestedBytes) {
+                        referenceCollectionCutoff = "model_requested_byte_limit";
+                        break collection;
+                    }
+                    String origin = "{\"instructionAddress\":" + json(byteAddress(instruction.getAddress())) +
+                        ",\"referenceAddress\":" + json(byteAddress(target)) + ",\"operandIndex\":" +
+                        (operand < 0 ? "null" : operand) + ",\"widthBasis\":" + json(basis) + "}";
+                    String record = "{\"address\":" + json(byteAddress(target)) + ",\"requestedLength\":" +
+                        (width == 0 ? "null" : width) + ",\"origin\":" + origin + "," +
+                        (width == 0 ? "\"availability\":\"unknown\",\"segments\":[]" : readByteSegments(target, width)) + "}";
+                    if (global == null) {
+                        global = new GlobalByteWindows();
+                        globals.put(id, global);
+                    }
+                    global.windows.add(new ByteWindow(target, instruction.getAddress(), operand, width, basis, record));
+                    windowCount++;
+                    requestedBytes += width;
+                }
+            }
+        }
+        checkByteCancellation();
+        for (Map.Entry<String, GlobalByteWindows> entry : globals.entrySet()) {
+            checkByteCancellation();
+            referencedByteEvidence.put(entry.getKey(), renderByteEvidence(entry.getValue()));
+        }
+        checkByteCancellation();
+    }
+
+    private GlobalEvidence globalAt(Address address) throws Exception {
+        checkByteCancellation();
         Data data = currentProgram.getListing().getDataContaining(address);
         Address base = data == null ? address : data.getAddress();
+        byteAddress(address);
+        byteAddress(base);
         Symbol symbol = currentProgram.getSymbolTable().getPrimarySymbol(base);
         String name = symbol == null ? "DAT_" + base.toString() : symbol.getName();
         String type = data == null ? "unsigned char" : data.getDataType().getDisplayName();
         String initializer = data == null ? null : data.getDefaultValueRepresentation();
-        return new GlobalEvidence(globalId(base), name, base, type, initializer);
+        GlobalEvidence global = new GlobalEvidence(globalId(base), name, base, type, initializer);
+        global.byteEvidence = referencedByteEvidence.get(global.id);
+        if (global.byteEvidence == null && referenceCollectionCutoff != null) global.byteEvidence = renderByteEvidence(null);
+        if (global.byteEvidence == null) throw new PlanningIntegrityException("missing reference byte-evidence origin: " + global.id);
+        checkByteCancellation();
+        return global;
     }
 
     private FunctionExport exportFunction(
@@ -909,9 +1204,11 @@ public class ExportProgramModel extends GhidraScript {
             InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
             while (instructions.hasNext()) {
                 Instruction instruction = instructions.next();
+                byteAddress(instruction.getAddress());
                 for (Reference reference : instruction.getReferencesFrom()) {
                     Address target = reference.getToAddress();
                     if (!target.isMemoryAddress()) continue;
+                    byteAddress(target);
                     Data data = currentProgram.getListing().getDataContaining(target);
                     if (data != null && data.hasStringValue() && data.getValue() != null) {
                         strings.add(data.getValue().toString());
@@ -1063,6 +1360,7 @@ public class ExportProgramModel extends GhidraScript {
             "      \"address\": " + json(String.format("0x%x", global.address.getOffset())) + ",\n" +
             "      \"type\": " + json(global.type) + ",\n" +
             "      \"initializer\": " + json(global.initializer) + ",\n" +
+            "      \"byteEvidence\": " + global.byteEvidence + ",\n" +
             "      \"extractionStatus\": \"recovered\",\n" +
             "      \"recoveryAssessment\": \"unassessed\"\n" +
             "    }";
@@ -1348,7 +1646,9 @@ public class ExportProgramModel extends GhidraScript {
                 }
                 String record = fragment.substring(location, recordEnd);
                 if (
-                    (evidenceKind.equals("globals") && (countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n") != 1 ||
+                    (evidenceKind.equals("globals") && (countOccurrences(record, "\n      \"byteEvidence\": {\"schemaVersion\":2,\"windows\":[") != 1 ||
+                        countOccurrences(record, ",\"collectionOmissions\":[") != 1 ||
+                        countOccurrences(record, "\n      \"extractionStatus\": \"recovered\",\n") != 1 ||
                         countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
                     (evidenceKind.equals("types") && (countOccurrences(record, "\n      \"extractionStatus\": \"partial\",\n") != 1 ||
                         countOccurrences(record, "\n      \"recoveryAssessment\": \"unassessed\"\n") != 1)) ||
@@ -1652,7 +1952,7 @@ public class ExportProgramModel extends GhidraScript {
         List<BoundFragment> types,
         List<BoundFragment> auxiliaryEvidence
     ) throws Exception {
-        String prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
+        String prefix = "{\n  \"schemaVersion\": 4,\n  \"inputSha256\": " + json(inputSha256) + ",\n  \"functions\": [\n";
         String globalsPrefix = "  ],\n  \"globals\": [\n";
         String typesPrefix = "  ],\n  \"types\": [\n";
         String suffix = "  ]\n}\n";
@@ -1783,6 +2083,7 @@ public class ExportProgramModel extends GhidraScript {
         while (inventory.hasNext()) {
             Function function = inventory.next();
             if (function.isExternal() || function.isThunk()) continue;
+            byteAddress(function.getEntryPoint());
             String id = functionId(function);
             if (previousFunctionId != null && previousFunctionId.compareTo(id) >= 0) {
                 throw new PlanningIntegrityException("program function inventory is not in strict address order: " + id);
@@ -1797,6 +2098,7 @@ public class ExportProgramModel extends GhidraScript {
             throw new PlanningIntegrityException("program inventory exceeds the planning batch-count bound");
         }
 
+        collectReferencedByteEvidence(functions);
         PlanningSemanticState planningSemanticState =
             includeDecompiledC ? null : computePlanningSemanticState(functions);
         if (

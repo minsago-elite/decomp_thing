@@ -235,7 +235,14 @@ class UploadServer(
     }
     // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
     private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
-    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    private val server = try {
+        HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    } catch (failure: Throwable) {
+        try { ownership.close() } catch (cleanup: Throwable) {
+            if (cleanup !== failure) failure.addSuppressed(cleanup)
+        }
+        throw failure
+    }
     private val store = JobStore(dataDir)
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
@@ -287,13 +294,24 @@ class UploadServer(
         try {
             jobs.initializeExistingStorage()
         } catch (failure: Throwable) {
-            server.stop(0)
-            requestExecutor.shutdownNow()
-            requestDeadlines.shutdownNow()
-            streamResources.shutdown()
-            access.close()
-            jobs.close()
-            ownership.close()
+            stopRequested.set(true)
+            stopping = true
+            fun cleanup(action: () -> Unit): Boolean {
+                return try { action(); true } catch (problem: Throwable) {
+                    if (problem !== failure) failure.addSuppressed(problem)
+                    false
+                }
+            }
+            // HttpServer.stop alone does not release an unstarted bound listener. No application
+            // context is installed yet; close admission before starting its dispatcher for teardown.
+            cleanup { server.start() }
+            cleanup { server.stop(0) }
+            cleanup { requestExecutor.shutdownNow() }
+            cleanup { requestDeadlines.shutdownNow() }
+            cleanup { streamResources.shutdown() }
+            cleanup { access.close() }
+            // Outer ownership must remain retained if service cleanup cannot confirm quiescence.
+            if (cleanup { jobs.close() }) cleanup { ownership.close() }
             throw failure
         }
         server.executor = requestExecutor
@@ -609,7 +627,7 @@ class UploadServer(
                 exchange.requestMethod in setOf("GET", "HEAD") && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
-                    exchange.sendJson(200, store.recoveryInventory().toJson().toString())
+                    exchange.sendJson(200, jobs.recoveryInventory().toJson().toString())
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods", "cancel") ->
                     handleAuthenticationCancellation(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
@@ -658,11 +676,11 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
-                "JOB_RECORD_UNAVAILABLE" -> publicWebDiagnosticMessage(code)
+                "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
             }, requestDiagnosticOutput) {
@@ -677,18 +695,30 @@ class UploadServer(
                 renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
-            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.", requestDiagnosticOutput) {
-                renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
+            if (exchange.responseCode != -1) {
+                exchange.close()
+            } else if (exchange.requestURI.rawPath in setOf("/api/v1/session", "/api/v1/session/csrf")) {
+                // These compatibility routes produce v1 envelopes even in legacy presentation mode.
+                access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
+            } else {
+                legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.", requestDiagnosticOutput) {
+                    renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
+                }
             }
         }
     }
 
     private fun renderJobDashboard(exchange: HttpExchange) {
         val inspections = jobs.listInspections()
+        val recovery = try {
+            jobs.recoveryInventory()
+        } catch (failure: WebJobServiceException) {
+            if (failure.code == "RECOVERY_INSPECTION_BUSY") null else throw failure
+        }
         exchange.sendHtml(200, renderDashboardDocument(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
-            store.recoveryInventory(),
+            recovery,
         ))
     }
 
@@ -775,22 +805,91 @@ class UploadServer(
 
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
-        val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
-            .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
-        val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
-        val repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY)
-        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()
+        val query = parseRecordedRepairHistoryQuery(exchange.requestURI.rawQuery)
+        val reports = query.runId?.let { jobs.reportContext(jobId, it) } ?: view.reports
+        val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
+        val page = try {
+            decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
+        } catch (failure: decompengine.repair.RepairRecordedSelectionFailure) {
+            val status = if (failure.problem == decompengine.repair.RepairRecordedSelectionProblem.OUT_OF_RANGE) 400 else 409
+            exchange.sendHtml(status, renderErrorPage(status, "History selection unavailable", requireNotNull(failure.message)))
+            return
+        }
+        // Resolve all page/stale checks before any report, evidence or receipt payload work.
+        val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
+            .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
+        val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
+        // The fixed reader already captured diagnostic H once. Never reread it as display input.
+        val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
+        val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
+        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, reports.runId, recorded, page) }.getOrNull()
         val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
-            repairEvidenceArtifactStates(jobId, view.reports, history, it)
+            repairEvidenceArtifactStates(jobId, reports, history, it)
         } }
-        exchange.sendHtml(200, renderJobDocument(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
+        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page)
+        exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
-            explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
+            explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
             repairHistory = repairHistory,
-            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
+            reconstructionProgress = readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
             artifacts = artifacts,
             repairEvidenceArtifactStates = repairEvidenceStates?.first,
-            repairReceiptBindingStates = repairEvidenceStates?.second))
+            repairReceiptBindingStates = repairEvidenceStates?.second,
+            recordedRepairHistory = recordedView))
+    }
+
+    /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
+    private fun recordedRepairEvidenceView(jobId: String, context: WebReportContext,
+        recorded: decompengine.repair.RepairHistoryReadResult, artifacts: List<WebArtifactSummary>?,
+        page: decompengine.repair.RepairRecordedHistoryPage?): RecordedRepairHistoryView {
+        val snapshot = recorded.snapshot?.takeIf { recorded.status == decompengine.repair.RepairHistoryReadStatus.RECORDED }
+            ?: return RecordedRepairHistoryView(recorded, runId = context.runId)
+        val selected = requireNotNull(page)
+        require(selected.snapshot === snapshot) { "Recorded history page does not match its capture." }
+        val targets = recordedRepairArtifactReferences(snapshot, selected).mapNotNull { reference ->
+            recordedRepairEvidenceTarget(reference, snapshot, context, artifacts)?.let { reference to it }
+        }.toMap()
+        val captured = mutableMapOf<String, Result<ByteArray>>()
+        var remainingWorkBytes = 64L * 1024 * 1024
+        var readAttempts = 0
+        fun readOnce(target: String): Result<ByteArray> = captured.getOrPut(target) {
+            val reserved = minOf(MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES, remainingWorkBytes)
+            if (reserved == 0L || readAttempts >= 128) Result.failure(IllegalStateException("Repair evidence presentation allowance exhausted"))
+            else {
+                // Bound calls and captured payloads. Failed reads retain their full reservation.
+                // This is a presentation allowance, not a hard RSS or execution-time guarantee.
+                readAttempts++
+                remainingWorkBytes -= reserved
+                runCatching { jobs.readArtifact(jobId, target, reserved).bytes }.onSuccess { bytes ->
+                    remainingWorkBytes += reserved - bytes.size
+                }
+            }
+        }
+        val evidence = targets.mapValues { (_, target) ->
+            val bytes = readOnce(target).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
+            if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
+                RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
+        }
+        val receipts = selected.evidenceAttempts.filter { it.invocation != null }.associate { attempt ->
+            val invocation = requireNotNull(attempt.invocation)
+            val target = targets[invocation.artifact]
+            val bytes = if (target == null || attempt.identity.rawIdentityWithheld) null else readOnce(target).getOrNull()
+            val state = if (bytes == null) RepairEvidenceArtifactState.UNAVAILABLE else {
+                val valid = runCatching {
+                    require(sha256Hex(bytes) == invocation.receiptSha256)
+                    val verified = verifyAcpExecutionReceiptDocument(bytes, TRACE_REPAIR_ACP_RECEIPT_KIND,
+                        TRACE_REPAIR_ACP_TASK_FIELD, attempt.identity.value)
+                    require(invocation.receiptSchemaVersion == 2)
+                    require(verified.requestSha256 == invocation.requestSha256)
+                    require(verified.resultChangesSha256 == invocation.resultChangesSha256)
+                    require(decompengine.repair.recordedRepairTerminalSha256(verified.terminalOutcome) == invocation.terminalSha256)
+                    require(verified.releaseComplete == invocation.receiptReleaseComplete)
+                }.isSuccess
+                if (valid) RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            }
+            attempt.identity to state
+        }
+        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId)
     }
 
     private data class RepairReceiptExpectation(

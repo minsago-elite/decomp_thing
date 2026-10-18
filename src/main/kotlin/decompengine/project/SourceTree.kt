@@ -1123,7 +1123,7 @@ object SourceTreeGenerator {
         val profileSha256: String? = null,
     ) {
         init {
-            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2) &&
+            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2, 3, 4) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
             require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
@@ -1699,7 +1699,7 @@ object SourceTreeGenerator {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
                     val status = details.second.name.lowercase()
-                    val assessment = if (unresolvedOutput || model.schemaVersion == 2) "unassessed (extraction: $status)" else status
+                    val assessment = if (unresolvedOutput || model.schemaVersion >= 2) "unassessed (extraction: $status)" else status
                     append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
                 }
             }

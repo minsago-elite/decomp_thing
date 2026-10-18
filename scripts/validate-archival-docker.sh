@@ -77,10 +77,19 @@ import pathlib
 import subprocess
 import sys
 
+from oracle.referenced_data_bytes import decode_program_model_bytes, validate_evidence
+
 root = pathlib.Path(sys.argv[1])
 for name in ("symbols-a", "stripped-a"):
-    model = json.loads((root / name / "analysis/reports/program_model.json").read_text())
-    assert model["schemaVersion"] == 2
+    model_bytes = (root / name / "analysis/reports/program_model.json").read_bytes()
+    model = decode_program_model_bytes(model_bytes)
+    assert type(model["schemaVersion"]) is int and model["schemaVersion"] == 4
+    byte_budget = [0, 0]
+    for item in model["globals"]:
+        # This is an active bundled exporter capture, whose emitted globals are
+        # eligible references; generic model4 null is not a producer cutoff proof.
+        assert item["byteEvidence"] is not None
+        validate_evidence(item["byteEvidence"], byte_budget, schema_version=2)
     for kind in ("functions", "globals", "types"):
         assert all(item["recoveryAssessment"] == "unassessed" for item in model[kind])
         assert all(item["extractionStatus"] in ("recovered", "partial", "failed", "synthetic") for item in model[kind])
@@ -116,9 +125,12 @@ for name in ("symbols-a", "stripped-a"):
     assert (root / name / "source-tree.zip").is_file()
 PY
 
-extract_root="$validation_root/extracted"
-mkdir -p "$extract_root"
-unzip -q "$validation_root/output/stripped-a/source-tree.zip" -d "$extract_root"
-(cd "$extract_root" && sha256sum --check ARCHIVE_MANIFEST.sha256 && make -j2)
+for name in symbols-a stripped-a; do
+  extract_root="$validation_root/extracted/$name"
+  mkdir -p "$extract_root"
+  echo "Verify and rebuild extracted archival fixture: $name"
+  unzip -q "$validation_root/output/$name/source-tree.zip" -d "$extract_root"
+  (cd "$extract_root" && sha256sum --check ARCHIVE_MANIFEST.sha256 && make -j2)
+done
 
 echo "Real Ghidra archival validation passed"

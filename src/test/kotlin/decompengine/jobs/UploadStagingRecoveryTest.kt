@@ -1,13 +1,16 @@
 package decompengine.jobs
 
+import decompengine.testing.RecoveryMatrixEvidence
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
-import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class UploadStagingRecoveryTest {
     @Test fun `cleanup removes only private staging and leaves published jobs and unrelated hidden entries`() = withRoot { root ->
         val job = StagedJobUpload(root).publish { it.write(elfFixture()); "inert.elf" }.job

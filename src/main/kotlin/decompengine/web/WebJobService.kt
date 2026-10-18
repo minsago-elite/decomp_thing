@@ -163,6 +163,12 @@ class WebJobService(
         attempts?.let { return it }
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
+            try {
+                store.prepareStorageDirectories()
+            } catch (failure: Exception) {
+                throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
+                    "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+            }
             decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
             acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
@@ -202,6 +208,17 @@ class WebJobService(
     private fun requireInitializedRead() {
         if (!initialized) throw WebJobServiceException("SERVICE_NOT_INITIALIZED", "Job storage must be initialized before serving reads.")
         if (closed) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopped.")
+    }
+
+    /** Bounded display-only inspection; never acquires ownership, replays work or removes files. */
+    @Synchronized
+    fun recoveryInventory(): decompengine.jobs.JobRecoveryInventory {
+        requireInitializedRead()
+        // Multipart writers release this monitor while their staging directories are live.
+        // Keep upload admission excluded throughout the scan when there are no active writers.
+        if (uploads.isNotEmpty()) throw WebJobServiceException("RECOVERY_INSPECTION_BUSY",
+            "Recovery inspection is paused while uploads are in progress. Refresh after uploads finish.")
+        return store.recoveryInventory()
     }
 
     @Synchronized
@@ -307,6 +324,25 @@ class WebJobService(
     @Synchronized
     internal fun listArtifactSummaries(jobId: String, runId: String? = null): List<WebArtifactSummary> =
         listLegacyArtifactSummaries(reportContext(jobId, runId))
+
+    @Synchronized
+    internal fun listArtifactSummaries(jobId: String, runId: String?,
+        recordedRepair: decompengine.repair.RepairHistoryReadResult?): List<WebArtifactSummary> =
+        listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair)
+
+    @Synchronized
+    internal fun listArtifactSummaries(jobId: String, runId: String?,
+        recordedRepair: decompengine.repair.RepairHistoryReadResult?,
+        page: decompengine.repair.RepairRecordedHistoryPage?): List<WebArtifactSummary> =
+        listLegacyArtifactSummaries(reportContext(jobId, runId), recordedRepair, page)
+
+    /** Authorize the selected durable job/run before the fixed retained canonical read. */
+    @Synchronized
+    internal fun readRecordedRepairHistory(jobId: String, runId: String? = null): decompengine.repair.RepairHistoryReadResult {
+        requireInitializedRead()
+        val selected = reportContext(jobId, runId)
+        return store.readRecordedRepairHistory(jobId, selected.runId)
+    }
 
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized

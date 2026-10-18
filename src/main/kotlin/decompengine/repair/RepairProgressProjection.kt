@@ -2,10 +2,16 @@ package decompengine.repair
 
 import decompengine.agent.*
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.ProgressWarnings
 import java.nio.file.Path
 
 /** Optional operator projection. Neither persistence nor observer failure changes repair authority. */
-internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable {
+internal class RepairProgressProjection(
+    reportsDirectory: Path,
+    private val onUnavailable: () -> Unit = {
+        ProgressWarnings.repairUnavailable()
+    },
+) : AutoCloseable {
     private var warned = false
     private var journal: AgentProgressJournal? = null
 
@@ -25,7 +31,7 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
     fun state(graph: ModuleRevisionGraph, phase: AgentWorkflowPhase? = null, revisionId: String? = null) = observe {
         val snapshot = graph.snapshot
         val run = snapshot.runs.lastOrNull() ?: return@observe
-        val actualPhase = phase ?: when (run.status) {
+        val actualPhase = if (run.status == RepairRunStatus.ROLLBACK_FAILED) AgentWorkflowPhase.FAILED else phase ?: when (run.status) {
             RepairRunStatus.FULLY_ACCEPTED -> AgentWorkflowPhase.ACCEPTED
             RepairRunStatus.COMPILE_VALID -> AgentWorkflowPhase.COMPILE_VALID
             RepairRunStatus.ITERATION_EXHAUSTED -> AgentWorkflowPhase.EXHAUSTED
@@ -33,7 +39,7 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
             RepairRunStatus.CANCELLED -> AgentWorkflowPhase.CANCELLED
             RepairRunStatus.INTERRUPTED -> AgentWorkflowPhase.INTERRUPTED
             RepairRunStatus.NO_CHANGES, RepairRunStatus.REJECTED -> AgentWorkflowPhase.REJECTED
-            RepairRunStatus.VALIDATION_FAILED -> AgentWorkflowPhase.FAILED
+            RepairRunStatus.VALIDATION_FAILED, RepairRunStatus.ROLLBACK_FAILED -> AgentWorkflowPhase.FAILED
             RepairRunStatus.RUNNING -> AgentWorkflowPhase.UNRESOLVED
         }
         val accepted = if (actualPhase == AgentWorkflowPhase.ACCEPTED) {
@@ -53,7 +59,11 @@ internal class RepairProgressProjection(reportsDirectory: Path) : AutoCloseable 
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             if (!warned) {
                 warned = true
-                System.err.println("Repair progress is unavailable; durable repair state remains authoritative.")
+                try {
+                    onUnavailable()
+                } catch (warningFailure: Exception) {
+                    if (warningFailure is InterruptedException) Thread.currentThread().interrupt()
+                }
             }
         }
     }

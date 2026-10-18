@@ -102,8 +102,11 @@ private class GccCompilerEnginePlanningDiagnosticImpl(
             if (model.inputSha256 != artifact.sha256) {
                 throw GccCompilerEnginePlanningException("GCC $engineId program model does not bind the authenticated input")
             }
-            if (model.schemaVersion != 2) {
-                throw GccCompilerEnginePlanningException("exporter version 11 requires program model schema 2")
+            if (model.schemaVersion != 4) {
+                throw GccCompilerEnginePlanningException("exporter version 13 requires program model schema 4")
+            }
+            if (model.globals.any { it.byteEvidence?.schemaVersion != 2 }) {
+                throw GccCompilerEnginePlanningException("eligible bundled exporter globals require supplied byte evidence schema 2")
             }
             requireWithinBudgets(started, suite, monitor, "export")
 

@@ -12,6 +12,8 @@ import { DEFAULT_FILTERS, jobFilters, filterSearch } from '../src/jobs/query';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, settings: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async importOriginal => ({ ...await importOriginal<typeof ClientModule>(), createApiClient: () => transport }));
+// Recovery has its own transport/lifecycle scenarios in dashboard-recovery.test.tsx.
+vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 function job(index: number): Job { return { ...sample, jobId: index.toString(16).padStart(32, '0'), displayFilename: `program-${index}.elf` }; }
 function page(items: Job[], nextCursor: string | null = null) { return { data: { items, page: { nextCursor, limit: 50, snapshotVersion: 'snapshot_1' } } }; }
@@ -220,6 +222,63 @@ it('opens an authenticated durable job deep link and clears metadata on logout',
     expect(screen.queryByText('program-3.elf')).toBeNull();
   } finally { session.dispose(); }
 });
+
+it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
+  'keeps workflow starts unavailable for %s capability evidence without selecting another harness', async reported => {
+    const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
+    const workflows: Bootstrap['capabilities'][number]['workflows'] = ['explore', 'reconstruct', 'build', 'validate', 'repair'];
+    const capabilities: Bootstrap['capabilities'] = [];
+    if (reported !== 'missing' && reported !== 'empty') capabilities.push({
+      id: 'harness_acp', state: reported, reasonCode: 'SELECTED_HARNESS_NOT_READY',
+      message: 'The selected harness cannot start these workflows.', workflows,
+      agentContractVersion: 1, limits: null,
+    });
+    if (reported !== 'empty') capabilities.push({
+      id: 'harness_builtin', state: 'supported', reasonCode: null,
+      message: 'The alternate harness fixture reports support.', workflows,
+      agentContractVersion: null,
+      limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
+    });
+    const gateway = {
+      bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, capabilities, basePath: '/nested/',
+        sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+      exchange: vi.fn(), logout: vi.fn(),
+    };
+    const session = createBrowserSession(gateway, '/nested');
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const selected = job(3);
+    transport.get.mockResolvedValue({ data: selected });
+    history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+    try {
+      await session.initialize({ kind: 'absent' });
+      render(<App basePath="/nested" session={session} />);
+      expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+      expect(screen.getByText('Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.')).toBeTruthy();
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out', 'Refresh job']);
+      fireEvent.click(screen.getByRole('link', { name: 'View reported workflow availability' }));
+      expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
+      if (reported === 'empty') expect(screen.getByText('No capabilities reported.')).toBeTruthy();
+      else {
+        expect(screen.getByText('harness_builtin').closest('li')?.textContent).toContain('supported');
+        if (reported === 'missing') expect(screen.queryByText('harness_acp')).toBeNull();
+        else {
+          const selectedCapability = screen.getByText('harness_acp').closest('li');
+          expect(selectedCapability?.textContent).toContain(reported);
+          expect(selectedCapability?.textContent).toContain('SELECTED_HARNESS_NOT_READY');
+          expect(selectedCapability?.textContent).toContain('The selected harness cannot start these workflows.');
+        }
+      }
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out']);
+      expect(gateway.bootstrap).toHaveBeenCalledOnce();
+      expect(gateway.exchange).not.toHaveBeenCalled();
+      expect(gateway.logout).not.toHaveBeenCalled();
+      expect(transport.get).toHaveBeenCalledOnce();
+      expect(transport.get).toHaveBeenCalledWith('job', '/jobs/' + selected.jobId, expect.anything());
+      expect(fetch).not.toHaveBeenCalled();
+      expect(document.body.textContent).not.toContain(bootstrap.csrfToken);
+    } finally { session.dispose(); }
+  },
+);
 
 it.each([
   new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }),
