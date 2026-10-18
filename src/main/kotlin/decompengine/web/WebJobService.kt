@@ -49,10 +49,18 @@ class WebJobService(
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
     progressRetentionIntervalMs: Long? = null,
 ) : AutoCloseable {
-    private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits)
-    private val registrations = durableAdapters.associate { it.workflow to Registration(it, it.limits) }.also {
+    private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits,
+        val harnessCapabilityId: String?)
+    private val registrations = durableAdapters.associate { it.workflow to Registration(it, it.limits, it.harnessCapabilityId) }.also {
         require(it.size == durableAdapters.size) { "duplicate durable workflow registration" }
         require(shutdownTimeoutMs in 0..5000) { "invalid workflow shutdown deadline" }
+        require(it.values.all { row -> row.harnessCapabilityId == null || row.harnessCapabilityId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }) {
+            "invalid registered harness capability identity"
+        }
+    }
+    private val maximumInFlight = run {
+        require(workers in 1..2 && queueCapacity in 1..32) { "invalid workflow worker or queue bound" }
+        workers + queueCapacity
     }
     private val ownedExecutor = if (executor == null) {
         require(workers in 1..2 && queueCapacity in 1..32)
@@ -544,6 +552,79 @@ class WebJobService(
             throw failure
         }
         return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
+    }
+
+    /** Caller must authorize the command before this service boundary. A replay is read-only;
+     * a new command validates its public If-Match before using the separate storage CAS token.
+     * Once admitted durably, a scheduler refusal retains that run rather than inviting re-execution.
+     */
+    @Synchronized
+    internal fun requestDurableStart(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
+        requestKey: String): DurableWebWorkflowStartResult {
+        requireInitializedRead()
+        requirePublicationAvailable()
+        if (!jobId.matches(Regex("[0-9a-f]{32}"))) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        if (!requestKey.matches(Regex("[A-Za-z0-9_-]{16,128}"))) throw WebJobServiceException("INVALID_IDEMPOTENCY_KEY", "The workflow start key is invalid.")
+        if (!expectedJobVersion.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) || request.previousRunId != null) {
+            throw WebJobServiceException("INVALID_WORKFLOW_REQUEST", "The workflow start request is invalid; explicit recovery requires a separate operation.")
+        }
+        val owner = attempts
+        val replay = try { owner?.replayStart(jobId, request, requestKey, expectedJobVersion) }
+        catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(failure.code, "The recorded workflow start is unavailable. Refresh its state before retrying.", failure)
+        }
+        if (replay != null) return DurableWebWorkflowStartResult(replay.attempt, replayed = true)
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload capacity is currently in use.")
+        val registration = registrations[request.workflow]
+            ?: throw WebJobServiceException("WORKFLOW_UNAVAILABLE", "The requested workflow is unavailable.")
+        if (request.limits != registration.limits) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
+        if (request.harnessCapabilityId != registration.harnessCapabilityId) {
+            throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
+        }
+        if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
+            ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
+        val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
+        if (publicVersion != expectedJobVersion) throw WebJobServiceException("VERSION_CONFLICT", "The job version changed. Refresh before starting new work.")
+        if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) {
+            throw WebJobServiceException("ACTIVE_RUN", "This job already has an active workflow attempt.")
+        }
+        // Admission uses owned task accounting, never sampled executor telemetry.
+        if (active.size >= maximumInFlight) throw WebJobServiceException("CAPACITY_UNAVAILABLE", "Workflow capacity is currently full.")
+        if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
+            throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The selected input revision is unavailable for this job.")
+        }
+        val job = store.get(jobId)
+        val admitted = publishStart(jobId) {
+            owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedJobVersion)
+        }
+        if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
+        val task = DurableTask(job, admitted.attempt, registration.adapter)
+        active[jobId] = task
+        try { workflowExecutor.execute(task) }
+        catch (_: RejectedExecutionException) {
+            task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.REFUSED))
+        } catch (failure: Throwable) {
+            try { task.finish(WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
+            catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+            if (failure !is Exception) throw failure
+            if (publicationFailures.isNotEmpty()) throw WebJobServiceException("RECOVERY_REQUIRED",
+                "Workflow publication is uncertain. Reopen storage before starting more work.", failure)
+            throw WebJobServiceException("SCHEDULING_FAILED", "Workflow scheduling did not finish. Read its retained attempt before retrying.", failure)
+        }
+        return DurableWebWorkflowStartResult(task.attempt, replayed = false)
+    }
+
+    private fun <T> publishStart(jobId: String, command: () -> T): T = try { command() }
+    catch (failure: Throwable) {
+        if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
+            throw WebJobServiceException(failure.code, "The workflow start was not recorded. Refresh its state before retrying.", failure)
+        }
+        val diagnostic = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED", "Workflow publication is uncertain. Reopen storage before starting more work.")
+        publicationFailures[jobId] = diagnostic
+        if (failure !is Exception) throw failure
+        throw WebJobServiceException(diagnostic.code, diagnostic.message, failure)
     }
 
     override fun close() {

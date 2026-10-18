@@ -72,3 +72,18 @@ different meanings. These are storage controls. Service queue admission, shared
 HTTP mutation authorization and production adapter/acceptance integration still
 need their own implementation and qualification; the receipt is no execution or
 acceptance authority.
+
+`DurableWebWorkflowStartTest` adds the service boundary with inert registered
+adapters. It checks replay before capability/capacity/version admission, the
+different initial public and storage version tokens, exact registered limits and
+harness selection, accepted-input ownership, and bounded owned worker/queue
+states. A committed start retains its run even if the executor immediately
+refuses it; replay never submits that task again. Admission and terminal-write
+faults preserve uncertainty and require recovery before further mutations.
+Restart reconciliation, shutdown and replay do not dispatch work. Current
+candidate output remains separate from the prior accepted-reference pointer.
+
+The new service command is internal. The versioned HTTP start route and its
+shared session/Origin/CSRF capability are still pending; production durable
+adapters remain unregistered. A recorded receipt and an injected adapter are
+not production readiness, live provider execution or acceptance attestation.

@@ -15,6 +15,7 @@ import java.nio.file.Path
 interface DurableWebWorkflowAdapter {
     val workflow: WorkflowKind
     val limits: WorkflowExecutionLimits
+    val harnessCapabilityId: String? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome
 }
 
@@ -30,6 +31,9 @@ sealed interface DurableWebWorkflowOutcome {
 }
 
 data class DurableWebWorkflowRequest(val workflow: WorkflowKind, val inputRevisionId: String? = null, val previousRunId: String? = null)
+
+/** A durable command result, including an explicitly refused scheduler outcome; never acceptance evidence. */
+internal data class DurableWebWorkflowStartResult(val attempt: WorkflowAttempt, val replayed: Boolean)
 
 sealed interface DurableWebWorkflowAdmission {
     data class Started(val jobId: String, val runId: String) : DurableWebWorkflowAdmission
