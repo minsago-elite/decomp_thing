@@ -179,6 +179,23 @@ If a CLI redaction inventory is rejected, the workflow does not run: reconstruct
 patch exits 2 with no diagnostic payload from the unadmitted inventory. Admission interruption is
 preserved. Normal usage errors retain their command help and exit status 2.
 
+Captured MVP request transcripts admit their complete raw prompt, failure kind, file paths/content
+and regression identifiers before rendering Markdown. The unchanged agent objective is checked
+separately after trimming, and its admitted UTF-8 file bytes are reused for execution. Request
+content and initial staging retain their existing 4 MiB and 2 MiB default ceilings; oversized raw
+padding cannot bypass admission through a short normalized objective. File/regression entry limits
+also apply before retention. The staging authority still enforces its own path, directory and
+mutation rules.
+
+Response admission checks the raw summary before trimming, the normalized/fallback summary, patch
+paths and complete replacements against the existing 16 MiB response and 2 MiB patch defaults.
+Rejection follows the existing rejected-assessment path after the immutable invocation receipt is
+persisted. The retention functions leave an existing transcript unchanged when admission fails. These are
+input-content budgets; Markdown framing and redaction output are not an asserted artifact-size cap.
+Complete permitted code and diffs retain their full formatter and are not diagnostic previews.
+Raw file reads, process stream collection, full artifact masking, host memory and verified cleanup
+remain separate requirements; transcript admission does not qualify those boundaries.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
   --tests decompengine.jobs.BestEffortProgressJournalTest \

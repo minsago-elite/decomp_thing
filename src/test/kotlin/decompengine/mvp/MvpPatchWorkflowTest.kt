@@ -7,8 +7,10 @@ import decompengine.repair.RepairClient
 import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairClientInvocation
 import decompengine.repair.RepairRequest
+import decompengine.repair.RepairResourceBudget
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
+import decompengine.validation.ProcessInput
 import java.nio.file.Path
 import java.nio.file.Files
 import kotlin.io.path.createDirectories
@@ -24,6 +26,123 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+    @Test
+    fun `captured request admission rejects raw padding and entry excess before replacing transcripts`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "request-")
+        val path = root.resolve("request.md")
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val budget = RepairResourceBudget(maximumRegressionInputBytes = 1, maximumRequestBytes = 256)
+        val request = RepairRequest("fixture", "public objective", mapOf("target.c" to "public code"), emptyList())
+        fun refused(value: RepairRequest, limits: RepairResourceBudget = budget) {
+            path.writeText("existing public transcript")
+            assertFailsWith<MvpPatchException> {
+                retainMvpCapturedRequest(path, value, "target.c", limits, evidence)
+            }
+            assertEquals("existing public transcript", path.readText())
+        }
+        val padded = request.copy(prompt = " ".repeat(1_024) + request.prompt)
+        assertEquals(request.prompt, padded.prompt.trim())
+        refused(padded)
+        refused(request.copy(regressionInputs = listOf(ProcessInput("x".repeat(256)))))
+        refused(request.copy(projectFiles = request.projectFiles + ("extra.c" to "public code")),
+            budget.copy(maximumContextFiles = 1, maximumPatchFiles = 1))
+        refused(request.copy(regressionInputs = listOf(ProcessInput("first"), ProcessInput("second"))),
+            budget.copy(maximumRegressionInputs = 1))
+    }
+
+    @Test
+    fun `captured request UTF8 boundaries match encoded bytes and frozen code remains complete`() {
+        for (sample in listOf("a", "é", "€", "😀", "\uD800", "\uDC00", "x\uD800y", "\uD800\uDC00")) {
+            val request = RepairRequest("fixture", "public $sample", mapOf("target.c" to "body$sample"), emptyList())
+            val objective = request.prompt.trim() + "\n\nEdit target.c in place. Do not create, delete, or modify any other file."
+            val common = listOf("project", RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID,
+                request.failureKind, "target.c", request.projectFiles.getValue("target.c"))
+                .sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
+            val exact = common + maxOf(request.prompt.toByteArray(Charsets.UTF_8).size,
+                objective.toByteArray(Charsets.UTF_8).size)
+            val budget = RepairResourceBudget(maximumRegressionInputBytes = 1, maximumRequestBytes = exact)
+            val admitted = prepareMvpCapturedRequest(request, "target.c", budget)
+            assertEquals(objective, admitted.objective)
+            assertTrue(admitted.initialFiles.getValue("target.c").contentEquals(
+                request.projectFiles.getValue("target.c").toByteArray(Charsets.UTF_8)))
+            assertFailsWith<MvpPatchException> {
+                prepareMvpCapturedRequest(request, "target.c", budget.copy(maximumRequestBytes = exact - 1))
+            }
+        }
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "complete-")
+        val path = root.resolve("request.md")
+        val code = "int public_value = 7; // λ\n".repeat(1_200)
+        val files = linkedMapOf("target.c" to code)
+        val inputs = mutableListOf(ProcessInput("original"))
+        val request = RepairRequest("fixture", "  public objective  ", files, inputs)
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val admitted = retainMvpCapturedRequest(path, request, "target.c", RepairResourceBudget(), evidence)
+        files["target.c"] = "later mutation"
+        files["extra.c"] = "later file"
+        inputs.clear()
+        assertEquals(mapOf("target.c" to code), admitted.request.projectFiles)
+        assertEquals(listOf("original"), admitted.request.regressionInputs.map { it.id })
+        assertTrue(admitted.initialFiles.getValue("target.c").contentEquals(code.toByteArray(Charsets.UTF_8)))
+        val text = path.readText()
+        assertTrue(text.length > 16_384 && text.contains(code.trimEnd()))
+        assertTrue(text.contains("## Objective\n\n  public objective  \n"))
+        assertFalse(text.contains("preview truncated"))
+    }
+
+    @Test
+    fun `captured staging bytes are admitted before retaining request content`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "staging-")
+        val path = root.resolve("request.md")
+        val request = RepairRequest("fixture", "public objective", mapOf("target.c" to "€😀"), emptyList())
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val bytes = request.projectFiles.getValue("target.c").toByteArray(Charsets.UTF_8).size.toLong()
+        val budget = RepairResourceBudget(maximumStagingBytes = bytes)
+        val admitted = retainMvpCapturedRequest(path, request, "target.c", budget, evidence)
+        assertEquals(bytes, admitted.initialFiles.values.sumOf { it.size.toLong() })
+        path.writeText("existing public transcript")
+        assertFailsWith<MvpPatchException> {
+            retainMvpCapturedRequest(path, request, "target.c", budget.copy(maximumStagingBytes = bytes - 1), evidence)
+        }
+        assertEquals("existing public transcript", path.readText())
+    }
+
+    @Test
+    fun `captured response admission protects transcripts and preserves complete replacements`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "response-")
+        val path = root.resolve("response.md")
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val response = RepairResponse("é", listOf(SourcePatch("target.c", "€")))
+        val exact = listOf(response.summary, "target.c", "€").sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
+        val budget = RepairResourceBudget(maximumResponseBytes = exact, maximumPatchBytes = 3)
+        retainMvpCapturedResponse(path, response, budget, evidence)
+        assertTrue(path.readText().contains("é") && path.readText().contains("€"))
+        fun refused(value: RepairResponse, limits: RepairResourceBudget) {
+            path.writeText("existing public transcript")
+            assertFailsWith<MvpPatchException> { retainMvpCapturedResponse(path, value, limits, evidence) }
+            assertEquals("existing public transcript", path.readText())
+        }
+        refused(response, budget.copy(maximumResponseBytes = exact - 1))
+        refused(response, budget.copy(maximumPatchBytes = 2))
+        refused(response.copy(patches = response.patches + SourcePatch("extra.c", "public")),
+            RepairResourceBudget(maximumPatchFiles = 1))
+        assertFailsWith<MvpPatchException> {
+            prepareMvpCapturedResponse(" ".repeat(256) + "public", "target.c", "x",
+                RepairResourceBudget(maximumResponseBytes = 64))
+        }
+        assertFailsWith<MvpPatchException> {
+            prepareMvpCapturedResponse(null, "target.c", "x", RepairResourceBudget(maximumResponseBytes = 9))
+        }
+        assertEquals("agent supplied a captured full-file replacement",
+            prepareMvpCapturedResponse(null, "target.c", "x", RepairResourceBudget()).summary)
+        val code = "int public_value = 7; // λ\n".repeat(1_200)
+        val complete = prepareMvpCapturedResponse("  public summary  ", "target.c", code, RepairResourceBudget())
+        assertEquals("public summary", complete.summary)
+        retainMvpCapturedResponse(path, complete, RepairResourceBudget(), evidence)
+        val text = path.readText()
+        assertTrue(text.length > 16_384 && text.contains(code.trimEnd()))
+        assertFalse(text.contains("preview truncated"))
+    }
+
     @Test
     fun `patch summary diagnostic fields share credential masking without shortening complete public diffs`() {
         val root = createTempDirectory(

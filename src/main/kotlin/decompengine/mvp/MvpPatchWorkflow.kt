@@ -118,15 +118,19 @@ class MvpPatchWorkflow(
                         "decompiled.c" to RECONSTRUCTION_TARGET_PLACEHOLDER,
                     ),
                 )
-                retainRequest(evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest, evidence)
+                val reconstructionInput = retainMvpCapturedRequest(
+                    evidenceDir.resolve("reconstruction-request.md"), reconstructionRequest,
+                    "decompiled.c", resourceBudget, evidence,
+                )
                 val reconstruction = requestCapturedReplacement(
-                    reconstructionRequest,
-                    "decompiled.c",
+                    reconstructionInput,
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_EVIDENCE),
                     evidenceDir.resolve(RECONSTRUCTION_AGENT_ASSESSMENT),
                     "reconstruction-turn",
                 )
-                retainResponse(evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, evidence)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("reconstruction-response.md"), reconstruction.response, resourceBudget, evidence,
+                )
                 val reconstructedSource = singleReplacement(
                     reconstruction.response.patches.map { it.relativePath to it.replacement },
                     "decompiled.c",
@@ -183,15 +187,18 @@ class MvpPatchWorkflow(
                         "patched.c" to reconstructed.readText(),
                     ),
                 )
-                retainRequest(evidenceDir.resolve("patch-request.md"), patchRequest, evidence)
+                val patchInput = retainMvpCapturedRequest(
+                    evidenceDir.resolve("patch-request.md"), patchRequest, "patched.c", resourceBudget, evidence,
+                )
                 val proposal = requestCapturedReplacement(
-                    patchRequest,
-                    "patched.c",
+                    patchInput,
                     evidenceDir.resolve(PATCH_AGENT_EVIDENCE),
                     evidenceDir.resolve(PATCH_AGENT_ASSESSMENT),
                     "patch-turn",
                 )
-                retainResponse(evidenceDir.resolve("patch-response.md"), proposal.response, evidence)
+                retainMvpCapturedResponse(
+                    evidenceDir.resolve("patch-response.md"), proposal.response, resourceBudget, evidence,
+                )
                 evidence.patchExplanation = proposal.response.summary
                 val proposedSource = patchedSourceDir.resolve("patched.c")
                 val proposedSourceText = singleReplacement(
@@ -351,20 +358,15 @@ class MvpPatchWorkflow(
      * aggregate workspace quotas as each replacement is received.
      */
     private fun requestCapturedReplacement(
-        request: RepairRequest,
-        target: String,
+        input: MvpCapturedRequest,
         receiptPath: Path,
         assessmentPath: Path,
         taskId: String,
     ): CapturedAgentReplacement {
-        require(target in request.projectFiles) { "captured patch target is absent: $target" }
-        val initialFiles = request.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) }
-        val objective = buildString {
-            append(request.prompt.trim())
-            append("\n\nEdit ").append(target)
-            append(" in place. Do not create, delete, or modify any other file.")
-        }
-        requireRequestBudget(request.failureKind, objective, initialFiles)
+        val request = input.request
+        val target = input.target
+        val initialFiles = input.initialFiles
+        val objective = input.objective
         lateinit var agentRequest: AgentExecutionRequest
         val eventRecorder = BoundedAgentExecutionEventRecorder()
         val staged = CapturedRepairStagingAuthority.executeReceipt(
@@ -478,15 +480,13 @@ class MvpPatchWorkflow(
         if (change.sizeBytes != null && change.sizeBytes != after.size.toLong()) {
             reject("change-size-mismatch", "patch agent size does not match the captured replacement")
         }
-        return CapturedAgentReplacement(
-            response = RepairResponse(
-                summary = result.summary?.trim().orEmpty().ifBlank {
-                    "agent supplied a captured full-file replacement"
-                },
-                patches = listOf(SourcePatch(target, decodeStrictUtf8(target, after))),
-            ),
-            agentExecutionEvidence = executionEvidence,
-        )
+        val replacement = decodeStrictUtf8(target, after)
+        val response = try {
+            prepareMvpCapturedResponse(result.summary, target, replacement, resourceBudget)
+        } catch (_: MvpPatchException) {
+            reject("response-content-budget", "patch agent response exceeds retained content budgets")
+        }
+        return CapturedAgentReplacement(response, executionEvidence)
     }
 
     private fun retainAgentExecutionEvidence(
@@ -546,29 +546,6 @@ class MvpPatchWorkflow(
         publicationMode == MvpPublicationMode.TEST_ONLY_NON_RELEASE -> false
         harnessProvenance?.startsWith("agent-harness-v1:legacy-openai:") == true -> false
         else -> true
-    }
-
-    private fun requireRequestBudget(
-        failureKind: String,
-        objective: String,
-        initialFiles: Map<String, ByteArray>,
-    ) {
-        var bytes = "project".toByteArray(StandardCharsets.UTF_8).size.toLong()
-        bytes = Math.addExact(
-            bytes,
-            RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID.toByteArray(StandardCharsets.UTF_8).size.toLong(),
-        )
-        bytes = Math.addExact(bytes, failureKind.toByteArray(StandardCharsets.UTF_8).size.toLong())
-        bytes = Math.addExact(bytes, objective.toByteArray(StandardCharsets.UTF_8).size.toLong())
-        initialFiles.forEach { (path, content) ->
-            bytes = Math.addExact(bytes, path.toByteArray(StandardCharsets.UTF_8).size.toLong())
-            bytes = Math.addExact(bytes, content.size.toLong())
-        }
-        if (bytes > resourceBudget.maximumRequestBytes) {
-            throw MvpPatchException(
-                "captured patch request requires $bytes bytes; limit=${resourceBudget.maximumRequestBytes}",
-            )
-        }
     }
 
     private fun decodeStrictUtf8(relativePath: String, bytes: ByteArray): String = try {
@@ -745,6 +722,147 @@ private fun validateMeaningfulReconstruction(source: String) {
     if (source.length < 120 || meaningfulLines < 6 || !hasMain || !hasRecoveredBehavior) {
         throw MvpPatchException("LLM reconstruction is a placeholder or lacks meaningful recovered control/data behavior")
     }
+}
+
+internal class MvpCapturedRequest(
+    val request: RepairRequest,
+    val target: String,
+    val objective: String,
+    val initialFiles: Map<String, ByteArray>,
+)
+
+/** Admit the complete retained fields before encoding files or rendering their Markdown. */
+internal fun prepareMvpCapturedRequest(
+    request: RepairRequest,
+    target: String,
+    budget: RepairResourceBudget,
+): MvpCapturedRequest {
+    if (request.projectFiles.size > budget.maximumContextFiles ||
+        request.regressionInputs.size > budget.maximumRegressionInputs
+    ) {
+        throw MvpPatchException("captured patch request exceeds its entry budget")
+    }
+    val frozen = request.copy(
+        projectFiles = request.projectFiles.toMap(),
+        regressionInputs = request.regressionInputs.toList(),
+    )
+    require(target in frozen.projectFiles) { "captured patch target is absent: $target" }
+    val content = MvpContentBudget(budget.maximumRequestBytes, "captured patch request")
+    content.charge("project")
+    content.charge(RepairClientAgentHarness.FAILURE_KIND_CONTEXT_ID)
+    content.charge(frozen.failureKind)
+    val staging = MvpContentBudget(budget.maximumStagingBytes, "captured patch staging")
+    frozen.projectFiles.forEach { (path, text) ->
+        content.charge(path)
+        staging.chargeBytes(content.charge(text))
+    }
+    val commonBytes = content.used
+    // The transcript retains the raw prompt, not the trimmed agent objective.
+    content.charge(frozen.prompt)
+    frozen.regressionInputs.forEach { content.charge(it.id) }
+    val objective = buildString {
+        append(frozen.prompt.trim())
+        append("\n\nEdit ").append(target)
+        append(" in place. Do not create, delete, or modify any other file.")
+    }
+    MvpContentBudget(budget.maximumRequestBytes, "captured patch request").apply {
+        chargeBytes(commonBytes)
+        charge(objective)
+    }
+    return MvpCapturedRequest(
+        frozen, target, objective,
+        frozen.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) },
+    )
+}
+
+internal fun retainMvpCapturedRequest(
+    path: Path,
+    request: RepairRequest,
+    target: String,
+    budget: RepairResourceBudget,
+    evidence: MvpRunEvidence,
+): MvpCapturedRequest {
+    val admitted = prepareMvpCapturedRequest(request, target, budget)
+    retainRequest(path, admitted.request, evidence)
+    return admitted
+}
+
+internal fun prepareMvpCapturedResponse(
+    summary: String?,
+    target: String,
+    replacement: String,
+    budget: RepairResourceBudget,
+): RepairResponse {
+    val raw = RepairResponse(summary.orEmpty(), listOf(SourcePatch(target, replacement)))
+    requireMvpResponseContentBudget(raw, budget)
+    val response = raw.copy(summary = raw.summary.trim().ifBlank {
+        "agent supplied a captured full-file replacement"
+    })
+    // A blank summary's fallback must also fit a caller's smaller response budget.
+    requireMvpResponseContentBudget(response, budget)
+    return response
+}
+
+internal fun retainMvpCapturedResponse(
+    path: Path,
+    response: RepairResponse,
+    budget: RepairResourceBudget,
+    evidence: MvpRunEvidence,
+) {
+    if (response.patches.size > budget.maximumPatchFiles) {
+        throw MvpPatchException("captured patch response exceeds its entry budget")
+    }
+    val frozen = response.copy(patches = response.patches.toList())
+    requireMvpResponseContentBudget(frozen, budget)
+    retainResponse(path, frozen, evidence)
+}
+
+private fun requireMvpResponseContentBudget(response: RepairResponse, budget: RepairResourceBudget) {
+    if (response.patches.size > budget.maximumPatchFiles) {
+        throw MvpPatchException("captured patch response exceeds its entry budget")
+    }
+    val content = MvpContentBudget(budget.maximumResponseBytes, "captured patch response")
+    val patches = MvpContentBudget(budget.maximumPatchBytes, "captured patch replacement")
+    content.charge(response.summary)
+    response.patches.forEach { patch ->
+        content.charge(patch.relativePath)
+        patches.chargeBytes(content.charge(patch.replacement))
+    }
+}
+
+/** Counts String.toByteArray(UTF_8) bytes without allocating an oversized encoded copy. */
+private class MvpContentBudget(private val maximum: Long, private val label: String) {
+    var used: Long = 0
+        private set
+
+    fun charge(text: String): Long {
+        val remaining = maximum - used
+        if (text.length.toLong() > remaining) exceeded()
+        var bytes = 0L
+        var index = 0
+        while (index < text.length) {
+            val character = text[index++].code
+            val width = when {
+                character < 0x80 -> 1
+                character < 0x800 -> 2
+                character in 0xD800..0xDBFF && index < text.length &&
+                    text[index].code in 0xDC00..0xDFFF -> { index++; 4 }
+                character in 0xD800..0xDFFF -> 1 // The UTF-8 encoder replaces an unpaired surrogate with '?'.
+                else -> 3
+            }
+            if (bytes > remaining - width) exceeded()
+            bytes += width
+        }
+        chargeBytes(bytes)
+        return bytes
+    }
+
+    fun chargeBytes(bytes: Long) {
+        if (bytes < 0 || bytes > maximum - used) exceeded()
+        used += bytes
+    }
+
+    private fun exceeded(): Nothing = throw MvpPatchException("$label exceeds its content byte budget")
 }
 
 private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEvidence) {
