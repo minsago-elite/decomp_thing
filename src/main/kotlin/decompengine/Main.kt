@@ -456,7 +456,10 @@ internal fun renderWorkflowFailure(
     val prefix = if (configuration) "configuration error" else command.failurePrefix
     // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
     val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
-    output.print(redactor.text("$prefix: $detail\n"))
+    val preview = redactor.text("$prefix: $detail\n")
+    // Truncation can remove the terminator. Reproject the completed preview so a newly
+    // adjacent newline cannot recreate a private literal across the truncation marker.
+    output.print(if (preview.endsWith("\n")) preview else redactor.text("$preview\n", 16_384))
 }
 
 private fun runPatch(args: List<String>) {

@@ -16,6 +16,30 @@ import kotlin.test.assertTrue
 
 class PatchCliTest {
     @Test
+    fun `long workflow failure previews retain a safe terminal newline`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            for (command in WorkflowCliCommand.entries) {
+                val message = "visible ".repeat(100)
+                renderWorkflowFailure(command, message, ProgressRedactor(emptyList()), output)
+                val text = bytes.toString(Charsets.UTF_8)
+                assertTrue(text.startsWith("${command.failurePrefix}: visible "))
+                assertTrue(text.endsWith("… [preview truncated]\n"), text)
+                assertEquals(1, text.count { it == '\n' })
+                assertTrue(text.length < 600)
+                bytes.reset()
+                val markerAndNewline = "… [preview truncated]\n"
+                renderWorkflowFailure(command, message, ProgressRedactor(listOf(markerAndNewline)), output)
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(markerAndNewline))
+                bytes.reset()
+                renderWorkflowFailure(command, "short", ProgressRedactor(emptyList()), output)
+                assertEquals("${command.failurePrefix}: short\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
+            }
+        }
+    }
+
+    @Test
     fun `workflow terminal framing is masked together with raw failure detail`() {
         val bytes = ByteArrayOutputStream()
         PrintStream(bytes, true, Charsets.UTF_8).use { output ->
