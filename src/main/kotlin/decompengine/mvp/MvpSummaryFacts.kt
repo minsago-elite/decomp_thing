@@ -1,7 +1,6 @@
 package decompengine.mvp
 
-import decompengine.project.GeneratedCMakeReconstructionProfile
-import decompengine.project.GeneratedCNinjaReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.util.Collections
 
@@ -79,14 +78,10 @@ internal enum class MvpSummaryApproval(val label: String) {
 }
 
 /** Only compiled built-in descriptors can appear as public profile facts. */
-internal enum class MvpSummaryProfile {
-    MAKE, NINJA;
+internal enum class MvpSummaryProfile(val id: String) {
+    MAKE("generated-c-make-v1"), NINJA("generated-c-ninja-v1");
 
-    private val descriptor get() = when (this) {
-        MAKE -> GeneratedCMakeReconstructionProfile.descriptor
-        NINJA -> GeneratedCNinjaReconstructionProfile.descriptor
-    }
-    val id: String get() = descriptor.id
+    private val descriptor get() = ReconstructionProfiles.named(id)
     val sha256: String get() = descriptor.sha256
 
     companion object {
