@@ -521,6 +521,19 @@ overflow refusal or dropping, as described by the [JDK HttpServer contract](http
 This setting covers connections waiting to be accepted; it does not cap already accepted connections,
 idle keep-alive connections, request duration, or stored uploads. Those bounds remain required under #71.
 
+The stop-reason mapping assertion retains a bounded header projection of the
+prelaunch observation already attached to its mapped failure. It reports only
+support status, first observed phase/kind, elapsed/remaining samples and last
+entered/returned phases. The assertion does not resample, traverse arbitrary
+causes, render phase/leaf payloads or invoke another operation. Missing, ambiguous,
+oversized or foreign records and malformed selected headers remain unavailable.
+The unused phase/leaf payload is not validated or rendered. The pure
+assertion controls cover that projection and private-text omission. Production
+budgets, native observations, launch/refusal/cleanup policy and every original
+stop-reason assertion are unchanged. A later passing mapping case cannot explain
+an earlier launch timeout or prove its cleanup; full prelaunch diagnosis remains
+open.
+
 The public `AcpAgentHarness` has no uncontained production mode. Before it starts an ACP agent it verifies an explicit
 Linux boundary made from digest-pinned, canonical, root-owned `bubblewrap`, `prlimit`, `systemd-run`, `systemctl`, and
 `bash` executables plus a digest/manifest-pinned static gate helper. Absence, replacement, an unsupported platform, a missing user systemd bus, or inability to create and

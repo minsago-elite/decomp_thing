@@ -1,5 +1,6 @@
 package decompengine.mvp
 
+import decompengine.jobs.ProgressRedactor
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.exists
@@ -26,6 +27,7 @@ internal class MvpRunEvidence(
     val profileId: String,
     val profileSha256: String,
 ) {
+    private val diagnosticRedactor = ProgressRedactor(environment.values)
     val phases = linkedMapOf<String, PhaseEvidence>()
     val verification = mutableListOf<VerificationEvidence>()
     var findingPath: Path? = null
@@ -57,6 +59,10 @@ internal class MvpRunEvidence(
     fun check(name: String, passed: Boolean, detail: String) {
         verification += VerificationEvidence(name, if (passed) EvidenceStatus.PASS else EvidenceStatus.FAIL, detail)
     }
+
+    fun redactDiagnostic(text: String): String = diagnosticRedactor.text(text)
+
+    fun redactTableDiagnostic(text: String): String = redactDiagnostic(redactDiagnostic(text).escapeTable())
 
     fun redact(text: String): String {
         var redacted = text.replace(Regex("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]")
@@ -99,10 +105,10 @@ internal fun writeMvpSummary(
         "Patch agent assessment" to output.resolve("evidence/$PATCH_AGENT_ASSESSMENT"),
     )
     val phaseRows = evidence.phases.values.joinToString("\n") {
-        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redact(it.detail).escapeTable()} |"
+        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redactTableDiagnostic(it.detail)} |"
     }.ifBlank { "| none | NOT_RUN | workflow stopped before a phase began |" }
     val verificationRows = evidence.verification.joinToString("\n") {
-        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redact(it.detail).escapeTable()} |"
+        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redactTableDiagnostic(it.detail)} |"
     }.ifBlank { "| none | NOT_RUN | no verification completed |" }
     val artifactRows = artifacts.entries.joinToString("\n") { (name, path) ->
         if (path != null && path.exists()) {
@@ -117,8 +123,9 @@ internal fun writeMvpSummary(
     val approvedDiff = evidence.patchDiff?.takeIf(String::isNotBlank)?.let {
         "```diff\n${evidence.redact(it).trimEnd()}\n```"
     } ?: "No approved source diff is available."
-    val normalizedFailure = evidence.redact(failure ?: "none")
-    val normalizedPatch = evidence.redact(evidence.patchExplanation).toSummaryParagraph()
+    val normalizedFailure = evidence.redactDiagnostic(failure ?: "none")
+    val patchPreview = evidence.redactDiagnostic(evidence.patchExplanation)
+    val normalizedPatch = evidence.redactDiagnostic(patchPreview.toSummaryParagraph())
 
     summaryPath.writeText(
         """
@@ -126,9 +133,9 @@ internal fun writeMvpSummary(
 
         - Result: $result
         - Failure phase and reason: $normalizedFailure
-        - Approval decision: ${evidence.redact(evidence.approvalDecision)}
-        - Execution isolation: ${evidence.redact(evidence.isolation)}
-        - Agent harness: `${evidence.redact(evidence.harnessProvenance)}`
+        - Approval decision: ${evidence.redactDiagnostic(evidence.approvalDecision)}
+        - Execution isolation: ${evidence.redactDiagnostic(evidence.isolation)}
+        - Agent harness: `${evidence.redactDiagnostic(evidence.harnessProvenance)}`
         - Reconstruction profile: `${evidence.profileId}` (`${evidence.profileSha256}`)
         - Verified final binary: `${if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published"}`
 

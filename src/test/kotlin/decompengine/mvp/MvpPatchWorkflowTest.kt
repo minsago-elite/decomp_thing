@@ -10,6 +10,7 @@ import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
 import java.nio.file.Path
+import java.nio.file.Files
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -23,6 +24,79 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+    @Test
+    fun `patch summary diagnostic fields share credential masking without shortening complete public diffs`() {
+        val root = createTempDirectory(
+            Files.createDirectories(Path.of("build/test-tmp/mvp-summary-privacy")), "summary-",
+        )
+        val configured = "ordinary-setting-sensitive-value"
+        val bearer = "unregistered-summary-bearer"
+        val basic = "c3ludGhldGljOnNlbnRpbmVs"
+        val api = "unregistered-summary-api"
+        val password = "unregistered-summary-password"
+        val token = "unregistered-summary-token"
+        val diagnostic = "before; $configured; Bearer $bearer; Authorization: Basic $basic; " +
+            "api_key=$api; password=$password; ghp_$token; after"
+        val environment = mapOf("PLAIN_SETTING" to configured, "PLAIN_INDICATOR" to "Bearer", "PLAIN_FIELD" to "api_key")
+        val evidence = MvpRunEvidence(environment, diagnostic, "fixture-profile", "a".repeat(64)).apply {
+            failPhase("reconstruct", diagnostic)
+            check("validation", false, diagnostic)
+            patchExplanation = diagnostic
+            approvalDecision = diagnostic
+            isolation = diagnostic
+        }
+        val fullDiff = "--- a/public.c\n+++ b/public.c\n" + " public approved context line\n".repeat(1000)
+        assertTrue(fullDiff.length > 16_384)
+        evidence.patchDiff = fullDiff
+        evidence.patchDiffPath = root.resolve("approved.patch").also { it.writeText(fullDiff) }
+        val summary = root.resolve("SUMMARY.md")
+        writeMvpSummary(summary, root, root.resolve("input.elf"), root.resolve("raw.c"),
+            root.resolve("source.c"), root.resolve("patched.c"), root.resolve("binary"), "FAIL", diagnostic, evidence)
+        val text = summary.readText()
+        listOf(configured, bearer, basic, api, password, token, "Bearer", "api_key").forEach {
+            assertFalse(text.contains(it), "diagnostic value survived summary redaction")
+        }
+        assertTrue(text.contains("[redacted]"))
+        assertTrue(text.contains("| reconstruct | FAIL | before; "))
+        assertTrue(text.contains("| validation | FAIL | before; "))
+        assertTrue(text.contains("Result: FAIL"))
+        assertTrue(text.contains(fullDiff.trimEnd()))
+        assertEquals(fullDiff, root.resolve("approved.patch").readText())
+    }
+
+    @Test
+    fun `patch diagnostic previews keep shared bounds and sensitive omission markers safe`() {
+        val markers = listOf("[oversized text omitted]", "[redacted]", "[unredactable text omitted]")
+        val evidence = MvpRunEvidence(markers.mapIndexed { index, value -> "PLAIN_$index" to value }.toMap(),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        assertEquals("", evidence.redactDiagnostic("x".repeat(16_385)))
+        assertEquals("", evidence.redactDiagnostic("Authorization: Basic synthetic-encoded-value"))
+        val ordinary = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val preview = ordinary.redactDiagnostic("public ".repeat(200))
+        assertTrue(preview.endsWith("… [preview truncated]"))
+        assertTrue(preview.length <= 512 + "… [preview truncated]".length)
+        assertFailsWith<IllegalArgumentException> {
+            MvpRunEvidence((0..4096).associate { "PLAIN_$it" to "value-$it" },
+                "fixture-harness", "fixture-profile", "a".repeat(64))
+        }
+        val root = createTempDirectory(
+            Files.createDirectories(Path.of("build/test-tmp/mvp-summary-privacy")), "normalization-",
+        )
+        val privateFallback = "No source patch was generated before the workflow stopped."
+        val secrets = markers + listOf(privateFallback, "alpha beta", "<br>", "\\|")
+        val safe = MvpRunEvidence(secrets.mapIndexed { index, value -> "PLAIN_$index" to value }.toMap(),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        safe.failPhase("reconstruct", "before\nafter|end")
+        for ((index, explanation) in listOf("", "alpha\tbeta").withIndex()) {
+            safe.patchExplanation = explanation
+            val summary = root.resolve("summary-$index.md")
+            writeMvpSummary(summary, root, root.resolve("input.elf"), root.resolve("raw.c"),
+                root.resolve("source.c"), root.resolve("patched.c"), root.resolve("binary"), "FAIL", "fixture failure", safe)
+            val text = summary.readText()
+            secrets.forEach { assertFalse(text.contains(it), "formatting synthesized a private diagnostic value") }
+        }
+    }
+
     @Test
     fun `runs patch workflow and publishes verified artifacts`() {
         val tempDir = createTempDirectory("mvp-patch-")
@@ -59,7 +133,7 @@ class MvpPatchWorkflowTest {
         assertTrue(summary.contains("## Approved Source Change"))
         assertTrue(summary.contains("bound copy to the local buffer"))
         assertFalse(summary.contains("top-secret-value"))
-        assertTrue(summary.contains("[REDACTED]"))
+        assertTrue(summary.contains("[redacted]"))
         assertTrue(summary.contains("approved interactively"))
         assertTrue(summary.contains("Agent harness: `agent-harness-unprovisioned`"))
         assertTrue(summary.contains("Reconstruction profile: `generated-c-make-v1`"))

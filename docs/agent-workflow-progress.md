@@ -149,10 +149,35 @@ outside that environment must provide them through `UploadServer.sensitiveValues
 are omitted before taking a preview, and HTML escaping still applies after redaction. This does not
 retroactively scrub historical job records or arbitrary downloadable artifacts.
 
+Basic and Bearer credentials, credential fields and recognized token prefixes are masked before
+configured literal values. A configured value such as `Bearer`, `api_key` or `ghp_` must not erase
+the indicator and leave an otherwise unregistered credential visible. Direct redactor and actual
+HTTP background-failure regressions cover this ordering, including persisted job metadata and
+withheld public diagnostics. Literal replacement still enforces the intermediate 16,384-character
+limit, including its exact boundary and safe omission when the marker is itself sensitive.
+
 Reconstruction CLI and browser jobs own their journal through a best-effort adapter. A busy
 writer, persistence failure, or phase-observer exception disables that display and emits a fixed
 diagnostic without replacing the workflow result or original exception. Closing still attempts to
 release the writer after a display failure and preserves the calling thread's interruption state.
+
+The reconstruction command catches ordinary workflow failures after its progress owner closes,
+prints a bounded redacted terminal diagnostic, and exits with status 1. It does not print the raw
+exception chain. Configuration diagnostics and harness provenance also use the shared redactor.
+The boundary preserves interruption and propagates fatal JVM errors; it does not change the
+workflow's typed failure, receipt or validation authority.
+
+Patch summary diagnostics use the same bounded redactor for failure reasons, phase/check details,
+explanations, approval/isolation text and harness provenance. All supplied environment values are
+included, independent of their key names. Redaction configuration is admitted before clearing output
+or opening the patch logger. Complete approved diffs and retained request/response code keep their existing
+artifact formatter and are not shortened by diagnostic preview limits. Their full privacy scope,
+doctor diagnostics, logs, paths and historical artifacts still require separate qualification.
+The patch CLI masks usage messages, provenance and ordinary failures; configuration failures exit 2,
+other ordinary failures exit 1, interruption is preserved and fatal errors propagate.
+If a CLI redaction inventory is rejected, the workflow does not run: reconstruction exits 1 and
+patch exits 2 with no diagnostic payload from the unadmitted inventory. Admission interruption is
+preserved. Normal usage errors retain their command help and exit status 2.
 
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \

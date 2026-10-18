@@ -111,20 +111,22 @@ class AgentProgressJournalTest {
         val marker = "[oversized text omitted]"
         val redactor = ProgressRedactor(listOf("q"))
         val largeToken = "q".repeat(2000)
-        // A later Bearer/field rule would collapse the expanded token again. Budget the
-        // intermediate result too, rather than allocating through every configured secret.
-        assertEquals(marker, redactor.text("Bearer $largeToken"))
-        assertEquals(marker, redactor.text("api_key=$largeToken"))
-        val exact = "Bearer " + "q".repeat(1637) + "1234567"
+        // Budget literal replacement work even when no credential format consumes the input.
+        assertEquals(marker, redactor.text("plain: $largeToken"))
+        val exact = "plain: " + "q".repeat(1637) + "1234567"
         // 7 prefix + 1637 ten-character replacements + 7 suffix = 16384 exactly.
-        assertEquals("Bearer [redacted]", redactor.text(exact))
+        val exactReplacement = "plain: " + "[redacted]".repeat(1637) + "1234567"
+        assertEquals(16_384, exactReplacement.length)
+        assertEquals(exactReplacement, redactor.text(exact, 16_384))
         assertEquals(marker, redactor.text(exact + "8"))
-        // Basic credentials are consumed by the earlier rule, preserving its normal result.
+        // Format masking consumes credentials before literal replacement can expand them.
         assertEquals("Authorization: [redacted]", redactor.text("Authorization: Basic $largeToken"))
+        assertEquals("Bearer [redacted]", redactor.text("Bearer $largeToken"))
+        assertEquals("api_key=[redacted]", redactor.text("api_key=$largeToken"))
         assertEquals("Bearer [redacted]", redactor.text("Bearer ordinary-token"))
         val privateMarker = ProgressRedactor(listOf("q", marker))
-        assertEquals("", privateMarker.text("Bearer $largeToken"))
-        assertEquals("", privateMarker.text("api_key=$largeToken"))
+        assertEquals("", privateMarker.text("plain: $largeToken"))
+        assertEquals("", privateMarker.text(exact + "8"))
         assertRawRedactionBudgetAdmission()
     }
 
@@ -757,6 +759,34 @@ class AgentProgressJournalTest {
         val redactor = ProgressRedactor(listOf("abc123"))
         assertEquals("api_key=[redacted] Bearer [redacted] [redacted]", redactor.text("api_key=some-value Bearer token-value abc123"))
         assertFalse(redactor.text("\u001b[31mhello").contains('\u001b'))
+    }
+
+    @Test
+    fun `configured literals cannot erase credential indicators before format masking`() {
+        val credential = "UNREGISTERED-CREDENTIAL-7Z"
+        val cases = listOf(
+            "Bearer" to "Bearer $credential",
+            "earer" to "Bearer $credential",
+            "Authorization" to "Authorization: Bearer $credential",
+            "api_key" to "api_key=$credential",
+            "api" to "api-key=$credential",
+            "access_token" to "access_token=$credential",
+            "password" to "password=$credential",
+            "secret" to "secret=$credential",
+            "ghp_" to "ghp_$credential",
+            "sk-" to "sk-$credential",
+            "github_pat_" to "github_pat_$credential",
+        )
+        for ((literal, input) in cases) {
+            val safe = ProgressRedactor(listOf(literal)).text("before; $input; after")
+            assertFalse(safe.contains(credential), "credential survived configured literal $literal")
+            assertFalse(safe.contains(literal), "configured literal survived redaction")
+            assertTrue(safe.startsWith("before; "))
+            assertTrue(safe.endsWith("; after"))
+            assertTrue(safe.contains("[redacted]"))
+        }
+        assertEquals("", ProgressRedactor(listOf("Bearer", "[redacted]", "[unredactable text omitted]"))
+            .text("Bearer $credential"))
     }
 
     @Test

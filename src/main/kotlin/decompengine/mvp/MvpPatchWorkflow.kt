@@ -74,6 +74,7 @@ class MvpPatchWorkflow(
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
         require(input.isRegularFile()) { "input ELF does not exist: $input" }
+        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256)
         cleanOutputDirectory(output, input)
         val logs = output.resolve("logs").createDirectories()
         val decompiled = output.resolve("decompile").createDirectories()
@@ -86,7 +87,6 @@ class MvpPatchWorkflow(
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
-        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256)
         var phase = "inspect"
         var reconstructionAgentEvidence: AcpExecutionReceiptDocument? = null
         var reconstructionCandidate: ByteArray? = null

@@ -239,7 +239,9 @@ jobs:
           - shard: oracle
             test-shard: core-oracle
           - shard: live
-            test-shard: live
+            test-shard: live-rest
+          - shard: live-fulltree
+            test-shard: live-fulltree
     steps:
       - uses: actions/checkout@v7
         with:

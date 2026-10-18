@@ -5,7 +5,6 @@ import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.doctor.Doctor
 import decompengine.doctor.parseDoctorInvocation
-import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
@@ -28,6 +27,7 @@ import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
+import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -179,32 +179,60 @@ private fun runReconstruct(args: List<String>) {
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
-    withReconstructionCliProgress(output, environment.values) { progress ->
-        val strategy = try {
-            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
-        } catch (e: IllegalArgumentException) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            progress.close()
-            reconstructUsageError(e.message ?: "invalid harness configuration")
+    val exitCode = runReconstructionCliAction(environment.values) { redactor ->
+        withReconstructionCliProgress(output, environment.values) { progress ->
+            val strategy = try {
+                selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
+            } catch (e: IllegalArgumentException) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                progress.close()
+                reconstructUsageError(e.message ?: "invalid harness configuration")
+            }
+            println(
+                strategy.harnessProvenance?.let { "harness provenance: ${redactor.text(it)}" }
+                    ?: "harness: none (evidence-only)",
+            )
+            val result = try {
+                ArchivalReconstructionService(
+                    GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                    profile = strategy.profile, progress = progress,
+                ).reconstruct(binary, output)
+            } catch (failure: Exception) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                throw failure
+            }
+            println("source tree: ${result.projectDir}")
+            println("archive: ${result.bundle.archivePath}")
+            println("archive sha256: ${result.bundle.archiveSha256}")
+            println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
         }
-        println(
-            strategy.harnessProvenance?.let { "harness provenance: $it" }
-                ?: "harness: none (evidence-only)",
-        )
-        val result = try {
-            ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
-                profile = strategy.profile, progress = progress,
-            ).reconstruct(binary, output)
-        } catch (failure: Exception) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            throw failure
-        }
-        println("source tree: ${result.projectDir}")
-        println("archive: ${result.bundle.archivePath}")
-        println("archive sha256: ${result.bundle.archiveSha256}")
-        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Catch ordinary failures after owned progress closes; raw exception chains stay off stderr. */
+internal fun runReconstructionCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Unit,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
+    return try {
+        action(redactor)
+        0
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        output.println("reconstruction failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        1
+    }
+}
+
+/** An unadmitted secret inventory cannot safely select diagnostic or replacement text. */
+private fun cliDiagnosticRedactor(sensitiveValues: Collection<String>): ProgressRedactor? = try {
+    ProgressRedactor(sensitiveValues)
+} catch (failure: Exception) {
+    if (failure is InterruptedException) Thread.currentThread().interrupt()
+    null
 }
 
 internal data class ReconstructionStrategy(
@@ -245,7 +273,7 @@ internal fun selectReconstructionStrategy(
 }
 
 private fun reconstructUsageError(message: String): Nothing {
-    System.err.println(message)
+    cliDiagnosticRedactor(System.getenv().values)?.let { System.err.println(it.text(message)) }
     System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
@@ -417,27 +445,44 @@ private fun runPatch(args: List<String>) {
         }
     }
     if (input == null || output == null) patchUsageError("patch requires an input ELF and output directory")
-    val strategy = try {
-        selectPatchStrategy(harnessOverride, System.getenv())
-    } catch (failure: IllegalArgumentException) {
-        patchUsageError(failure.message ?: "invalid harness configuration")
-    }
-    println("harness provenance: ${strategy.harnessProvenance}")
-    try {
+    val environment = System.getenv()
+    val exitCode = runPatchCliAction(environment.values) { redactor ->
+        val strategy = try {
+            selectPatchStrategy(harnessOverride, environment)
+        } catch (failure: IllegalArgumentException) {
+            patchUsageError(failure.message ?: "invalid harness configuration")
+        }
+        println("harness provenance: ${redactor.text(strategy.harnessProvenance)}")
         MvpPatchWorkflow(
             harness = strategy.harness,
-            environment = System.getenv(),
+            environment = environment,
             harnessProvenance = strategy.harnessProvenance,
         ).run(MvpPatchOptions(input, output, assumeYes), profile)
-    } catch (failure: IllegalArgumentException) {
-        System.err.println("configuration error: ${failure.message}"); kotlin.system.exitProcess(2)
-    } catch (failure: MvpPatchException) {
-        System.err.println("patch failed: ${failure.message}"); kotlin.system.exitProcess(1)
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Preserve patch usage status while withholding raw ordinary-exception chains at the CLI. */
+internal fun runPatchCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Unit,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    return try {
+        action(redactor)
+        0
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        val configuration = failure is IllegalArgumentException
+        val prefix = if (configuration) "configuration error" else "patch failed"
+        output.println("$prefix: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        if (configuration) 2 else 1
     }
 }
 
 private fun patchUsageError(message: String): Nothing {
-    System.err.println(message)
+    cliDiagnosticRedactor(System.getenv().values)?.let { System.err.println(it.text(message)) }
     System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }

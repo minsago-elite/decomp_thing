@@ -1,12 +1,22 @@
 package decompengine
 
+import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
+import decompengine.agent.AgentWorkflowPhase
+import decompengine.jobs.AgentProgressJournal
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.GeneratedCEvidenceCarrier
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.GeneratedCNinjaReconstructionProfile
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertNotEquals
@@ -14,6 +24,118 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
+    @Test
+    fun `reconstruction redactor rejection returns failure without exposing configuration or running action`() {
+        var oversizedIterations = 0
+        val noIteration = object : AbstractCollection<String>() {
+            override val size: Int get() = 4097
+            override fun iterator(): Iterator<String> {
+                oversizedIterations++
+                error("oversized inventory must be rejected before iteration")
+            }
+        }
+        val brokenInventory = object : AbstractCollection<String>() {
+            override val size: Int get() = 1
+            override fun iterator(): Iterator<String> = error("PRIVATE_CONFIGURATION_SENTINEL")
+        }
+        val rejected = listOf(noIteration, brokenInventory, listOf("x".repeat(1024 * 1024 + 1)),
+            List(4097) { "[oversized text omitted]" })
+        val bytes = ByteArrayOutputStream()
+        var actions = 0
+        PrintStream(bytes, true, Charsets.UTF_8).use { console ->
+            rejected.forEach { inventory ->
+                assertEquals(1, runReconstructionCliAction(inventory, console) { actions++ })
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            val initiallyInterrupted = Thread.interrupted()
+            try {
+                val interruptedInventory = object : AbstractCollection<String>() {
+                    override val size: Int get() = 1
+                    override fun iterator(): Iterator<String> = throw InterruptedException("PRIVATE_CONFIGURATION_SENTINEL")
+                }
+                assertEquals(1, runReconstructionCliAction(interruptedInventory, console) { actions++ })
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            } finally {
+                Thread.interrupted()
+                if (initiallyInterrupted) Thread.currentThread().interrupt()
+            }
+        }
+        assertEquals(0, actions)
+        assertEquals(0, oversizedIterations)
+    }
+
+    @Test
+    fun `reconstruction failure closes progress before emitting only a redacted terminal diagnostic`() {
+        val root = Files.createTempDirectory(
+            Files.createDirectories(Path.of("build/test-tmp/reconstruction-cli-diagnostics")), "journal-",
+        )
+        val configured = "synthetic-cli-configured-value"
+        val bearer = "unregistered-cli-bearer-value"
+        val apiKey = "unregistered-cli-api-value"
+        val cause = IllegalStateException("PRIVATE_CAUSE_SENTINEL")
+        val suppressed = IllegalArgumentException("PRIVATE_SUPPRESSED_SENTINEL")
+        val failure = AgentExecutionException(
+            AgentFailure(AgentFailureKind.PROTOCOL, "before; $configured; Bearer $bearer; api_key=$apiKey; after"),
+            cause,
+        ).apply { addSuppressed(suppressed) }
+        val bytes = ByteArrayOutputStream()
+        var terminalObserved = false
+        val console = object : PrintStream(bytes, true, Charsets.UTF_8) {
+            override fun println(line: String?) {
+                if (line?.startsWith("reconstruction failed:") == true) {
+                    // Check ownership at emission, before the terminal boundary has returned.
+                    AgentProgressJournal(root, "reconstruction").use { }
+                    terminalObserved = true
+                }
+                super.println(line)
+            }
+        }
+        console.use {
+            val exitCode = runReconstructionCliAction(listOf(configured), console) {
+                withReconstructionCliProgress(root, listOf(configured), console) { progress ->
+                    progress.phase(AgentWorkflowPhase.FAILED)
+                    throw failure
+                }
+            }
+            assertEquals(1, exitCode)
+        }
+        assertTrue(terminalObserved)
+        val lines = bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.toList()
+        assertEquals(listOf("reconstruction: failed",
+            "reconstruction failed: before; [redacted]; Bearer [redacted]; api_key=[redacted]; after"), lines)
+        val text = bytes.toString(Charsets.UTF_8)
+        listOf(configured, bearer, apiKey, "PRIVATE_CAUSE_SENTINEL", "PRIVATE_SUPPRESSED_SENTINEL", "AgentExecutionException")
+            .forEach { assertFalse(text.contains(it)) }
+        assertSame(cause, failure.cause)
+        assertSame(suppressed, failure.suppressed.single())
+    }
+
+    @Test
+    fun `reconstruction terminal boundary preserves success interruption and fatal errors`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { console ->
+            assertEquals(0, runReconstructionCliAction(emptyList(), console) { })
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            val fatal = AssertionError("fatal sentinel")
+            assertSame(fatal, assertFailsWith<AssertionError> {
+                runReconstructionCliAction(emptyList(), console) { throw fatal }
+            })
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            val initiallyInterrupted = Thread.interrupted()
+            try {
+                assertEquals(1, runReconstructionCliAction(emptyList(), console) {
+                    throw InterruptedException("Bearer synthetic-interrupted-credential")
+                })
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals("reconstruction failed: Bearer [redacted]", bytes.toString(Charsets.UTF_8).trim())
+            } finally {
+                Thread.interrupted()
+                if (initiallyInterrupted) Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     @Test
     fun `evidence-only reconstruction is agent-free and does not inspect the environment`() {
         val inaccessibleEnvironment = object : AbstractMap<String, String>() {

@@ -22,16 +22,26 @@ ISOLATED = [
     "v3BoundaryPublicationIsolated",
     "v3BoundaryCensusIsolated",
 ]
+REPORT_SHARDS = {"core": "core", "oracle": "oracle", "live": "live", "live-fulltree": "live"}
+FULLTREE_PACKAGE = "decompengine.oracle.fulltree."
 
 
 def check_partition_reports(root):
     owners = {}
     partitions = {}
+    shards = {}
+    logical_outcomes = {role: Counter() for role in REPORT_SHARDS.values()}
+    logical_identities = {role: set() for role in REPORT_SHARDS.values()}
     inputs = []
-    for role in ["core", "oracle", "live"]:
+    for role in REPORT_SHARDS:
         directory = root / f"kotlin-{role}-test-reports"
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(f"missing or linked {role} report directory")
+    expected = {f"kotlin-{role}-test-reports" for role in REPORT_SHARDS}
+    if any(path.name not in expected for path in root.iterdir()):
+        raise ValueError("unexpected CI partition report artifact")
+    for role, logical in REPORT_SHARDS.items():
+        directory = root / f"kotlin-{role}-test-reports"
         outcomes = Counter()
         identities = set()
         for path in sorted(directory.rglob("*.xml")):
@@ -42,7 +52,7 @@ def check_partition_reports(root):
                 suite = ET.fromstring(raw)
             except ET.ParseError as failure:
                 raise ValueError(f"malformed {role} JUnit report: {path.name}") from failure
-            inputs.append({"partition": role, "path": str(path.relative_to(root)),
+            inputs.append({"partition": logical, "shard": role, "path": str(path.relative_to(root)),
                            "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
             for case in suite.iter("testcase"):
                 classname, name = case.get("classname"), case.get("name")
@@ -53,6 +63,11 @@ def check_partition_reports(root):
                     raise ValueError(f"core contains oracle test: {classname}.{name}")
                 if role == "oracle" and not oracle:
                     raise ValueError(f"oracle contains non-oracle test: {classname}.{name}")
+                fulltree = classname.startswith(FULLTREE_PACKAGE)
+                if role == "live" and fulltree:
+                    raise ValueError(f"live contains fulltree test: {classname}.{name}")
+                if role == "live-fulltree" and not fulltree:
+                    raise ValueError(f"live-fulltree contains non-fulltree test: {classname}.{name}")
                 identity = (classname, name)
                 if identity in owners and owners[identity] != role:
                     raise ValueError(f"test reported by more than one partition: {classname}.{name}")
@@ -63,23 +78,29 @@ def check_partition_reports(root):
                 outcomes["SKIP" if case.find("skipped") is not None else "PASS"] += 1
         if not sum(outcomes.values()):
             raise ValueError(f"no JUnit test cases in {role}")
-        partitions[role] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
-                            "SKIP": outcomes["SKIP"], "uniqueClassMethodPairs": len(identities)}
-    return {"schemaVersion": 1, "status": "passed", "partitions": partitions,
+        shards[role] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
+                        "SKIP": outcomes["SKIP"], "uniqueClassMethodPairs": len(identities)}
+        logical_outcomes[logical].update(outcomes)
+        logical_identities[logical].update(identities)
+    for logical, outcomes in logical_outcomes.items():
+        partitions[logical] = {"executions": sum(outcomes.values()), "PASS": outcomes["PASS"],
+                               "SKIP": outcomes["SKIP"], "uniqueClassMethodPairs": len(logical_identities[logical])}
+    return {"schemaVersion": 2, "status": "passed", "partitions": partitions, "reportShards": shards,
             "executions": sum(p["executions"] for p in partitions.values()),
-            "uniqueClassMethodPairs": len(owners), "crossPartitionDuplicates": 0, "inputs": inputs,
+            "uniqueClassMethodPairs": len(owners), "crossPartitionDuplicates": 0,
+            "crossShardDuplicates": 0, "inputs": inputs,
             "scope": "JUnit partition placement; full original-inventory comparison remains separate"}
 
 
 def report_command(arguments):
-    parser = argparse.ArgumentParser(description="Check the three standard CI JUnit report artifacts")
+    parser = argparse.ArgumentParser(description="Check the required CI JUnit report artifacts")
     parser.add_argument("--check-reports", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     options = parser.parse_args(arguments)
     try:
         report = check_partition_reports(options.check_reports)
     except (ValueError, OSError) as failure:
-        report = {"schemaVersion": 1, "status": "failed", "reason": str(failure)}
+        report = {"schemaVersion": 2, "status": "failed", "reason": str(failure)}
     options.output.parent.mkdir(parents=True, exist_ok=True)
     options.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report))
@@ -270,8 +291,14 @@ class CiPartitionRoutingTest(unittest.TestCase):
     def test_live_entry_point_keeps_its_original_selection(self):
         self.assert_selection("live", BASE + ["-PciTestShard=live"])
 
+    def test_live_package_pair_keeps_the_tag_and_routes_both_complements(self):
+        for package in ["fulltree", "rest"]:
+            with self.subTest(package=package):
+                self.assert_selection("live-" + package,
+                                      BASE + ["-PciTestShard=live", "-PciLivePackagePartition=" + package])
+
     def test_unsupported_selections_refuse_before_any_gradle_invocation(self):
-        for selector in ["core-other", "../../core"]:
+        for selector in ["core-other", "../../core", "live-all", "live-fulltree/../../core"]:
             with self.subTest(selector=selector):
                 result, invocations = self.invoke(selector)
                 self.assertEqual(2, result.returncode)
@@ -294,7 +321,7 @@ class CiPartitionRoutingTest(unittest.TestCase):
         self.assert_repair_selection(None, [])
 
     def test_quota_followup_refuses_nonowning_or_unknown_ci_partitions_before_gradle(self):
-        for selector in ["core-oracle", "live", "bad"]:
+        for selector in ["core-oracle", "live", "live-fulltree", "live-rest", "bad"]:
             with self.subTest(selector=selector):
                 result, invocations = self.invoke_repair(selector)
                 self.assertEqual(2, result.returncode)
@@ -312,6 +339,7 @@ class CiPartitionReportTest(unittest.TestCase):
         self.core = self.write("core", "decompengine.project.ExampleTest", "ordinary")
         self.oracle = self.write("oracle", "decompengine.oracle.ExampleTest", "oracle")
         self.live = self.write("live", "decompengine.acp.LiveTest", "live")
+        self.live_fulltree = self.write("live-fulltree", "decompengine.oracle.fulltree.ExampleLiveTest", "live fulltree")
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -331,9 +359,37 @@ class CiPartitionReportTest(unittest.TestCase):
         self.write("core", "decompengine.project.SnapshotTest", "quota", "SKIP")
         self.write("core", "decompengine.project.SnapshotTest", "quota")
         report = check_partition_reports(self.root)
-        self.assertEqual(5, report["executions"])
-        self.assertEqual(4, report["uniqueClassMethodPairs"])
+        self.assertEqual(6, report["executions"])
+        self.assertEqual(5, report["uniqueClassMethodPairs"])
         self.assertEqual(1, report["partitions"]["core"]["SKIP"])
+        self.assertEqual(2, report["partitions"]["live"]["executions"])
+        self.assertEqual(1, report["reportShards"]["live"]["executions"])
+        self.assertEqual(1, report["reportShards"]["live-fulltree"]["executions"])
+        self.assertEqual(0, report["crossShardDuplicates"])
+        self.assertEqual(2, report["schemaVersion"])
+
+    def test_fulltree_cases_cannot_hide_in_the_other_live_report(self):
+        self.write("live", "decompengine.oracle.fulltree.ExampleLiveTest", "misplaced")
+        with self.assertRaisesRegex(ValueError, "live contains fulltree"):
+            check_partition_reports(self.root)
+
+    def test_other_live_cases_cannot_hide_in_the_fulltree_report(self):
+        self.write("live-fulltree", "decompengine.oracle.gcc.ExampleLiveTest", "misplaced")
+        with self.assertRaisesRegex(ValueError, "live-fulltree contains non-fulltree"):
+            check_partition_reports(self.root)
+
+    def test_missing_or_empty_fulltree_artifact_is_refused(self):
+        self.live_fulltree.write_text("<testsuite/>", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no JUnit test cases in live-fulltree"):
+            check_partition_reports(self.root)
+        shutil.rmtree(self.root / "kotlin-live-fulltree-test-reports")
+        with self.assertRaisesRegex(ValueError, "missing or linked live-fulltree"):
+            check_partition_reports(self.root)
+
+    def test_unclaimed_report_artifacts_are_refused(self):
+        self.write("unclaimed", "decompengine.oracle.fulltree.ExampleLiveTest", "hidden")
+        with self.assertRaisesRegex(ValueError, "unexpected CI partition report artifact"):
+            check_partition_reports(self.root)
 
     def test_oracle_check_leaking_into_core_is_refused(self):
         self.write("core", "decompengine.oracle.gcc.GccCompilerEnginePlanningTest", "isolated")
