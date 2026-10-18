@@ -36,7 +36,11 @@ class RepairCliPresentationTest {
             bytes.reset()
             assertEquals(2, renderRepairPresentation(RepairCliPresentation(2, listOf("first", "second", "last")),
                 listOf("first\nsecond"), output))
-            assertEquals("[REDACTED]\nlast\n", bytes.toString(Charsets.UTF_8))
+            assertEquals("[REDACTED]\n[REDACTED]\nlast\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            assertEquals(0, renderRepairPresentation(RepairCliPresentation(0, listOf("first", "last")),
+                listOf("first\nlast\n"), output))
+            assertEquals("[REDACTED]\n[REDACTED]\n", bytes.toString(Charsets.UTF_8))
             bytes.reset()
             assertEquals(1, renderRepairPresentation(RepairCliPresentation(1,
                 listOf("Bearer synthetic-token", "Authorization: Basic c3ludGhldGlj", "password=synthetic-password")),
@@ -75,6 +79,13 @@ class RepairCliPresentationTest {
             }
             assertEquals(1, renderRepairPresentation(RepairCliPresentation(0, listOf("xa".repeat(3000))), listOf("x"), output))
             assertEquals("", bytes.toString(Charsets.UTF_8))
+            for (shown in listOf(RepairCliPresentation(0, listOf("first\nsecond")),
+                RepairCliPresentation(0, listOf("Authorization: Basic", "synthetic-token")))) {
+                assertEquals(1, renderRepairPresentation(shown, emptyList(), output))
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            assertEquals(1, renderRepairPresentation(valid, listOf("\u0000\n"), output))
+            assertEquals("", bytes.toString(Charsets.UTF_8))
             val initiallyInterrupted = Thread.interrupted()
             try {
                 val interrupted = object : AbstractCollection<String>() {
@@ -112,8 +123,14 @@ class RepairCliPresentationTest {
                 renderRepairExplorationSummary(3, 7, ProgressRedactor(listOf(value)), output)
                 assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
                 assertTrue(bytes.toString(Charsets.UTF_8).contains("[redacted]"))
+                assertTrue(bytes.toString(Charsets.UTF_8).endsWith("\n"))
                 bytes.reset()
             }
+            renderRepairExplorationSummary(3, 7, ProgressRedactor(listOf(expected, "[redacted]\n")), output)
+            assertEquals("\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            renderRepairExplorationSummary(3, 7, ProgressRedactor(listOf("\u0000\n")), output)
+            assertEquals("", bytes.toString(Charsets.UTF_8))
             assertFailsWith<IllegalArgumentException> { renderRepairExplorationSummary(-1, 0, ProgressRedactor(emptyList()), output) }
             assertEquals("", bytes.toString(Charsets.UTF_8))
         }

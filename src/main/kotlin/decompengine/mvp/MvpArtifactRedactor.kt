@@ -33,13 +33,27 @@ internal class MvpArtifactRedactor private constructor(
 
     fun project(render: MvpArtifactText.() -> Unit): String {
         val document = MvpArtifactText(maximumBytes).apply(render)
-        return projectText(document.build(), null, document.publicHashes())
+        return projectText(document.build(), null, document.publicHashes()).text
+    }
+
+    /** Restore a safe ending while carrying producer hash ranges through every projection. */
+    fun projectTerminated(render: MvpArtifactText.() -> Unit): String {
+        val document = MvpArtifactText(maximumBytes).apply(render)
+        var projection = projectText(document.build(), null, document.publicHashes())
+        repeat(2) {
+            if (projection.text.endsWith("\n")) return projection.text
+            projection = projectText(projection.text + "\n", null, projection.publicHashes)
+        }
+        if (!projection.text.endsWith("\n")) {
+            throw MvpPatchException("complete artifact line framing could not be retained")
+        }
+        return projection.text
     }
 
     fun text(value: String, normalizedMask: IntRange? = null): String =
-        projectText(value, normalizedMask, emptyList())
+        projectText(value, normalizedMask, emptyList()).text
 
-    private fun projectText(value: String, normalizedMask: IntRange?, publicHashes: List<IntRange>): String {
+    private fun projectText(value: String, normalizedMask: IntRange?, publicHashes: List<IntRange>): MvpArtifactProjection {
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
         // Use the diagnostic control policy, without taking a prefix of complete content.
@@ -60,7 +74,7 @@ internal class MvpArtifactRedactor private constructor(
         return finish(MvpArtifactProjection(safe, hashes))
     }
 
-    private fun finish(projection: MvpArtifactProjection): String {
+    private fun finish(projection: MvpArtifactProjection): MvpArtifactProjection {
         val value = projection.text
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
@@ -69,7 +83,7 @@ internal class MvpArtifactRedactor private constructor(
         ) {
             throw MvpPatchException("complete artifact masking could not produce a safe projection")
         }
-        return value
+        return projection
     }
 
     private fun normalizedHashes(value: String, hashes: List<IntRange>): List<IntRange> {

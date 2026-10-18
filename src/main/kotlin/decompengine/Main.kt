@@ -218,7 +218,7 @@ internal fun renderReconstructionSuccess(
     sensitiveValues: Collection<String>,
     output: PrintStream = System.out,
 ) {
-    val text = MvpArtifactRedactor(sensitiveValues, 16_384L).project {
+    val text = MvpArtifactRedactor(sensitiveValues, 16_384L).projectTerminated {
         append("source tree: ").append(projectDirectory).append("\n")
         append("archive: ").append(archivePath).append("\n")
         append("archive sha256: ").appendSha256(archiveSha256).append("\n")
@@ -425,13 +425,18 @@ internal fun renderRepairPresentation(
 ): Int {
     val text = try {
         require(presentation.exitCode in 0..2 && presentation.lines.size <= 32)
-        MvpArtifactRedactor(sensitiveValues, 16_384L).project {
-            var count = 0
+        val redactor = MvpArtifactRedactor(sensitiveValues, 16_384L)
+        val lines = redactor.forLogLines()
+        var count = 0
+        val projected = redactor.project {
             for (line in presentation.lines) {
                 require(count++ < 32)
-                append(line).append("\n")
+                require('\n' !in line && '\r' !in line)
+                append(lines.text(line)).append("\n")
             }
         }
+        require(projected.count { it == '\n' } == count) { "complete repair line framing could not be retained" }
+        projected
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
         return 1
@@ -447,7 +452,8 @@ internal fun renderRepairExplorationSummary(
     output: PrintStream = System.out,
 ) {
     require(candidateCount >= 0 && signatureCount >= 0)
-    output.print(redactor.text("exploration retained $candidateCount regression input(s) across $signatureCount observed output signature(s)\n", 16_384))
+    printProjectedCliFrame("exploration retained $candidateCount regression input(s) across $signatureCount observed output signature(s)\n",
+        16_384, output, redactor::text)
 }
 
 private fun repairUsageError(message: String): Nothing {

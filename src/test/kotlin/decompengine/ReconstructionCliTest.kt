@@ -49,8 +49,13 @@ class ReconstructionCliTest {
                 renderReconstructionSuccess("boundary", "/public/result.zip", hash, listOf(value), output)
                 assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
                 assertTrue(bytes.toString(Charsets.UTF_8).contains("archive sha256: $hash\n"))
+                assertTrue(bytes.toString(Charsets.UTF_8).endsWith("\n"))
                 bytes.reset()
             }
+            renderReconstructionSuccess("project", "archive.zip", hash, listOf("1", "unresolved reports\n"), output)
+            assertTrue(bytes.toString(Charsets.UTF_8).contains("archive sha256: $hash\n"))
+            assertTrue(bytes.toString(Charsets.UTF_8).endsWith("[REDACTED]\n"))
+            bytes.reset()
         }
     }
 
@@ -81,6 +86,12 @@ class ReconstructionCliTest {
                 renderReconstructionSuccess("project", "archive.zip", hash, listOf("archive sha256: ${hash.take(4)}"), output)
             }
             assertEquals("", bytes.toString(Charsets.UTF_8))
+            for (values in listOf(listOf("unresolved reports\n", "[REDACTED]\n"), listOf("\u0000\n"))) {
+                assertFailsWith<MvpPatchException> {
+                    renderReconstructionSuccess("project", "archive.zip", hash, values, output)
+                }
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
         }
     }
 
