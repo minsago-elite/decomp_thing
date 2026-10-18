@@ -75,6 +75,7 @@ data class WorkflowAttempt(
     val terminalReason: WorkflowTerminalReason?, val usage: WorkflowUsage?, val candidate: WorkflowCandidate?,
     val acceptedRevision: WorkflowAcceptanceReference?,
     val progressRetentionPinned: Boolean = false,
+    internal val startReceipt: WorkflowStartReceipt? = null,
 ) {
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
 }
@@ -198,6 +199,43 @@ class WorkflowAttemptStore private constructor(
 
     fun create(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt): WorkflowMutation = withJob(jobId) { directory ->
         val current = available(jobId, directory).snapshot
+        createLocked(directory, current, expectedJobVersion, request)
+    }
+
+    /** Read-only replay lookup for a future authenticated service admission, before queue/CAS checks. */
+    internal fun replayStart(jobId: String, request: NewWorkflowAttempt, requestKey: String,
+        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId) { directory ->
+        val key = workflowStartKeyDigest(jobId, requestKey)
+        val intent = workflowStartIntentSha256(expectedRequestVersion, request)
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        replayStartLocked(current, key, intent)
+    }
+
+    /** The attempt and its receipt share the existing single atomic durable publication. */
+    internal fun createIdempotent(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
+        requestKey: String, expectedRequestVersion: String = expectedJobVersion): WorkflowStartResult = withJob(jobId) { directory ->
+        val key = workflowStartKeyDigest(jobId, requestKey)
+        val intent = workflowStartIntentSha256(expectedRequestVersion, request)
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        replayStartLocked(current, key, intent) ?: run {
+            val created = createLocked(directory, current, expectedJobVersion, request,
+                { runId -> WorkflowStartReceipt(runId, key, expectedRequestVersion, intent) })
+            WorkflowStartResult(created.snapshot, created.attempt, replayed = false)
+        }
+    }
+
+    private fun replayStartLocked(current: WorkflowJobSnapshot, key: String, intent: String): WorkflowStartResult? {
+        val selected = current.attempts.singleOrNull { it.startReceipt?.requestKeyDigest == key } ?: return null
+        if (selected.startReceipt!!.intentSha256 != intent) {
+            fail("IDEMPOTENCY_CONFLICT", "The workflow start request key was already used for different intent.")
+        }
+        return WorkflowStartResult(current, selected, replayed = true)
+    }
+
+    private fun createLocked(directory: Path, current: WorkflowJobSnapshot, expectedJobVersion: String,
+        request: NewWorkflowAttempt, receipt: ((String) -> WorkflowStartReceipt)? = null): WorkflowMutation {
         checkVersion(current.version, expectedJobVersion)
         requireRecovered(current, directory)
         if (current.attempts.any { !it.state.terminal }) fail("ACTIVE_RUN", "This job already has an active workflow attempt.")
@@ -205,12 +243,13 @@ class WorkflowAttemptStore private constructor(
         request.previousRunId?.let { previous ->
             if (current.attempts.none { it.runId == previous && it.state.terminal }) fail("INVALID_PREVIOUS_RUN", "The previous attempt must be a terminal attempt of this job.")
         }
-        val attempt = WorkflowAttempt(newId("run"), jobId, request.workflow, WorkflowRunState.QUEUED, newId("version"),
+        val initial = WorkflowAttempt(newId("run"), current.jobId, request.workflow, WorkflowRunState.QUEUED, newId("version"),
             clock.instant(), null, null, request.previousRunId, request.inputRevisionId, request.harnessCapabilityId,
             request.limits, null, null, null, null)
+        val attempt = if (receipt == null) initial else initial.copy(startReceipt = receipt(initial.runId))
         val updated = current.copy(version = newId("version"), attempts = immutable(current.attempts + attempt))
         persist(directory, updated)
-        WorkflowMutation(updated, attempt)
+        return WorkflowMutation(updated, attempt)
     }
 
     fun transition(jobId: String, runId: String, expectedRunVersion: String, transition: WorkflowTransition): WorkflowMutation = withJob(jobId) { directory ->
@@ -524,10 +563,13 @@ class WorkflowAttemptStore private constructor(
             require(snapshot.legacy.status in LEGACY_STATUSES && snapshot.attempts.size <= MAX_ATTEMPTS)
             require(!snapshot.legacy.recoveredInterrupted || snapshot.legacy.status in setOf("queued", "analyzing"))
             require(snapshot.attempts.map(WorkflowAttempt::runId).distinct().size == snapshot.attempts.size)
+            val startKeys = snapshot.attempts.mapNotNull { it.startReceipt?.requestKeyDigest }
+            require(startKeys.size == startKeys.distinct().size) { "duplicate workflow start receipt key" }
             require(snapshot.attempts.count { !it.state.terminal } <= 1)
             require(snapshot.attempts.none { !it.state.terminal } || !snapshot.attempts.last().state.terminal)
             val previous = mutableSetOf<String>()
             snapshot.attempts.forEach { attempt ->
+                attempt.startReceipt?.validate(attempt)
                 requireId(attempt.runId); requireId(attempt.version); require(attempt.jobId == snapshot.jobId)
                 listOfNotNull(attempt.inputRevisionId, attempt.harnessCapabilityId, attempt.previousRunId).forEach(::requireId)
                 require(attempt.previousRunId == null || attempt.previousRunId in previous)
@@ -567,13 +609,14 @@ class WorkflowAttemptStore private constructor(
             put("candidate", a.candidate?.let { c -> buildJsonObject { put("revisionId", c.revisionId); put("sourceSha256", c.sourceSha256) } } ?: JsonNull)
             put("acceptedRevision", a.acceptedRevision?.let(::encodeAcceptance) ?: JsonNull)
             if (a.progressRetentionPinned) put("progressRetentionPinned", true)
+            a.startReceipt?.let { put("startReceipt", it.encode()) }
         }
         private fun encodeAcceptance(a: WorkflowAcceptanceReference): JsonObject = buildJsonObject {
             put("jobId", a.jobId); put("runId", a.runId); put("revisionId", a.revisionId); put("sourceSha256", a.sourceSha256)
             put("graphNodeId", a.graphNodeId); put("artifactId", a.artifactId); put("artifactSha256", a.artifactSha256)
         }
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
-            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
+            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
             val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
@@ -582,7 +625,8 @@ class WorkflowAttemptStore private constructor(
                 WorkflowExecutionLimits(limits.uint("wallClockMs"), limits.uint("idleMs"), limits.uint("maxOutputBytes"), limits.uint("maxToolCalls")), a.optionalString("terminalReason")?.let(WorkflowTerminalReason::valueOf),
                 usage?.let { WorkflowUsage(it.optionalUInt("inputTokens"), it.optionalUInt("outputTokens"), it.optionalUInt("cachedInputTokens"), it.optionalUInt("toolCalls"), it.optionalUInt("wallClockMs")) },
                 candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance),
-                if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false)
+                if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false,
+                if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null)
         }
         private fun parseAcceptance(value: JsonElement): WorkflowAcceptanceReference {
             val a = value.asObject().also { it.keysExactly("jobId", "runId", "revisionId", "sourceSha256", "graphNodeId", "artifactId", "artifactSha256") }
