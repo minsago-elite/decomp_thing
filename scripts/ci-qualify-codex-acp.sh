@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if (($# != 0)); then
-  echo "usage: scripts/ci-qualify-codex-acp.sh" >&2
+if (($# > 1)) || { (($# == 1)) && [[ "$1" != --fetch-archive ]]; }; then
+  echo "usage: scripts/ci-qualify-codex-acp.sh [--fetch-archive]" >&2
   exit 64
 fi
 if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
@@ -15,11 +15,13 @@ fi
 readonly CODEX_ACP_VERSION="0.16.0"
 readonly CODEX_ACP_ARCHIVE="codex-acp-${CODEX_ACP_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 readonly CODEX_ACP_ARCHIVE_URL="https://github.com/zed-industries/codex-acp/releases/download/v${CODEX_ACP_VERSION}/${CODEX_ACP_ARCHIVE}"
+readonly CODEX_ACP_ASSET_API_URL="https://api.github.com/repos/zed-industries/codex-acp/releases/assets/441865401"
+readonly CODEX_ACP_ARCHIVE_BYTES="74262216"
 readonly CODEX_ACP_ARCHIVE_SHA256="0a9ad6c31ec9b2b87dccb7e9da3faf5d387e74470d24dbced75a160ed7b22d06"
 readonly CODEX_ACP_EXECUTABLE_SHA256="23a9f2af247fc61aa9a895d5ee91a62a35d05a883bddc2c85d1dc6b2be697087"
 readonly CODEX_ACP_BUNDLED_BWRAP_SHA256="5a5104807cfbe9b509d0b9fa1c46054ff48dbed5393f30d261b34263ebf0e3fe"
 
-for required_command in curl gzip javac java ldd sha256sum tar; do
+for required_command in cp curl gzip javac java ldd ln sha256sum tar wc; do
   command -v "$required_command" >/dev/null || {
     echo "missing ACP compatibility command: $required_command" >&2
     exit 1
@@ -29,7 +31,6 @@ done
 compatibility_root="$(pwd)/build/acp-codex-compatibility"
 mkdir -p "$compatibility_root/results" "$compatibility_root/work"
 work_directory=$(mktemp -d "$compatibility_root/work/codex-acp-${CODEX_ACP_VERSION}.XXXXXX")
-result_directory=$(mktemp -d "$compatibility_root/results/codex-acp-${CODEX_ACP_VERSION}.XXXXXX")
 cleanup() {
   case "$work_directory" in
     "$compatibility_root"/work/codex-acp-"$CODEX_ACP_VERSION".*)
@@ -42,44 +43,95 @@ cleanup() {
 }
 trap cleanup EXIT
 
-printf '%s\n' \
-  "schema=decomp-engine-acp-compatibility-target-v1" \
-  "agent=codex-acp" \
-  "version=$CODEX_ACP_VERSION" \
-  "archive=$CODEX_ACP_ARCHIVE_URL" \
-  "archiveSha256=$CODEX_ACP_ARCHIVE_SHA256" \
-  "archiveEntries=codex-acp,codex-resources/bwrap" \
-  "executableSha256=$CODEX_ACP_EXECUTABLE_SHA256" \
-  "bundledBwrapSha256=$CODEX_ACP_BUNDLED_BWRAP_SHA256" \
-  "bundledResourceMounted=false" \
-  "argv=codex-acp" \
-  "case=credential-free-session-authentication-boundary" \
-  "initializeRequired=true" \
-  "sessionCreationAttempted=true" \
-  "sessionCreated=false" \
-  "modelPromptSent=false" \
-  "workspaceFilesystemAuthorityGranted=false" \
-  "workspaceFilesystemEdits=false" \
-  "terminalAuthorityGranted=false" \
-  "permissionAuthorityGranted=false" \
-  "credentialsForwarded=false" \
-  "outerNetworkEnabled=false" \
-  "oracleAccessGranted=false" \
-  >"$result_directory/target.properties"
+if [[ "${1:-}" != --fetch-archive ]]; then
+  result_directory=$(mktemp -d "$compatibility_root/results/codex-acp-${CODEX_ACP_VERSION}.XXXXXX")
+  printf '%s\n' \
+    "schema=decomp-engine-acp-compatibility-target-v1" \
+    "agent=codex-acp" \
+    "version=$CODEX_ACP_VERSION" \
+    "archive=$CODEX_ACP_ARCHIVE_URL" \
+    "archiveSha256=$CODEX_ACP_ARCHIVE_SHA256" \
+    "archiveEntries=codex-acp,codex-resources/bwrap" \
+    "executableSha256=$CODEX_ACP_EXECUTABLE_SHA256" \
+    "bundledBwrapSha256=$CODEX_ACP_BUNDLED_BWRAP_SHA256" \
+    "bundledResourceMounted=false" \
+    "argv=codex-acp" \
+    "case=credential-free-session-authentication-boundary" \
+    "initializeRequired=true" \
+    "sessionCreationAttempted=true" \
+    "sessionCreated=false" \
+    "modelPromptSent=false" \
+    "workspaceFilesystemAuthorityGranted=false" \
+    "workspaceFilesystemEdits=false" \
+    "terminalAuthorityGranted=false" \
+    "permissionAuthorityGranted=false" \
+    "credentialsForwarded=false" \
+    "outerNetworkEnabled=false" \
+    "oracleAccessGranted=false" \
+    >"$result_directory/target.properties"
+fi
+
+archive_path="$work_directory/$CODEX_ACP_ARCHIVE"
+cache_directory="$compatibility_root/download-cache"
+cache_archive="$cache_directory/$CODEX_ACP_ARCHIVE"
+verify_archive() {
+  [[ ! -L "$1" && -f "$1" ]] || return 1
+  [[ "$(wc -c <"$1")" == "$CODEX_ACP_ARCHIVE_BYTES" ]] || return 1
+  local observed_digest=""
+  read -r observed_digest _ < <(sha256sum -- "$1")
+  [[ "$observed_digest" == "$CODEX_ACP_ARCHIVE_SHA256" ]]
+}
+if [[ -L "$cache_directory" || ( -e "$cache_directory" && ! -d "$cache_directory" ) ]]; then
+  echo "pinned codex-acp download cache is not a regular directory" >&2
+  exit 1
+fi
+mkdir -p "$cache_directory"
+if [[ -e "$cache_archive" || -L "$cache_archive" ]]; then
+  if ! verify_archive "$cache_archive"; then
+    echo "pinned codex-acp cached archive differs from its size/SHA-256 lock" >&2
+    exit 1
+  fi
+  cp -- "$cache_archive" "$archive_path"
+  echo "Reused verified pinned codex-acp archive"
+else
+  downloaded=false
+  # Two official endpoints, one attempt each, at most 240 seconds of transfer time.
+  # This retries acquisition only; no agent/protocol invocation is repeated.
+  for archive_url in "$CODEX_ACP_ARCHIVE_URL" "$CODEX_ACP_ASSET_API_URL"; do
+    if curl --fail --location --max-redirs 3 --proto '=https' --proto-redir '=https' \
+      --tlsv1.2 --connect-timeout 15 --max-time 120 --max-filesize "$CODEX_ACP_ARCHIVE_BYTES" \
+      --retry 0 --show-error --silent --header 'Accept: application/octet-stream' \
+      --output "$archive_path" "$archive_url"; then
+      if ! verify_archive "$archive_path"; then
+        echo "pinned codex-acp downloaded archive differs from its size/SHA-256 lock" >&2
+        exit 1
+      fi
+      downloaded=true
+      break
+    fi
+  done
+  if [[ "$downloaded" != true ]]; then
+    echo "both official pinned codex-acp archive endpoints refused acquisition" >&2
+    exit 1
+  fi
+  # A hard link publishes complete verified bytes atomically without replacement.
+  if ! ln --no-target-directory -- "$archive_path" "$cache_archive"; then
+    if ! verify_archive "$cache_archive"; then
+      echo "pinned codex-acp cache publication found an incompatible existing entry" >&2
+      exit 1
+    fi
+  fi
+fi
+if ! verify_archive "$archive_path"; then
+  echo "pinned codex-acp staged archive differs from its size/SHA-256 lock" >&2
+  exit 1
+fi
+if [[ "${1:-}" == --fetch-archive ]]; then
+  exit 0
+fi
 
 ./gradlew --no-daemon installDist
 
-archive_path="$work_directory/$CODEX_ACP_ARCHIVE"
-curl \
-  --fail \
-  --location \
-  --proto '=https' \
-  --retry 3 \
-  --show-error \
-  --silent \
-  --tlsv1.2 \
-  --output "$archive_path" \
-  "$CODEX_ACP_ARCHIVE_URL"
 read -r actual_archive_sha256 _ < <(sha256sum -- "$archive_path")
 if [[ "$actual_archive_sha256" != "$CODEX_ACP_ARCHIVE_SHA256" ]]; then
   echo "pinned codex-acp archive digest mismatch" >&2
