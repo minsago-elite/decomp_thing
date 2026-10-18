@@ -286,7 +286,7 @@ class SchemaMigration(unittest.TestCase):
         from test_link_inputs import LinkInputTests,pin
         case=LinkInputTests('test_full_static_closure');case.setUp();self.addCleanup(case.doCleanups)
         value=pin.collect_pin(case.manifest,case.root)
-        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
             root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
             with patch.object(f,'BASE',root),patch.object(importlib.util,'spec_from_file_location',
                     side_effect=AssertionError('mutable source loader used')):
@@ -1405,7 +1405,7 @@ class FreezeDependencyCapture(unittest.TestCase):
 class SealerToolchainSources(unittest.TestCase):
     def test_each_post_admission_source_mutation_refuses_before_compile(self):
         for selected,_,_ in f._SEAL_TOOLCHAIN_SOURCES:
-            with self.subTest(source=selected),tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+            with self.subTest(source=selected),tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
                 root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
                 path=root/selected;raw=path.read_bytes();path.write_bytes(bytes([raw[0]^1])+raw[1:])
                 with patch.object(f,'BASE',root),patch.object(f,'compile',create=True) as compiled:
@@ -1413,7 +1413,7 @@ class SealerToolchainSources(unittest.TestCase):
                     compiled.assert_not_called()
 
     def test_captured_closure_survives_later_path_changes_without_reopening(self):
-        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
             root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
             original=f.read_admitted;calls=[]
             def captured(record,maximum):
@@ -1436,7 +1436,7 @@ class SealerToolchainSources(unittest.TestCase):
         poison=ModuleType('poison');poison.revalidate_pin=lambda *args: self.fail('ambient revalidator used')
         names=('pin_environment','callable_v3_link_inputs','callable_v3_monitor_inputs',
                '_v3_monitor_pin_environment','_v3_monitor_link_inputs','_v3_monitor_inputs')
-        with tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+        with tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
             root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
             with patch.object(f,'BASE',root),patch.dict(sys.modules,{name:poison for name in names}), \
                     patch.object(importlib.util,'spec_from_file_location',side_effect=AssertionError('path fallback')):
@@ -1451,7 +1451,7 @@ class SealerToolchainSources(unittest.TestCase):
     def test_missing_link_metadata_checkpoint_and_forged_generation_refuse(self):
         import hashlib
         for defect in ('missing-record','checkpoint','record-size','symlink','forged-generation'):
-            with self.subTest(defect=defect),tempfile.TemporaryDirectory(dir=static_temp('sealer-toolchain')) as directory:
+            with self.subTest(defect=defect),tempfile.TemporaryDirectory(dir=static_temp('static-process')) as directory:
                 root=Path(directory);sources,checkpoint=_toolchain_revalidator_fixture(root)
                 path=root/'toolchain-001/pin_environment.py';key=str(path)
                 if defect=='missing-record':del sources[key]
