@@ -426,17 +426,19 @@ internal fun renderRepairPresentation(
     val text = try {
         require(presentation.exitCode in 0..2 && presentation.lines.size <= 32)
         val redactor = MvpArtifactRedactor(sensitiveValues, 16_384L)
-        val lines = redactor.forLogLines()
+        val fragments = redactor.forLogLines()
         var count = 0
-        val projected = redactor.project {
+        val projected = fragments.project {
             for (line in presentation.lines) {
                 require(count++ < 32)
                 require('\n' !in line && '\r' !in line)
-                append(lines.text(line)).append("\n")
+                append(line).append("\n")
             }
         }
         require(projected.count { it == '\n' } == count) { "complete repair line framing could not be retained" }
-        projected
+        redactor.text(projected).also {
+            require(it.count { unit -> unit == '\n' } == count) { "complete repair line framing could not be retained" }
+        }
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
         return 1
