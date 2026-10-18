@@ -318,3 +318,13 @@ precede response transcript projection, so a display refusal reaches the existin
 rejected-assessment path rather than leaving the captured turn pending. The
 immutable receipt, capture validation and assessment serialization remain intact.
 These review corrections require current-source ordinary Actions evidence.
+
+
+The bounded shared diagnostic redactor uses the same original-input coverage
+principle. It reuses its KMP tables, adds at most two input-length integer arrays
+only when a match exists, and admits exact output characters before allocating a
+builder. The 16 Ki-character input/intermediate ceiling, eight passes, primary
+4096/oneMiB inventory and separate130-value preference budget remain unchanged.
+This closes the same delimiter-tail source gap for journal/Doctor/error previews
+without applying full-artifact limits or allocating a large extra index there.
+Ordinary Actions must verify the new metadata regression and all preceding gates.

@@ -8,6 +8,43 @@ import kotlin.io.path.fileSize
 import kotlin.test.*
 
 class AgentProgressJournalTest {
+
+    @Test
+    fun `complete configured diagnostic secrets survive format matching only as masked coverage`() {
+        for (secret in listOf("top secret", "top,secret", "top;secret", "top\nsecret", "top\u0001 secret")) {
+            for (redactor in listOf(ProgressRedactor(listOf(secret)), ProgressRedactor(emptyList(), listOf(secret)))) {
+                for (prefix in listOf("password=", "Bearer ", "Authorization: Basic ")) {
+                    val safe = redactor.text(prefix + secret + "; public tail")
+                    assertFalse(safe.contains("top"))
+                    assertFalse(safe.contains("secret"))
+                    assertTrue(safe.contains("public tail"))
+                }
+            }
+        }
+        val cases = listOf("ababa" to "aba", "aaaaaa" to "aa", "abc" to "abc", "ab" to "abcd",
+            "😀😀" to "😀", "a\uD800b\uD800" to "\uD800")
+        for ((source, literal) in cases) {
+            val starts = IntArray(source.length + 1)
+            val ends = IntArray(source.length + 1)
+            ProgressLiteralSecret(literal).markCoverage(source, starts, ends)
+            val expected = BooleanArray(source.length)
+            for (position in 0..source.length - literal.length) if (source.startsWith(literal, position)) {
+                for (offset in literal.indices) expected[position + offset] = true
+            }
+            var active = 0
+            for (index in source.indices) {
+                active += starts[index] - ends[index]
+                assertEquals(expected[index], active > 0)
+            }
+        }
+        val labelAndValue = ProgressRedactor(listOf("Bearer", "top secret"))
+        val safe = labelAndValue.text("Bearer top secret; public")
+        assertFalse(safe.contains("Bearer"))
+        assertFalse(safe.contains("top"))
+        assertFalse(safe.contains("secret"))
+        assertTrue(safe.contains("public"))
+    }
+
     @Test
     fun `indexed literal redaction preserves bounded replacement and UTF16 matching`(): Unit {
         val sources = mutableListOf("")

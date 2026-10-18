@@ -643,25 +643,69 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     private fun omission(marker: String): String = if (leaks(marker)) "" else marker
 
     private fun redact(source: String): String? {
-        var safe = source
-        fun replace(pattern: Regex, replacement: String): Boolean {
-            safe = safe.replace(pattern, replacement)
-            return safe.length <= MAXIMUM_REDACTION_CHARACTERS
+        val replacement = "[redacted]"
+        var starts: IntArray? = null
+        var ends: IntArray? = null
+        fun allocate() {
+            if (starts == null) {
+                starts = IntArray(source.length + 1)
+                ends = IntArray(source.length + 1)
+            }
         }
-        // Consume both Basic scheme and credential before the generic field rule can remove
-        // just the scheme. Mask every credential format before configured literals can erase
-        // a scheme, field name or token prefix and leave an unregistered credential behind.
-        if (!replace(Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+"), "$1[redacted]")) return null
-        if (!replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")) return null
-        if (!replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")) return null
-        if (!replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")) return null
-        for (secret in secrets) {
-            safe = secret.replaceBounded(safe, "[redacted]", MAXIMUM_REDACTION_CHARACTERS) ?: return null
+        // Neither format nor literal masking may destroy the other's complete match.
+        for ((pattern, retainPrefix) in FORMATS) {
+            val matcher = pattern.toPattern().matcher(source)
+            while (matcher.find()) {
+                allocate()
+                starts!![if (retainPrefix) matcher.end(1) else matcher.start()]++
+                ends!![matcher.end()]++
+            }
         }
-        return safe
+        // No-match calls need no coverage arrays or builder; keep the immutable KMP inventory.
+        if (starts == null && secrets.none { it.occursIn(source) }) return source
+        allocate()
+        val beginnings = requireNotNull(starts)
+        val endings = requireNotNull(ends)
+        for (secret in secrets) secret.markCoverage(source, beginnings, endings)
+        fun render(output: StringBuilder?): Int? {
+            var active = 0
+            var masking = false
+            var length = 0
+            for (index in source.indices) {
+                active -= endings[index]
+                // Preserve separate adjacent matches, including the existing exact-growth contract.
+                if (active == 0) masking = false
+                active += beginnings[index]
+                if (active > 0) {
+                    if (!masking) {
+                        if (length > MAXIMUM_REDACTION_CHARACTERS - replacement.length) return null
+                        length += replacement.length
+                        output?.append(replacement)
+                        masking = true
+                    }
+                } else {
+                    if (length == MAXIMUM_REDACTION_CHARACTERS) return null
+                    length++
+                    output?.append(source[index])
+                    masking = false
+                }
+            }
+            return length
+        }
+        val length = render(null) ?: return null
+        // Admit the exact output size before allocating; no builder grows beyond the old cap.
+        val output = StringBuilder(length)
+        render(output)
+        return output.toString()
     }
 
     private companion object {
+        val FORMATS = listOf(
+            Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+") to true,
+            Regex("(?i)(bearer\\s+)[^\\s,;]+") to true,
+            Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+") to true,
+            Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+") to false,
+        )
         const val REDACTION_PASSES = 8
         const val MAXIMUM_REDACTION_CHARACTERS = 16_384
     }
@@ -701,6 +745,22 @@ internal class ProgressLiteralSecret(private val value: String) {
         }
         if (output.length.toLong() + source.length - copied > maximumCharacters) return null
         return output.append(source, copied, source.length).toString()
+    }
+
+    /** Mark complete overlapping matches without changing text or allocating a match object. */
+    fun markCoverage(source: String, starts: IntArray, ends: IntArray) {
+        require(starts.size == source.length + 1 && ends.size == starts.size)
+        if (value.length > source.length) return
+        var matched = 0
+        for (index in source.indices) {
+            while (matched > 0 && source[index] != value[matched]) matched = prefix[matched - 1]
+            if (source[index] == value[matched]) matched++
+            if (matched == value.length) {
+                starts[index - value.length + 1]++
+                ends[index + 1]++
+                matched = prefix[matched - 1]
+            }
+        }
     }
 
     private fun find(source: String, start: Int): Int {
