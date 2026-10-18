@@ -5,6 +5,8 @@ import decompengine.jobs.PublishedJobUpload
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowPinActor
 import decompengine.jobs.WorkflowPinRequestResult
+import decompengine.jobs.WorkflowCancellationActor
+import decompengine.jobs.WorkflowCancellationRequestResult
 import java.io.InputStream
 
 /**
@@ -36,6 +38,11 @@ internal class WebJobMutationBoundary(
         checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
         return AuthorizedWebWorkflowStart(jobs)
     }
+
+    fun authorizeCancellation(exchange: HttpExchange): AuthorizedWebCancellation {
+        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebCancellation(session, jobs)
+    }
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */
@@ -65,6 +72,17 @@ internal class AuthorizedWebWorkflowStart internal constructor(private val jobs:
     fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
         requestKey: String): DurableWebWorkflowStartResult =
         jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey)
+}
+
+/** Cancellation-only capability; the body cannot select the authenticated actor. */
+internal class AuthorizedWebCancellation internal constructor(
+    private val session: AuthorizedWebSession,
+    private val jobs: WebJobService,
+) {
+    fun request(jobId: String, runId: String, expectedRunVersion: String,
+        requestKey: String): WorkflowCancellationRequestResult = jobs.requestDurableCancellation(
+            jobId, runId, expectedRunVersion, WorkflowCancellationActor.browserSession(session.sessionId), requestKey,
+        )
 }
 
 /** Progress-retention capability whose actor identity can only come from authorization. */
