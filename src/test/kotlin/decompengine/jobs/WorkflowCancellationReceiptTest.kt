@@ -282,6 +282,50 @@ class WorkflowCancellationReceiptTest {
         }
     }
 
+    @Test fun `start and cancellation receipts coexist across pins terminal state later work and reopen`() = fixture { root, job ->
+        val startKey = "authored_start_receipt_key"
+        val publicVersion = "authored_public_start_version"
+        lateinit var original: WorkflowAttempt
+        lateinit var startReceipt: WorkflowStartReceipt
+        lateinit var cancellation: WorkflowCancellationReceipt
+        lateinit var laterId: String
+        WorkflowAttemptStore.open(root).use { store ->
+            original = store.createIdempotent(job, store.snapshot(job).version, request, startKey, publicVersion).attempt
+            startReceipt = assertNotNull(original.startReceipt)
+            val first = store.requestCancellation(job, original.runId, original.version, actor, key)
+            cancellation = first.receipt
+            val pinned = store.setProgressRetentionPinned(job, original.runId, first.attempt.version, true).attempt
+            val before = root.resolve("$job/workflow-state.json").readBytes()
+            val startReplay = assertNotNull(store.replayStart(job, request, startKey, publicVersion))
+            assertTrue(startReplay.replayed); assertEquals(pinned, startReplay.attempt)
+            assertEquals(startReceipt, startReplay.attempt.startReceipt)
+            val cancelReplay = store.requestCancellation(job, original.runId, original.version, actor, key)
+            assertTrue(cancelReplay.replayed); assertEquals(pinned, cancelReplay.attempt)
+            assertEquals(cancellation, cancelReplay.receipt)
+            assertContentEquals(before, root.resolve("$job/workflow-state.json").readBytes())
+            val terminal = store.transition(job, original.runId, pinned.version,
+                WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED))
+            assertEquals(startReceipt, terminal.attempt.startReceipt)
+            laterId = store.createIdempotent(job, terminal.snapshot.version, request,
+                "authored_later_start_key", "authored_later_public_version").attempt.runId
+        }
+        WorkflowAttemptStore.open(root).use { store ->
+            store.recoverAfterRestart(job)
+            val before = root.resolve("$job/workflow-state.json").readBytes()
+            val startReplay = assertNotNull(store.replayStart(job, request, startKey, publicVersion))
+            val cancelReplay = store.requestCancellation(job, original.runId, original.version, actor, key)
+            assertEquals(WorkflowRunState.CANCELLED, startReplay.attempt.state)
+            assertEquals(startReplay.attempt, cancelReplay.attempt)
+            assertEquals(startReceipt, startReplay.attempt.startReceipt)
+            assertEquals(cancellation, cancelReplay.receipt)
+            assertEquals(laterId, store.snapshot(job).latestRun!!.runId)
+            assertEquals(WorkflowRunState.INTERRUPTED, store.snapshot(job).latestRun!!.state)
+            assertTrue(startReplay.attempt.progressRetentionPinned)
+            assertNull(store.snapshot(job).acceptedRevision)
+            assertContentEquals(before, root.resolve("$job/workflow-state.json").readBytes())
+        }
+    }
+
     private fun WorkflowAttemptStore.snapshot(job: String) = assertIs<WorkflowJobInspection.Available>(inspect(job)).snapshot
     private fun fixture(action: (Path, String) -> Unit) {
         val root = createTempDirectory("workflow-cancel-receipt-")

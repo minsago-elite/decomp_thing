@@ -189,6 +189,34 @@ absence of a total never prevents page navigation.
 
 ## Errors, deadlines and concurrent mutations
 
+The workflow-start transport accepts only the `workflowStart` data object (not
+its fixture wrapper), bounded to 4096 bytes. It uses the shared local
+session/Origin/JSON/CSRF mutation boundary before reading a body or job record.
+It requires a canonical job target, no query, one strong job `If-Match`, one
+16–128 character `Idempotency-Key`, and no other conditional headers. Both
+identity fields must be present as bounded IDs or null; all four limit fields
+must be canonical unsigned decimal strings. Duplicate keys, unknown fields,
+invalid UTF-8, numeric JSON limits and arbitrary command/path fields are refused.
+
+An admitted start returns `202 run`, its run `Location` and strong run ETag.
+Replay returns the same retained run identity and current retained run state,
+with `Idempotency-Replayed: true`, even after later work or a restart. It neither
+requeues work nor promotes candidate output to acceptance. Key conflicts are
+409, a fresh stale guard is 412, per-job active work is 409, admission capacity
+is 429, and unavailable workflow/harness/limits are 503. Missing guards are 428;
+invalid request values or unavailable accepted input are 422. Uncertain
+publication returns a recovery failure without a success location. A scheduler
+refusal that was durably recorded returns its failed run; another scheduling
+exception requires reconciliation through the job and retained key.
+
+Production durable adapters remain unregistered, and bootstrap continues to
+report them unavailable. Without registered adapters or retained keyed starts,
+POST retains the existing 405 response without consuming a body. A retained
+receipt keeps the route available for authenticated read-only replay after
+registrations are removed; it does not enable fresh work. Injected inert
+adapters qualify transport/storage behavior, not runtime readiness or upstream
+model/binary execution and accepted-publication integration.
+
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
 pointer plus stable code/message and never the rejected value. Resource existence is disclosed

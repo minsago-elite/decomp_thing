@@ -53,3 +53,48 @@ outcome contracts (#604), reproducible datasets (#606), isolated Git/provider
 fixtures (#607), and retained packaged-history evidence without replacing them.
 They do not qualify live provider execution, production recovery, a packaged
 browser journey, or the parent tracker as a whole.
+
+## Durable start receipt controls
+
+`WorkflowStartReceiptTest` exercises the store's keyed admission using only the
+existing authored ELF header and persisted lifecycle transitions. A start receipt
+and its queued attempt use one atomic state publication. The stored key is a
+job-scoped digest; it survives listener/session changes without storing the raw
+request key. Intent includes the original request version, workflow, input and
+harness identities, predecessor, and all declared limits. Replays select that
+same retained attempt before CAS or active-attempt checks, including after
+restart and after a later run starts. They never enqueue or execute work.
+
+The controls cover competing identical/conflicting requests, every existing
+atomic publication fault point, old unkeyed records and malformed/copied/duplicate
+receipts. A completed candidate and a stored accepted reference keep their
+different meanings. These are storage controls. Service queue admission, shared
+HTTP mutation authorization and production adapter/acceptance integration still
+need their own implementation and qualification; the receipt is no execution or
+acceptance authority.
+
+`DurableWebWorkflowStartTest` adds the service boundary with inert registered
+adapters. It checks replay before capability/capacity/version admission, the
+different initial public and storage version tokens, exact registered limits and
+harness selection, accepted-input ownership, and bounded owned worker/queue
+states. A committed start retains its run even if the executor immediately
+refuses it; replay never submits that task again. Admission and terminal-write
+faults preserve uncertainty and require recovery before further mutations.
+Restart reconciliation, shutdown and replay do not dispatch work. Current
+candidate output remains separate from the prior accepted-reference pointer.
+
+`WebWorkflowStartControllerTest` exercises the versioned route through a real
+local HTTP server with an injected inert service. It covers keyed replay after
+later work and restart with registrations removed, owned queue and per-job
+refusals, nullable harness identity, full unsigned limits, scheduler refusal and
+publication uncertainty. Direct memory exchanges observe zero body consumption
+for authorization/header/target refusals and bound oversized reads. Strict JSON
+controls reject malformed UTF-8, duplicate/unknown fields, fixture wrappers and
+command/path input. The benign recovery verifier requires this suite as well.
+
+The internal service command is reached through the shared session/Origin/CSRF
+capability. Production durable adapters remain unregistered; the existing default
+405 refusals and unavailable bootstrap claims remain. Runtime capability and
+accepted-publication integration still require their owning qualification. A
+recorded receipt and an injected adapter are not production readiness, live
+provider execution or acceptance attestation.
