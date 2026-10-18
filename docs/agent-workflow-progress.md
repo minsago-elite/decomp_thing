@@ -49,6 +49,11 @@ including unknown root fields. Only the exact legacy and admitted-run journal na
 source/receipt files sharing the basename keep their original bytes. Reads and bounded canonical JSON
 output use the journal's two-MiB ceiling. Invalid journals return a fixed unavailable error without
 raw parser causes. This protects downloaded display content without rewriting unopened stored files.
+An owned historical cleanup changes retained record bytes. Existing signed replay cursors bind
+those bytes, so a changed anchor still returns `EVENT_GAP` with its snapshot recovery route.
+Consumers take a fresh snapshot and resume from its retained boundary; cleanup does not weaken
+record-change detection or authenticate history. Append-only publication after that cutover keeps
+unchanged anchors usable, including when already-cleaned records are republished.
 
 Raw protocol frames and arbitrary exception messages do not enter this view. Message chunks retain
 content/identity commitments and counts. Up to 16 messages of 8,192 characters each can be accumulated
