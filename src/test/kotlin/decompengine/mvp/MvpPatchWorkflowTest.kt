@@ -26,6 +26,156 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+
+    @Test
+    fun `complete artifact literal index agrees with independent overlapping span coverage`() {
+        fun expected(source: String, values: List<String>): String {
+            val covered = BooleanArray(source.length)
+            for (value in values) for (position in 0..source.length - value.length) {
+                if (source.startsWith(value, position)) for (offset in value.indices) covered[position + offset] = true
+            }
+            return buildString {
+                var position = 0
+                while (position < source.length) {
+                    if (!covered[position]) append(source[position++]) else {
+                        append("[REDACTED]")
+                        while (position < source.length && covered[position]) position++
+                    }
+                }
+            }
+        }
+        val random = java.util.Random(7568)
+        val alphabet = charArrayOf('a', 'b', 'c', 'é', '\uD800', '\uDC00')
+        repeat(400) {
+            val values = List(1 + random.nextInt(8)) {
+                buildString { repeat(1 + random.nextInt(6)) { append(alphabet[random.nextInt(alphabet.size)]) } }
+            }
+            val source = buildString { repeat(random.nextInt(50)) { append(alphabet[random.nextInt(alphabet.size)]) } }
+            val index = MvpArtifactLiteralIndex(values)
+            assertEquals(expected(source, values), index.replace(source, 1024))
+            assertEquals(values.any { source.contains(it) }, index.contains(source))
+        }
+        for ((source, values) in listOf(
+            "abcdeZ" to listOf("ab", "bcde", "de"),
+            "aaaaaaa!" to listOf("a", "aa", "aaaa"),
+            "cababa!" to listOf("ab", "baba", "cab"),
+            "abXYcd" to listOf("ab", "cd"),
+        )) assertEquals(expected(source, values), MvpArtifactLiteralIndex(values).replace(source, 1024))
+        val broad = List(4096) { (it + 256).toChar().toString() }
+        assertEquals(List(4096) { "[REDACTED]" }.joinToString(","),
+            MvpArtifactLiteralIndex(broad).replace(broad.joinToString(","), 65_536))
+        val prefixValues = List(256) { "a".repeat(it + 1) + "b" }
+        val prefixSource = "a".repeat(100_000) + "b; public tail"
+        assertEquals("a".repeat(100_000 - 256) + "[REDACTED]; public tail",
+            MvpArtifactLiteralIndex(prefixValues).replace(prefixSource, 200_000))
+    }
+
+    @Test
+    fun `complete artifact inventory is immutable and credential formats precede literal masking`() {
+        val configured = "ordinary-setting-sensitive-value"
+        val environment = mutableMapOf("PLAIN_SETTING" to configured, "PLAIN_SCHEME" to "Bearer",
+            "PLAIN_FIELD" to "api_key", "PLAIN_CONTROL" to "left\u0001right")
+        val evidence = MvpRunEvidence(environment, "fixture-harness", "fixture-profile", "a".repeat(64))
+        environment.clear()
+        environment["PLAIN_SETTING"] = "later-public-value"
+        val text = evidence.redact("public; $configured; Bearer unregistered-bearer; Authorization: Basic synthetic-basic; " +
+            "api_key=synthetic-api; password=synthetic-password; ghp_syntheticToken; left\u0002right; later-public-value")
+        for (privateValue in listOf(configured, "Bearer", "api_key", "unregistered-bearer", "synthetic-basic",
+            "synthetic-api", "synthetic-password", "syntheticToken", "leftright")) assertFalse(text.contains(privateValue))
+        assertTrue(text.contains("later-public-value"))
+        assertTrue(text.contains("[REDACTED]"))
+        assertFalse(evidence.redactDiagnostic(configured).contains(configured))
+        assertTrue(evidence.redactDiagnostic("later-public-value").contains("later-public-value"))
+        val publicContent = "public complete code line;\n".repeat(2_000)
+        assertTrue(publicContent.length > 16_384)
+        assertEquals(publicContent, evidence.redact(publicContent))
+    }
+
+    @Test
+    fun `complete request and response projections mask paths and formatting without changing captured inputs`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-artifact-privacy")), "transcript-")
+        val privateValue = "ordinary-setting-sensitive-value"
+        val pathValue = "private-segment"
+        val renderedHeader = "## target.c"
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to privateValue, "PLAIN_PATH" to pathValue,
+            "PLAIN_FORMAT" to renderedHeader), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val complete = "public complete code line;\n".repeat(2_000)
+        val source = complete + "/* $privateValue; Authorization: Basic synthetic-basic */\n"
+        val request = RepairRequest("fixture", "public $privateValue", mapOf("target.c" to source,
+            "$pathValue.c" to "public extra code"), listOf(ProcessInput(privateValue)))
+        val target = root.resolve("request.md")
+        val admitted = retainMvpCapturedRequest(target, request, "target.c", RepairResourceBudget(), evidence)
+        assertEquals(source, admitted.request.projectFiles.getValue("target.c"))
+        assertTrue(admitted.initialFiles.getValue("target.c").contentEquals(source.toByteArray(Charsets.UTF_8)))
+        val requestText = target.readText()
+        for (value in listOf(privateValue, pathValue, renderedHeader, "synthetic-basic")) assertFalse(requestText.contains(value))
+        assertTrue(requestText.contains(complete.trimEnd()))
+        val response = RepairResponse("public $privateValue", listOf(SourcePatch("$pathValue.c", source)))
+        val responsePath = root.resolve("response.md")
+        retainMvpCapturedResponse(responsePath, response, RepairResourceBudget(), evidence)
+        val responseText = responsePath.readText()
+        for (value in listOf(privateValue, pathValue, "synthetic-basic")) assertFalse(responseText.contains(value))
+        assertTrue(responseText.contains(complete.trimEnd()))
+        assertEquals(source, response.patches.single().replacement)
+    }
+
+    @Test
+    fun `complete summary projects artifact paths phase names and source mapping with full public diffs`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-artifact-privacy")), "summary-")
+        val privateValue = "private-segment"
+        val source = root.resolve("$privateValue.c").also { it.writeText("public code") }
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to privateValue), "fixture-harness", privateValue, "a".repeat(64))
+        evidence.passPhase(privateValue, "public success")
+        evidence.check(privateValue, true, "public validation")
+        evidence.findingSourceLocation = "$privateValue.c:12"
+        evidence.findingPath = source
+        val full = "--- a/public.c\n+++ b/public.c\n" + " public complete context\n".repeat(2_000)
+        evidence.patchDiff = full
+        evidence.patchDiffPath = root.resolve("$privateValue.patch").also { it.writeText(full) }
+        val summary = root.resolve("SUMMARY.md")
+        writeMvpSummary(summary, root, source, source, source, source, source, "PASS", null, evidence)
+        val text = summary.readText()
+        assertFalse(text.contains(privateValue))
+        assertTrue(text.contains("Result: PASS"))
+        assertTrue(text.contains("| PASS | public success |"))
+        assertTrue(text.contains(full.trimEnd()))
+        assertEquals("public code", source.readText())
+        assertEquals(full, evidence.patchDiffPath!!.readText())
+    }
+
+    @Test
+    fun `complete artifact byte admission handles UTF8 boundaries markers inventory rejection and interruption`() {
+        for (sample in listOf("a", "é", "€", "😀", "\uD800", "\uDC00", "x\uD800y")) {
+            val bytes = sample.toByteArray(Charsets.UTF_8).size.toLong()
+            assertEquals(sample, MvpArtifactRedactor(emptyList(), bytes).text(sample))
+            if (bytes > 1) assertFailsWith<MvpPatchException> { MvpArtifactRedactor(emptyList(), bytes - 1).text(sample) }
+        }
+        assertEquals("😀", MvpArtifactText(4).append("\uD83D").append("\uDE00").build())
+        assertFailsWith<MvpPatchException> { MvpArtifactText(3).append("\uD83D").append("\uDE00") }
+        assertFailsWith<MvpPatchException> { MvpArtifactRedactor(emptyList(), 3).text("\uD83D\u0001\uDE00") }
+        assertEquals("[REDACTED]", MvpArtifactRedactor(listOf("x"), 10).text("x"))
+        assertFailsWith<MvpPatchException> { MvpArtifactRedactor(listOf("x"), 9).text("x") }
+        assertFailsWith<MvpPatchException> { MvpArtifactRedactor(listOf("[REDACTED]"), 1024).text("password=synthetic") }
+        val oversized = object : AbstractCollection<String>() {
+            override val size: Int = 4097
+            override fun iterator(): Iterator<String> = error("oversized inventory must not be iterated")
+        }
+        assertFailsWith<IllegalArgumentException> { MvpArtifactRedactor(oversized, 1024) }
+        assertFailsWith<IllegalArgumentException> { MvpArtifactRedactor(listOf("x".repeat(1024 * 1024 + 1)), 1024) }
+        assertEquals("public", MvpArtifactRedactor(listOf("x".repeat(1024 * 1024)), 1024).text("public"))
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-artifact-privacy")), "refusal-")
+        val target = root.resolve("request.md").also { it.writeText("existing public transcript") }
+        val request = RepairRequest("fixture", "public objective", mapOf("target.c" to "public code"), emptyList())
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64), 16)
+        assertFailsWith<MvpPatchException> { retainMvpCapturedRequest(target, request, "target.c", RepairResourceBudget(), evidence) }
+        assertEquals("existing public transcript", target.readText())
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<InterruptedException> { evidence.redact("public") }
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
+    }
+
     @Test
     fun `captured regression payloads obey aggregate byte and argument limits before transcript writes`() {
         val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "regression-")

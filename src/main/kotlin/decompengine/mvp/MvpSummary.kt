@@ -1,6 +1,7 @@
 package decompengine.mvp
 
 import decompengine.jobs.ProgressRedactor
+import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.exists
@@ -22,12 +23,14 @@ internal data class VerificationEvidence(
 )
 
 internal class MvpRunEvidence(
-    private val environment: Map<String, String>,
+    environment: Map<String, String>,
     val harnessProvenance: String,
     val profileId: String,
     val profileSha256: String,
+    maximumProjectionBytes: Long = MAXIMUM_REPAIR_PROJECTION_BYTES,
 ) {
-    private val diagnosticRedactor = ProgressRedactor(environment.values)
+    private val artifactRedactor = MvpArtifactRedactor(environment.values, maximumProjectionBytes)
+    private val diagnosticRedactor = ProgressRedactor(artifactRedactor.sensitiveValues)
     val phases = linkedMapOf<String, PhaseEvidence>()
     val verification = mutableListOf<VerificationEvidence>()
     var findingPath: Path? = null
@@ -64,15 +67,9 @@ internal class MvpRunEvidence(
 
     fun redactTableDiagnostic(text: String): String = redactDiagnostic(redactDiagnostic(text).escapeTable())
 
-    fun redact(text: String): String {
-        var redacted = text.replace(Regex("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]")
-        environment.filterKeys { key ->
-            val normalized = key.uppercase()
-            normalized.contains("KEY") || normalized.contains("TOKEN") || normalized.contains("SECRET") ||
-                normalized.contains("PASSWORD") || normalized.contains("AUTH")
-        }.values.filter { it.isNotBlank() }.forEach { secret -> redacted = redacted.replace(secret, "[REDACTED]") }
-        return redacted
-    }
+    fun redact(text: String): String = artifactRedactor.text(text)
+
+    fun artifactText(render: MvpArtifactText.() -> Unit): String = artifactRedactor.project(render)
 }
 
 internal fun writeMvpSummary(
@@ -104,82 +101,71 @@ internal fun writeMvpSummary(
         "Patch agent execution" to output.resolve("evidence/$PATCH_AGENT_EVIDENCE"),
         "Patch agent assessment" to output.resolve("evidence/$PATCH_AGENT_ASSESSMENT"),
     )
-    val phaseRows = evidence.phases.values.joinToString("\n") {
-        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redactTableDiagnostic(it.detail)} |"
-    }.ifBlank { "| none | NOT_RUN | workflow stopped before a phase began |" }
-    val verificationRows = evidence.verification.joinToString("\n") {
-        "| ${it.name.escapeTable()} | ${it.status} | ${evidence.redactTableDiagnostic(it.detail)} |"
-    }.ifBlank { "| none | NOT_RUN | no verification completed |" }
-    val artifactRows = artifacts.entries.joinToString("\n") { (name, path) ->
-        if (path != null && path.exists()) {
-            "| $name | `${path.relativeOrAbsolute(output)}` | `${path.sha256()}` |"
+    val phaseRows = evidence.artifactText {
+        for (phase in evidence.phases.values) {
+            append("| ").append(evidence.redactTableDiagnostic(phase.name)).append(" | ").append(phase.status.toString())
+                .append(" | ").append(evidence.redactTableDiagnostic(phase.detail)).append(" |\n")
+        }
+        if (evidence.phases.isEmpty()) append("| none | NOT_RUN | workflow stopped before a phase began |\n")
+    }.trimEnd()
+    val verificationRows = evidence.artifactText {
+        for (check in evidence.verification) {
+            append("| ").append(evidence.redactTableDiagnostic(check.name)).append(" | ").append(check.status.toString())
+                .append(" | ").append(evidence.redactTableDiagnostic(check.detail)).append(" |\n")
+        }
+        if (evidence.verification.isEmpty()) append("| none | NOT_RUN | no verification completed |\n")
+    }.trimEnd()
+    val artifactRows = evidence.artifactText {
+        for ((name, path) in artifacts) {
+            append("| ").append(name).append(" | ")
+            if (path != null && path.exists()) {
+                append("`").append(path.relativeOrAbsolute(output)).append("` | `").append(path.sha256()).append("` |\n")
+            } else {
+                append("unavailable | unavailable |\n")
+            }
+        }
+    }.trimEnd()
+    val sourceMapping = evidence.artifactText {
+        val location = evidence.findingSourceLocation
+        if (location != null) {
+            append("AddressSanitizer mapped the observed out-of-bounds write to `").append(location)
+                .append("` in `decompile/decompiled.c`.")
         } else {
-            "| $name | unavailable | unavailable |"
+            append("No source location was captured before the workflow stopped.")
         }
     }
-    val sourceMapping = evidence.findingSourceLocation?.let {
-        "AddressSanitizer mapped the observed out-of-bounds write to `$it` in `decompile/decompiled.c`."
-    } ?: "No source location was captured before the workflow stopped."
     val approvedDiff = evidence.patchDiff?.takeIf(String::isNotBlank)?.let {
-        "```diff\n${evidence.redact(it).trimEnd()}\n```"
+        evidence.artifactText { append("```diff\n").append(evidence.redact(it).trimEnd()).append("\n```") }
     } ?: "No approved source diff is available."
     val normalizedFailure = evidence.redactDiagnostic(failure ?: "none")
     val patchPreview = evidence.redactDiagnostic(evidence.patchExplanation)
     val normalizedPatch = evidence.redactDiagnostic(patchPreview.toSummaryParagraph())
 
-    summaryPath.writeText(
-        """
-        # MVP Patch Summary
-
-        - Result: $result
-        - Failure phase and reason: $normalizedFailure
-        - Approval decision: ${evidence.redactDiagnostic(evidence.approvalDecision)}
-        - Execution isolation: ${evidence.redactDiagnostic(evidence.isolation)}
-        - Agent harness: `${evidence.redactDiagnostic(evidence.harnessProvenance)}`
-        - Reconstruction profile: `${evidence.profileId}` (`${evidence.profileSha256}`)
-        - Verified final binary: `${if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published"}`
-
-        ## Executed Phases
-
-        | Phase | Status | Evidence |
-        |---|---|---|
-        $phaseRows
-
-        ## Artifact Hashes
-
-        | Artifact | Path | SHA-256 |
-        |---|---|---|
-        $artifactRows
-
-        ## CWE-787 Evidence and Source Mapping
-
-        $sourceMapping The unpatched reconstructed program is classified as CWE-787 only when its sanitizer run reports an out-of-bounds write. Exact retained output: `${evidence.findingPath?.takeIf(Path::exists)?.relativeOrAbsolute(output) ?: "unavailable"}`.
-
-        ## Approved Source Change
-
-        $normalizedPatch
-
-        $approvedDiff
-
-        ## Build and Validation Results
-
-        | Check | Status | Evidence |
-        |---|---|---|
-        $verificationRows
-
-        ## Output Paths
-
-        - Reconstructed source: `${if (source.exists()) source.relativeOrAbsolute(output) else "unavailable"}`
-        - Patched source: `${if (patchedSource.exists()) patchedSource.relativeOrAbsolute(output) else "unavailable"}`
-        - Patched binary: `${if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published"}`
-        - Logs: `logs/`
-        - Retained evidence: `evidence/`
-
-        ## Residual Risks
-
-        Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.
-        """.trimIndent() + "\n",
-    )
+    val summary = evidence.artifactText {
+        append("# MVP Patch Summary\n\n- Result: ").append(result)
+        append("\n- Failure phase and reason: ").append(normalizedFailure)
+        append("\n- Approval decision: ").append(evidence.redactDiagnostic(evidence.approvalDecision))
+        append("\n- Execution isolation: ").append(evidence.redactDiagnostic(evidence.isolation))
+        append("\n- Agent harness: `").append(evidence.redactDiagnostic(evidence.harnessProvenance)).append("`")
+        append("\n- Reconstruction profile: `").append(evidence.profileId).append("` (`").append(evidence.profileSha256).append("`)")
+        append("\n- Verified final binary: `")
+            .append(if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published").append("`\n\n")
+        append("## Executed Phases\n\n| Phase | Status | Evidence |\n|---|---|---|\n").append(phaseRows)
+        append("\n\n## Artifact Hashes\n\n| Artifact | Path | SHA-256 |\n|---|---|---|\n").append(artifactRows)
+        append("\n\n## CWE-787 Evidence and Source Mapping\n\n").append(sourceMapping)
+        append(" The unpatched reconstructed program is classified as CWE-787 only when its sanitizer run reports an out-of-bounds write. Exact retained output: `")
+            .append(evidence.findingPath?.takeIf(Path::exists)?.relativeOrAbsolute(output) ?: "unavailable").append("`.\n\n")
+        append("## Approved Source Change\n\n").append(normalizedPatch).append("\n\n").append(approvedDiff)
+        append("\n\n## Build and Validation Results\n\n| Check | Status | Evidence |\n|---|---|---|\n").append(verificationRows)
+        append("\n\n## Output Paths\n\n- Reconstructed source: `")
+            .append(if (source.exists()) source.relativeOrAbsolute(output) else "unavailable").append("`")
+        append("\n- Patched source: `").append(if (patchedSource.exists()) patchedSource.relativeOrAbsolute(output) else "unavailable").append("`")
+        append("\n- Patched binary: `")
+            .append(if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published").append("`")
+        append("\n- Logs: `logs/`\n- Retained evidence: `evidence/`\n\n## Residual Risks\n\n")
+        append("Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.\n")
+    }
+    summaryPath.writeText(summary)
 }
 
 private fun Path.relativeOrAbsolute(root: Path): String =

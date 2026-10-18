@@ -271,3 +271,19 @@ snapshot byte cap. Reads reject inconsistent ranges when supplied. Older schema-
 this field remain readable and acquire ranges on the next writer publication. Queue/history
 counters retain aggregate causes; individual ranges do not distinguish those causes. These ranges
 cannot account for events lost before an interrupted process published its snapshot.
+
+
+### Complete MVP artifact privacy projection
+
+MVP evidence snapshots one bounded environment-value inventory for diagnostics and
+complete artifact display. Complete projections apply the shared credential-format
+precedence and control-character policy, then use a packed sparse multi-pattern
+literal index; they do not apply the diagnostic preview cutoff to permitted code
+or diffs. Request filenames and complete rendered Markdown are checked as well.
+The existing `maximumProjectionBytes` bounds each builder and masking stage before
+growth; byte accounting includes surrogate pairs formed across append boundaries.
+Fixed-point/marker collisions or projection excess refuse before replacing a
+transcript. Authoritative captured bytes, receipts, hashes and compilation inputs
+are unchanged. These components still require exact-source Actions qualification;
+stream collection, chunk/session privacy, cleanup and real-agent qualification
+remain separate open acceptance.

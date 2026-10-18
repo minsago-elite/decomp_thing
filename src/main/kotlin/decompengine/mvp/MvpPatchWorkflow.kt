@@ -75,7 +75,10 @@ class MvpPatchWorkflow(
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
         require(input.isRegularFile()) { "input ELF does not exist: $input" }
-        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256)
+        val evidence = MvpRunEvidence(
+            environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256,
+            resourceBudget.maximumProjectionBytes,
+        )
         cleanOutputDirectory(output, input)
         val logs = output.resolve("logs").createDirectories()
         val decompiled = output.resolve("decompile").createDirectories()
@@ -898,21 +901,34 @@ private class MvpContentBudget(private val maximum: Long, private val label: Str
 }
 
 private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEvidence) {
-    val files = request.projectFiles.toSortedMap().entries.joinToString("\n\n") { (name, content) ->
-        "## $name\n\n```c\n${evidence.redact(content).trimEnd()}\n```"
+    val transcript = evidence.artifactText {
+        append("# Retained LLM Request\n\n- Failure kind: ").append(request.failureKind)
+        append("\n- Regression inputs: ")
+        request.regressionInputs.forEachIndexed { index, input ->
+            if (index != 0) append(", ")
+            append(input.id)
+        }
+        append("\n\n## Objective\n\n").append(request.prompt).append("\n\n## Binary-derived context\n\n")
+        request.projectFiles.toSortedMap().entries.forEachIndexed { index, (name, content) ->
+            if (index != 0) append("\n\n")
+            append("## ").append(name).append("\n\n```c\n").append(evidence.redact(content).trimEnd()).append("\n```")
+        }
+        append("\n")
     }
-    path.writeText(
-        "# Retained LLM Request\n\n- Failure kind: ${evidence.redact(request.failureKind)}\n" +
-            "- Regression inputs: ${request.regressionInputs.joinToString { evidence.redact(it.id) }}\n\n" +
-            "## Objective\n\n${evidence.redact(request.prompt)}\n\n## Binary-derived context\n\n$files\n",
-    )
+    path.writeText(transcript)
 }
 
 private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
-    val patches = response.patches.joinToString("\n\n") { patch ->
-        "## ${evidence.redact(patch.relativePath)}\n\n```c\n${evidence.redact(patch.replacement).trimEnd()}\n```"
+    val transcript = evidence.artifactText {
+        append("# Retained LLM Response\n\n## Summary\n\n").append(response.summary).append("\n\n")
+        response.patches.forEachIndexed { index, patch ->
+            if (index != 0) append("\n\n")
+            append("## ").append(patch.relativePath).append("\n\n```c\n")
+                .append(evidence.redact(patch.replacement).trimEnd()).append("\n```")
+        }
+        append("\n")
     }
-    path.writeText("# Retained LLM Response\n\n## Summary\n\n${evidence.redact(response.summary)}\n\n$patches\n")
+    path.writeText(transcript)
 }
 
 private fun findSourceLocation(sanitizer: String): String? =

@@ -1,0 +1,281 @@
+package decompengine.mvp
+
+import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
+import java.util.Collections
+
+/** Complete display projections only; authoritative source, receipts and hashes are untouched. */
+internal class MvpArtifactRedactor(values: Collection<String>, private val maximumBytes: Long) {
+    init {
+        require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES)
+    }
+
+    val sensitiveValues: List<String> = snapshot(values)
+    private val controls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val literals = MvpArtifactLiteralIndex(
+        sensitiveValues.map { it.replace(controls, "") }.filter(String::isNotEmpty).distinct().sorted(),
+    )
+
+    fun project(render: MvpArtifactText.() -> Unit): String = text(MvpArtifactText(maximumBytes).apply(render).build())
+
+    fun text(value: String): String {
+        artifactActive()
+        MvpArtifactByteBudget(maximumBytes).charge(value)
+        // Use the diagnostic control policy, without taking a prefix of complete content.
+        var safe = value.replace(controls, "")
+        MvpArtifactByteBudget(maximumBytes).charge(safe)
+        repeat(8) {
+            var next = safe
+            next = maskFormats(next)
+            next = literals.replace(next, maximumBytes)
+            if (next == safe) return finish(next)
+            safe = next
+        }
+        return finish(safe)
+    }
+
+    private fun maskFormats(value: String): String {
+        var next = value
+        for ((pattern, retainPrefix) in formats) {
+            val output = MvpArtifactText(maximumBytes)
+            var copied = 0
+            for (match in pattern.findAll(next)) {
+                artifactActive()
+                output.append(next, copied, match.range.first)
+                if (retainPrefix) output.append(match.groupValues[1])
+                output.append("[REDACTED]")
+                copied = match.range.last + 1
+            }
+            if (copied != 0) next = output.append(next, copied, next.length).build()
+        }
+        return next
+    }
+
+    private fun finish(value: String): String {
+        artifactActive()
+        MvpArtifactByteBudget(maximumBytes).charge(value)
+        if (literals.contains(value) || maskFormats(value) != value) {
+            throw MvpPatchException("complete artifact masking could not produce a safe projection")
+        }
+        return value
+    }
+
+    private companion object {
+        val formats = listOf(
+            Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+") to true,
+            Regex("(?i)(bearer\\s+)[^\\s,;]+") to true,
+            Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+") to true,
+            Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+") to false,
+        )
+
+        fun snapshot(values: Collection<String>): List<String> {
+            artifactActive()
+            require(values.size in 0..4096) { "artifact redaction values exceed the configured limit" }
+            val copy = ArrayList<String>()
+            var units = 0L
+            for (value in values) {
+                artifactActive()
+                require(copy.size < 4096 && value.length <= 1024 * 1024 - units) {
+                    "artifact redaction values exceed the configured limit"
+                }
+                units += value.length
+                copy += value
+            }
+            return Collections.unmodifiableList(copy.filter(String::isNotBlank).distinct())
+        }
+    }
+}
+
+/** Sparse Aho-Corasick index. Packed sorted edges avoid a map/object per private character. */
+internal class MvpArtifactLiteralIndex(values: List<String>) {
+    private val offsets: IntArray
+    private val labels: CharArray
+    private val targets: IntArray
+    private val failures: IntArray
+    private val longest: IntArray
+
+    init {
+        artifactActive()
+        val sorted = values.filter(String::isNotEmpty).distinct().sorted()
+        val units = sorted.sumOf { it.length.toLong() }
+        require(sorted.size <= 4096 && units <= 1024 * 1024) { "artifact literal index exceeds the configured limit" }
+        val maximumNodes = units.toInt() + 1
+        failures = IntArray(maximumNodes) // Parents during construction, then failure links.
+        longest = IntArray(maximumNodes)
+        offsets = IntArray(maximumNodes + 1) // Child counts, then packed edge offsets.
+        val nodeLabels = CharArray(maximumNodes)
+        val path = IntArray((sorted.maxOfOrNull(String::length) ?: 0) + 1)
+        var nodes = 1
+        var previous = ""
+        for (value in sorted) {
+            artifactActive()
+            var shared = 0
+            while (shared < minOf(previous.length, value.length) && previous[shared] == value[shared]) shared++
+            for (position in shared until value.length) {
+                if ((position and 4095) == 0) artifactActive()
+                val node = nodes++
+                failures[node] = path[position]
+                offsets[path[position]]++
+                nodeLabels[node] = value[position]
+                path[position + 1] = node
+            }
+            longest[path[value.length]] = value.length
+            previous = value
+        }
+        var edge = 0
+        for (node in 0 until nodes) {
+            val count = offsets[node]
+            offsets[node] = edge
+            edge += count
+        }
+        offsets[nodes] = edge
+        labels = CharArray(edge)
+        targets = IntArray(edge)
+        val cursor = offsets.copyOf(nodes)
+        for (node in 1 until nodes) {
+            val destination = cursor[failures[node]]++
+            labels[destination] = nodeLabels[node]
+            targets[destination] = node
+        }
+        // Lexicographic insertion already orders each state's outgoing UTF-16 units.
+        var queued = 0
+        var consumed = 0
+        for (index in offsets[0] until offsets[1]) {
+            val node = targets[index]
+            failures[node] = 0
+            cursor[queued++] = node
+        }
+        while (consumed < queued) {
+            if ((consumed and 4095) == 0) artifactActive()
+            val parent = cursor[consumed++]
+            for (index in offsets[parent] until offsets[parent + 1]) {
+                val node = targets[index]
+                failures[node] = advance(failures[parent], labels[index])
+                longest[node] = maxOf(longest[node], longest[failures[node]])
+                cursor[queued++] = node
+            }
+        }
+    }
+
+    private fun edge(state: Int, unit: Char): Int {
+        var low = offsets[state]
+        var high = offsets[state + 1] - 1
+        while (low <= high) {
+            val middle = (low + high) ushr 1
+            val comparison = labels[middle].compareTo(unit)
+            if (comparison == 0) return targets[middle]
+            if (comparison < 0) low = middle + 1 else high = middle - 1
+        }
+        return -1
+    }
+
+    private fun advance(initial: Int, unit: Char): Int {
+        var state = initial
+        var next = edge(state, unit)
+        while (next < 0 && state != 0) {
+            state = failures[state]
+            next = edge(state, unit)
+        }
+        return if (next < 0) 0 else next
+    }
+
+    fun contains(source: String): Boolean {
+        var state = 0
+        for (position in source.indices) {
+            if ((position and 4095) == 0) artifactActive()
+            state = advance(state, source[position])
+            if (longest[state] != 0) return true
+        }
+        return false
+    }
+
+    fun replace(source: String, maximumBytes: Long): String {
+        var starts = IntArray(0)
+        var ends = IntArray(0)
+        var size = 0
+        var state = 0
+        for (position in source.indices) {
+            if ((position and 4095) == 0) artifactActive()
+            state = advance(state, source[position])
+            val length = longest[state]
+            if (length == 0) continue
+            var start = position + 1 - length
+            // Ends arrive in order. Merge backwards; each stored span is popped at most once.
+            while (size > 0 && ends[size - 1] >= start) {
+                size--
+                start = minOf(start, starts[size])
+            }
+            if (size == starts.size) {
+                val capacity = maxOf(16, starts.size * 2).coerceAtMost(source.length + 1)
+                starts = starts.copyOf(capacity)
+                ends = ends.copyOf(capacity)
+            }
+            starts[size] = start
+            ends[size++] = position + 1
+        }
+        if (size == 0) return source
+        val output = MvpArtifactText(maximumBytes)
+        var copied = 0
+        for (index in 0 until size) {
+            output.append(source, copied, starts[index]).append("[REDACTED]")
+            copied = ends[index]
+        }
+        return output.append(source, copied, source.length).build()
+    }
+}
+
+/** Admit bytes before a builder grows, including surrogate pairs formed across append calls. */
+internal class MvpArtifactText(private val maximumBytes: Long) {
+    private val budget = MvpArtifactByteBudget(maximumBytes)
+    private val output = StringBuilder(minOf(maximumBytes, 4096).toInt())
+    private var previousHigh = false
+
+    fun append(value: String, start: Int = 0, end: Int = value.length): MvpArtifactText {
+        artifactActive()
+        require(start in 0..end && end <= value.length)
+        if (start == end) return this
+        budget.charge(value, start, end)
+        if (previousHigh && value[start].isLowSurrogate()) budget.chargeBytes(2)
+        output.append(value, start, end)
+        previousHigh = value[end - 1].isHighSurrogate()
+        return this
+    }
+
+    fun build(): String = output.toString()
+}
+
+private class MvpArtifactByteBudget(private val maximum: Long) {
+    private var used = 0L
+
+    init { require(maximum in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) }
+
+    fun charge(source: String, start: Int = 0, end: Int = source.length) {
+        if (end - start > maximum - used) exceeded()
+        var position = start
+        var bytes = 0L
+        while (position < end) {
+            if ((position and 4095) == 0) artifactActive()
+            val unit = source[position++].code
+            val width = when {
+                unit < 0x80 -> 1
+                unit < 0x800 -> 2
+                unit in 0xD800..0xDBFF && position < end && source[position].isLowSurrogate() -> { position++; 4 }
+                unit in 0xD800..0xDFFF -> 1
+                else -> 3
+            }
+            if (bytes > maximum - used - width) exceeded()
+            bytes += width
+        }
+        chargeBytes(bytes)
+    }
+
+    fun chargeBytes(bytes: Long) {
+        if (bytes < 0 || bytes > maximum - used) exceeded()
+        used += bytes
+    }
+
+    private fun exceeded(): Nothing = throw MvpPatchException("complete artifact projection exceeds its byte budget")
+}
+
+private fun artifactActive() {
+    if (Thread.currentThread().isInterrupted) throw InterruptedException("artifact projection interrupted")
+}
