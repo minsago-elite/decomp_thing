@@ -2,12 +2,61 @@ package decompengine
 
 import decompengine.repair.*
 import decompengine.validation.*
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class RepairCliPresentationTest {
+    @Test
+    fun `repair usage diagnostics admit secrets before printing complete terminal framing`() {
+        val usage = "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]"
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val secret = "SYNTHETIC_REPAIR_KEY"
+            for (argument in listOf("--unknown=$secret", secret)) {
+                assertEquals(2, renderRepairUsageError("unexpected argument: $argument", listOf(secret), output))
+                assertEquals("unexpected argument: ${argument.replace(secret, "[redacted]")}\n$usage\n",
+                    bytes.toString(Charsets.UTF_8))
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
+                bytes.reset()
+            }
+            assertEquals(2, renderRepairUsageError("unexpected argument: public", emptyList(), output))
+            assertEquals("unexpected argument: public\n$usage\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            val formatted = "Bearer synthetic-bearer; Authorization: Basic c3ludGhldGlj; password=synthetic-password"
+            assertEquals(2, renderRepairUsageError(formatted, emptyList(), output))
+            listOf("synthetic-bearer", "c3ludGhldGlj", "synthetic-password").forEach {
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(it))
+            }
+            bytes.reset()
+            assertEquals(2, renderRepairUsageError("private\u000Cargument", listOf("privateargument"), output))
+            assertEquals("[redacted]\n$usage\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            for (value in listOf("usage: llm_bin_patch repair", "boundary\nusage:", "legacy-openai]\n")) {
+                assertEquals(2, renderRepairUsageError("boundary", listOf(value), output))
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(value), "terminal framing exposed $value")
+                bytes.reset()
+            }
+            assertEquals(2, renderRepairUsageError("fooX", listOf("foo", "[redacted]X"), output))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("foo"))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("[redacted]X"))
+            bytes.reset()
+            val tooMany = object : AbstractCollection<String>() {
+                override val size: Int = 4097
+                override fun iterator(): Iterator<String> = error("rejected inventory must not be iterated")
+            }
+            for (values in listOf(tooMany, listOf("x".repeat(1024 * 1024 + 1)))) {
+                assertEquals(2, renderRepairUsageError("PRIVATE_REPAIR_ARGUMENT", values, output))
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            assertEquals(2, renderRepairUsageError("x".repeat(16_385), emptyList(), output))
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
     @Test
     fun `repair CLI reports unavailable validation without exposing an exception stack`() {
         val root = createTempDirectory("repair-cli-unavailable-")

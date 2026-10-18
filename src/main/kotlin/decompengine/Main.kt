@@ -408,9 +408,21 @@ private fun runRepair(args: List<String>) {
 }
 
 private fun repairUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println("usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]")
+    renderRepairUsageError(message, System.getenv().values)
     kotlin.system.exitProcess(2)
+}
+
+/** Admit the inventory and mask the complete diagnostic, including its usage and line endings. */
+internal fun renderRepairUsageError(
+    message: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    val usage = "usage: llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]"
+    if (message.length > 16_384 - usage.length - 2) return 2
+    output.print(redactor.text("$message\n$usage\n", 16_384))
+    return 2
 }
 
 private fun runPatch(args: List<String>) {
