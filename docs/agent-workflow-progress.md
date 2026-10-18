@@ -202,6 +202,21 @@ complete Authorization value. This diagnostic path still propagates interruption
 and fatal errors. Tools-only environment access, probe execution and profile budgets are unchanged.
 Other Doctor diagnostic fields and complete artifact privacy still require separate qualification.
 
+Doctor diagnostics accept a separate caller-owned secret inventory; the configuration map remains
+opaque in both ACP and tools-only modes. The inventory is copied and admitted before probing,
+with the shared limits of 4,096 values and 1,048,576 UTF-16 units. Only the explicit legacy transport path adds
+the API key it already resolves. Raw configuration is checked before trimming or projecting a host,
+and advertisement previews are checked before terminal quoting. Report names/details use bounded
+masking and the existing private-fragment concealment index; pass/fail values retain their meaning.
+
+The agent-enabled CLI supplies its process inventory and rechecks complete terminal lines after
+formatting. Ordinary escaping exceptions are rendered without raw cause chains. Diagnostic inventory
+rejection exits 2 without inspecting or emitting diagnostic payload; check/ordinary failures exit 1
+and success exits 0. Interruption, cancellation and fatal errors propagate. Tools-only mode keeps
+ambient/legacy configuration unenumerated, uses format-only masking and renders invalid usage with
+fixed guidance instead of echoing unknown arguments. These diagnostic changes do not qualify probes,
+provider execution, cleanup or the complete privacy/release scope.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
   --tests decompengine.jobs.BestEffortProgressJournalTest \

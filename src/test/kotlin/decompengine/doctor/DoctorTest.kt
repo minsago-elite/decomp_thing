@@ -11,6 +11,59 @@ import kotlin.test.assertTrue
 
 class DoctorTest {
     @Test
+    fun `doctor report diagnostics snapshot supplied secrets and mask fields before projection`() {
+        val fragmentSecret = "0123456789abcdefghijklmnopqrstuv"
+        val values = mutableListOf("private-literal", "  padded-model  ", fragmentSecret)
+        val diagnostic = DoctorDiagnostics(values)
+        values.clear()
+        val original = DoctorReport(listOf(
+            DoctorCheck("public private-literal", false, "Authorization: Basic synthetic-wire-value private-literal"),
+            DoctorCheck("large", true, "x".repeat(16_385)),
+        ))
+        val report = diagnostic.report(original)
+        assertFalse(report.passed)
+        assertEquals(listOf(false, true), report.checks.map { it.passed })
+        assertEquals(2, report.checks.size)
+        val text = report.checks.joinToString()
+        assertFalse(text.contains("private-literal") || text.contains("synthetic-wire-value"))
+        assertFalse(text.contains("x".repeat(100)))
+        assertTrue(original.checks.first().detail.contains("private-literal"))
+        assertFalse(diagnostic.projected("  padded-model  ", "padded-model").contains("padded-model"))
+        assertEquals("", diagnostic.preview("public " + fragmentSecret.substring(5, 25)))
+        diagnostic.include("  private-credential  ")
+        assertFalse(diagnostic.projected("  private-credential  ", "private-credential").contains("private-credential"))
+        val quoted = quoteTerminalPreview(diagnostic.preview("private-literal\nAuthorization: Basic synthetic-wire-value", 256))
+        assertFalse(quoted.contains("private-literal") || quoted.contains("synthetic-wire-value"))
+    }
+
+    @Test
+    fun `doctor diagnostic inventories bound iteration and retain masking after rejected additions`() {
+        val oversized = object : AbstractCollection<String>() {
+            override val size: Int = 4097
+            override fun iterator(): Iterator<String> = error("oversized inventory must not be iterated")
+        }
+        assertFailsWith<DoctorDiagnosticAdmissionException> { DoctorDiagnostics(oversized) }
+        DoctorDiagnostics(listOf("a".repeat(1024 * 1024)))
+        assertFailsWith<DoctorDiagnosticAdmissionException> { DoctorDiagnostics(listOf("a".repeat(1024 * 1024 + 1))) }
+        val diagnostic = DoctorDiagnostics((0 until 4096).map { "private-$it-end" })
+        diagnostic.include("private-0-end")
+        assertFailsWith<DoctorDiagnosticAdmissionException> { diagnostic.include("additional-private-key") }
+        assertFalse(diagnostic.text("private-0-end").contains("private-0-end"))
+        val interrupted = InterruptedException("private inventory failure")
+        val foreign = object : AbstractCollection<String>() {
+            override val size: Int get() = throw interrupted
+            override fun iterator(): Iterator<String> = error("foreign inventory must not be iterated")
+        }
+        assertSame(interrupted, assertFailsWith<InterruptedException> { DoctorDiagnostics(foreign) })
+        val fatal = AssertionError("private fatal inventory")
+        val fatalValues = object : AbstractCollection<String>() {
+            override val size: Int get() = throw fatal
+            override fun iterator(): Iterator<String> = error("fatal inventory must not be iterated")
+        }
+        assertSame(fatal, assertFailsWith<AssertionError> { DoctorDiagnostics(fatalValues) })
+    }
+
+    @Test
     fun `connectivity failure diagnostics omit raw header credentials and exception chains`() {
         val secret = "synthetic-private-token-Ā"
         val cause = IllegalStateException("private provider body")
