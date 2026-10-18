@@ -11,6 +11,7 @@ import decompengine.doctor.parseDoctorInvocation
 import decompengine.doctor.requireDoctorActive
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
+import decompengine.mvp.MvpArtifactRedactor
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
@@ -192,10 +193,7 @@ private fun runReconstruct(args: List<String>) {
                 progress.close()
                 reconstructUsageError(e.message ?: "invalid harness configuration")
             }
-            println(
-                strategy.harnessProvenance?.let { "harness provenance: ${redactor.text(it)}" }
-                    ?: "harness: none (evidence-only)",
-            )
+            renderWorkflowProvenance(WorkflowCliCommand.RECONSTRUCT, strategy.harnessProvenance, redactor)
             val result = try {
                 ArchivalReconstructionService(
                     GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
@@ -205,13 +203,28 @@ private fun runReconstruct(args: List<String>) {
                 progress.phase(AgentWorkflowPhase.FAILED)
                 throw failure
             }
-            println("source tree: ${result.projectDir}")
-            println("archive: ${result.bundle.archivePath}")
-            println("archive sha256: ${result.bundle.archiveSha256}")
-            println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
+            renderReconstructionSuccess(result.projectDir.toString(), result.bundle.archivePath.toString(),
+                result.bundle.archiveSha256, environment.values)
         }
     }
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Only the archive producer's computed SHA is public; every other field receives full projection. */
+internal fun renderReconstructionSuccess(
+    projectDirectory: String,
+    archivePath: String,
+    archiveSha256: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.out,
+) {
+    val text = MvpArtifactRedactor(sensitiveValues, 16_384L).project {
+        append("source tree: ").append(projectDirectory).append("\n")
+        append("archive: ").append(archivePath).append("\n")
+        append("archive sha256: ").appendSha256(archiveSha256).append("\n")
+        append("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports\n")
+    }
+    output.print(text)
 }
 
 /** Catch ordinary failures after owned progress closes; raw exception chains stay off stderr. */
@@ -390,7 +403,7 @@ private fun runRepair(args: List<String>) {
                 harnessOverride = harnessOverride,
             ),
         ).use { runtime ->
-            System.err.println("repair harness: ${redactor.text(runtime.harnessProvenance)}")
+            renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
                 runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
             }
@@ -454,6 +467,25 @@ internal fun renderWorkflowFailure(
     configuration: Boolean = false,
 ) {
     val prefix = if (configuration) "configuration error" else command.failurePrefix
+    printWorkflowCliLine(prefix, message, redactor, output)
+}
+
+internal fun renderWorkflowProvenance(
+    command: WorkflowCliCommand,
+    provenance: String?,
+    redactor: ProgressRedactor,
+    output: PrintStream = System.out,
+) {
+    if (provenance == null) {
+        require(command == WorkflowCliCommand.RECONSTRUCT) { "workflow harness provenance is required" }
+        printWorkflowCliLine("harness", "none (evidence-only)", redactor, output)
+    } else {
+        val prefix = if (command == WorkflowCliCommand.REPAIR) "repair harness" else "harness provenance"
+        printWorkflowCliLine(prefix, provenance, redactor, output)
+    }
+}
+
+private fun printWorkflowCliLine(prefix: String, message: String, redactor: ProgressRedactor, output: PrintStream) {
     // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
     val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
     val preview = redactor.text("$prefix: $detail\n")
@@ -505,7 +537,7 @@ private fun runPatch(args: List<String>) {
         } catch (failure: IllegalArgumentException) {
             patchUsageError(failure.message ?: "invalid harness configuration")
         }
-        println("harness provenance: ${redactor.text(strategy.harnessProvenance)}")
+        renderWorkflowProvenance(WorkflowCliCommand.PATCH, strategy.harnessProvenance, redactor)
         MvpPatchWorkflow(
             harness = strategy.harness,
             environment = environment,

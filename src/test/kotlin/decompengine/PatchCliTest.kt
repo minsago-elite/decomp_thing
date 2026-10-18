@@ -16,6 +16,42 @@ import kotlin.test.assertTrue
 
 class PatchCliTest {
     @Test
+    fun `workflow provenance masks complete prefixes and evidence only framing`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            for ((command, prefix) in listOf(WorkflowCliCommand.PATCH to "harness provenance",
+                WorkflowCliCommand.RECONSTRUCT to "harness provenance", WorkflowCliCommand.REPAIR to "repair harness")) {
+                renderWorkflowProvenance(command, "public-descriptor", ProgressRedactor(emptyList()), output)
+                assertEquals("$prefix: public-descriptor\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
+                for (value in listOf("$prefix: private-descriptor", "$prefix: private-descriptor\n", prefix)) {
+                    renderWorkflowProvenance(command, "private-descriptor", ProgressRedactor(listOf(value)), output)
+                    assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
+                    assertTrue(bytes.toString(Charsets.UTF_8).contains("[redacted]"))
+                    bytes.reset()
+                }
+                val longDescriptor = "x".repeat(600)
+                renderWorkflowProvenance(command, longDescriptor, ProgressRedactor(listOf("$prefix: $longDescriptor")), output)
+                assertEquals("[redacted]\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
+            }
+            renderWorkflowProvenance(WorkflowCliCommand.RECONSTRUCT, null, ProgressRedactor(emptyList()), output)
+            assertEquals("harness: none (evidence-only)\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            renderWorkflowProvenance(WorkflowCliCommand.RECONSTRUCT, null,
+                ProgressRedactor(listOf("harness: none (evidence-only)")), output)
+            assertEquals("[redacted]\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            for (command in listOf(WorkflowCliCommand.PATCH, WorkflowCliCommand.REPAIR)) {
+                assertFailsWith<IllegalArgumentException> {
+                    renderWorkflowProvenance(command, null, ProgressRedactor(emptyList()), output)
+                }
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+        }
+    }
+
+    @Test
     fun `long workflow failure previews retain a safe terminal newline`() {
         val bytes = ByteArrayOutputStream()
         PrintStream(bytes, true, Charsets.UTF_8).use { output ->

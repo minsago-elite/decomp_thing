@@ -5,6 +5,7 @@ import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.AgentProgressJournal
+import decompengine.mvp.MvpPatchException
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.GeneratedCEvidenceCarrier
 import decompengine.project.GeneratedCMakeReconstructionProfile
@@ -24,6 +25,65 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
+    @Test
+    fun `reconstruction completion masks paths and full framing while preserving computed public SHA`() {
+        val bytes = ByteArrayOutputStream()
+        val hash = "1".repeat(64)
+        val ending = "recovery accuracy: unassessed; see the source tree's confidence and unresolved reports\n"
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            renderReconstructionSuccess("/output/public/source-tree", "/output/public/source-tree.zip", hash, emptyList(), output)
+            assertEquals("source tree: /output/public/source-tree\narchive: /output/public/source-tree.zip\narchive sha256: $hash\n$ending",
+                bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            val privatePath = "SYNTHETIC_RECON_PATH_KEY"
+            renderReconstructionSuccess("/output/$privatePath/source-tree", "/output/$privatePath/source-tree.zip", hash,
+                listOf(privatePath, "1"), output)
+            assertEquals("source tree: /output/[REDACTED]/source-tree\narchive: /output/[REDACTED]/source-tree.zip\narchive sha256: $hash\n$ending",
+                bytes.toString(Charsets.UTF_8))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains(privatePath))
+            bytes.reset()
+            renderReconstructionSuccess("before\u000Cafter", "/public/result.zip", hash, listOf("beforeafter"), output)
+            assertTrue(bytes.toString(Charsets.UTF_8).startsWith("source tree: [REDACTED]\n"))
+            bytes.reset()
+            for (value in listOf("source tree:", "boundary\narchive:", "unresolved reports\n")) {
+                renderReconstructionSuccess("boundary", "/public/result.zip", hash, listOf(value), output)
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
+                assertTrue(bytes.toString(Charsets.UTF_8).contains("archive sha256: $hash\n"))
+                bytes.reset()
+            }
+        }
+    }
+
+    @Test
+    fun `reconstruction completion admits inventory hash and complete byte budget before any output`() {
+        val bytes = ByteArrayOutputStream()
+        val hash = "a".repeat(64)
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val tooMany = object : AbstractCollection<String>() {
+                override val size: Int = 4097
+                override fun iterator(): Iterator<String> = error("rejected inventory must not be iterated")
+            }
+            for (values in listOf(tooMany, listOf("x".repeat(1024 * 1024 + 1)))) {
+                assertFailsWith<IllegalArgumentException> {
+                    renderReconstructionSuccess("project", "archive.zip", hash, values, output)
+                }
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            assertFailsWith<IllegalArgumentException> {
+                renderReconstructionSuccess("project", "archive.zip", "INVALID_HASH", emptyList(), output)
+            }
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            assertFailsWith<MvpPatchException> {
+                renderReconstructionSuccess("x".repeat(16_385), "archive.zip", hash, emptyList(), output)
+            }
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            assertFailsWith<MvpPatchException> {
+                renderReconstructionSuccess("project", "archive.zip", hash, listOf("archive sha256: ${hash.take(4)}"), output)
+            }
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
     @Test
     fun `reconstruction redactor rejection returns failure without exposing configuration or running action`() {
         var oversizedIterations = 0
