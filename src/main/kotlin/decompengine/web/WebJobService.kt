@@ -539,7 +539,8 @@ class WebJobService(
         }
         val job = store.get(jobId)
         val queued = owner.create(jobId, view.snapshot.version,
-            NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId, previousRunId = request.previousRunId))
+            NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId,
+                harnessCapabilityId = registration.harnessCapabilityId, previousRunId = request.previousRunId))
         val task = DurableTask(job, queued.attempt, registration.adapter)
         active[jobId] = task
         try { workflowExecutor.execute(task) }

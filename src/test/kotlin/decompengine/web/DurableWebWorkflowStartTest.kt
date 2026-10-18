@@ -22,6 +22,43 @@ import kotlin.test.*
 @ExtendWith(RecoveryMatrixEvidence::class)
 class DurableWebWorkflowStartTest {
     @Test
+    fun `both durable start paths retain the trusted harness capability in execution and storage`() {
+        for (capability in listOf(CAPABILITY, null)) withRoot { root ->
+            val store = JobStore(root); val job = store.createFromUpload("capability.elf", elfFixture())
+            val observed = mutableListOf<String?>()
+            val registered = object : DurableWebWorkflowAdapter {
+                override val workflow = WorkflowKind.RECONSTRUCT
+                override val limits = LIMITS
+                override val harnessCapabilityId = capability
+                override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+                    observed.add(context.attempt.harnessCapabilityId)
+                    return DurableWebWorkflowOutcome.Completed()
+                }
+            }
+            service(store, listOf(registered)).use { service ->
+                service.initializeExistingStorage()
+                val legacy = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(
+                    job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT),
+                ))
+                val retained = service.getAttempt(job.id, legacy.runId)
+                assertEquals(capability, retained.harnessCapabilityId)
+                assertEquals(WorkflowRunState.COMPLETED, retained.state)
+                val keyed = service.requestDurableStart(job.id, version(service, job.id),
+                    REQUEST.copy(harnessCapabilityId = capability), KEY)
+                assertEquals(capability, keyed.attempt.harnessCapabilityId)
+                assertEquals(WorkflowRunState.COMPLETED, keyed.attempt.state)
+                assertNotEquals(retained.runId, keyed.attempt.runId)
+                assertEquals(listOf(capability, capability), observed)
+            }
+            WorkflowAttemptStore.open(root).use { owner ->
+                val attempts = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot.attempts
+                assertEquals(2, attempts.size)
+                assertTrue(attempts.all { it.harnessCapabilityId == capability && it.state == WorkflowRunState.COMPLETED })
+            }
+        }
+    }
+
+    @Test
     fun `public request version and storage CAS stay separate and old replay never dispatches later work`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("authored.elf", elfFixture())
         val calls = AtomicInteger()
