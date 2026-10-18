@@ -5,12 +5,97 @@ import decompengine.validation.*
 import decompengine.jobs.ProgressRedactor
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CharsetDecoder
+import java.nio.charset.CharsetEncoder
+import java.nio.charset.CoderResult
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class RepairCliPresentationTest {
+    @Test
+    fun `CLI encoding cannot reconstruct secrets through replacement or a lossy codec alias`() {
+        val secret = "a?b"
+        val hash = "1".repeat(64)
+        val lossy = object : Charset("synthetic-lossy", emptyArray()) {
+            override fun contains(cs: Charset) = cs === this
+            override fun newDecoder(): CharsetDecoder = object : CharsetDecoder(this, 1f, 1f) {
+                override fun decodeLoop(input: ByteBuffer, output: CharBuffer): CoderResult {
+                    while (input.hasRemaining()) {
+                        if (!output.hasRemaining()) return CoderResult.OVERFLOW
+                        output.put((input.get().toInt() and 255).toChar())
+                    }
+                    return CoderResult.UNDERFLOW
+                }
+            }
+            override fun newEncoder(): CharsetEncoder = object : CharsetEncoder(this, 1f, 1f) {
+                override fun encodeLoop(input: CharBuffer, output: ByteBuffer): CoderResult {
+                    while (input.hasRemaining()) {
+                        val unit = input.get(input.position())
+                        if (unit.code > 127 && unit != '€') return CoderResult.unmappableForLength(1)
+                        if (!output.hasRemaining()) return CoderResult.OVERFLOW
+                        input.get()
+                        output.put((if (unit == '€') '?' else unit).code.toByte())
+                    }
+                    return CoderResult.UNDERFLOW
+                }
+            }
+        }
+        for ((charset, raw) in listOf(Charsets.US_ASCII to "a€b", Charsets.UTF_8 to "a\uD800b", lossy to "a€b")) {
+            val baseline = ByteArrayOutputStream()
+            PrintStream(baseline, true, charset).use { it.print("$raw\n") }
+            assertEquals("$secret\n", baseline.toString(Charsets.US_ASCII))
+            val bytes = ByteArrayOutputStream()
+            PrintStream(bytes, true, charset).use { output ->
+                val shown = RepairCliPresentation(0, listOf(raw))
+                assertEquals(1, renderRepairPresentation(shown, listOf(secret), output))
+                assertEquals(RepairCliPresentation(0, listOf(raw)), shown)
+                assertEquals("", bytes.toString())
+                assertFailsWith<decompengine.mvp.MvpPatchException> {
+                    renderReconstructionSuccess(raw, "archive.zip", hash, listOf(secret), output)
+                }
+                assertEquals("", bytes.toString())
+                assertEquals(2, renderWorkflowUsageError(WorkflowCliCommand.RECONSTRUCT, raw, listOf(secret), output))
+                assertEquals("${WorkflowCliCommand.RECONSTRUCT.usage}\n", bytes.toString(Charsets.US_ASCII))
+                bytes.reset()
+                renderWorkflowFailure(WorkflowCliCommand.PATCH, raw, ProgressRedactor(listOf(secret)), output)
+                renderWorkflowProvenance(WorkflowCliCommand.PATCH, raw, ProgressRedactor(listOf(secret)), output)
+                assertEquals("", bytes.toString())
+                assertEquals(0, runDoctorCliAction(listOf(secret), output, output) {
+                    decompengine.doctor.DoctorReport(listOf(decompengine.doctor.DoctorCheck(raw, true, "available")))
+                })
+                assertEquals("Environment check passed (1 checks)\n", bytes.toString(Charsets.US_ASCII))
+                assertFalse(bytes.toString(Charsets.US_ASCII).contains(secret))
+            }
+        }
+        for (charset in listOf(Charsets.UTF_8, Charsets.UTF_16)) {
+            val bytes = ByteArrayOutputStream()
+            PrintStream(bytes, true, charset).use { output ->
+                repeat(2) {
+                    assertEquals(0, renderRepairPresentation(RepairCliPresentation(0, listOf("public € 😀")), listOf(secret), output))
+                }
+                assertEquals("public € 😀\n".repeat(2), bytes.toString(charset))
+            }
+        }
+        val masked = ByteArrayOutputStream()
+        PrintStream(masked, true, Charsets.US_ASCII).use { output ->
+            assertEquals(0, renderRepairPresentation(RepairCliPresentation(0, listOf("a€b")), listOf("a€b"), output))
+            assertEquals("[REDACTED]\n", masked.toString(Charsets.US_ASCII))
+        }
+        for (count in listOf(8190, 8191)) {
+            val bytes = ByteArrayOutputStream()
+            PrintStream(bytes, true, Charsets.UTF_16).use { output ->
+                assertEquals(if (count == 8190) 0 else 1,
+                    renderRepairPresentation(RepairCliPresentation(0, listOf("x".repeat(count))), emptyList(), output))
+                assertEquals(if (count == 8190) 16_384 else 0, bytes.size())
+            }
+        }
+    }
+
     @Test
     fun `repair result projection preserves typed outcomes and masks complete private display frames`() {
         val bytes = ByteArrayOutputStream()

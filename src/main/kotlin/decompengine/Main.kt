@@ -12,6 +12,7 @@ import decompengine.doctor.requireDoctorActive
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.MvpArtifactRedactor
+import decompengine.mvp.MvpPatchException
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
@@ -33,6 +34,9 @@ import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
 import java.io.PrintStream
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -224,6 +228,7 @@ internal fun renderReconstructionSuccess(
         append("archive sha256: ").appendSha256(archiveSha256).append("\n")
         append("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports\n")
     }
+    if (!admitCliEncoding(text, output)) throw MvpPatchException("reconstruction display encoding is not admitted")
     output.print(text)
 }
 
@@ -438,6 +443,7 @@ internal fun renderRepairPresentation(
         require(projected.count { it == '\n' } == count) { "complete repair line framing could not be retained" }
         redactor.text(projected).also {
             require(it.count { unit -> unit == '\n' } == count) { "complete repair line framing could not be retained" }
+            require(admitCliEncoding(it, output)) { "repair display encoding is not admitted" }
         }
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
@@ -506,12 +512,14 @@ internal fun renderWorkflowUsageError(
         if (projectedSuffix.isEmpty() || !projected.endsWith(projectedSuffix)) return@repeat
         val next = projected.dropLast(projectedSuffix.length)
         if (next == prefix) {
-            output.print(next + suffix)
+            val display = next + suffix
+            if (admitCliEncoding(display, output)) output.print(display)
+            else if (admitCliEncoding("$usage\n", output)) output.print("$usage\n")
             return 2
         }
         prefix = next
     }
-    output.print("$usage\n")
+    if (admitCliEncoding("$usage\n", output)) output.print("$usage\n")
     return 2
 }
 
@@ -559,13 +567,45 @@ private fun printProjectedCliFrame(
     // newline, and emit only a complete safe line. Persistent conflicts withhold detail.
     repeat(2) {
         if (preview.endsWith("\n")) {
-            output.print(preview)
+            if (admitCliEncoding(preview, output)) output.print(preview)
             return
         }
         preview = project("$preview\n", 16_384)
     }
     if (!preview.endsWith("\n")) preview = project("\n", 16_384)
-    if (preview.endsWith("\n")) output.print(preview)
+    if (preview.endsWith("\n") && admitCliEncoding(preview, output)) output.print(preview)
+}
+
+/** Replacement or a codec alias must not reconstruct private text after projection. */
+private fun admitCliEncoding(text: String, output: PrintStream): Boolean {
+    if (text.length > 16_384) return false
+    if (text.isEmpty()) return true
+    return try {
+        val charset = output.charset()
+        val encoder = charset.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val capacity = minOf(16_384.0, maxOf(1.0,
+            kotlin.math.ceil(text.length * encoder.maxBytesPerChar().toDouble()))).toInt()
+        val input = CharBuffer.wrap(text)
+        val encoded = ByteBuffer.allocate(capacity)
+        if (!encoder.encode(input, encoded, true).isUnderflow || input.hasRemaining() ||
+            !encoder.flush(encoded).isUnderflow) return false
+        encoded.flip()
+        val decoder = charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val decoded = CharBuffer.allocate(text.length)
+        if (!decoder.decode(encoded, decoded, true).isUnderflow || encoded.hasRemaining() ||
+            !decoder.flush(decoded).isUnderflow) return false
+        decoded.flip()
+        decoded.toString() == text
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw failure
+        }
+        if (failure is java.util.concurrent.CancellationException) throw failure
+        false
+    }
 }
 
 private fun runPatch(args: List<String>) {
