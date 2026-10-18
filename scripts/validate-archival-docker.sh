@@ -5,31 +5,93 @@ cd "$(dirname "$0")/.."
 
 validation_parent="$PWD/build"
 mkdir -p "$validation_parent"
+for command in timeout python3 stat; do
+  command -v "$command" >/dev/null || { echo "missing archival cleanup command: $command" >&2; exit 1; }
+done
 validation_root=$(mktemp -d "$validation_parent/decomp-archival-ci.XXXXXX")
+diagnostic_directory="$validation_parent/archival-ci-diagnostics"
+validation_device=""
+validation_inode=""
+permission_repair_attempted=0
+permission_repair_status=1
+image_built=0
+
+check_root() {
+  timeout --signal=TERM --kill-after=1s 2s python3 -I -B scripts/collect-archival-diagnostics.py \
+    "$validation_root" "$validation_device" "$validation_inode" --check-root >/dev/null 2>&1
+}
+
+repair_permissions() {
+  if ((permission_repair_attempted == 0)); then
+    permission_repair_attempted=1
+    if ((image_built == 0)); then
+      permission_repair_status=0
+    elif ! check_root; then
+      permission_repair_status=2
+    elif timeout --signal=TERM --kill-after=1s 10s docker run --rm --pull=never \
+      --volume "$validation_root/output:/output" --entrypoint sh decomp-thing-archival-ci \
+      -c 'find /output -mindepth 1 -exec chmod a+rwX {} +' >/dev/null 2>&1; then
+      permission_repair_status=0
+    else
+      permission_repair_status=$?
+    fi
+  fi
+  return "$permission_repair_status"
+}
+
 cleanup() {
   local status=$?
-  if ((status != 0)) && [[ -d "$validation_root/output" ]]; then
-    echo "Archival validation failed; retained build evidence follows" >&2
-    docker run --rm \
-      --volume "$validation_root/output:/output" \
-      --entrypoint sh \
-      decomp-thing-archival-ci \
-      -c 'find /output -mindepth 1 -exec chmod a+rwX {} +' >/dev/null 2>&1 || true
-    while IFS= read -r evidence; do
-      echo "==> ${evidence#"$validation_root/"}" >&2
-      sed -n '1,240p' "$evidence" >&2
-    done < <(
-      find "$validation_root/output" -type f \
-        \( -path '*/reports/build.log' -o -path '*/reports/build/modules/*.log' -o -path '*/src/main.c' \) \
-        -print | sort
-    )
+  local cleanup_failed=0
+  local removal_allowed=1
+  trap - EXIT
+  set +e
+  if [[ -d "$validation_root/output" ]]; then
+    if ((status != 0)); then echo "Archival validation failed; retained build evidence follows" >&2; fi
+    echo "Retaining bounded archival build and owner diagnostics" >&2
+    if ! repair_permissions; then
+      echo "Archival permission repair incomplete; retaining the validation tree" >&2
+      removal_allowed=0
+      cleanup_failed=1
+    fi
+    local diagnostic_file="$diagnostic_directory/${validation_root##*/}.jsonl"
+    if [[ ! -L "$diagnostic_directory" ]] && mkdir -p -- "$diagnostic_directory" &&
+       (umask 077; set -C; : > "$diagnostic_file"); then
+      if ! timeout --signal=TERM --kill-after=1s 10s python3 -I -B scripts/collect-archival-diagnostics.py \
+        "$validation_root" "$validation_device" "$validation_inode" >"$diagnostic_file" 2>/dev/null; then
+        removal_allowed=0
+        cleanup_failed=1
+        echo "Archival diagnostic collection incomplete; retaining the validation tree" >&2
+      fi
+      if ! timeout --signal=TERM --kill-after=1s 2s cat -- "$diagnostic_file" >&2; then
+        removal_allowed=0
+        cleanup_failed=1
+      fi
+    else
+      removal_allowed=0
+      cleanup_failed=1
+      echo "Archival diagnostic retention unavailable; retaining the validation tree" >&2
+    fi
   fi
-  case "$validation_root" in
-    "$validation_parent"/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
-    *) echo "refusing to remove unexpected validation path: $validation_root" >&2 ;;
-  esac
+  if ((removal_allowed)); then
+    if check_root; then
+      case "$validation_root" in
+        "$validation_parent"/decomp-archival-ci.*)
+          if ! timeout --signal=TERM --kill-after=1s 20s rm -rf --one-file-system -- "$validation_root"; then cleanup_failed=1; fi ;;
+        *) cleanup_failed=1; echo "refusing to remove unexpected validation path" >&2 ;;
+      esac
+    else
+      cleanup_failed=1
+      echo "Archival cleanup root identity is unverified; retaining the validation tree" >&2
+    fi
+  fi
+  if ((cleanup_failed)); then
+    echo "Archival cleanup is incomplete: $validation_root" >&2
+    if ((status == 0)); then status=1; fi
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
+read -r validation_device validation_inode < <(timeout --signal=TERM --kill-after=1s 2s stat -c '%d %i' -- "$validation_root")
 
 mkdir -p "$validation_root/input" "$validation_root/output"
 gcc -O0 -g benchmarks/archival/large_project.c -o "$validation_root/input/large-symbols"
@@ -39,6 +101,7 @@ chmod -R a+rwX "$validation_root"
 
 image=decomp-thing-archival-ci
 docker build --tag "$image" .
+image_built=1
 
 run_reconstruction() {
   local binary=$1
@@ -57,10 +120,7 @@ run_reconstruction large-stripped stripped-b
 # The image uses a fixed non-root UID, while hosted runners may use another UID.
 # Normalize only this disposable mount from inside the owning container before
 # host-side determinism checks and cleanup.
-docker run --rm \
-  --volume "$validation_root/output:/output" \
-  --entrypoint sh \
-  "$image" -c 'find /output -mindepth 1 -exec chmod a+rwX {} +'
+repair_permissions
 
 cmp "$validation_root/output/symbols-a/analysis/reports/program_model.json" \
     "$validation_root/output/symbols-b/analysis/reports/program_model.json"
