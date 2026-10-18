@@ -1687,6 +1687,8 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
             common += [Path(row['path']) for row in compiler_recording['binding']['dependencies']]
         reaper = _nonprivileged_executable(Path('/usr/bin/bwrap'), deadline)
         monitor = _nonprivileged_executable(Path(binding['binaryPath']), deadline)
+        if monitor['sha256'] != binding['binarySha256']:
+            raise ValueError('monitor executable differs from validated binding')
         common += [Path(target['path']), Path(reaper['path']), Path(monitor['path']),
                    BASE / 'worker_exec_monitor.c', BASE / 'worker_exec_proof.py',
                    BASE / 'contracts/worker-exec-proof-schema.json', BASE / 'toolchain-001/worker-exec-monitor.json',
@@ -1770,6 +1772,10 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
         for relative, _, source_sha in _MONITOR_LOADER_SOURCES:
             if pins.get(str(BASE / relative), {}).get('sha256') != source_sha:
                 raise ValueError('authenticated monitor loader source launch pin differs')
+        monitor_pin = pins.get(monitor['path'])
+        if (monitor_pin != {key:monitor[key] for key in ('device','inode','mode','sha256')} or
+                monitor_pin.get('sha256') != binding['binarySha256']):
+            raise ValueError('monitor launch pin differs from validated executable')
     profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
     if type(profile_pin) is not dict or profile_pin.get('sha256') != bounds['profileSha256']:
         raise ValueError('launch profile pin differs from admitted bounds profile')

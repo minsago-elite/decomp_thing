@@ -114,6 +114,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                     pins.update({str(runtime.BASE/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
                         for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
                     pins[str(runtime.BASE/'worker_exec_proof.py')]={'device':70,'inode':80,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
+                    pins[str(monitor)]={key:value for key,value in executable(monitor).items() if key!='path'}
                     if mutation=='missing':pins.pop(key)
                     if mutation=='wrong':pins[key]['sha256']='f'*64
                     if mutation=='rekeyed':pins['/authored/other-profile.json']=pins.pop(key)
@@ -156,6 +157,7 @@ class RuntimeWorkerProof(unittest.TestCase):
             profile_pins.update({str(base/relative):{'device':70,'inode':72+i,'mode':0o400,'sha256':sha}
                 for i,(relative,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
             profile_pins[str(base/'worker_exec_proof.py')]={'device':70,'inode':80,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
+            profile_pins[str(helper)]={key:value for key,value in identity(helper).items() if key!='path'}
             with patch.object(runtime,'_snapshot_library',return_value=(snapshot,None)),patch.object(runtime,'process_identity',return_value={'start':1}),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=identity),patch.object(runtime,'_pin_files',return_value=profile_pins):
                 launch=runtime._prepare_launch(runtime_command(helper,library,2),self.work,
                                                runtime.execution_bounds(managed_scope=True,phase='runtime'),receipt,False,runtime_library={'path':str(library),'sha256':'0'*64})
@@ -662,6 +664,7 @@ class RuntimeWorkerProof(unittest.TestCase):
             return {'path':str(path),**real_pin_reader([path],deadline)[str(path)]}
         binding={'binaryPath':str(monitor),'dependencies':[{'path':str(cache),'sha256':runtime.digest(cache)}],
                  **{key:runtime._WORKER_PROOF_PARSER_SHA256 if key=='parserSha256' else '0'*64 for key in ('environmentPinSha256','binarySha256','sourceSha256','protocolSha256','parserSha256','manifestSha256')}}
+        binding['binarySha256']=runtime.digest(monitor)
         with patch.object(runtime,'BASE',base),patch.object(runtime,'load_worker_monitor_binding',return_value=binding),patch.object(runtime,'_nonprivileged_executable',side_effect=executable),patch.object(runtime,'_pin_files',side_effect=producer_pins):
             receipt=runtime._create_worker_receipt();self.addCleanup(os.close,receipt['fd'])
             launch=runtime._prepare_launch(consumer.runtime_command(caller,library,0),self.work,
@@ -968,6 +971,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                 str(runtime.BASE/'worker_exec_proof.py'):{'device':1,'inode':3,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}}
         common.update({str(runtime.BASE/name):{'device':2,'inode':index,'mode':0o400,'sha256':sha}
                        for index,(name,_,sha) in enumerate(runtime._MONITOR_LOADER_SOURCES)})
+        common['/authored/monitor']={'device':7,'inode':8,'mode':0o500,'sha256':'a'*64}
         case.receipt.update(directory=Path('/authored')/('a'*32),directoryDevice=3,directoryInode=4,device=5,inode=6)
         real_pin=runtime._pin_files;native_stat=Path.stat;native_lstat=Path.lstat;configs=[]
         def pin(paths,deadline=None):
@@ -1940,6 +1944,7 @@ class RuntimeWorkerProof(unittest.TestCase):
         def executable(path,deadline=None):
             dev,ino=(3,4) if str(path)=='/usr/bin/bwrap' else (11,12) if path==monitor else (7,8)
             return {'path':str(path),'device':dev,'inode':ino,'mode':0o500,'sha256':'a'*64}
+        pins[str(monitor)]={key:value for key,value in executable(monitor).items() if key!='path'}
         with patch.object(Path,'stat',return_value=types.SimpleNamespace(st_dev=5,st_ino=6)), \
                 patch.object(Path,'lstat',return_value=types.SimpleNamespace(st_dev=1,st_ino=2)), \
                 patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
@@ -1957,14 +1962,113 @@ class RuntimeWorkerProof(unittest.TestCase):
         self.assertIs(launch['expected'],launch['proofBinding']['expected'])
         published.assert_called_once()
 
+    def _monitor_launch_control(self):
+        # Real bounded pin reads of authored inert bytes; host admission, metadata
+        # and publication are controlled. No executable or worker is launched.
+        profile,profile_sha=build_contract.load_profile_with_digest()
+        bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
+        self.monitor_control_count=getattr(self,'monitor_control_count',0)+1
+        monitor=self.directory/('monitor-control-'+str(self.monitor_control_count))
+        monitor.write_bytes(b'authored trusted monitor');monitor.chmod(0o500)
+        real_pin=runtime._pin_files
+        trusted=real_pin([monitor])[str(monitor)]
+        binding={'binaryPath':str(monitor),'dependencies':[],**{name:'a'*64 for name in
+            ('environmentPinSha256','sourceSha256','protocolSha256','manifestSha256')}}
+        binding.update(binarySha256=trusted['sha256'],parserSha256=runtime._WORKER_PROOF_PARSER_SHA256)
+        receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
+        recipe={'target':Path('/authored/target'),'worker':['/target'],'prefix':[],'mounts':[]}
+        case=types.SimpleNamespace(monitor=monitor,trusted=trusted,binding=binding,events=[],published=Mock(),
+            before_admission=lambda:None,before_pin=lambda:None,change_pins=lambda pins:None)
+        def load(deadline=None):
+            case.events.append(('binding',deadline));case.before_admission();return binding
+        def executable(path,deadline=None):
+            if path==monitor:
+                case.events.append(('monitor-admission',deadline))
+                case.admitted=real_pin([monitor],deadline)[str(monitor)]
+                return {'path':str(monitor),**case.admitted}
+            return {'path':str(path),'device':7,'inode':8,'mode':0o500,'sha256':'a'*64}
+        def launch_pins(paths,deadline=None):
+            self.assertIn(monitor,paths);case.events.append(('launch-pins',deadline));case.before_pin()
+            pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'sha256':profile_sha},
+                  str(runtime.BASE/'worker_exec_proof.py'):{'sha256':runtime._WORKER_PROOF_PARSER_SHA256}}
+            pins.update({str(runtime.BASE/name):{'sha256':sha} for name,_,sha in runtime._MONITOR_LOADER_SOURCES})
+            case.retained=real_pin([monitor],deadline)[str(monitor)]
+            pins[str(monitor)]=dict(case.retained);case.change_pins(pins);return pins
+        real_stat,real_lstat=Path.stat,Path.lstat
+        def metadata(path,*args,**kwargs):
+            if str(path)=='/proc/self/ns/pid':return types.SimpleNamespace(st_dev=5,st_ino=6)
+            return real_stat(path,*args,**kwargs)
+        def lmetadata(path,*args,**kwargs):
+            if path==receipt['directory']/'python-cache':return types.SimpleNamespace(st_dev=1,st_ino=2)
+            return real_lstat(path,*args,**kwargs)
+        def invoke():
+            with patch.object(Path,'stat',metadata),patch.object(Path,'lstat',lmetadata), \
+                    patch.object(runtime.time,'monotonic',return_value=0), \
+                    patch.object(runtime,'_contained_recipe',return_value=recipe), \
+                    patch.object(runtime,'load_worker_monitor_binding',side_effect=load), \
+                    patch.object(runtime,'_nonprivileged_executable',side_effect=executable), \
+                    patch.object(runtime,'_recorded_compiler_inputs',return_value=None), \
+                    patch.object(runtime,'_pin_files',side_effect=launch_pins), \
+                    patch.object(runtime,'_publish_config',case.published), \
+                    patch.object(runtime,'private_directory',side_effect=lambda path:path), \
+                    patch.object(runtime,'process_identity',return_value={'start':1}):
+                return runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10.0)
+        def replace():
+            replacement=self.directory/'monitor-replacement'
+            replacement.write_bytes(b'authored stable replacement');replacement.chmod(0o500);replacement.replace(monitor)
+        case.invoke=invoke;case.replace=replace
+        return case
+
+    def test_prepare_refuses_monitor_replacement_after_binding_before_executable_admission(self):
+        case=self._monitor_launch_control();case.before_admission=case.replace
+        with self.assertRaisesRegex(ValueError,'monitor executable differs from validated binding'):case.invoke()
+        self.assertNotEqual(case.trusted['sha256'],case.admitted['sha256'])
+        self.assertEqual([('binding',10.0),('monitor-admission',10.0)],case.events)
+        case.published.assert_not_called()
+
+    def test_prepare_refuses_monitor_replacement_after_admission_before_launch_pin(self):
+        case=self._monitor_launch_control();case.before_pin=case.replace
+        with self.assertRaisesRegex(ValueError,'monitor launch pin differs from validated executable'):case.invoke()
+        self.assertEqual(case.trusted,case.admitted)
+        self.assertNotEqual(case.admitted['sha256'],case.retained['sha256'])
+        self.assertNotEqual(case.admitted['inode'],case.retained['inode'])
+        self.assertEqual([('binding',10.0),('monitor-admission',10.0),('launch-pins',10.0)],case.events)
+        case.published.assert_not_called()
+
+    def test_prepare_refuses_missing_rekeyed_or_drifted_monitor_launch_pin(self):
+        for mutation in ('missing','rekeyed','sha256','device','inode','mode'):
+            with self.subTest(mutation=mutation):
+                case=self._monitor_launch_control()
+                def change(pins):
+                    key=str(case.monitor)
+                    if mutation=='missing':pins.pop(key)
+                    elif mutation=='rekeyed':pins[key+'-other']=pins.pop(key)
+                    elif mutation=='sha256':pins[key][mutation]='f'*64
+                    else:pins[key][mutation]+=1
+                case.change_pins=change
+                with self.assertRaisesRegex(ValueError,'monitor launch pin differs from validated executable'):case.invoke()
+                self.assertEqual(case.trusted,case.admitted);self.assertEqual(case.admitted,case.retained)
+                case.published.assert_not_called()
+
+    def test_prepare_preserves_trusted_monitor_digest_and_original_admission(self):
+        case=self._monitor_launch_control();launch=case.invoke()
+        self.assertEqual(case.trusted,launch['pins'][str(case.monitor)])
+        self.assertEqual(case.binding['binarySha256'],launch['proofBinding']['monitorBinarySha256'])
+        self.assertEqual(case.trusted,case.admitted);self.assertEqual(case.admitted,case.retained)
+        case.published.assert_called_once()
+        self.assertEqual(case.published.call_args.args[0].name,'launch.json')
+        command=launch['command'];at=command.index('/_worker_exec_monitor')
+        self.assertEqual(['--ro-bind',str(case.monitor),'/_worker_exec_monitor'],command[at-2:at+1])
+
     def test_prepare_launch_refuses_untrusted_monitor_or_canonical_parser_row_before_publication(self):
         profile,sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')
         recipe={'target':Path('/authored/target'),'worker':['/target'],'prefix':[],'mounts':[]}
         receipt={'directory':Path('/authored')/('a'*32),'directoryDevice':1,'directoryInode':2,'device':1,'inode':3}
         for mutation in ('binding','missing','rekeyed','row','both'):
             with self.subTest(mutation=mutation):
-                binding={'binaryPath':'/authored/monitor','dependencies':[],'parserSha256':runtime._WORKER_PROOF_PARSER_SHA256}
+                binding={'binaryPath':'/authored/monitor','binarySha256':'a'*64,'dependencies':[],'parserSha256':runtime._WORKER_PROOF_PARSER_SHA256}
                 pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'sha256':sha}}
+                pins['/authored/monitor']={'device':1,'inode':2,'mode':0o500,'sha256':'a'*64}
                 pins.update({str(runtime.BASE/name):{'sha256':digest} for name,_,digest in runtime._MONITOR_LOADER_SOURCES})
                 key=str(runtime.BASE/'worker_exec_proof.py');pins[key]={'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
                 if mutation in ('binding','both'):binding['parserSha256']='f'*64
@@ -1975,7 +2079,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                         patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
                         patch.object(runtime,'load_worker_monitor_binding',return_value=binding), \
                         patch.object(runtime,'_recorded_compiler_inputs',return_value=None), \
-                        patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'sha256':'a'*64}), \
+                        patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'mode':0o500,'sha256':'a'*64}), \
                         patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime,'_publish_config') as published:
                     with self.assertRaisesRegex(ValueError,'worker proof parser launch binding differs'):
                         runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10)
@@ -2328,6 +2432,7 @@ class RuntimeWorkerProof(unittest.TestCase):
             for mutation in ('missing','wrong'):
                 with self.subTest(index=index,mutation=mutation):
                     pins={str(runtime.BASE/'contracts/candidate-build-profile.json'):{'sha256':profile_sha}}
+                    pins['/authored/monitor']={'device':1,'inode':2,'mode':0o500,'sha256':'a'*64}
                     pins.update({str(runtime.BASE/relative):{'sha256':sha} for relative,_,sha in runtime._MONITOR_LOADER_SOURCES})
                     key=str(runtime.BASE/runtime._MONITOR_LOADER_SOURCES[index][0])
                     if mutation=='missing':pins.pop(key)
@@ -2336,7 +2441,7 @@ class RuntimeWorkerProof(unittest.TestCase):
                             patch.object(runtime.time,'monotonic',return_value=0),patch.object(runtime,'_contained_recipe',return_value=recipe), \
                             patch.object(runtime,'load_worker_monitor_binding',return_value=binding) as loader, \
                             patch.object(runtime,'_recorded_compiler_inputs',return_value=None), \
-                            patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'sha256':'a'*64}), \
+                            patch.object(runtime,'_nonprivileged_executable',side_effect=lambda p,deadline=None:{'path':str(p),'device':1,'inode':2,'mode':0o500,'sha256':'a'*64}), \
                             patch.object(runtime,'_pin_files',return_value=pins),patch.object(runtime,'_publish_config') as published:
                         with self.assertRaisesRegex(ValueError,'source launch pin differs'):
                             runtime._prepare_launch(['/authored'],self.work,bounds,receipt,False,deadline=10.0)
