@@ -8,8 +8,8 @@ fresh version guard. It neither rewrites state nor acts on a later run.
 
 Receipts use domain-separated actor and request-key digests scoped to the job and
 run. Raw session identities and request keys are not stored. Attribution does
-not authorize a request: the future shared HTTP mutation boundary must supply
-the authenticated actor. A different actor or run is a different request scope;
+not authorize a request: the shared HTTP mutation capability supplies the
+authenticated actor. A different actor or run is a different request scope;
 the original key with changed intent conflicts. At 256 retained receipts per job,
 new keys are refused while existing keys remain replayable. No key is evicted.
 
@@ -35,6 +35,7 @@ does not turn the committed acknowledgement into a failed admission.
 The [owned service coordinator](web-attempt-cancellation.md) calls this command
 before signalling an exact task and keeps running cancellation pending until its
 adapter exits. Persisted `cancelling` is not worker termination or native cleanup
-proof. Shared HTTP authorization, the current API route/schema, browser controls
+proof. The current POST HTTP route uses the shared authorized capability and
+closed request schema. Its authored HTTP methods await Actions; browser controls
 and production-adapter qualification still need integration. Production adapters
 remain unregistered.

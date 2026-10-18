@@ -29,6 +29,9 @@ still set. The recovery verifier requires this suite alongside the existing ones
 
 These are service state and ownership controls with inert adapters. They do not
 qualify native process absence, cleanup or an accepted-publication attestation.
-Production adapters remain unregistered. The current cancellation HTTP schema,
-shared session/Origin/CSRF actor capability, route and browser behavior still need
-integration and their own qualification.
+Production adapters remain unregistered. The current POST cancellation handler
+uses the closed action contract and the shared session/Origin/CSRF mutation
+capability. Its response retains original acknowledgement status while presenting
+current run state. The separate HTTP methods are authored and await Actions;
+browser behavior and production/runtime qualification remain unfinished. See
+[the HTTP contract](web-api.md#errors-deadlines-and-concurrent-mutations).

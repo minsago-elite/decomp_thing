@@ -236,10 +236,23 @@ authorized session; actor and receipt internals are not response fields. Neither
 202 nor receipt replay asserts worker termination or promotes candidate output
 to an accepted revision.
 
-This cancellation schema and its generated types/fixtures prepare the reserved
-route. The HTTP handler, shared authorized capability and real HTTP/browser
-qualification remain unfinished; this contract addition does not enable an
-endpoint or advertise production cancellation readiness.
+The cancellation handler now dispatches this route through
+`WebJobMutationBoundary.authorizeCancellation`. The capability derives the actor
+from the authorized session and calls the owned service coordinator; the HTTP
+controller cannot select an actor or write storage directly. Fresh stale guards
+return 412, conflicting retained intent 409, exhausted receipt capacity 429, and
+unknown/foreign targets 404. Uncertain publication returns 503 without a success
+location or signal. Running work without an owned task requires reconciliation.
+
+`WebCancellationControllerTest` adds inert HTTP controls for queued/running
+cancellation, concurrent replay, completion races, accepted-reference and
+diagnostic preservation, guards, strict JSON, actor isolation, revocation,
+capacity and publication faults. Service/storage restart coverage retains the
+same listener's in-memory authorization service. It does not establish replay by
+a new session after a full listener restart. These authored methods await their
+own Actions qualification; browser and production-adapter/runtime qualification
+remain unfinished. Bootstrap continues to report workflows unavailable, and
+fresh starts without registrations or retained start receipts retain 405.
 
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
