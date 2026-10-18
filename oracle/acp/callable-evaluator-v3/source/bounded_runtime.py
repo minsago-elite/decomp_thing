@@ -127,7 +127,7 @@ def _valid_worker_bindings(result: dict) -> bool:
               'protocolSha256','parserSha256','manifestSha256','targetSha256','launchPinsSha256'}
     def sha(value):
         return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
-    if (not isinstance(binding, dict) or set(binding) != hashes | {'protocolVersion','expected'} or
+    if (not isinstance(binding, dict) or set(binding) != hashes | {'protocolVersion','expected','monitorExecutable'} or
             type(binding['protocolVersion']) is not int or binding['protocolVersion'] != 1 or
             any(not sha(binding[key]) for key in hashes) or not isinstance(pins, dict) or not 1 <= len(pins) <= 256 or
             not isinstance(bounds, dict) or not sha(bounds.get('profileSha256'))):
@@ -149,6 +149,31 @@ def _valid_worker_bindings(result: dict) -> bool:
                 any(type(item[key]) is not int or not 0 <= item[key] <= (1 << 64) - 1 for key in ('device','inode')) or
                 type(item['mode']) is not int or not 0 <= item['mode'] <= 0o7777 or not sha(item['sha256'])):
             return False
+    # Replay the exact executable admission retained by the controller. A digest
+    # claimed by another ordinary pin cannot identify the launched monitor.
+    monitor = binding['monitorExecutable']
+    if (type(monitor) is not dict or set(monitor) != {'path','device','inode','mode','sha256'} or
+            type(monitor['path']) is not str or not Path(monitor['path']).is_absolute() or
+            monitor['path'].startswith('//') or len(Path(monitor['path']).parts) < 2 or
+            str(Path(monitor['path'])) != monitor['path'] or '\0' in monitor['path'] or
+            '..' in Path(monitor['path']).parts or
+            any(type(monitor[key]) is not int or not 0 <= monitor[key] <= (1 << 64) - 1 for key in ('device','inode')) or
+            type(monitor['mode']) is not int or not 0 <= monitor['mode'] <= 0o7777 or
+            monitor['mode'] & 0o6000 or not monitor['mode'] & 0o111 or
+            not sha(monitor['sha256']) or monitor['sha256'] != binding['monitorBinarySha256']):
+        return False
+    try:
+        if len(monitor['path'].encode('utf-8')) > 4096:
+            return False
+    except UnicodeError:
+        return False
+    if pins.get(monitor['path']) != {key:monitor[key] for key in ('device','inode','mode','sha256')}:
+        return False
+    if (monitor['device'], monitor['inode']) in (
+            (expected['reportDevice'], expected['reportInode']),
+            (expected['targetDevice'], expected['targetInode']),
+            (expected['reaperDevice'], expected['reaperInode'])):
+        return False
     profile_pin = pins.get(str(BASE / 'contracts/candidate-build-profile.json'))
     if profile_pin is None or profile_pin['sha256'] != bounds['profileSha256']:
         return False
@@ -1814,6 +1839,7 @@ def _prepare_launch(argv, cwd, bounds, receipt, provisioning, deadline=None, run
                 '--phase-deadline', repr(deadline if deadline is not None else time.monotonic() + bounds['wallSeconds'])]
     proof_binding = None if provisioning else {
         'protocolVersion':1, 'expected':expected, 'launchConfigSha256':config_sha,
+        'monitorExecutable':dict(monitor),
         'environmentPinSha256':binding['environmentPinSha256'], 'monitorBinarySha256':binding['binarySha256'],
         'monitorSourceSha256':binding['sourceSha256'], 'protocolSha256':binding['protocolSha256'],
         'parserSha256':binding['parserSha256'], 'manifestSha256':binding['manifestSha256'],

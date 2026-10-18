@@ -253,6 +253,30 @@ class SchemaMigration(unittest.TestCase):
             with self.assertRaises(Exception):e.validate_exchange('report',report)
         report=report_fixture();report['apiEntryCount']=1
         with self.assertRaises(Exception):e.validate_exchange('report',report)
+    def test_report_and_reference_require_complete_monitor_admission_and_exact_launch_pin(self):
+        import bounded_runtime as runtime
+        reference={'schemaVersion':3,'sourceSha256':'a'*64,'callerSha256':'a'*64,
+                   'callerPath':'/synthetic/caller','libraryPath':'/synthetic/libcandidate.so',
+                   'librarySha256':'c'*64,'profileSha256':e.digest(e.BASE/'contracts/candidate-build-profile.json'),
+                   'observations':[{**o,'evidenceSha256':'c'*64} for o in observations()]}
+        for name,value,rows in (('report',report_fixture(),'scenarios'),
+                                ('reference-observations',reference,'observations')):
+            self.assertEqual(value,e.validate_exchange(name,value))
+            for mutation in ('missing','null','missing-path','extra','bad-sha','missing-pin','rekeyed-pin','wrong-pin'):
+                with self.subTest(exchange=name,mutation=mutation):
+                    changed=deepcopy(value);process=changed[rows][0]['process']
+                    binding=process['workerProofBindings'];monitor=binding['monitorExecutable'];pins=process['launchInputPins']
+                    if mutation=='missing':del binding['monitorExecutable']
+                    elif mutation=='null':binding['monitorExecutable']=None
+                    elif mutation=='missing-path':del monitor['path']
+                    elif mutation=='extra':monitor['extra']=True
+                    elif mutation=='bad-sha':monitor['sha256']='x'*64
+                    elif mutation=='missing-pin':pins.pop(monitor['path'])
+                    elif mutation=='rekeyed-pin':pins[monitor['path']+'-other']=pins.pop(monitor['path'])
+                    else:pins[monitor['path']]['inode']+=1
+                    binding['launchPinsSha256']=runtime._canonical_pin_digest(pins)
+                    with self.assertRaises(Exception):e.validate_exchange(name,changed)
+
     def test_all_changed_exchange_schemas_closed_version3(self):
         for name in ('report','reference-observations','matrix','preparation','execution-bindings','visible-manifest'):
             schema=json.loads((e.BASE/'contracts'/(name+'-schema.json')).read_bytes())

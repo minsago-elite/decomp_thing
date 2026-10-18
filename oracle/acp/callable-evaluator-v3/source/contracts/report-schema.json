@@ -743,6 +743,44 @@
                             ],
                             "additionalProperties": false
                           },
+                          "monitorExecutable": {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "pattern": "^/",
+                                "minLength": 2,
+                                "maxLength": 4096
+                              },
+                              "device": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "inode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 18446744073709551615
+                              },
+                              "mode": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4095
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "path",
+                              "device",
+                              "inode",
+                              "mode",
+                              "sha256"
+                            ],
+                            "additionalProperties": false
+                          },
                           "launchConfigSha256": {
                             "type": "string",
                             "pattern": "^[0-9a-f]{64}$"
@@ -783,6 +821,7 @@
                         "required": [
                           "protocolVersion",
                           "expected",
+                          "monitorExecutable",
                           "launchConfigSha256",
                           "environmentPinSha256",
                           "monitorBinarySha256",

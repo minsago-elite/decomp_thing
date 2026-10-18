@@ -1871,6 +1871,64 @@ class RuntimeWorkerProof(unittest.TestCase):
                     self.assertFalse(runtime._valid_worker_bindings(value));self.assertFalse(runtime.worker_execution_complete(value))
                 parsing.assert_not_called()
 
+    def test_monitor_replay_requires_original_launch_pin_after_aggregate_resealing(self):
+        import copy
+        import evaluate_candidate_v3 as evaluator
+        from test_identity_graph import completed_result
+        for mutation in ('missing','rekeyed','decoy','device','inode','mode','sha256','claim','admission-sha'):
+            with self.subTest(mutation=mutation):
+                value=completed_result(stdout=b'partial behavior');pins=value['launchInputPins']
+                binding=value['workerProofBindings'];name=binding['monitorExecutable']['path']
+                if mutation=='missing':pins.pop(name)
+                elif mutation=='rekeyed':pins[name+'-replacement']=pins.pop(name)
+                elif mutation=='decoy':
+                    row=pins.pop(name);pins['/authored/unrelated']={**row,'inode':row['inode']+1}
+                elif mutation in ('device','inode','mode'):pins[name][mutation]+=1
+                elif mutation=='sha256':pins[name]['sha256']='f'*64
+                elif mutation=='claim':binding['monitorBinarySha256']='f'*64
+                else:
+                    binding['monitorExecutable']['sha256']='f'*64;pins[name]['sha256']='f'*64
+                binding['launchPinsSha256']=runtime._canonical_pin_digest(pins)
+                original=copy.deepcopy(value)
+                with patch.object(runtime,'_parse_worker_proof',side_effect=AssertionError('monitor admission before parser')) as parsing, \
+                        patch.object(runtime.os,'open',side_effect=AssertionError('replay never opens a serialized coordinate')):
+                    self.assertFalse(runtime._valid_worker_bindings(value))
+                    self.assertFalse(runtime.worker_execution_complete(value));self.assertFalse(evaluator._proof_replays(value))
+                    observation=evaluator.process_observation(value)
+                parsing.assert_not_called();self.assertEqual(original,value)
+                self.assertFalse(observation['completed']);self.assertEqual(b'partial behavior'.hex(),observation['stdoutHex'])
+
+    def test_monitor_replay_rejects_malformed_or_aliased_admission_before_parser_use(self):
+        import evaluate_candidate_v3 as evaluator
+        from test_identity_graph import completed_result
+        cases=[('absent',None,None),('null',None,None),('missing','inode',None),('extra','extra',True),
+               ('path','path','relative'),('path','path','/'),('path','path','//authored/monitor'),
+               ('path','path','/authored/../monitor'),('path','path','/authored/./monitor'),
+               ('path','path','/authored/monitor\0'),('path','path','/'+('x'*4096)),
+               ('path','path','/\ud800'),('boolean-device','device',True),('negative-inode','inode',-1),
+               ('oversized-inode','inode',1<<64),('boolean-mode','mode',True),('nonexec','mode',0o400),
+               ('setuid','mode',0o4500),('setgid','mode',0o2500),('bad-sha','sha256','x'*64)]
+        cases += [(role,None,None) for role in ('target','reaper','report')]
+        for label,field,new in cases:
+            with self.subTest(case=label,value=new):
+                value=completed_result();binding=value['workerProofBindings'];monitor=binding['monitorExecutable']
+                old_name=monitor['path'];pins=value['launchInputPins']
+                if label=='absent':del binding['monitorExecutable']
+                elif label=='null':binding['monitorExecutable']=None
+                elif label=='missing':del monitor[field]
+                elif label in ('target','reaper','report'):
+                    expected=binding['expected'];monitor.update(device=expected[label+'Device'],inode=expected[label+'Inode'])
+                    pins[old_name]={k:monitor[k] for k in ('device','inode','mode','sha256')}
+                else:
+                    monitor[field]=new
+                    if label=='path':pins[new]=pins.pop(old_name)
+                    elif field in pins[old_name]:pins[old_name][field]=new
+                binding['launchPinsSha256']=runtime._canonical_pin_digest(pins)
+                with patch.object(runtime,'_parse_worker_proof',side_effect=AssertionError('malformed monitor before parser')) as parsing, \
+                        patch.object(runtime.os,'open',side_effect=AssertionError('data-only replay')):
+                    self.assertFalse(runtime.worker_execution_complete(value));self.assertFalse(evaluator._proof_replays(value))
+                parsing.assert_not_called()
+
     def test_actual_finish_completion_and_evaluator_share_authenticated_parser_under_path_replacement(self):
         import evaluate_candidate_v3 as evaluator
         lock=self.parser_lock()
@@ -2053,12 +2111,33 @@ class RuntimeWorkerProof(unittest.TestCase):
     def test_prepare_preserves_trusted_monitor_digest_and_original_admission(self):
         case=self._monitor_launch_control();launch=case.invoke()
         self.assertEqual(case.trusted,launch['pins'][str(case.monitor)])
+        self.assertEqual({'path':str(case.monitor),**case.trusted},launch['proofBinding']['monitorExecutable'])
         self.assertEqual(case.binding['binarySha256'],launch['proofBinding']['monitorBinarySha256'])
         self.assertEqual(case.trusted,case.admitted);self.assertEqual(case.admitted,case.retained)
         case.published.assert_called_once()
         self.assertEqual(case.published.call_args.args[0].name,'launch.json')
         command=launch['command'];at=command.index('/_worker_exec_monitor')
         self.assertEqual(['--ro-bind',str(case.monitor),'/_worker_exec_monitor'],command[at-2:at+1])
+
+    def test_actual_monitor_admission_survives_public_record_and_evaluator_replay(self):
+        import copy
+        import evaluate_candidate_v3 as evaluator
+        from test_identity_graph import completed_result
+        case=self._monitor_launch_control();launch=case.invoke()
+        admitted=launch['proofBinding']['monitorExecutable']
+        self.assertEqual({'path':str(case.monitor),**case.admitted},admitted)
+        # Exercise the actual monitor admission/public replay bridge. Other proof
+        # roles and raw bytes are independently authored, never a launched worker.
+        for code in (0,7,-11):
+            value=completed_result(exit_code=code);binding=value['workerProofBindings'];pins=value['launchInputPins']
+            pins.pop(binding['monitorExecutable']['path']);pins[admitted['path']]=dict(launch['pins'][admitted['path']])
+            binding.update(monitorExecutable=copy.deepcopy(admitted),monitorBinarySha256=admitted['sha256'],
+                           launchPinsSha256=runtime._canonical_pin_digest(pins))
+            self.assertTrue(runtime.worker_execution_complete(value));public=runtime.public_result(value)
+            runtime._worker_proof_parser()  # authenticate the parser before denying any further payload opens
+            with patch.object(runtime.os,'open',side_effect=AssertionError('replay must not reopen the monitor')):
+                self.assertTrue(runtime.worker_execution_complete(public));self.assertTrue(evaluator._proof_replays(public))
+            self.assertEqual(admitted,public['workerProofBindings']['monitorExecutable'])
 
     def test_prepare_launch_refuses_untrusted_monitor_or_canonical_parser_row_before_publication(self):
         profile,sha=build_contract.load_profile_with_digest();bounds=runtime.execution_bounds(managed_scope=True,phase='runtime')

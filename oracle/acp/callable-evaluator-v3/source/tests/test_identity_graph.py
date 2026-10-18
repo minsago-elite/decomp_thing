@@ -59,6 +59,7 @@ def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64, 
     import bounded_runtime as runtime
     pins={'/authored/worker':{'device':7,'inode':8,'mode':493,'sha256':target_sha},
           '/authored/bwrap':{'device':3,'inode':4,'mode':493,'sha256':'0'*64},
+          '/authored/monitor':{'device':13,'inode':14,'mode':0o500,'sha256':'9'*64},
           str(runtime.BASE/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':256,'sha256':'0'*64}}
     pins[str(runtime.BASE/'worker_exec_proof.py')]={'device':70,'inode':72,'mode':256,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
     bindings={'protocolVersion':1,'expected':{'attempt':'a'*32,'phase':'runtime','reportDevice':1,
@@ -71,6 +72,8 @@ def completed_result(stdout=b'', stderr=b'', exit_code=0, *, target_sha='0'*64, 
     bindings['expected']['phase']=phase
     bindings['launchPinsSha256']=hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     bindings['targetSha256']=target_sha
+    bindings['monitorBinarySha256']='9'*64
+    bindings['monitorExecutable']={'path':'/authored/monitor',**pins['/authored/monitor']}
     bindings['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
     execution={'v':1,'t':'exec','s':1,'a':'a'*32,'p':'runtime','c':3,'ed':7,'ei':8,'od':7,'oi':8,
                'w':(4<<16)|(5<<8)|127,'cf':1,'dp':0,'rd':3,'ri':4,'b':[1,100,5,9,1,3]}

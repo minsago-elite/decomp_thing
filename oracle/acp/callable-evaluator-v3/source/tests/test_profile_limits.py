@@ -368,6 +368,7 @@ class ProfileLimits(unittest.TestCase):
         stack.enter_context(patch.object(runtime,'_worker_proof_parser',return_value=parser.parse_proof))
         pins={'/authored/worker':{'device':7,'inode':8,'mode':0o755,'sha256':'0'*64},
               '/authored/bwrap':{'device':3,'inode':4,'mode':0o755,'sha256':'0'*64},
+              '/authored/monitor':{'device':13,'inode':14,'mode':0o500,'sha256':'9'*64},
               str(base/'contracts/candidate-build-profile.json'):{'device':70,'inode':71,'mode':0o400,'sha256':declared_profile_sha}}
         pins[str(base/'worker_exec_proof.py')]={'device':70,'inode':72,'mode':0o400,'sha256':runtime._WORKER_PROOF_PARSER_SHA256}
         stack.enter_context(patch.object(runtime,'_pin_files',return_value=pins))
@@ -386,6 +387,8 @@ class ProfileLimits(unittest.TestCase):
                                                'protocolSha256','parserSha256','manifestSha256','targetSha256')},
                      'launchPinsSha256':runtime._canonical_pin_digest(pins)}
             binding['parserSha256']=runtime._WORKER_PROOF_PARSER_SHA256
+            binding['monitorBinarySha256']='9'*64
+            binding['monitorExecutable']={'path':'/authored/monitor',**pins['/authored/monitor']}
             return {'argv':['mock-no-execution'],'unit':'mock.scope','expected':expected,'pins':pins,
                     'configSha256':config_sha,'proofBinding':None if provisioning else binding}
         stack.enter_context(patch.object(runtime,'_prepare_launch',side_effect=prepare))
