@@ -677,11 +677,13 @@ class StreamingLogger private constructor(
         val stdout = StringBuilder()
         val stderr = StringBuilder()
         val projectionFailure = MvpLogFailure()
-        val outThread = stream(process.inputStream, stdout, false, projectionFailure)
-        val errThread = stream(process.errorStream, stderr, true, projectionFailure)
+        val display = MvpLiveCommandDisplay(privacy) { line, error, pipe -> emit(line, error, pipe = pipe) }
+        val outThread = stream(process.inputStream, stdout, false, projectionFailure, display)
+        val errThread = stream(process.errorStream, stderr, true, projectionFailure, display)
         outThread.join(); errThread.join()
         val code = process.waitFor()
         projectionFailure.requireSuccess()
+        display.finish(stdout, stderr)
         info("$label exit_code=$code")
         if (requireSuccess && code !in accepted) throw MvpPatchException("$label failed with exit code $code")
         return CommandResult(code, stdout.toString(), stderr.toString())
@@ -708,16 +710,16 @@ class StreamingLogger private constructor(
 
     private fun stream(
         input: java.io.InputStream, capture: StringBuilder, error: Boolean,
-        projectionFailure: MvpLogFailure,
+        projectionFailure: MvpLogFailure, display: MvpLiveCommandDisplay,
     ): Thread {
-        val lines = privacy.lines()
         return Thread {
             try {
                 input.bufferedReader().useLines { incoming -> incoming.forEach { line ->
                     // Capture stays raw for validation. Failed collection/display cannot be accepted.
                     capture.appendLine(line)
-                    projectionFailure.attempt { outputLine(line, error, lines) }
+                    projectionFailure.attempt { display.line(error, capture) }
                 } }
+                projectionFailure.attempt { display.complete(error, capture) }
             } catch (failure: Throwable) {
                 // Avoid the JVM's raw child-thread exception printer; caller rethrows unchanged.
                 projectionFailure.record(failure)

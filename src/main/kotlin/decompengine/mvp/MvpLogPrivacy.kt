@@ -2,6 +2,7 @@ package decompengine.mvp
 
 import decompengine.jobs.ProgressControlPolicy
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 /** One immutable policy; each command pipe owns its own small credential-continuation state. */
 internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
@@ -119,6 +120,93 @@ internal class MvpLogPrivacy(artifact: MvpArtifactRedactor) {
             Regex(it.pattern.removeSuffix("\$"), it.options)
         }
     }
+}
+
+/** Each reader owns one state; finish runs only after both readers have joined.
+ * A completed peer publishes a small immutable projection policy, not a second raw capture.
+ */
+internal class MvpLiveCommandDisplay(
+    private val privacy: MvpLogPrivacy,
+    private val emit: (String, Boolean, MvpLogPrivacy.Lines?) -> Unit,
+) {
+    private class Pipe {
+        var receivedLines = 0L
+        var observedUnits = 0
+        var publishedUnits = 0
+        var progressLines = 0L
+        var policy: MvpLogPrivacy.Lines? = null
+    }
+
+    private val pipes = Array(2) { Pipe() }
+    private val completed = AtomicReferenceArray<MvpLogPrivacy.Lines?>(2)
+
+    fun line(error: Boolean, capture: CharSequence) {
+        val pipe = pipes[index(error)]
+        check(completed.get(index(error)) == null) { "command display pipe is already complete" }
+        require(capture.length > pipe.observedUnits && capture[capture.length - 1] == '\n') {
+            "command display requires an appended captured line"
+        }
+        pipe.receivedLines = Math.addExact(pipe.receivedLines, 1L)
+        pipe.observedUnits = capture.length
+        if (!flush(error, capture) && (pipe.receivedLines and (pipe.receivedLines - 1L)) == 0L) {
+            progress(error, pipe)
+        }
+    }
+
+    fun complete(error: Boolean, capture: CharSequence) {
+        val slot = index(error)
+        val pipe = pipes[slot]
+        check(completed.get(slot) == null) { "command display pipe is already complete" }
+        require(capture.length == pipe.observedUnits) { "command display capture has unobserved data" }
+        admitLength(capture)
+        // Both the full input and credential prefixes must be admitted before the peer can emit.
+        // Only this reader accesses its mutable capture. The other reader sees this policy alone.
+        val peerPolicy = privacy.linesWithUnorderedPeer(capture.toString())
+        completed.set(slot, peerPolicy)
+        if (!flush(error, capture)) progress(error, pipe)
+    }
+
+    fun finish(stdout: CharSequence, stderr: CharSequence) {
+        check(completed.get(0) != null && completed.get(1) != null) { "command display pipes are incomplete" }
+        flush(false, stdout)
+        flush(true, stderr)
+    }
+
+    private fun flush(error: Boolean, capture: CharSequence): Boolean {
+        val pipe = pipes[index(error)]
+        val policy = pipe.policy ?: completed.get(1 - index(error))?.fork()?.also { pipe.policy = it }
+            ?: return false
+        if (pipe.publishedUnits == capture.length) return true
+        admitLength(capture)
+        val pending = capture.subSequence(pipe.publishedUnits, capture.length).toString()
+        privacy.project(pending) // Admit the complete pending batch before publishing any record.
+        var start = 0
+        while (start < pending.length) {
+            val end = pending.indexOf('\n', start)
+            check(end >= 0) { "command display capture has an incomplete line" }
+            emit(pending.substring(start, end), error, policy)
+            pipe.publishedUnits += end - start + 1
+            start = end + 1
+        }
+        return true
+    }
+
+    private fun progress(error: Boolean, pipe: Pipe) {
+        if (pipe.receivedLines == 0L || pipe.progressLines == pipe.receivedLines) return
+        val channel = if (error) "stderr" else "stdout"
+        emit("$channel progress: captured_lines=${pipe.receivedLines} captured_utf16_units=${pipe.observedUnits}; " +
+            "text pending peer-order privacy projection", error, null)
+        pipe.progressLines = pipe.receivedLines
+    }
+
+    private fun admitLength(capture: CharSequence) {
+        // A UTF-8 projection cannot admit more UTF-16 units than this byte ceiling. Check before copy.
+        if (capture.length.toLong() > privacy.maximumBytes) {
+            throw MvpPatchException("command display projection exceeds its byte budget")
+        }
+    }
+
+    private fun index(error: Boolean): Int = if (error) 1 else 0
 }
 
 /** Keep reader/display failures private and rethrow the first one before accepting a command. */

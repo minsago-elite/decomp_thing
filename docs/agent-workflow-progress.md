@@ -62,9 +62,14 @@ Before displaying either string, the logger admits both and scans their raw norm
 introducers at every possible earlier prefix, including inside a completed line. A peer introducer
 conservatively withholds every local record during replay: a credential could have arrived midway
 through that record, before the peer finished its line. Public content in the affected capture can
-also be withheld; raw binary results used for validation stay unchanged. Command logging still
-uses synchronized completed-line order plus independent per-pipe state. That order does not prove
-cross-pipe byte order; partial-line live-command privacy remains separate unfinished work.
+also be withheld; raw binary results used for validation stay unchanged. Command readers likewise
+have no merged byte order. While a peer is open, the display emits coalesced captured-line/unit
+counts instead of exposing text before the peer's credential prefixes are known. Once the peer
+closes, its complete admitted capture supplies the same conservative policy: the local reader
+releases pending records and subsequent local lines with that policy. A final flush after both
+readers join releases remaining records once. Public diagnostics remain complete when the peer
+has no credential introducer; a peer introducer can withhold complete local records. These display
+counts and omissions are not ACP terminal completeness or resource/release qualification.
 Display identity/content commitments use the receipt text encoding: valid text keeps exact UTF-8;
 malformed JVM strings use a `0xff` marker followed by raw UTF-16BE units. Distinct malformed IDs
 therefore cannot collapse through replacement encoding and merge separate message buffers.
@@ -331,6 +336,17 @@ or printing raw child-thread exceptions. This changes neither
 process launch/isolation recipes nor cleanup policy. Raw collector size, blocking
 I/O and bounded failure termination still require separate resource work; the
 binary boundary, unlike the command logger, still reads stdout/stderr sequentially.
+The command display keeps two small reader-owned states and atomically publishes
+only a completed peer's projection policy. It adds no raw display queue or second
+retained capture. Before a peer closes, progress totals are emitted at powers of
+two, plus a distinct final total: at most 32 notices per pipe under the existing
+StringBuilder size limit. Totals describe captured logical lines and UTF-16 units,
+not raw OS byte counts. Pending projection copies are length-checked before copy
+and admitted under the full byte ceiling before any batch record is emitted.
+An incomplete or refused peer cannot authorize a text flush. Public text can
+resume before local EOF once the peer is complete; ambiguous records remain
+explicitly masked. Neither this policy nor its pure metadata cases establish
+native scheduling, bounded collection, cleanup or full ACP progress acceptance.
 These source components require their own ordinary Actions qualification.
 
 

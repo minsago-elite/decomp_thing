@@ -28,6 +28,119 @@ import kotlin.test.assertTrue
 class MvpPatchWorkflowTest {
 
     @Test
+    fun `live command display waits for complete peer grammar in either reader order`() {
+        for (prefix in listOf("Bearer ", "Authorization: Basic ", "password=", "ghp_",
+            "public metadata; Bearer already-complete; public-tail")) {
+            for (prefixError in listOf(false, true)) for (privateFirst in listOf(false, true)) {
+                for (prefixClosesFirst in listOf(false, true)) {
+                    val privacy = MvpLogPrivacy(MvpArtifactRedactor(emptyList(), 8192))
+                    val shared = privacy.lines()
+                    val frames = mutableListOf<MvpLogFrame>()
+                    val display = MvpLiveCommandDisplay(privacy) { value, error, pipe ->
+                        frames += privacy.frame(privacy.message(value, shared, pipe), error)
+                    }
+                    val captures = arrayOf(StringBuilder(), StringBuilder())
+                    val privateValue = "synthetic-live-private"
+                    fun deliver(error: Boolean, value: String) {
+                        val capture = captures[if (error) 1 else 0]
+                        capture.appendLine(value)
+                        display.line(error, capture)
+                    }
+                    if (privateFirst) {
+                        // This also represents a peer prefix still held inside readLine until EOF.
+                        deliver(!prefixError, "public head; $privateValue; public tail")
+                        deliver(prefixError, prefix)
+                    } else {
+                        deliver(prefixError, prefix)
+                        deliver(!prefixError, "public head; $privateValue; public tail")
+                    }
+                    assertEquals(2, frames.size)
+                    assertTrue(frames.all { it.console.contains("progress: captured_lines=1") })
+                    assertTrue(frames.none { it.console.contains(privateValue) || it.retained.contains(privateValue) })
+                    val first = if (prefixClosesFirst) prefixError else !prefixError
+                    display.complete(first, captures[if (first) 1 else 0])
+                    display.complete(!first, captures[if (first) 0 else 1])
+                    display.finish(captures[0], captures[1])
+                    assertTrue(frames.any { it.console.contains("[REDACTED]") })
+                    assertTrue(frames.none { it.console.contains(privateValue) || it.retained.contains(privateValue) })
+                    val published = frames.toList()
+                    display.finish(captures[0], captures[1])
+                    assertEquals(published, frames)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `live command display releases public records before local EOF and bounds pending work`() {
+        val privacy = MvpLogPrivacy(MvpArtifactRedactor(emptyList(), 8192))
+        val shared = privacy.lines()
+        val frames = mutableListOf<MvpLogFrame>()
+        val records = mutableListOf<String>()
+        val progress = mutableListOf<String>()
+        val display = MvpLiveCommandDisplay(privacy) { value, error, pipe ->
+            if (pipe == null) progress += value else records += value
+            frames += privacy.frame(privacy.message(value, shared, pipe), error)
+        }
+        val stdout = StringBuilder()
+        val publicLines = (1..10).map { "public diagnostic $it" }
+        for (line in publicLines.take(9)) {
+            stdout.appendLine(line)
+            display.line(false, stdout)
+        }
+        assertEquals(listOf(1, 2, 4, 8), progress.map {
+            it.substringAfter("captured_lines=").substringBefore(' ').toInt()
+        })
+        assertTrue(records.isEmpty())
+        display.complete(true, "")
+        stdout.appendLine(publicLines.last())
+        display.line(false, stdout)
+        assertEquals(publicLines, records) // Published while stdout is still open.
+        assertTrue(frames.any { it.console == publicLines.first() })
+        display.complete(false, stdout)
+        display.finish(stdout, "")
+        assertEquals(publicLines, records)
+        assertEquals(publicLines.joinToString("\n", postfix = "\n"), stdout.toString())
+
+        val ticks = mutableListOf<String>()
+        val noisy = MvpLiveCommandDisplay(privacy) { value, _, pipe -> if (pipe == null) ticks += value }
+        val captured = StringBuilder()
+        repeat(1025) {
+            captured.appendLine("public")
+            noisy.line(false, captured)
+        }
+        assertEquals(11, ticks.size)
+        noisy.complete(false, captured)
+        assertEquals(12, ticks.size) // Powers of two plus the distinct final total.
+        assertTrue(ticks.last().contains("captured_lines=1025 captured_utf16_units=7175"))
+        noisy.complete(true, "")
+        noisy.finish(captured, "")
+        assertEquals(12, ticks.size)
+
+        val small = MvpLogPrivacy(MvpArtifactRedactor(emptyList(), 1024))
+        val oversized = object : CharSequence {
+            override val length: Int = 1025
+            override fun get(index: Int): Char = if (index == length - 1) '\n' else 'x'
+            override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = error("unexpected capture copy")
+            override fun toString(): String = error("unexpected capture copy")
+        }
+        val bounded = MvpLiveCommandDisplay(small) { _, _, _ -> }
+        bounded.line(false, oversized)
+        assertFailsWith<MvpPatchException> { bounded.complete(false, oversized) }
+        assertFailsWith<IllegalStateException> { bounded.finish(oversized, "") }
+        val wide = StringBuilder().appendLine("é".repeat(600))
+        val encoded = MvpLiveCommandDisplay(small) { _, _, _ -> }
+        encoded.line(false, wide)
+        assertFailsWith<MvpPatchException> { encoded.complete(false, wide) }
+
+        val original = IllegalStateException("synthetic display failure")
+        val failed = MvpLiveCommandDisplay(privacy) { _, _, _ -> throw original }
+        val latch = MvpLogFailure()
+        latch.attempt { failed.line(false, "public\n") }
+        assertTrue(assertFailsWith<IllegalStateException> { latch.requireSuccess() } === original)
+    }
+
+    @Test
     fun `MVP log continuations conceal credential values across blank lines and independent pipes`() {
         val evidence = MvpRunEvidence(mapOf("PLAIN_SCHEME" to "Bearer", "PLAIN_HEADER" to "Authorization"),
             "fixture-harness", "fixture-profile", "a".repeat(64))
