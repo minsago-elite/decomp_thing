@@ -3,6 +3,9 @@ package decompengine.project
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class ModulePlanJsonTest {
     private val layout = GeneratedCMakeReconstructionProfile.descriptor.layout
@@ -67,6 +70,58 @@ class ModulePlanJsonTest {
             val parsed = ModulePlanJson.readCanonical(candidate.toJson().toByteArray(), 1024 * 1024)
             assertFails { ModulePlanJson.requireExactOwnership(parsed, model, layout, 10) }
         }
+    }
+
+    @Test
+    fun `checkpoint aware plan validation preserves canonical bytes ownership and old entries`() {
+        val candidate = plan.copy(modules = plan.modules.map {
+            it.copy(boundaryEvidence = it.boundaryEvidence + "long quoted { evidence \\\n".repeat(5000))
+        })
+        val bytes = candidate.toJson().toByteArray()
+        val stages = mutableSetOf<String>()
+        val parsed = ModulePlanJson.readCanonical(bytes, bytes.size) { stages += it }
+        assertEquals(candidate, parsed)
+        assertEquals(ModulePlanJson.readCanonical(bytes, bytes.size), parsed)
+        assertEquals(bytes.toList(), parsed.toJson().toByteArray().toList())
+        ModulePlanJson.requireExactOwnership(parsed, model, layout, 1) { stages += it }
+        assertTrue(stages.any { it.startsWith("scanning module plan after ") })
+        assertTrue("reading module plan module" in stages)
+        assertTrue("consuming module plan function" in stages)
+        assertTrue("after module plan ownership" in stages)
+    }
+
+    @Test
+    fun `checkpoint refusal interrupts long plan traversal and propagates the exact failure`() {
+        val candidate = plan.copy(modules = plan.modules.map {
+            it.copy(boundaryEvidence = it.boundaryEvidence + "bounded traversal".repeat(5000))
+        })
+        val bytes = candidate.toJson().toByteArray()
+        for (target in listOf("scanning module plan after ", "reading module plan module",
+            "reading module plan string", "before rendering canonical module plan", "before returning module plan")) {
+            val expected = IllegalStateException("controlled plan checkpoint refusal")
+            val actual = assertFailsWith<IllegalStateException> {
+                ModulePlanJson.readCanonical(bytes, bytes.size) { stage -> if (stage.startsWith(target)) throw expected }
+            }
+            assertSame(expected, actual)
+            assertEquals(candidate, ModulePlanJson.readCanonical(bytes, bytes.size))
+        }
+    }
+
+    @Test
+    fun `ownership interruption never mutates the model or later ownership validation`() {
+        val before = plan.toJson()
+        val functions = model.functions.toList()
+        val expected = InterruptedException("independent ownership cancellation")
+        var visited = 0
+        val actual = assertFailsWith<InterruptedException> {
+            ModulePlanJson.requireExactOwnership(plan, model, layout, 1) { stage ->
+                if (stage == "consuming module plan function" && ++visited == 2) throw expected
+            }
+        }
+        assertSame(expected, actual)
+        assertEquals(2, visited)
+        assertEquals(before, plan.toJson()); assertEquals(functions, model.functions)
+        ModulePlanJson.requireExactOwnership(plan, model, layout, 1)
     }
 
     @Test

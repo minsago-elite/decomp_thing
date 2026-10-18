@@ -4,6 +4,31 @@ This is a narrow source-contract record for issue #291, captured against source
 revision `bf2501568f39ab52b23492dfc37839bb81895587`. It records repository facts
 only; it is not a hosted execution receipt or a production qualification claim.
 
+## Planner capture checkpoint handoff
+
+The retained planner owner now passes its same-process admitted operation
+deadline into output capture and assessment. Descriptor-bound reads request at
+most 64 KiB per call and check between requests. The same callback reaches the
+existing canonical model reader, module-plan text/entity traversal and exact
+ownership checks. No phase receives a fresh clock. Existing entry points retain
+their no-op compatibility delegation, and valid canonical bytes, provenance,
+ownership, directory/file identity and incomplete/release-ineligible markers
+retain their original meanings.
+
+Six authored JVM methods cover exact-output compatibility, refusal at captured
+handoffs, read-request boundaries, long plan text and interrupted ownership
+traversal. Capture fixtures use repository-local temporary directories. These
+methods await their own Actions qualification; no local subject run is claimed.
+
+These cooperative checks do not preempt an indefinitely blocked native read,
+charset conversion, general library JSON parsing, every sort/join, allocation or
+rendering step. Serialized-byte admission is not aggregate host-plus-worker RSS
+accounting. Final result publication is unchanged: a no-replace publication can
+still commit after expiry before its outer check refuses. In-flight I/O
+ownership, bounded cleanup, host memory and commit semantics remain open under
+#982 and full parent #291. This handoff does not establish CLI/engine production
+qualification or change native containment and oracle authority.
+
 ## Observed contract
 
 - `Main.runGccEnginePlan` parses the immutable CLI selection and calls

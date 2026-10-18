@@ -357,8 +357,12 @@ internal class GccBoundExportFiles(private val maximumBytes: Long, private val c
                     val buffer = ByteBuffer.wrap(captured)
                     while (buffer.hasRemaining()) {
                         checkpoint()
-                        require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" }
+                        val limit = buffer.limit()
+                        buffer.limit(buffer.position() + minOf(buffer.remaining(), 64 * 1024))
+                        try { require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" } }
+                        finally { buffer.limit(limit) }
                     }
+                    checkpoint()
                     require(channel.read(ByteBuffer.allocate(1)) == -1) { "GCC export file grew: $name" }
                 }
             }

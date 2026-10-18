@@ -511,9 +511,12 @@ internal class GccBundledPreparedOperation internal constructor(
                 inputs.verify("after GCC planner and cgroup absence")
                 val executionReceipt = journal.recordPlannerExecution(execution.canonicalBytes)
                 val logLimit = minOf(maximumFileBytes, 64L * 1024 * 1024).toInt()
+                deadline.requireCurrent()
+                val capturedModel = exported.programModelBytes
+                deadline.requireCurrent()
                 val captured = borrowed.withPinnedDescriptor { descriptor ->
                     GccBundledPlannerOutputCapture.capture(descriptor, controlName, checkNotNull(execution.controlDirectoryIdentity),
-                        request, exported.programModelBytes, logLimit, logLimit)
+                        request, capturedModel, logLimit, logLimit) { deadline.requireCurrent() }
                 }
                 inputs.verify("after GCC planner output capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
