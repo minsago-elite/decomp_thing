@@ -286,6 +286,32 @@ scripts/validate-archival-docker.sh
 
 That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated rich and stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project. The explicit evidence-only policy retains every raw model entity and its planned ownership while compiling diagnostic inventory sources. It preserves unsupported display text as evidence, keeps implementation acceptance false, and does not claim that the diagnostic executable reproduces the input program's ABI or behavior. The ordinary generated-C declaration and implementation gates remain strict.
 
+Archival exit cleanup retains bounded build/owner diagnostics before removal. It
+admits the original disposable root device/inode and reads selected regular,
+single-link files through retained non-following directory descriptors. Names are
+JSON-escaped data. Collection allows 4,096 entry advances (including EOF), 24
+relative path components including output, 128 KiB of cumulative entry paths, and 256 KiB of
+JSONL output. Each file supplies at most 32 KiB, 240 lines and 1 KiB per rendered
+line; `truncated` records intentional excerpt omissions. Missing, unreadable,
+changed or over-budget evidence produces an explicit incomplete result and
+retains the tree. `archival-build-diagnostics` uploads the bounded JSONL on both
+successful and failed runs.
+
+GNU [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html)
+requests TERM after 10 seconds for the single permission-repair attempt and for
+collection, two seconds for root checks and diagnostic display, and 20 seconds
+for removal; KILL is requested one second later. Collection also checks an
+eight-second internal deadline and applies a non-increasing
+[`RLIMIT_FSIZE`](https://docs.python.org/3.12/library/resource.html) ceiling in its
+own process. A timeout or status 137 remains incomplete cleanup and establishes
+no process-absence fact. Repair cannot pull an image and runs only after
+the build completed. A failed repair is not relaunched by the EXIT trap. Cleanup
+preserves the original nonzero validation exit; incomplete cleanup also fails an
+otherwise successful validation. Authored controls exercise the actual collector
+and shell trap with fake Docker, including bounded hung-command cases, in the
+frontend gate before the heavy job fanout. These controls do not qualify an ACP
+agent, host-mount cause or production process-cleanup authority.
+
 ### Real Angr proposal qualification
 
 The core partition selects `realAngrQualification` when the workflow, Docker
