@@ -149,6 +149,13 @@ outside that environment must provide them through `UploadServer.sensitiveValues
 are omitted before taking a preview, and HTML escaping still applies after redaction. This does not
 retroactively scrub historical job records or arbitrary downloadable artifacts.
 
+Basic and Bearer credentials, credential fields and recognized token prefixes are masked before
+configured literal values. A configured value such as `Bearer`, `api_key` or `ghp_` must not erase
+the indicator and leave an otherwise unregistered credential visible. Direct redactor and actual
+HTTP background-failure regressions cover this ordering, including persisted job metadata and
+withheld public diagnostics. Literal replacement still enforces the intermediate 16,384-character
+limit, including its exact boundary and safe omission when the marker is itself sensitive.
+
 Reconstruction CLI and browser jobs own their journal through a best-effort adapter. A busy
 writer, persistence failure, or phase-observer exception disables that display and emits a fixed
 diagnostic without replacing the workflow result or original exception. Closing still attempts to

@@ -972,6 +972,47 @@ class UploadServerTest {
     }
 
     @Test
+    fun `configured credential indicators cannot expose background diagnostic values in storage`() {
+        val dataDir = createTempDirectory(
+            Files.createDirectories(Path.of("build", "progress-credential-indicator-tests")), "web-",
+        )
+        val credentials = listOf("unknown-bearer-value", "unknown-api-value", "unknown-password-value", "unknown-token-value")
+        val diagnostic = "Provider refused; Bearer ${credentials[0]}; api_key=${credentials[1]}; " +
+            "password=${credentials[2]}; ghp_${credentials[3]}; end"
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> error(diagnostic) },
+            reconstructor = JobReconstructor { _, _ -> error(diagnostic) },
+            executor = Executor { it.run() }, sensitiveValues = listOf("Bearer", "api_key", "password", "ghp_"))
+        server.start()
+        try {
+            val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            for (workflow in listOf("explore", "reconstruct")) {
+                assertEquals(303, request(server, "POST", "/jobs/$id/$workflow", followRedirects = false).status)
+                val job = decompengine.jobs.JobStore(dataDir).get(id)
+                assertEquals("failed", job.status)
+                assertTrue(job.statusMessage!!.startsWith("Provider refused; "))
+                assertTrue(job.statusMessage!!.endsWith("; end"))
+                val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
+                val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
+                val page = request(server, "GET", "/jobs/$id").body.decodeToString()
+                for (text in listOf(persisted, api, page)) {
+                    credentials.forEach { assertFalse(text.contains(it)) }
+                    assertFalse(text.contains(diagnostic))
+                }
+                assertTrue(persisted.contains("[redacted]"))
+                assertFalse(api.contains("status_message"))
+                assertFalse(api.contains("Provider refused"))
+                assertFalse(page.contains("Provider refused"))
+                assertFalse(page.contains("[redacted]"))
+                assertTrue(page.contains("Stored diagnostic details are withheld"))
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `background diagnostics cannot persist sensitive omission markers`() {
         val dataDir = createTempDirectory(
             Files.createDirectories(Path.of("build", "progress-redactor-fallback-tests")), "web-",
