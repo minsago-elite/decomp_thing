@@ -13,7 +13,6 @@ import java.security.MessageDigest
 import kotlin.io.path.exists
 import kotlin.io.path.createDirectories
 import kotlin.io.path.inputStream
-import kotlin.io.path.writeText
 
 internal enum class EvidenceStatus { RUNNING, PASS, FAIL, NOT_RUN }
 
@@ -150,7 +149,7 @@ internal fun writeMvpSummary(
         val patchPreview = evidence.redactDiagnostic(evidence.patchExplanation)
         val normalizedPatch = evidence.redactDiagnostic(patchPreview.toSummaryParagraph())
 
-        evidence.artifactText {
+        val text = evidence.artifactText {
             append("# MVP Patch Summary\n\n- Result: ").append(result)
             append("\n- Failure phase and reason: ").append(normalizedFailure)
             append("\n- Approval decision: ").append(evidence.redactDiagnostic(evidence.approvalDecision))
@@ -185,12 +184,13 @@ internal fun writeMvpSummary(
             append("\n- Logs: `logs/`\n- Retained evidence: `evidence/`\n\n## Residual Risks\n\n")
             append("Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.\n")
         }
+        encodeMvpSummaryUtf8(text)
     } catch (_: MvpPatchException) {
         val details = retainMvpSummaryDetails(output, failure, evidence)
         MvpSummaryFacts.capture(result, failure != null, binary.exists() && result == "PASS", artifactFacts, evidence, details)
-            .render(evidence.maximumProjectionBytes)
+            .render(evidence.maximumProjectionBytes).let(::encodeMvpSummaryUtf8)
     }
-    summaryPath.writeText(summary)
+    Files.write(summaryPath, summary)
 }
 
 /** No public hash fields enter this projection, so private prose can be retained independently. */
@@ -220,10 +220,8 @@ private fun retainMvpSummaryDetails(output: Path, failure: String?, evidence: Mv
         return null
     }
     val bytes = try {
-        val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(detail))
-        ByteArray(encoded.remaining()).also { encoded.get(it) }
-    } catch (_: CharacterCodingException) {
+        encodeMvpSummaryUtf8(detail)
+    } catch (_: MvpPatchException) {
         return null
     }
     if (Thread.currentThread().isInterrupted) throw InterruptedException("MVP report detail interrupted")
@@ -232,6 +230,15 @@ private fun retainMvpSummaryDetails(output: Path, failure: String?, evidence: Mv
     Files.write(path, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
         StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
     return MvpSummaryDetailsFact(path.sha256())
+}
+
+/** Encoding is part of privacy admission, before either output file is opened. */
+private fun encodeMvpSummaryUtf8(text: String): ByteArray = try {
+    val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text))
+    ByteArray(encoded.remaining()).also { encoded.get(it) }
+} catch (_: CharacterCodingException) {
+    throw MvpPatchException("MVP report text cannot be encoded faithfully")
 }
 
 private fun Path.relativeOrAbsolute(root: Path): String =

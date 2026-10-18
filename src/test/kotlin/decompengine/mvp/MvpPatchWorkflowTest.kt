@@ -811,6 +811,34 @@ class MvpPatchWorkflowTest {
         assertTrue(retained.readText().contains("Report detail: withheld"))
         assertFalse(retained.readText().contains("| Redacted report details |"))
         assertEquals(retainedDetails, root.resolve(MVP_SUMMARY_DETAILS_PATH).readText())
+
+        // Replacement encoding must never form a configured secret after private projection.
+        val encodingSecret = "a?b"
+        val encodingEvidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to encodingSecret),
+            "fixture-harness", profile.id, profile.sha256)
+        encodingEvidence.patchDiffPath = evidence.patchDiffPath
+        val encodedSummary = root.resolve("SUMMARY-encoding.md")
+        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
+            "x".repeat(20_000) + "a\uDC00b")) {
+            assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
+            encodingEvidence.patchDiff = if (payload.length < 20_000) null else full
+            encodingEvidence.patchExplanation = "public explanation $payload"
+            writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+            val encodedText = encodedSummary.readText()
+            assertFalse(encodedText.contains(encodingSecret))
+            assertTrue(encodedText.contains("- Result: PASS"))
+            assertTrue(encodedText.contains("Report detail: withheld"))
+            assertFalse(encodedText.contains("| Redacted report details |"))
+            assertTrue(encodedText.contains("| Input ELF | withheld | `0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
+            assertEquals(retainedDetails, root.resolve(MVP_SUMMARY_DETAILS_PATH).readText())
+            assertEquals("public code", source.readText())
+            assertEquals(full, evidence.patchDiffPath!!.readText())
+        }
+        encodingEvidence.patchDiff = full
+        encodingEvidence.patchExplanation = "public explanation a€b 😀 λ"
+        writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+        assertTrue(encodedSummary.readText().contains(encodingEvidence.patchExplanation))
+        assertFalse(encodedSummary.readText().contains("Report detail:"))
     }
 
     @Test

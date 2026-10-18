@@ -326,7 +326,7 @@ stream collection, chunk/session privacy, cleanup and real-agent qualification
 remain separate open acceptance.
 
 MVP reporting requires at least 16,384 projection bytes before a run starts.
-If the complete summary projection refuses, `SUMMARY.md` retains bounded producer
+If the complete summary projection or strict UTF-8 encoding refuses, `SUMMARY.md` retains bounded producer
 facts, exact artifact commitments, approval, mapping and separate validation
 outcomes. Available failure reasons, source-change explanations and phase/check
 details receive complete private projection in `evidence/summary-details.md`,
@@ -338,6 +338,9 @@ in the summary.
 Each detail projection obeys the configured projection ceiling. A privacy refusal
 withholds that detail artifact and its reference; the typed summary explains the
 omission. File I/O and interruption retain their distinct failure behavior.
+Both full and fallback summaries are strictly encoded before the summary file is
+opened. Malformed UTF-16 cannot become a configured private value through encoding
+replacement after masking. Valid Unicode report text is preserved.
 The report projections preserve authoritative source, receipts and publication
 decisions.
 
