@@ -1,0 +1,836 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "gccTarget",
+    "implicitLinkClosure",
+    "dependencies",
+    "monitorClosure",
+    "inspectionClosure"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "status": {
+      "const": "static-recording-unqualified"
+    },
+    "gccTarget": {
+      "const": "x86_64-pc-linux-gnu"
+    },
+    "implicitLinkClosure": {
+      "$ref": "#/$defs/closure"
+    },
+    "dependencies": {
+      "type": "object",
+      "maxProperties": 20000,
+      "patternProperties": {
+        "^/": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "monitorClosure": {
+      "$ref": "#/$defs/monitorClosure"
+    },
+    "inspectionClosure": {
+      "$ref": "#/$defs/inspectionClosure"
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:decomp:callable-evaluator:v3:toolchain-pin",
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "driverArgv",
+        "dryRun",
+        "workingDirectory",
+        "environment",
+        "tools",
+        "specs",
+        "configurationRoots",
+        "generatedFiles",
+        "monitor",
+        "inspection"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 3
+        },
+        "driverArgv": {
+          "const": [
+            "/usr/bin/gcc",
+            "-shared",
+            "-Wl,-z,relro,-z,now,-z,noexecstack,--no-undefined",
+            "/work/candidate.o",
+            "-o",
+            "/work/libcandidate.so"
+          ]
+        },
+        "dryRun": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "workingDirectory": {
+          "const": "/work"
+        },
+        "environment": {
+          "const": {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TMPDIR": "/tmp"
+          }
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gcc",
+            "cc1",
+            "collect2",
+            "as",
+            "ld"
+          ],
+          "properties": {
+            "gcc": {
+              "const": "/usr/bin/gcc"
+            },
+            "cc1": {
+              "type": "string",
+              "pattern": "^/[^\\u0000]*$",
+              "maxLength": 4096
+            },
+            "collect2": {
+              "type": "string",
+              "pattern": "^/[^\\u0000]*$",
+              "maxLength": 4096
+            },
+            "as": {
+              "type": "string",
+              "pattern": "^/[^\\u0000]*$",
+              "maxLength": 4096
+            },
+            "ld": {
+              "type": "string",
+              "pattern": "^/[^\\u0000]*$",
+              "maxLength": 4096
+            }
+          }
+        },
+        "specs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/[^\\u0000]*$",
+            "maxLength": 4096
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "configurationRoots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/[^\\u0000]*$",
+            "maxLength": 4096
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "generatedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/[^\\u0000]*$",
+            "maxLength": 4096
+          },
+          "maxItems": 128,
+          "minItems": 2,
+          "uniqueItems": true
+        },
+        "monitor": {
+          "$ref": "#/$defs/monitorRecord"
+        },
+        "inspection": {
+          "$ref": "#/$defs/inspectionRecord"
+        }
+      }
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "manifest",
+        "expandedLinkArgv",
+        "files",
+        "directories",
+        "selections",
+        "status"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 3
+        },
+        "manifest": {
+          "$ref": "#/$defs/manifest"
+        },
+        "expandedLinkArgv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 20000
+        },
+        "files": {
+          "type": "object",
+          "maxProperties": 20000,
+          "patternProperties": {
+            "^/": {
+              "$ref": "#/$defs/file"
+            }
+          },
+          "additionalProperties": false
+        },
+        "directories": {
+          "type": "object",
+          "maxProperties": 20000,
+          "patternProperties": {
+            "^(recursive|search):/": {
+              "$ref": "#/$defs/directory"
+            }
+          },
+          "additionalProperties": false
+        },
+        "selections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "request",
+              "static",
+              "attempts",
+              "selected"
+            ],
+            "properties": {
+              "request": {
+                "type": "string",
+                "minLength": 1
+              },
+              "static": {
+                "type": "boolean"
+              },
+              "attempts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "exists"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "pattern": "^/[^\\u0000]*$",
+                      "maxLength": 4096
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "maxItems": 20000
+              },
+              "selected": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096
+              }
+            }
+          },
+          "maxItems": 20000
+        },
+        "status": {
+          "const": "static-recording-unqualified"
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalPath",
+        "realpath",
+        "sha256",
+        "bytes",
+        "symlinks",
+        "identity"
+      ],
+      "properties": {
+        "logicalPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096
+        },
+        "realpath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 536870912
+        },
+        "symlinks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "target"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          },
+          "maxItems": 40
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dev",
+            "ino",
+            "mode",
+            "uid",
+            "gid",
+            "nlink"
+          ],
+          "properties": {
+            "dev": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "ino": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "mode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "uid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "gid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "nlink": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            }
+          }
+        }
+      }
+    },
+    "directory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalPath",
+        "realpath",
+        "symlinks",
+        "entries"
+      ],
+      "properties": {
+        "logicalPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096
+        },
+        "realpath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096
+        },
+        "symlinks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "target"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          },
+          "maxItems": 40
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "kind"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "enum": [
+                      "file",
+                      "directory"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "kind",
+                  "target"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "const": "symlink"
+                  },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          },
+          "maxItems": 20000
+        }
+      }
+    },
+    "monitorRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "binaryPath",
+        "sourcePath",
+        "parserPath",
+        "protocolPath",
+        "buildScriptPath",
+        "provisioningManifestPath",
+        "buildInputs",
+        "runtimeLibraries",
+        "cachePath"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "binaryPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "parserPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "protocolPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "buildScriptPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "provisioningManifestPath": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 4096,
+          "minLength": 2
+        },
+        "buildInputs": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "path"
+            ],
+            "properties": {
+              "role": {
+                "enum": [
+                  "header",
+                  "tool",
+                  "startup",
+                  "library",
+                  "configuration"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096,
+                "minLength": 2
+              }
+            }
+          }
+        },
+        "runtimeLibraries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "soname",
+              "path"
+            ],
+            "properties": {
+              "soname": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.+\\-]{1,255}$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096,
+                "minLength": 2
+              }
+            }
+          }
+        },
+        "cachePath": {
+          "const": "/etc/ld.so.cache"
+        }
+      }
+    },
+    "inspectionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "bashPath",
+        "scriptPath",
+        "cachePath",
+        "runtimeLibraries"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "bashPath": {
+          "const": "/bin/bash"
+        },
+        "scriptPath": {
+          "const": "/usr/bin/ldd"
+        },
+        "cachePath": {
+          "const": "/etc/ld.so.cache"
+        },
+        "runtimeLibraries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "soname",
+              "path"
+            ],
+            "properties": {
+              "soname": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.+\\-]{1,255}$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\u0000]*$",
+                "maxLength": 4096,
+                "minLength": 2
+              }
+            }
+          }
+        }
+      }
+    },
+    "monitorClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "status",
+        "selectionStatus",
+        "record",
+        "files",
+        "elfGraph",
+        "buildInputStatus",
+        "buildCommand"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "status": {
+          "const": "static-recording-unqualified"
+        },
+        "selectionStatus": {
+          "const": "declared-selection-native-unqualified"
+        },
+        "record": {
+          "$ref": "#/$defs/monitorRecord"
+        },
+        "files": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 20000,
+          "patternProperties": {
+            "^/": {
+              "$ref": "#/$defs/file"
+            }
+          },
+          "additionalProperties": false
+        },
+        "elfGraph": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 128,
+          "patternProperties": {
+            "^/": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "interpreter",
+                "needed",
+                "soname",
+                "type"
+              ],
+              "properties": {
+                "interpreter": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^/[^\\u0000]*$",
+                      "maxLength": 4096,
+                      "minLength": 2
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "needed": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+\\-]{1,255}$"
+                  }
+                },
+                "soname": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 255
+                },
+                "type": {
+                  "enum": [
+                    2,
+                    3
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "buildInputStatus": {
+          "const": "recorded-build-inputs-unqualified"
+        },
+        "buildCommand": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "inspectionClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "status",
+        "selectionStatus",
+        "record",
+        "files",
+        "elfGraph"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "status": {
+          "const": "static-recording-unqualified"
+        },
+        "selectionStatus": {
+          "const": "declared-selection-native-unqualified"
+        },
+        "record": {
+          "$ref": "#/$defs/inspectionRecord"
+        },
+        "files": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 20000,
+          "patternProperties": {
+            "^/": {
+              "$ref": "#/$defs/file"
+            }
+          },
+          "additionalProperties": false
+        },
+        "elfGraph": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 128,
+          "patternProperties": {
+            "^/": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "interpreter",
+                "needed",
+                "soname",
+                "type"
+              ],
+              "properties": {
+                "interpreter": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^/[^\\u0000]*$",
+                      "maxLength": 4096,
+                      "minLength": 2
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "needed": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+\\-]{1,255}$"
+                  }
+                },
+                "soname": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 255
+                },
+                "type": {
+                  "enum": [
+                    2,
+                    3
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "$comment": "Static unqualified record. Runtime reader additionally enforces 2 MiB raw JSON before parsing, combined128 inventory roots, 4096-character paths/words, 20000 expanded words/entries/files, shared200000 resolution steps, and remaining byte/I/O reservations before reads. Logical path spelling preserves symlink-sensitive dot components. Mandatory operational monitor and fixed Bash/ldd/cache closures remain UNQUALIFIED. Runtime recomputes bounded ELF graph and exact reachable SONAME inventory with a shared descriptor/hash budget. Actual GCC/header/link and loader selection/native qualification are separate mandatory gates."
+}

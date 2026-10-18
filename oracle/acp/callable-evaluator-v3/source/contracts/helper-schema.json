@@ -1,0 +1,881 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:decomp-thing:callable-evaluator:helper:3",
+  "title": "Canonical declaration graph helper v3",
+  "description": "Closed raw helper payload, validated before trusted execution/inputBindings enrichment. The independent unified 4096-work budget includes descriptor and enum-member visits, with depth <=64; the per-enum maxItems=4096 is a necessary ceiling, not a guarantee that 4096 members fit after descriptor overhead. Cross-reference uniqueness/reachability, active cycles, exact integer signedness and GCC binding completeness additionally require interface_gate_v3._validated_graph. Provenance remains diagnostic only.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 3
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataLayout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "const": "supported"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096
+        },
+        "interfaces": {
+          "type": "object",
+          "properties": {
+            "acp_mix": {
+              "$ref": "#/definitions/descriptor"
+            },
+            "acp_pair_scale": {
+              "$ref": "#/definitions/descriptor"
+            },
+            "acp_update": {
+              "$ref": "#/definitions/descriptor"
+            },
+            "acp_apply": {
+              "$ref": "#/definitions/descriptor"
+            },
+            "acp_fold": {
+              "$ref": "#/definitions/descriptor"
+            },
+            "acp_state": {
+              "$ref": "#/definitions/descriptor"
+            }
+          },
+          "required": [
+            "acp_mix",
+            "acp_pair_scale",
+            "acp_update",
+            "acp_apply",
+            "acp_fold",
+            "acp_state"
+          ],
+          "additionalProperties": false
+        },
+        "declarationNodes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/record"
+              },
+              {
+                "$ref": "#/definitions/enum"
+              }
+            ]
+          },
+          "maxItems": 4096
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/provenance"
+          },
+          "maxItems": 4096
+        },
+        "gccTypeBindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/binding"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "target",
+        "dataLayout",
+        "status",
+        "diagnostics",
+        "interfaces",
+        "declarationNodes",
+        "provenance",
+        "gccTypeBindings"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 3
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataLayout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "const": "refused"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096
+        },
+        "interfaces": {
+          "type": "object",
+          "properties": {
+            "acp_mix": {
+              "$ref": "#/definitions/refusedDescriptor"
+            },
+            "acp_pair_scale": {
+              "$ref": "#/definitions/refusedDescriptor"
+            },
+            "acp_update": {
+              "$ref": "#/definitions/refusedDescriptor"
+            },
+            "acp_apply": {
+              "$ref": "#/definitions/refusedDescriptor"
+            },
+            "acp_fold": {
+              "$ref": "#/definitions/refusedDescriptor"
+            },
+            "acp_state": {
+              "$ref": "#/definitions/refusedDescriptor"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "declarationNodes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/refusedRecord"
+              },
+              {
+                "$ref": "#/definitions/refusedEnum"
+              }
+            ]
+          },
+          "maxItems": 4096
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/provenance"
+          },
+          "maxItems": 4096
+        },
+        "gccTypeBindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/binding"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "status",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 3
+        },
+        "fixtureOnly": {
+          "const": true
+        },
+        "status": {
+          "enum": [
+            "supported",
+            "refused"
+          ]
+        },
+        "diagnostic": {
+          "type": "string"
+        },
+        "visited": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "fixtureOnly",
+        "status",
+        "diagnostic",
+        "visited"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "integer": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "integer"
+        },
+        "builtinKind": {
+          "enum": [
+            "char",
+            "signed-char",
+            "unsigned-char",
+            "short",
+            "unsigned-short",
+            "int",
+            "unsigned-int",
+            "long",
+            "unsigned-long",
+            "long-long",
+            "unsigned-long-long"
+          ]
+        },
+        "bits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "signed": {
+          "type": "boolean"
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "builtinKind",
+        "bits",
+        "signed",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "float": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "float"
+        },
+        "name": {
+          "enum": [
+            "float",
+            "double",
+            "long double"
+          ]
+        },
+        "bits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "bits",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "void": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "void"
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "recordRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "record"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "enumRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "enum"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "function": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "function"
+        },
+        "return": {
+          "$ref": "#/definitions/descriptor"
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/descriptor"
+          },
+          "maxItems": 4096
+        },
+        "variadic": {
+          "type": "boolean"
+        },
+        "callingConvention": {
+          "const": "C"
+        }
+      },
+      "required": [
+        "kind",
+        "return",
+        "parameters",
+        "variadic",
+        "callingConvention"
+      ],
+      "additionalProperties": false
+    },
+    "pointer": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "pointer"
+        },
+        "bits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pointee": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/void"
+            },
+            {
+              "$ref": "#/definitions/function"
+            }
+          ]
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "bits",
+        "pointee",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "descriptor": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/integer"
+        },
+        {
+          "$ref": "#/definitions/float"
+        },
+        {
+          "$ref": "#/definitions/void"
+        },
+        {
+          "$ref": "#/definitions/recordRef"
+        },
+        {
+          "$ref": "#/definitions/enumRef"
+        },
+        {
+          "$ref": "#/definitions/function"
+        },
+        {
+          "$ref": "#/definitions/pointer"
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z_0-9]*$"
+        },
+        "type": {
+          "$ref": "#/definitions/descriptor"
+        },
+        "offsetBits": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "offsetBits"
+      ],
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "record"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sizeBits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "alignBits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/field"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "sizeBits",
+        "alignBits",
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "enumerator": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z_0-9]*$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)$"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "enum": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "enum"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "integerType": {
+          "$ref": "#/definitions/integer"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/enumerator"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "integerType",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expression": {
+          "type": "string",
+          "pattern": "^((struct|enum) )?[A-Za-z_][A-Za-z_0-9]*$"
+        }
+      },
+      "required": [
+        "identity",
+        "expression"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "alias"
+            },
+            "identity": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "name": {
+              "type": "string"
+            },
+            "underlyingDiagnosticSpelling": {
+              "type": "string"
+            },
+            "targetIdentity": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "identity",
+            "name",
+            "underlyingDiagnosticSpelling"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "record"
+            },
+            "identity": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "definitionIdentity": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "diagnosticName": {
+              "type": "string"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identity": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "identity",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 4096
+            }
+          },
+          "required": [
+            "kind",
+            "identity",
+            "definitionIdentity",
+            "diagnosticName",
+            "fields"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "enum"
+            },
+            "identity": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "identity",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "unsupported": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "unsupported"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "refusedFunction": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "function"
+        },
+        "return": {
+          "$ref": "#/definitions/refusedDescriptor"
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/refusedDescriptor"
+          },
+          "maxItems": 4096
+        },
+        "variadic": {
+          "type": "boolean"
+        },
+        "callingConvention": {
+          "const": "C"
+        }
+      },
+      "required": [
+        "kind",
+        "return",
+        "parameters",
+        "variadic",
+        "callingConvention"
+      ],
+      "additionalProperties": false
+    },
+    "refusedPointer": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "pointer"
+        },
+        "bits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pointee": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/void"
+            },
+            {
+              "$ref": "#/definitions/refusedFunction"
+            }
+          ]
+        },
+        "qualifiers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "kind",
+        "bits",
+        "pointee",
+        "qualifiers"
+      ],
+      "additionalProperties": false
+    },
+    "refusedField": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z_0-9]*$"
+        },
+        "type": {
+          "$ref": "#/definitions/refusedDescriptor"
+        },
+        "offsetBits": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "offsetBits"
+      ],
+      "additionalProperties": false
+    },
+    "refusedRecord": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "record"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sizeBits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "alignBits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/refusedField"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "sizeBits",
+        "alignBits",
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "refusedEnum": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "enum"
+        },
+        "identity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "integerType": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/integer"
+            },
+            {
+              "$ref": "#/definitions/unsupported"
+            }
+          ]
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/enumerator"
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "kind",
+        "identity",
+        "integerType",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "refusedDescriptor": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/integer"
+        },
+        {
+          "$ref": "#/definitions/float"
+        },
+        {
+          "$ref": "#/definitions/void"
+        },
+        {
+          "$ref": "#/definitions/recordRef"
+        },
+        {
+          "$ref": "#/definitions/enumRef"
+        },
+        {
+          "$ref": "#/definitions/refusedFunction"
+        },
+        {
+          "$ref": "#/definitions/refusedPointer"
+        },
+        {
+          "$ref": "#/definitions/unsupported"
+        }
+      ]
+    }
+  }
+}

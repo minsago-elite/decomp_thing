@@ -52,6 +52,24 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify public callable evaluator v3 static contracts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          TMPDIR: ${{ github.workspace }}/build/callable-evaluator-v3-static-ci/tmp
+          PIP_CACHE_DIR: ${{ github.workspace }}/build/callable-evaluator-v3-static-ci/pip-cache
+        run: |
+          mkdir -p "$TMPDIR" build/callable-evaluator-v3-static-ci
+          set -o pipefail
+          python3 -B oracle/acp/callable-evaluator-v3/source/tests/run_static_tests.py 2>&1 \
+            | tee build/callable-evaluator-v3-static-ci/tests.log
+      - name: Retain public callable evaluator static evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: callable-evaluator-v3-static-contracts
+          retention-days: 14
+          if-no-files-found: warn
+          path: build/callable-evaluator-v3-static-ci
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
       - name: Reject generated API contract drift

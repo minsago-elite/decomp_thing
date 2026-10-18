@@ -1,0 +1,327 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "profile": {
+      "const": {
+        "schemaVersion": 3,
+        "target": "x86_64 SysV AMD64 ELF LP64; C11; GCC; no LTO, external libraries, injected headers or export scripts",
+        "environment": {
+          "PATH": "/usr/bin:/bin",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TMPDIR": "/tmp"
+        },
+        "commands": {
+          "preprocess": [
+            "/usr/bin/gcc",
+            "-E",
+            "-P",
+            "-std=c11",
+            "/work/candidate.c",
+            "-o",
+            "/work/candidate.i"
+          ],
+          "compile": [
+            "/usr/bin/gcc",
+            "-std=c11",
+            "-O2",
+            "-fPIC",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fno-fast-math",
+            "-ffp-contract=off",
+            "-fvisibility=default",
+            "-c",
+            "/work/candidate.i",
+            "-o",
+            "/work/candidate.o"
+          ],
+          "link": [
+            "/usr/bin/gcc",
+            "-shared",
+            "-Wl,-z,relro,-z,now,-z,noexecstack,--no-undefined",
+            "/work/candidate.o",
+            "-o",
+            "/work/libcandidate.so"
+          ]
+        },
+        "exports": "Provide external function definitions acp_mix acp_pair_scale acp_update acp_apply acp_fold and writable object acp_state. Ordinary external definitions have default public visibility.",
+        "bounds": {
+          "memoryBytes": 536870912,
+          "swapBytes": 0,
+          "tasks": 32,
+          "compilerSeconds": 30,
+          "runtimeSeconds": 5,
+          "outputBytesPerStream": 65536,
+          "sourceBytes": 262144,
+          "virtualAddressSpaceBytes": 2147483648,
+          "cpuSeconds": 30,
+          "helperOutputBytesPerStream": 1048576,
+          "elfInspectionSeconds": 10,
+          "coreBytes": 0,
+          "openFiles": 64,
+          "fileSizeBytes": 16777216,
+          "probeSeconds": 30,
+          "callerBuildSeconds": 30,
+          "helperBuildSeconds": 60,
+          "toolchainInspectionSeconds": 10,
+          "stdinBytes": 4096,
+          "cleanupWaitSeconds": 5,
+          "cleanupVerificationSeconds": 5,
+          "selectorPollSeconds": 0.1,
+          "cleanupPollSeconds": 0.02,
+          "scopeAdmissionSeconds": 5,
+          "scopeAdmissionPollSeconds": 0.01,
+          "temporaryFilesystemBytes": 16777216,
+          "helperInputBytes": 262144,
+          "helperGraphNodes": 4096,
+          "helperGraphDepth": 64,
+          "defaultWallSeconds": 15,
+          "captureReadBytes": 8192,
+          "waitFloorSeconds": 0.001,
+          "workerProofRecords": 2,
+          "workerProofRecordBytes": 512,
+          "workerProofBytes": 1024,
+          "workerBarrierSeconds": 1,
+          "workerBarrierPollSeconds": 0.01,
+          "workerBarrierAttempts": 100,
+          "workerProcEntries": 256,
+          "workerFdEntries": 66,
+          "workerNumericFds": 64,
+          "workerMetadataBytes": 4096,
+          "workerMonitorProcesses": 1,
+          "workerLaunchPinEntries": 256,
+          "workerLaunchPinFileBytes": 16777216
+        },
+        "toolchainEnvironmentPinSha256": "df06d577d23d2f147671412434577eaa560ec6edeac91158a6e6d62c076ba0a6",
+        "gccIdentity": {
+          "executable": "/usr/bin/gcc",
+          "realpath": "/usr/x86_64-pc-linux-gnu/gcc-bin/16/x86_64-pc-linux-gnu-gcc",
+          "sha256": "95802777c75a38582efb76cb15eb5cb34bfad66bcbef5c1c265c0a1f2e51132c",
+          "target": "x86_64-pc-linux-gnu",
+          "version": "gcc (Gentoo 16.2.1_p20260926 p1) 16.2.1 20260926"
+        },
+        "analysisIsolation": {
+          "engine": "bubblewrap",
+          "namespaces": "unshare-all",
+          "capabilities": "none",
+          "environment": {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TMPDIR": "/tmp",
+            "LD_LIBRARY_PATH": "/usr/lib/gcc/x86_64-pc-linux-gnu/16:/usr/lib/llvm/23/lib64"
+          },
+          "readOnlySystemMounts": [
+            "/usr",
+            "/lib",
+            "/lib64"
+          ],
+          "readOnlyHelper": "/probe",
+          "readOnlyOwnedSourceWork": "/work",
+          "sourceArgument": "/work/<relative-source-path>",
+          "expectedSourceWork": "separate trusted fixture clone; never mapped into candidate probe",
+          "temporaryFilesystem": {
+            "path": "/tmp",
+            "bytes": 16777216
+          },
+          "hostPathsOutsideMounts": "inaccessible",
+          "readOnlySystemFiles": [
+            "/etc/ld.so.cache"
+          ],
+          "explicitReadOnlyFileInputs": "exact regular files at original absolute paths, overlaid read-only even within writable work; no parent inference or control-source work tree"
+        },
+        "limitSemantics": {
+          "cpuSeconds": "RLIMIT_CPU soft=hard per process; not aggregate cgroup CPU",
+          "aggregateCgroupCpuLimit": null,
+          "aggregateCgroupCpuLimitEnforced": false,
+          "resourceLimits": "soft=hard; units are bytes, seconds or descriptor count as named",
+          "streamOutput": "independent cap for stdout and stderr; excess makes capture incomplete",
+          "cleanup": "wait and subsequent absence-verification each have a distinct 5-second ceiling",
+          "helperBuild": "60-second wall supervisor bound; the same 30-second per-process CPU RLIMIT still applies",
+          "workerExecProof": "barrier and monitor overhead are inside the original phase wall/resource budgets; proof file is independent of untrusted stdout/stderr"
+        },
+        "limitAudit": [
+          {
+            "phase": "all-launches",
+            "source": "bounded_runtime.py:process_limits",
+            "keys": [
+              "coreBytes",
+              "cpuSeconds",
+              "virtualAddressSpaceBytes",
+              "openFiles",
+              "fileSizeBytes"
+            ],
+            "scope": "per-process RLIMITs"
+          },
+          {
+            "phase": "managed-scope",
+            "source": "bounded_runtime.py:bounded_run",
+            "keys": [
+              "tasks",
+              "memoryBytes",
+              "swapBytes"
+            ],
+            "scope": "kernel-verified aggregate cgroup; no aggregate CPU limit"
+          },
+          {
+            "phase": "compiler",
+            "source": "evaluate_candidate_v3.py:run",
+            "keys": [
+              "compilerSeconds",
+              "outputBytesPerStream",
+              "sourceBytes"
+            ],
+            "scope": "preprocess/compile/link/GCC assertions"
+          },
+          {
+            "phase": "probe",
+            "source": "interface_gate_v3.py:probe",
+            "keys": [
+              "probeSeconds",
+              "helperOutputBytesPerStream",
+              "helperInputBytes",
+              "helperGraphNodes",
+              "helperGraphDepth"
+            ],
+            "scope": "separate expected/candidate input roots"
+          },
+          {
+            "phase": "runtime",
+            "source": "evaluate_candidate_v3.py:run",
+            "keys": [
+              "runtimeSeconds",
+              "outputBytesPerStream"
+            ],
+            "scope": "one wrapped scenario process"
+          },
+          {
+            "phase": "elf-inspection",
+            "source": "interface_gate_v3.py:export_inventory",
+            "keys": [
+              "elfInspectionSeconds",
+              "outputBytesPerStream"
+            ],
+            "scope": "each readelf invocation"
+          },
+          {
+            "phase": "caller-build",
+            "source": "private preparation coordinator (not in public archive)",
+            "keys": [
+              "callerBuildSeconds",
+              "outputBytesPerStream"
+            ],
+            "scope": "trusted caller compiler wall/capture"
+          },
+          {
+            "phase": "helper-build",
+            "source": "toolchain-001/build_helper.py",
+            "keys": [
+              "helperBuildSeconds",
+              "helperOutputBytesPerStream"
+            ],
+            "scope": "existing helper compiler/link supervisor; not candidate compiler"
+          },
+          {
+            "phase": "toolchain-inspection",
+            "source": "toolchain-001/pin_environment.py",
+            "keys": [
+              "toolchainInspectionSeconds",
+              "helperOutputBytesPerStream"
+            ],
+            "scope": "each metadata/dependency command"
+          },
+          {
+            "phase": "capture",
+            "source": "bounded_runtime.py:bounded_run",
+            "keys": [
+              "defaultWallSeconds",
+              "outputBytesPerStream",
+              "stdinBytes",
+              "captureReadBytes",
+              "selectorPollSeconds",
+              "waitFloorSeconds"
+            ],
+            "scope": "default15s, bounded stdin before launch, per-stream capture; final wait floor is supervisor policy"
+          },
+          {
+            "phase": "cleanup",
+            "source": "bounded_runtime.py:bounded_run",
+            "keys": [
+              "cleanupWaitSeconds",
+              "cleanupVerificationSeconds",
+              "cleanupPollSeconds"
+            ],
+            "scope": "owned PID-start identity and cgroup/session absence"
+          },
+          {
+            "phase": "scope-admission",
+            "source": "scope_gate.py",
+            "keys": [
+              "scopeAdmissionSeconds",
+              "scopeAdmissionPollSeconds"
+            ],
+            "scope": "gate timeout/poll; immutable existing supervisor constants"
+          },
+          {
+            "phase": "isolation",
+            "source": "evaluate_candidate_v3.py:phase_command/runtime_command; interface_gate_v3.py:probe_command",
+            "keys": [
+              "temporaryFilesystemBytes"
+            ],
+            "scope": "/tmp tmpfs; exact environment/namespaces/mount and writable-work contract below"
+          },
+          {
+            "phase": "worker-exec-proof",
+            "source": "bounded_runtime.py/scope_gate.py/worker_exec_monitor.c",
+            "keys": [
+              "workerProofRecords",
+              "workerProofRecordBytes",
+              "workerProofBytes",
+              "workerBarrierSeconds",
+              "workerBarrierPollSeconds",
+              "workerBarrierAttempts",
+              "workerProcEntries",
+              "workerFdEntries",
+              "workerNumericFds",
+              "workerMetadataBytes",
+              "workerMonitorProcesses",
+              "workerLaunchPinEntries",
+              "workerLaunchPinFileBytes"
+            ],
+            "scope": "closed 2-record proof, bounded pre-worker proc/FD barrier, one monitor inside existing aggregate task budget"
+          }
+        ],
+        "workerExecProof": {
+          "protocolVersion": 1,
+          "monitorInsidePath": "/_worker_exec_monitor",
+          "manifestPath": "toolchain-001/worker-exec-monitor.json",
+          "receiptRoot": "exec-proof-receipts",
+          "receiptFile": "worker-proof.jsonl",
+          "reportDescriptor": 4,
+          "receiptMode": 384,
+          "receiptDirectoryMode": 448,
+          "workerPhases": "all require fresh contained monitor exec/terminal proof",
+          "taskBudget": "existing aggregate32 includes reaper and one extra monitor; no extra candidate resources",
+          "provisioningException": "fixed public monitor source/compiler command only; channel-free provisioning-only, never candidate acceptance"
+        }
+      }
+    },
+    "profileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "profile",
+    "profileSha256"
+  ],
+  "additionalProperties": false
+}
