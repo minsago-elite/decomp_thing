@@ -838,6 +838,8 @@ class MvpPatchWorkflowTest {
         assertTrue(text.contains("Result: FAIL"))
         assertTrue(text.contains(fullDiff.trimEnd()))
         assertEquals(fullDiff, root.resolve("approved.patch").readText())
+        assertTrue(text.contains("| Approved patch | `approved.patch` | " +
+            "`adc753498270d3d87d1ee4e3034b0a25805bb4337bf7805dff9bf8964c7f3796` |"))
     }
 
     @Test

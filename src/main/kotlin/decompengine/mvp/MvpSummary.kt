@@ -5,7 +5,7 @@ import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.exists
-import kotlin.io.path.readBytes
+import kotlin.io.path.inputStream
 import kotlin.io.path.writeText
 
 internal enum class EvidenceStatus { RUNNING, PASS, FAIL, NOT_RUN }
@@ -173,8 +173,18 @@ private fun Path.relativeOrAbsolute(root: Path): String =
     runCatching { root.toAbsolutePath().normalize().relativize(toAbsolutePath().normalize()).toString() }
         .getOrElse { toAbsolutePath().normalize().toString() }
 
-private fun Path.sha256(): String =
-    MessageDigest.getInstance("SHA-256").digest(readBytes()).joinToString("") { "%02x".format(it) }
+private fun Path.sha256(): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
 
 private fun String.escapeTable(): String = replace("|", "\\|").replace("\n", "<br>")
 
