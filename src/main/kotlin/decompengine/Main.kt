@@ -28,6 +28,7 @@ import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
+import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -179,31 +180,51 @@ private fun runReconstruct(args: List<String>) {
     }
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
-    withReconstructionCliProgress(output, environment.values) { progress ->
-        val strategy = try {
-            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
-        } catch (e: IllegalArgumentException) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            progress.close()
-            reconstructUsageError(e.message ?: "invalid harness configuration")
+    val exitCode = runReconstructionCliAction(environment.values) { redactor ->
+        withReconstructionCliProgress(output, environment.values) { progress ->
+            val strategy = try {
+                selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
+            } catch (e: IllegalArgumentException) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                progress.close()
+                reconstructUsageError(e.message ?: "invalid harness configuration")
+            }
+            println(
+                strategy.harnessProvenance?.let { "harness provenance: ${redactor.text(it)}" }
+                    ?: "harness: none (evidence-only)",
+            )
+            val result = try {
+                ArchivalReconstructionService(
+                    GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                    profile = strategy.profile, progress = progress,
+                ).reconstruct(binary, output)
+            } catch (failure: Exception) {
+                progress.phase(AgentWorkflowPhase.FAILED)
+                throw failure
+            }
+            println("source tree: ${result.projectDir}")
+            println("archive: ${result.bundle.archivePath}")
+            println("archive sha256: ${result.bundle.archiveSha256}")
+            println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
         }
-        println(
-            strategy.harnessProvenance?.let { "harness provenance: $it" }
-                ?: "harness: none (evidence-only)",
-        )
-        val result = try {
-            ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
-                profile = strategy.profile, progress = progress,
-            ).reconstruct(binary, output)
-        } catch (failure: Exception) {
-            progress.phase(AgentWorkflowPhase.FAILED)
-            throw failure
-        }
-        println("source tree: ${result.projectDir}")
-        println("archive: ${result.bundle.archivePath}")
-        println("archive sha256: ${result.bundle.archiveSha256}")
-        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
+    }
+    if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Catch ordinary failures after owned progress closes; raw exception chains stay off stderr. */
+internal fun runReconstructionCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Unit,
+): Int {
+    val redactor = ProgressRedactor(sensitiveValues)
+    return try {
+        action(redactor)
+        0
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        output.println("reconstruction failed: ${redactor.text(failure.message ?: failure.javaClass.simpleName)}")
+        1
     }
 }
 
@@ -245,7 +266,7 @@ internal fun selectReconstructionStrategy(
 }
 
 private fun reconstructUsageError(message: String): Nothing {
-    System.err.println(message)
+    System.err.println(ProgressRedactor(System.getenv().values).text(message))
     System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }

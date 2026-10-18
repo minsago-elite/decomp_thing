@@ -161,6 +161,13 @@ writer, persistence failure, or phase-observer exception disables that display a
 diagnostic without replacing the workflow result or original exception. Closing still attempts to
 release the writer after a display failure and preserves the calling thread's interruption state.
 
+The reconstruction command catches ordinary workflow failures after its progress owner closes,
+prints a bounded redacted terminal diagnostic, and exits with status 1. It does not print the raw
+exception chain. Configuration diagnostics and harness provenance also use the shared redactor.
+The boundary preserves interruption and propagates fatal JVM errors; it does not change the
+workflow's typed failure, receipt or validation authority. Patch/doctor diagnostics and historical
+artifacts require their own privacy checks.
+
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \
   --tests decompengine.jobs.BestEffortProgressJournalTest \
