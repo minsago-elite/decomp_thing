@@ -536,7 +536,17 @@ internal fun renderWorkflowProvenance(
 private fun printWorkflowCliLine(prefix: String, message: String, redactor: ProgressRedactor, output: PrintStream) {
     // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
     val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
-    var preview = redactor.text("$prefix: $detail\n")
+    printProjectedCliFrame("$prefix: $detail\n", 512, output, redactor::text)
+}
+
+/** Every caller supplies a complete frame and an already admitted private projection. */
+private fun printProjectedCliFrame(
+    frame: String,
+    previewCharacters: Int,
+    output: PrintStream,
+    project: (String, Int) -> String,
+) {
+    var preview = project(frame, previewCharacters)
     // Truncation or replacement can consume the terminator. Reproject each restored
     // newline, and emit only a complete safe line. Persistent conflicts withhold detail.
     repeat(2) {
@@ -544,9 +554,9 @@ private fun printWorkflowCliLine(prefix: String, message: String, redactor: Prog
             output.print(preview)
             return
         }
-        preview = redactor.text("$preview\n", 16_384)
+        preview = project("$preview\n", 16_384)
     }
-    if (!preview.endsWith("\n")) preview = redactor.text("\n", 16_384)
+    if (!preview.endsWith("\n")) preview = project("\n", 16_384)
     if (preview.endsWith("\n")) output.print(preview)
 }
 
@@ -683,13 +693,13 @@ private fun runnerUsageError(message: String): Nothing {
 }
 
 private fun runDoctor(args: List<String>) {
-    val defaultOutput = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
+    val environment = System.getenv()
     val invocation = try {
+        val defaultOutput = Path.of(environment["OUTPUT_DIR"] ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
         parseDoctorInvocation(args, defaultOutput)
     } catch (failure: IllegalArgumentException) {
         doctorUsageError(failure.message ?: "invalid doctor configuration", "--tools-only" in args)
     }
-    val environment = System.getenv()
     val sensitiveValues = if (invocation.options.toolsOnly) emptyList() else environment.values
     val exitCode = runDoctorCliAction(sensitiveValues) {
         Doctor(environment = environment, sensitiveValues = sensitiveValues).inspect(invocation.options, invocation.profile)
@@ -716,7 +726,7 @@ internal fun runDoctorCliAction(
         requireDoctorActive(failure)
         if (failure is DoctorDiagnosticAdmissionException) return 2
         val detail = redactor.text(failure.message ?: failure.javaClass.simpleName, 4096)
-        diagnostic.println(redactor.text("doctor failed: $detail", 4096))
+        printProjectedCliFrame("doctor failed: $detail\n", 4096, diagnostic, redactor::text)
         return 1
     }
     requireDoctorActive()
@@ -725,14 +735,14 @@ internal fun runDoctorCliAction(
         val stream = if (check.passed) output else diagnostic
         val name = redactor.text(check.name, 4096)
         val detail = redactor.text(check.detail, 4096)
-        stream.println(redactor.text("[${if (check.passed) "ok" else "failed"}] $name: $detail", 4096))
+        printProjectedCliFrame("[${if (check.passed) "ok" else "failed"}] $name: $detail\n", 4096, stream, redactor::text)
         stream.flush()
     }
     if (!report.passed) {
-        diagnostic.println(redactor.text("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.", 4096))
+        printProjectedCliFrame("Environment check failed (${report.checks.count { !it.passed }} check(s)); resolve each [failed] item above.\n", 4096, diagnostic, redactor::text)
         return 1
     }
-    output.println(redactor.text("Environment check passed (${report.checks.size} checks)", 4096))
+    printProjectedCliFrame("Environment check passed (${report.checks.size} checks)\n", 4096, output, redactor::text)
     output.flush()
     return 0
 }
@@ -748,9 +758,14 @@ internal fun renderDoctorUsageError(
     } catch (_: DoctorDiagnosticAdmissionException) {
         return 2
     }
-    output.println(redactor.text(if (toolsOnly) "invalid doctor configuration; check the options below" else message, 4096))
-    output.println(redactor.text("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]", 4096))
-    output.println(redactor.text("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]", 4096))
+    val usage = "usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]\n" +
+        "   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]\n"
+    val detail = when {
+        toolsOnly -> "invalid doctor configuration; check the options below"
+        message.length > 16_384 - usage.length - 1 -> redactor.text(message, 0)
+        else -> message
+    }
+    printProjectedCliFrame("$detail\n$usage", 16_384, output, redactor::text)
     return 2
 }
 
