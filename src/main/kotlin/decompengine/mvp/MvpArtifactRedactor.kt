@@ -31,34 +31,72 @@ internal class MvpArtifactRedactor private constructor(
 
     fun forLogLines(): MvpArtifactRedactor = MvpArtifactRedactor(sensitiveValues, maximumBytes, true)
 
-    fun project(render: MvpArtifactText.() -> Unit): String = text(MvpArtifactText(maximumBytes).apply(render).build())
+    fun project(render: MvpArtifactText.() -> Unit): String {
+        val document = MvpArtifactText(maximumBytes).apply(render)
+        return projectText(document.build(), null, document.publicHashes())
+    }
 
-    fun text(value: String, normalizedMask: IntRange? = null): String {
+    fun text(value: String, normalizedMask: IntRange? = null): String =
+        projectText(value, normalizedMask, emptyList())
+
+    private fun projectText(value: String, normalizedMask: IntRange?, publicHashes: List<IntRange>): String {
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
         // Use the diagnostic control policy, without taking a prefix of complete content.
+        var hashes = normalizedHashes(value, publicHashes)
         var safe = value.replace(controls, "")
         MvpArtifactByteBudget(maximumBytes).charge(safe)
         var extraMask = normalizedMask
         var original: String? = value
         repeat(8) {
             // All coverage refers to the same unchanged input, including delimiter-containing secrets.
-            val next = literals.replace(safe, maximumBytes, formats, extraMask, original)
+            val next = literals.replaceProjection(safe, maximumBytes, formats, extraMask, original, hashes)
             extraMask = null
             original = null
-            if (next == safe) return finish(next)
-            safe = next
+            if (next.text == safe) return finish(next)
+            safe = next.text
+            hashes = next.publicHashes
         }
-        return finish(safe)
+        return finish(MvpArtifactProjection(safe, hashes))
     }
 
-    private fun finish(value: String): String {
+    private fun finish(projection: MvpArtifactProjection): String {
+        val value = projection.text
         artifactActive()
         MvpArtifactByteBudget(maximumBytes).charge(value)
-        if (literals.contains(value) || literals.replace(value, maximumBytes, formats) != value) {
+        if (literals.containsOutsidePublicHashes(value, projection.publicHashes) ||
+            literals.replaceProjection(value, maximumBytes, formats, publicHashes = projection.publicHashes).text != value
+        ) {
             throw MvpPatchException("complete artifact masking could not produce a safe projection")
         }
         return value
+    }
+
+    private fun normalizedHashes(value: String, hashes: List<IntRange>): List<IntRange> {
+        require(hashes.size <= MAXIMUM_PUBLIC_ARTIFACT_HASHES)
+        var previousEnd = -1
+        for (range in hashes) {
+            require(!range.isEmpty() && range.first > previousEnd && range.last < value.length &&
+                range.last - range.first == 63 && range.all { value[it] in "0123456789abcdef" }) {
+                "public artifact commitment is invalid"
+            }
+            previousEnd = range.last
+        }
+        if (hashes.isEmpty()) return emptyList()
+        var removed = 0
+        var control = controls.find(value)
+        return hashes.map { range ->
+            while (true) {
+                val match = control ?: break
+                if (match.range.last >= range.first) break
+                removed += match.value.length
+                control = match.next()
+            }
+            // A validated ASCII digest cannot contain a removable control.
+            val nextControl = control
+            require(nextControl == null || nextControl.range.first > range.last)
+            (range.first - removed)..(range.last - removed)
+        }
     }
 
     private companion object {
@@ -192,6 +230,16 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
         return false
     }
 
+    internal fun containsOutsidePublicHashes(source: String, publicHashes: List<IntRange>): Boolean {
+        if (publicHashes.isEmpty()) return contains(source)
+        val cursor = LiteralCursor(source)
+        while (cursor.advance()) {
+            val hash = overlappingPublicHash(publicHashes, cursor.start, cursor.end)
+            if (hash == null || cursor.start < hash.first || cursor.end > hash.last + 1) return true
+        }
+        return false
+    }
+
     private inner class LiteralCursor(private val source: String) : MvpMaskCursor {
         override var start = 0
             private set
@@ -218,11 +266,18 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
     fun replace(
         source: String, maximumBytes: Long, formats: List<Pair<Regex, Boolean>> = emptyList(),
         normalizedMask: IntRange? = null, original: String? = null,
-    ): String {
+    ): String = replaceProjection(source, maximumBytes, formats, normalizedMask, original).text
+
+    internal fun replaceProjection(
+        source: String, maximumBytes: Long, formats: List<Pair<Regex, Boolean>> = emptyList(),
+        normalizedMask: IntRange? = null, original: String? = null,
+        publicHashes: List<IntRange> = emptyList(),
+    ): MvpArtifactProjection {
         MvpArtifactByteBudget(maximumBytes).charge(source)
         require(formats.size <= 4) { "artifact format inventory exceeds its limit" }
         val cursors = ArrayList<MvpMaskCursor>()
-        cursors += LiteralCursor(source)
+        val literal = LiteralCursor(source)
+        cursors += literal
         for ((pattern, prefix) in formats) cursors += MvpRegexMaskCursor(pattern, source, prefix)
         if (original != null) {
             MvpArtifactByteBudget(maximumBytes).charge(original)
@@ -248,6 +303,16 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
             val cursor = cursors[selected]
             var start = cursor.start
             val end = cursor.end
+            val hash = overlappingPublicHash(publicHashes, start, end)
+            if (hash != null) {
+                // Only an unrelated literal coincidence inside a trusted public digest is public.
+                // Credential-format/continuation masks and matches crossing its boundary refuse.
+                if (cursor === literal && start >= hash.first && end <= hash.last + 1) {
+                    ready[selected] = cursor.advance()
+                    continue
+                }
+                throw MvpPatchException("private artifact masking overlaps a public commitment")
+            }
             // Each cursor advances by end position; merge their ordered coverage before replacing.
             while (size > 0 && ends[size - 1] >= start) {
                 size--
@@ -262,16 +327,40 @@ internal class MvpArtifactLiteralIndex(values: List<String>, maximumPatterns: In
             ends[size++] = end
             ready[selected] = cursor.advance()
         }
-        if (size == 0) return source
+        if (size == 0) return MvpArtifactProjection(source, publicHashes)
         val output = MvpArtifactText(maximumBytes)
         var copied = 0
         for (index in 0 until size) {
             output.append(source, copied, starts[index]).append("[REDACTED]")
             copied = ends[index]
         }
-        return output.append(source, copied, source.length).build()
+        val text = output.append(source, copied, source.length).build()
+        var mask = 0
+        var shift = 0
+        val shiftedHashes = publicHashes.map { range ->
+            while (mask < size && ends[mask] <= range.first) {
+                shift = Math.addExact(shift, "[REDACTED]".length - (ends[mask] - starts[mask]))
+                mask++
+            }
+            Math.addExact(range.first, shift)..Math.addExact(range.last, shift)
+        }
+        return MvpArtifactProjection(text, shiftedHashes)
     }
 
+}
+
+internal data class MvpArtifactProjection(val text: String, val publicHashes: List<IntRange>)
+
+private const val MAXIMUM_PUBLIC_ARTIFACT_HASHES = 32
+
+private fun overlappingPublicHash(hashes: List<IntRange>, start: Int, end: Int): IntRange? {
+    var low = 0
+    var high = hashes.size
+    while (low < high) {
+        val middle = (low + high) ushr 1
+        if (hashes[middle].last < start) low = middle + 1 else high = middle
+    }
+    return hashes.getOrNull(low)?.takeIf { it.first < end }
 }
 
 private interface MvpMaskCursor {
@@ -319,6 +408,7 @@ private class MvpFixedMaskCursor(private val range: IntRange) : MvpMaskCursor {
 internal class MvpArtifactText(private val maximumBytes: Long) {
     private val budget = MvpArtifactByteBudget(maximumBytes)
     private val output = StringBuilder(minOf(maximumBytes, 4096).toInt())
+    private val hashes = ArrayList<IntRange>()
     private var previousHigh = false
 
     fun append(value: String, start: Int = 0, end: Int = value.length): MvpArtifactText {
@@ -333,6 +423,20 @@ internal class MvpArtifactText(private val maximumBytes: Long) {
     }
 
     fun build(): String = output.toString()
+
+    /** Trusted producer-computed public facts only; never use this for peer/configuration text. */
+    fun appendSha256(value: String): MvpArtifactText {
+        require(value.length == 64 && value.all { it in "0123456789abcdef" }) {
+            "public artifact commitment must be a lowercase SHA-256"
+        }
+        require(hashes.size < MAXIMUM_PUBLIC_ARTIFACT_HASHES) { "too many public artifact commitments" }
+        val start = output.length
+        append(value)
+        hashes += start until output.length
+        return this
+    }
+
+    internal fun publicHashes(): List<IntRange> = hashes.toList()
 }
 
 private class MvpArtifactByteBudget(private val maximum: Long) {

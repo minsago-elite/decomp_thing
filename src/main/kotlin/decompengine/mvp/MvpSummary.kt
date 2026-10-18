@@ -116,16 +116,6 @@ internal fun writeMvpSummary(
         }
         if (evidence.verification.isEmpty()) append("| none | NOT_RUN | no verification completed |\n")
     }.trimEnd()
-    val artifactRows = evidence.artifactText {
-        for ((name, path) in artifacts) {
-            append("| ").append(name).append(" | ")
-            if (path != null && path.exists()) {
-                append("`").append(path.relativeOrAbsolute(output)).append("` | `").append(path.sha256()).append("` |\n")
-            } else {
-                append("unavailable | unavailable |\n")
-            }
-        }
-    }.trimEnd()
     val sourceMapping = evidence.artifactText {
         val location = evidence.findingSourceLocation
         if (location != null) {
@@ -148,11 +138,21 @@ internal fun writeMvpSummary(
         append("\n- Approval decision: ").append(evidence.redactDiagnostic(evidence.approvalDecision))
         append("\n- Execution isolation: ").append(evidence.redactDiagnostic(evidence.isolation))
         append("\n- Agent harness: `").append(evidence.redactDiagnostic(evidence.harnessProvenance)).append("`")
-        append("\n- Reconstruction profile: `").append(evidence.profileId).append("` (`").append(evidence.profileSha256).append("`)")
+        append("\n- Reconstruction profile: `").append(evidence.profileId).append("` (`").appendSha256(evidence.profileSha256).append("`)")
         append("\n- Verified final binary: `")
             .append(if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published").append("`\n\n")
         append("## Executed Phases\n\n| Phase | Status | Evidence |\n|---|---|---|\n").append(phaseRows)
-        append("\n\n## Artifact Hashes\n\n| Artifact | Path | SHA-256 |\n|---|---|---|\n").append(artifactRows)
+        append("\n\n## Artifact Hashes\n\n| Artifact | Path | SHA-256 |\n|---|---|---|\n")
+        for ((index, entry) in artifacts.entries.withIndex()) {
+            val (name, path) = entry
+            if (index > 0) append("\n")
+            append("| ").append(name).append(" | ")
+            if (path != null && path.exists()) {
+                append("`").append(path.relativeOrAbsolute(output)).append("` | `").appendSha256(path.sha256()).append("` |")
+            } else {
+                append("unavailable | unavailable |")
+            }
+        }
         append("\n\n## CWE-787 Evidence and Source Mapping\n\n").append(sourceMapping)
         append(" The unpatched reconstructed program is classified as CWE-787 only when its sanitizer run reports an out-of-bounds write. Exact retained output: `")
             .append(evidence.findingPath?.takeIf(Path::exists)?.relativeOrAbsolute(output) ?: "unavailable").append("`.\n\n")
