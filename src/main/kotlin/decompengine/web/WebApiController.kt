@@ -28,6 +28,7 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -169,6 +170,9 @@ internal class WebApiController(
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
                     sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs")) && exchange.requestMethod == "POST" -> {
+                    workflowStarts.handle(exchange, resource.split('/')[1])
                 }
                 resource.matches(Regex("jobs/[^/]+/runs")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))
