@@ -110,6 +110,16 @@ The standalone runner's manifest is version 2; its Java/kernel/temporary-filesys
 fields describe the launcher, while testcase configuration comes from the JUnit
 records. The report-consumption inventory is version 3.
 
+The pinned Codex ACP qualifier admits its exact-size/SHA-256 archive before
+`installDist`. Two official HTTPS endpoints have one bounded attempt each; only
+verified regular archives enter the content-keyed Actions download cache. Corrupt
+or linked cache entries refuse rather than repair or follow them, and atomic
+publication never replaces an existing entry. `--fetch-archive` stops before the
+build, extraction and qualification. The core job runs nine inert acquisition
+controls with fake curl and forbidden runtime/extraction commands. This caches
+archive bytes only; current qualification reports still require fresh execution.
+The original native mount-event refusal and cleanup gates remain unwaived.
+
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.

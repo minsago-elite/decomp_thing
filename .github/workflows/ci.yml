@@ -289,6 +289,9 @@ jobs:
       - name: Check pinned Goose archive acquisition controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-goose-archive-download.py
+      - name: Check pinned Codex ACP archive acquisition controls
+        if: matrix.shard == 'core'
+        run: python3 scripts/test-codex-acp-archive-download.py
       - name: Check recovery scenario coverage controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-web-job-recovery-inventory.py
@@ -328,6 +331,12 @@ jobs:
         if: matrix.shard == 'live'
         continue-on-error: true
         run: scripts/ci-qualify-goose-acp.sh
+      - name: Cache verified pinned Codex ACP archive
+        uses: actions/cache@v6
+        if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
+        with:
+          path: ${{ github.workspace }}/build/acp-codex-compatibility/download-cache/codex-acp-0.16.0-x86_64-unknown-linux-gnu.tar.gz
+          key: codex-acp-archive-v1-${{ runner.os }}-${{ runner.arch }}-0a9ad6c31ec9b2b87dccb7e9da3faf5d387e74470d24dbced75a160ed7b22d06
       - name: Qualify pinned credential-free codex-acp authentication boundary
         if: matrix.shard == 'live' && steps.goose-initialize.outcome == 'success'
         run: scripts/ci-qualify-codex-acp.sh
