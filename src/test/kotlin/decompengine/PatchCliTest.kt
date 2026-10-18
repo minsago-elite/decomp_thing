@@ -91,7 +91,19 @@ class PatchCliTest {
                 bytes.reset()
                 val markerAndNewline = "… [preview truncated]\n"
                 renderWorkflowFailure(command, message, ProgressRedactor(listOf(markerAndNewline)), output)
-                assertFalse(bytes.toString(Charsets.UTF_8).contains(markerAndNewline))
+                val remasked = bytes.toString(Charsets.UTF_8)
+                assertFalse(remasked.contains(markerAndNewline))
+                assertTrue(remasked.startsWith("${command.failurePrefix}: visible "))
+                assertTrue(remasked.endsWith("[redacted]\n"), remasked)
+                assertEquals(1, remasked.count { it == '\n' })
+                bytes.reset()
+                renderWorkflowFailure(command, message,
+                    ProgressRedactor(listOf(markerAndNewline, "[redacted]\n")), output)
+                assertEquals("\n", bytes.toString(Charsets.UTF_8))
+                bytes.reset()
+                // A nonblank supplied value can normalize into the newline itself.
+                renderWorkflowFailure(command, message, ProgressRedactor(listOf("\u0000\n")), output)
+                assertEquals("", bytes.toString(Charsets.UTF_8))
                 bytes.reset()
                 renderWorkflowFailure(command, "short", ProgressRedactor(emptyList()), output)
                 assertEquals("${command.failurePrefix}: short\n", bytes.toString(Charsets.UTF_8))

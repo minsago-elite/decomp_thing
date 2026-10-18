@@ -536,10 +536,18 @@ internal fun renderWorkflowProvenance(
 private fun printWorkflowCliLine(prefix: String, message: String, redactor: ProgressRedactor, output: PrintStream) {
     // Omit oversized detail before allocating the frame; a truncated raw prefix could expose a secret fragment.
     val detail = if (message.length > 16_384 - prefix.length - 3) redactor.text(message, 0) else message
-    val preview = redactor.text("$prefix: $detail\n")
-    // Truncation can remove the terminator. Reproject the completed preview so a newly
-    // adjacent newline cannot recreate a private literal across the truncation marker.
-    output.print(if (preview.endsWith("\n")) preview else redactor.text("$preview\n", 16_384))
+    var preview = redactor.text("$prefix: $detail\n")
+    // Truncation or replacement can consume the terminator. Reproject each restored
+    // newline, and emit only a complete safe line. Persistent conflicts withhold detail.
+    repeat(2) {
+        if (preview.endsWith("\n")) {
+            output.print(preview)
+            return
+        }
+        preview = redactor.text("$preview\n", 16_384)
+    }
+    if (!preview.endsWith("\n")) preview = redactor.text("\n", 16_384)
+    if (preview.endsWith("\n")) output.print(preview)
 }
 
 private fun runPatch(args: List<String>) {
