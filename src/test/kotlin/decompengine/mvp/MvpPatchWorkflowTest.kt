@@ -27,6 +27,46 @@ import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
     @Test
+    fun `captured regression payloads obey aggregate byte and argument limits before transcript writes`() {
+        val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "regression-")
+        val path = root.resolve("request.md")
+        val evidence = MvpRunEvidence(emptyMap(), "fixture-harness", "fixture-profile", "a".repeat(64))
+        val arguments = mutableListOf("é", "x")
+        val stdin = byteArrayOf(1, 2, 3)
+        val inputs = mutableListOf(ProcessInput("case", arguments, stdin))
+        val request = RepairRequest("fixture", "public objective", mapOf("target.c" to "public code"), inputs)
+        val exact = "case".toByteArray(Charsets.UTF_8).size + arguments.sumOf { it.toByteArray(Charsets.UTF_8).size } + stdin.size
+        val budget = RepairResourceBudget(maximumRegressionInputBytes = exact.toLong(), maximumRegressionArguments = 2)
+        val admitted = retainMvpCapturedRequest(path, request, "target.c", budget, evidence)
+        arguments.clear(); stdin.fill(9); inputs.clear()
+        val retained = admitted.request.regressionInputs.single()
+        assertEquals(listOf("é", "x"), retained.args)
+        assertTrue(retained.stdin.contentEquals(byteArrayOf(1, 2, 3)))
+        fun refused(input: List<ProcessInput>, limits: RepairResourceBudget = budget) {
+            path.writeText("existing public transcript")
+            assertFailsWith<MvpPatchException> {
+                retainMvpCapturedRequest(path, request.copy(regressionInputs = input), "target.c", limits, evidence)
+            }
+            assertEquals("existing public transcript", path.readText())
+        }
+        refused(listOf(ProcessInput("case", listOf("é", "x"), byteArrayOf(1, 2, 3))),
+            budget.copy(maximumRegressionInputBytes = exact - 1L))
+        refused(listOf(ProcessInput("case", stdin = ByteArray(exact))))
+        refused(listOf(ProcessInput("case", listOf("€".repeat(exact)))))
+        val oversizedArguments = object : AbstractList<String>() {
+            override val size: Int = 3
+            override fun get(index: Int): String = error("oversized argument list must not be iterated")
+        }
+        refused(listOf(ProcessInput("case", oversizedArguments)))
+        val separate = listOf(ProcessInput("a", listOf("x"), byteArrayOf(1)),
+            ProcessInput("b", listOf("x"), byteArrayOf(2)))
+        refused(separate, budget.copy(maximumRegressionInputBytes = 5))
+        refused(separate, budget.copy(maximumRegressionArguments = 1))
+        val payload = ProcessInput("case", stdin = ByteArray(256))
+        refused(listOf(payload), budget.copy(maximumRegressionInputBytes = 260, maximumRequestBytes = 260))
+    }
+
+    @Test
     fun `captured request admission rejects raw padding and entry excess before replacing transcripts`() {
         val root = createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/mvp-transcript-admission")), "request-")
         val path = root.resolve("request.md")

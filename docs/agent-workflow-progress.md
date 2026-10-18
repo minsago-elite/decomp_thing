@@ -186,6 +186,10 @@ content and initial staging retain their existing 4 MiB and 2 MiB default ceilin
 padding cannot bypass admission through a short normalized objective. File/regression entry limits
 also apply before retention. The staging authority still enforces its own path, directory and
 mutation rules.
+Regression IDs, arguments and stdin share the existing aggregate regression-byte ceiling, and
+argument counts share the aggregate argument ceiling. Argument lists and stdin are copied only
+after their admitted prefix fits; the complete admitted payload also counts against the raw
+request-content ceiling. Caller mutation cannot change the retained regression snapshot.
 
 Response admission checks the raw summary before trimming, the normalized/fallback summary, patch
 paths and complete replacements against the existing 16 MiB response and 2 MiB patch defaults.

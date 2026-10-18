@@ -37,6 +37,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.util.Comparator
+import java.util.Collections
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -744,7 +745,7 @@ internal fun prepareMvpCapturedRequest(
     }
     val frozen = request.copy(
         projectFiles = request.projectFiles.toMap(),
-        regressionInputs = request.regressionInputs.toList(),
+        regressionInputs = captureMvpRegressionInputs(request.regressionInputs, budget),
     )
     require(target in frozen.projectFiles) { "captured patch target is absent: $target" }
     val content = MvpContentBudget(budget.maximumRequestBytes, "captured patch request")
@@ -759,7 +760,11 @@ internal fun prepareMvpCapturedRequest(
     val commonBytes = content.used
     // The transcript retains the raw prompt, not the trimmed agent objective.
     content.charge(frozen.prompt)
-    frozen.regressionInputs.forEach { content.charge(it.id) }
+    frozen.regressionInputs.forEach { input ->
+        content.charge(input.id)
+        input.args.forEach { content.charge(it) }
+        content.chargeBytes(input.stdin.size.toLong())
+    }
     val objective = buildString {
         append(frozen.prompt.trim())
         append("\n\nEdit ").append(target)
@@ -773,6 +778,33 @@ internal fun prepareMvpCapturedRequest(
         frozen, target, objective,
         frozen.projectFiles.mapValues { (_, text) -> text.toByteArray(StandardCharsets.UTF_8) },
     )
+}
+
+private fun captureMvpRegressionInputs(inputs: List<ProcessInput>, budget: RepairResourceBudget): List<ProcessInput> {
+    val content = MvpContentBudget(budget.maximumRegressionInputBytes, "captured regression inputs")
+    val snapshot = ArrayList<ProcessInput>()
+    var argumentCount = 0L
+    inputs.forEach { input ->
+        val suppliedArguments = input.args.size.toLong()
+        if (snapshot.size >= budget.maximumRegressionInputs || suppliedArguments < 0 ||
+            suppliedArguments > budget.maximumRegressionArguments - argumentCount
+        ) {
+            throw MvpPatchException("captured regression inputs exceed their entry budget")
+        }
+        content.charge(input.id)
+        content.chargeBytes(input.stdin.size.toLong())
+        val arguments = ArrayList<String>()
+        input.args.forEach { argument ->
+            if (argumentCount >= budget.maximumRegressionArguments) {
+                throw MvpPatchException("captured regression inputs exceed their argument budget")
+            }
+            content.charge(argument)
+            arguments += argument
+            argumentCount++
+        }
+        snapshot += ProcessInput(input.id, Collections.unmodifiableList(arguments), input.stdin.copyOf())
+    }
+    return Collections.unmodifiableList(snapshot)
 }
 
 internal fun retainMvpCapturedRequest(
