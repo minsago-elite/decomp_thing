@@ -254,9 +254,12 @@ The agent-enabled CLI supplies its process inventory and rechecks complete termi
 formatting. Ordinary escaping exceptions are rendered without raw cause chains. Diagnostic inventory
 rejection exits 2 without inspecting or emitting diagnostic payload; check/ordinary failures exit 1
 and success exits 0. Interruption, cancellation and fatal errors propagate. Tools-only mode keeps
-ambient/legacy configuration unenumerated, uses format-only masking and renders invalid usage with
-fixed guidance instead of echoing unknown arguments. These diagnostic changes do not qualify probes,
-provider execution, cleanup or the complete privacy/release scope.
+ambient/legacy configuration unenumerated. Its terminal report uses producer-attached compiled check
+types, actual pass/fail values and fixed remediation. Paths, tool responses, arbitrary labels and
+ordinary exception messages do not enter that report. Untyped checks retain their status under a
+numbered generic check label; labels are never promoted by matching peer text. Invalid usage keeps
+fixed guidance. Normal mode retains its private inventory and diagnostic previews. These display
+facts do not authorize execution or qualify provider effectiveness, cleanup or release behavior.
 
 ```sh
 ./gradlew test --tests decompengine.jobs.AgentProgressJournalTest \

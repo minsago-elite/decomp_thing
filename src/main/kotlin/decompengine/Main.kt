@@ -7,6 +7,7 @@ import decompengine.doctor.Doctor
 import decompengine.doctor.DoctorDiagnosticAdmissionException
 import decompengine.doctor.DoctorDiagnostics
 import decompengine.doctor.DoctorReport
+import decompengine.doctor.DoctorToolKind
 import decompengine.doctor.parseDoctorInvocation
 import decompengine.doctor.requireDoctorActive
 import decompengine.mvp.MvpPatchOptions
@@ -749,7 +750,7 @@ private fun runDoctor(args: List<String>) {
         doctorUsageError(failure.message ?: "invalid doctor configuration", "--tools-only" in args)
     }
     val sensitiveValues = if (invocation.options.toolsOnly) emptyList() else environment.values
-    val exitCode = runDoctorCliAction(sensitiveValues) {
+    val exitCode = runDoctorCliAction(sensitiveValues, toolsOnly = invocation.options.toolsOnly) {
         Doctor(environment = environment, sensitiveValues = sensitiveValues).inspect(invocation.options, invocation.profile)
     }
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
@@ -760,10 +761,11 @@ internal fun runDoctorCliAction(
     sensitiveValues: Collection<String>,
     output: PrintStream = System.out,
     diagnostic: PrintStream = System.err,
+    toolsOnly: Boolean = false,
     action: () -> DoctorReport,
 ): Int {
     val redactor = try {
-        DoctorDiagnostics(sensitiveValues)
+        DoctorDiagnostics(if (toolsOnly) emptyList() else sensitiveValues)
     } catch (_: DoctorDiagnosticAdmissionException) {
         return 2
     }
@@ -773,16 +775,23 @@ internal fun runDoctorCliAction(
     } catch (failure: Exception) {
         requireDoctorActive(failure)
         if (failure is DoctorDiagnosticAdmissionException) return 2
-        val detail = redactor.text(failure.message ?: failure.javaClass.simpleName, 4096)
+        val detail = if (toolsOnly) {
+            "Tool checks stopped before completion. Verify the selected profile, tools and output directory."
+        } else redactor.text(failure.message ?: failure.javaClass.simpleName, 4096)
         printProjectedCliFrame("doctor failed: $detail\n", 4096, diagnostic, redactor::text)
         return 1
     }
     requireDoctorActive()
-    report.checks.forEach { check ->
+    report.checks.forEachIndexed { index, check ->
         requireDoctorActive()
         val stream = if (check.passed) output else diagnostic
-        val name = redactor.text(check.name, 4096)
-        val detail = redactor.text(check.detail, 4096)
+        val kind = check.toolsOnlyKind ?: DoctorToolKind.UNKNOWN
+        val name = if (toolsOnly) {
+            if (kind == DoctorToolKind.UNKNOWN) "${kind.label} ${index + 1}" else kind.label
+        } else redactor.text(check.name, 4096)
+        val detail = if (toolsOnly) {
+            if (check.passed) "Check passed." else kind.remediation
+        } else redactor.text(check.detail, 4096)
         printProjectedCliFrame("[${if (check.passed) "ok" else "failed"}] $name: $detail\n", 4096, stream, redactor::text)
         stream.flush()
     }

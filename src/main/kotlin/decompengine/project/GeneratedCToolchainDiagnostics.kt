@@ -2,6 +2,7 @@ package decompengine.project
 
 import decompengine.doctor.CommandProbe
 import decompengine.doctor.DoctorCheck
+import decompengine.doctor.DoctorToolKind
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -28,11 +29,17 @@ internal class GeneratedCToolchainDiagnostics(
                 "C compiler",
                 listOf(compilerDriver, "--version"),
                 "Install the selected C compiler and ensure $compilerDriver is executable.",
+                DoctorToolKind.C_COMPILER,
             ),
             ToolchainVersionProbe(
                 buildName,
                 listOf(buildExecutable, "--version"),
                 "Install $buildName and ensure $buildExecutable is executable.",
+                when (buildSystem) {
+                    "gnu-make" -> DoctorToolKind.MAKE
+                    "ninja" -> DoctorToolKind.NINJA
+                    else -> DoctorToolKind.UNKNOWN
+                },
             ),
         ))
     }
@@ -45,7 +52,7 @@ internal class GeneratedCToolchainDiagnostics(
             checkCapabilities(commandProbe) {}
 
         override fun checkCapabilities(commandProbe: CommandProbe, checkpoint: (String) -> Unit): List<DoctorCheck> =
-            listOf(sanitizerCheck(commandProbe, checkpoint))
+            listOf(sanitizerCheck(commandProbe, checkpoint).withToolsOnlyKind(DoctorToolKind.SANITIZERS))
 
         private fun sanitizerCheck(commandProbe: CommandProbe, checkpoint: (String) -> Unit): DoctorCheck {
             requireNotInterrupted()
