@@ -2656,7 +2656,13 @@ class AcpAgentHarnessTest {
             val authorityReceipt = authorityHarness.executeReceipt(
                 authorityFixture.request.withCancellation(authorityCancellation),
             )
-            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(authorityReceipt.outcome).result
+            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(
+                authorityReceipt.outcome,
+                "rootCheckpoint=$rootCheckpoint " +
+                    "failureKind=${(authorityReceipt.outcome as? AgentExecutionOutcome.Failed)?.failure?.kind} " +
+                    "${(authorityReceipt.providerEvidence as? AcpInvocationEvidenceSnapshot)?.summaryForTest()} " +
+                    "cause=${boundedPreparationCauseForTest(authorityReceipt.failureCause)}",
+            ).result
             val authorityEvidence = assertIs<AcpInvocationEvidenceSnapshot>(authorityReceipt.providerEvidence)
             assertTrue(authorityCancellationObserved.get(), "actual filesystem authority checkpoint was not reached")
             assertEquals(AgentStopReason.CANCELLED, authorityResult.stopReason)
