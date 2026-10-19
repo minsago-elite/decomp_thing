@@ -112,7 +112,34 @@ unavailable-bytes message rather than an empty or successful sample. Unsupported
 or inconsistent formats are refused. Format/artifact/session changes discard
 private detail; refresh failures clear previous observations.
 
-Generation failures before observation, independently established regression
-origins and broader integration qualification remain outstanding. The historical
-verification above covers its recorded source only; new pure metadata and
-in-memory fetch/decoder/DOM controls require current Actions evidence.
+## Failures before candidate observation
+
+The existing Angr, static-hint and mutation callbacks can retain a separate
+`decomp-exploration-preparation-failure` version-1 partial record when they throw.
+Their order and multiplicity are unchanged. The original exception is rethrown
+immediately; retention errors are suppressed once and later stages do not run.
+Completed proposals still use the original deduplication, candidate cap, observation
+calls and successful report writer.
+
+The record names the failed generation stage and reports available provided-seed,
+Angr and static-hint counts. An unreturned group is null, distinct from a returned
+empty group. The final expanded proposal and sample counts remain unknown.
+`observationState: "not-started"` is the producer's pipeline claim, not independent
+execution or containment evidence. Fixed generic, I/O and interruption codes use
+exception types only; an exit124 or message mentioning timeout supplies no timeout,
+tool-availability, launch or cleanup classification. Messages/stacks are omitted.
+
+Optional inputs retain exact reported IDs/sources/argv/stdin bytes under the same
+1000-per-group,256-argument,1,000,000-byte/90,000-node conservative retention budget;
+oversized detail is wholly omitted before JSON allocation. The existing read-only
+adapter and version-one partial viewer validate the separate known namespace,
+stage/availability consistency and unknown counts. Stable group/position identities
+preserve repeated IDs. The viewer keeps its existing byte/node/preview/page limits,
+artifact/attempt/length/digest checks and deliberate read/abort/refresh policy.
+Input inspection never presents an exit code, output or observation that this
+preparation record does not contain.
+
+Independently established regression origins and broader integration qualification
+remain outstanding. The historical verification above covers its recorded source
+only; new pure callback/metadata and in-memory fetch/decoder/DOM controls require
+their own current Actions evidence.
