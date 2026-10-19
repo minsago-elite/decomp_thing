@@ -55,8 +55,8 @@ it('shows timezone context and retains nanoseconds, source offsets and large cou
 });
 
 it('rejects absent own values instead of displaying inherited object methods', () => {
-  // @ts-expect-error A named message value must be supplied, even for a prototype property name.
-  expect(() => message<'{toString}'>('{toString}', {})).toThrow('Missing display message parameter');
+  // @ts-expect-error A required rich-message slot must be supplied.
+  expect(() => message<'{missing}'>('{missing}', {})).toThrow('Missing display message parameter');
   // @ts-expect-error Plain text uses the same required named-value contract.
   expect(() => textMessage<'{toString}'>('{toString}', {})).toThrow('Missing display message parameter');
 });
