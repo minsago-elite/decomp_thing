@@ -1,5 +1,6 @@
 import { ApiClientError } from '../api/errors';
-import { parseBoundedJson } from '../api/json';
+import { MAX_JSON_BYTES, parseBoundedJson } from '../api/json';
+import { MAX_RETAINED_JSON_NODES } from './explorationCases';
 import type { RetainedCase, RetainedCases } from './explorationCases';
 import { parseFailureCases } from './explorationFailureCases';
 import type { FailureRetainedCases } from './explorationFailureCases';
@@ -82,7 +83,7 @@ function preparationCases(root: Record<string, unknown>): PreparationCases {
 
 /** Known namespaces only; legacy bytes never enter a declared version-one partial viewer. */
 export function parsePartialCases(input: string): PreparationCases | FailureRetainedCases {
-  const root: unknown = parseBoundedJson(input);
+  const root: unknown = parseBoundedJson(input, MAX_JSON_BYTES, MAX_RETAINED_JSON_NODES);
   if (root && typeof root === 'object' && !Array.isArray(root) && 'schema' in root
     && root.schema === 'decomp-exploration-preparation-failure') return preparationCases(root as Record<string, unknown>);
   return parseFailureCases(input);

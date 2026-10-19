@@ -86,6 +86,9 @@ class ExplorationPreparationFailureTest {
         val root = Json.parseToJsonElement(valid().toJson()).jsonObject
         val available = root.getValue("availableInputs").jsonObject
         val failure = root.getValue("failure").jsonObject
+        val details = root.getValue("details").jsonObject
+        val seed = details.getValue("seeds").jsonArray.single().jsonObject
+        fun changedInput(input: JsonObject) = JsonObject(root + ("details" to JsonObject(details + ("seeds" to JsonArray(listOf(input))))))
         for (invalid in listOf(
             JsonObject(root + ("availableInputs" to JsonObject(available + ("expanded" to JsonPrimitive(0))))),
             JsonObject(root + ("availableInputs" to JsonObject(available + ("angr" to JsonNull)))),
@@ -94,6 +97,8 @@ class ExplorationPreparationFailureTest {
             JsonObject(root + ("observationState" to JsonPrimitive("complete"))),
             JsonObject(root + ("coverage" to JsonPrimitive(0))),
             JsonObject(root + ("detailsOmitted" to JsonPrimitive("detail-budget"))),
+            changedInput(JsonObject(seed + ("stdinHex" to JsonPrimitive("FF")))),
+            changedInput(JsonObject(seed + ("args" to JsonArray(listOf(JsonPrimitive(1)))))),
         )) assertFails { explorationPreparationFailureLimitation(invalid) }
     }
 }

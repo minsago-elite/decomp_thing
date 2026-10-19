@@ -33,12 +33,9 @@ internal fun proposeExplorationInputs(
     fun <T> capture(stage: ExplorationPreparationStage, action: () -> T): T = try {
         action()
     } catch (failure: Exception) {
-        try {
+        retainExplorationFailure(failure) {
             retainFailure(ExplorationPreparationFailureRecord(stage, ExplorationPreparationReason.from(failure), seeds, angrInputs, staticInputs))
-        } catch (retentionFailure: Exception) {
-            if (retentionFailure !== failure) failure.addSuppressed(retentionFailure)
         }
-        throw failure
     }
     val generated = seeds + capture(ExplorationPreparationStage.ANGR, angr).also { angrInputs = it } +
         capture(ExplorationPreparationStage.STATIC_HINTS, staticHints).also { staticInputs = it }

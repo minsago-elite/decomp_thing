@@ -82,6 +82,15 @@ it('preserves byte duplicate-key argument and group bounds before constructing a
   const count = fixture(); count.availableInputs.seeds = 1001; count.details.seeds = Array.from({ length: 1001 }, () => input()); expect(() => parse(count)).toThrow();
 });
 
+it('admits producer-bounded large preparation groups through the dedicated artifact node ceiling', () => {
+  const seeds = Array.from({ length: 192 }, () => ({ ...input(), args: Array.from({ length: 256 }, () => '') }));
+  const value = { ...fixture(), failure: { stage: 'angr-generation', kind: 'generation-failure', code: 'candidate-generation-failed' },
+    availableInputs: { seeds: 192, angr: null, staticHints: null, expanded: null }, details: { seeds, angr: null, staticHints: null } };
+  expect(parse(value).cases).toHaveLength(192);
+  expect(parse(value).cases[191]?.args).toHaveLength(256);
+  expect(parse(value).preparation.available.expanded).toBeNull();
+});
+
 it('reads the real decoded digest-bound generation record and inspects only reported inputs without execution outcomes', async () => {
   const { fetcher, artifact } = await read(fixture());
   const progress = await screen.findByRole('table', { name: 'Recorded input availability before generation failed' });
