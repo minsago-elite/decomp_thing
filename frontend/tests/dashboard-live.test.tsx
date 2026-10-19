@@ -54,7 +54,7 @@ it('defers the whole changed snapshot while a row is focused and applies it on e
   expect(order()).toEqual(['live-1.elf', 'live-2.elf']);
   expect(document.activeElement).toBe(focused);
   expect(within(focused.closest('li')!).getByText('Uploaded')).toBeTruthy();
-  expect(within(focused.closest('li')!).queryByText('Failed')).toBeNull();
+  expect(within(screen.getByRole('list', { name: 'Uploaded jobs' })).queryByText('Failed')).toBeNull();
   expect(screen.getByText(/The displayed rows are an earlier snapshot/)).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
