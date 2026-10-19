@@ -74,4 +74,22 @@ class WebExplorationScalarTypesTest {
         }
         assertEquals("available", project(legacy).getValue("state").jsonPrimitive.content)
     }
+
+    @Test fun `legacy new signature count must match its retained list before exposing a summary`() {
+        fun retained(signatures: List<String>, count: String): JsonObject = JsonObject(legacy + mapOf(
+            "newOutputSignatures" to JsonArray(signatures.map(::JsonPrimitive)),
+            "confidence" to JsonObject(legacy.getValue("confidence").jsonObject +
+                ("newOutputSignatureCount" to Json.parseToJsonElement(count))),
+        ))
+        for ((signatures, count) in listOf(emptyList<String>() to "0", listOf("new") to "1")) {
+            val result = project(retained(signatures, count))
+            assertEquals("available", result.getValue("state").jsonPrimitive.content)
+            assertEquals(count, result.getValue("summary").jsonObject.getValue("confidence").jsonObject
+                .getValue("newOutputSignatureCount").jsonPrimitive.content)
+        }
+        for ((signatures, count) in listOf(
+            emptyList<String>() to "1", listOf("new") to "0", listOf("new") to "2",
+            listOf("new", "other") to "1", emptyList<String>() to "18446744073709551615",
+        )) assertUnavailable(retained(signatures, count), "invalid")
+    }
 }
