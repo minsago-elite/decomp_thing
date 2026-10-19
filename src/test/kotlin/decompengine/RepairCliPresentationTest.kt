@@ -18,6 +18,85 @@ import kotlin.test.*
 
 class RepairCliPresentationTest {
     @Test
+    fun `repair action masks preparation failures before dispatch and retains status and cleanup`() {
+        val secret = "SYNTHETIC_REPAIR_PREPARATION"
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            val stages = listOf("exploration", "runtime", "presentation")
+            for (failedStage in stages) for (failure in listOf(
+                java.io.IOException("$failedStage: $secret"),
+                IllegalArgumentException("$failedStage: $secret"),
+                NumberFormatException("$failedStage: $secret"),
+            )) {
+                val entered = mutableListOf<String>()
+                var closed = false
+                assertEquals(1, runRepairCliAction(listOf(secret), output) {
+                    AutoCloseable { closed = true }.use {
+                        for (stage in stages) {
+                            entered += stage
+                            if (stage == failedStage) throw failure
+                        }
+                        0
+                    }
+                })
+                assertEquals(stages.take(stages.indexOf(failedStage) + 1), entered)
+                assertTrue(closed)
+                val diagnostic = bytes.toString(Charsets.UTF_8)
+                assertTrue(diagnostic.startsWith("repair unavailable or failed:"), diagnostic)
+                assertFalse(diagnostic.contains("usage:"), diagnostic)
+                assertFalse(diagnostic.contains(secret), diagnostic)
+                assertFalse(diagnostic.contains("Exception"), diagnostic)
+                bytes.reset()
+            }
+            val configurationFailure = assertFailsWith<RepairCliConfigurationException> {
+                prepareRepairCliConfiguration(Path.of("synthetic-repair-history.json"), "invalid-harness")
+            }
+            assertIs<IllegalArgumentException>(configurationFailure.cause)
+            assertEquals(2, runRepairCliAction(emptyList(), output) { throw configurationFailure })
+            assertTrue(bytes.toString(Charsets.UTF_8).contains(WorkflowCliCommand.REPAIR.usage))
+            bytes.reset()
+            val suppliedValues = mutableListOf(secret)
+            val originalConfigurationFailure = IllegalArgumentException("invalid $secret")
+            val privateConfigurationFailure = RepairCliConfigurationException(originalConfigurationFailure)
+            assertSame(originalConfigurationFailure, privateConfigurationFailure.cause)
+            assertEquals(2, runRepairCliAction(suppliedValues, output) {
+                suppliedValues.clear()
+                throw privateConfigurationFailure
+            })
+            assertTrue(bytes.toString(Charsets.UTF_8).contains(WorkflowCliCommand.REPAIR.usage))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
+            bytes.reset()
+            for (status in 0..2) {
+                assertEquals(status, runRepairCliAction(emptyList(), output) { status })
+                assertEquals("", bytes.toString(Charsets.UTF_8))
+            }
+            var dispatched = false
+            val rejected = object : AbstractCollection<String>() {
+                override val size: Int = 4097
+                override fun iterator(): Iterator<String> = error("$secret must not be read")
+            }
+            assertEquals(1, runRepairCliAction(rejected, output) { dispatched = true; 0 })
+            assertFalse(dispatched)
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+            val initiallyInterrupted = Thread.interrupted()
+            try {
+                assertEquals(1, runRepairCliAction(listOf(secret), output) { throw InterruptedException(secret) })
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
+            } finally {
+                Thread.interrupted()
+                if (initiallyInterrupted) Thread.currentThread().interrupt()
+            }
+            bytes.reset()
+            val fatal = AssertionError(secret)
+            assertSame(fatal, assertFailsWith<AssertionError> {
+                runRepairCliAction(listOf(secret), output) { throw fatal }
+            })
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
+    @Test
     fun `CLI encoding cannot reconstruct secrets through replacement or a lossy codec alias`() {
         val secret = "a?b"
         val hash = "1".repeat(64)

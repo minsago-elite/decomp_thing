@@ -60,11 +60,22 @@ fun main(args: Array<String>) {
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
-            System.err.println("unknown command: ${args.first()}")
+            val exitCode = renderUnknownCommand(args.first(), System.getenv().values)
             printHelp()
-            kotlin.system.exitProcess(2)
+            kotlin.system.exitProcess(exitCode)
         }
     }
+}
+
+/** Reject an unknown selector without exposing its raw argument before workflow dispatch. */
+internal fun renderUnknownCommand(
+    command: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    printWorkflowCliLine("unknown command", command, redactor, output)
+    return 2
 }
 
 private fun runRecordedRepairHistory(args: List<String>) {
@@ -385,42 +396,63 @@ private fun runRepair(args: List<String>) {
         }
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
-    val reportsDir = reports ?: project.resolve("reports")
+    val originalBinary: Path = original
+    val projectDirectory: Path = project
+    val reportsDir = reports ?: projectDirectory.resolve("reports")
     val environment = System.getenv()
-    val redactor = cliDiagnosticRedactor(environment.values) ?: kotlin.system.exitProcess(1)
-    val regressionInputs = if (exploreInputs) {
-        val exploration = AutomaticExplorer().explore(
-            original,
-            listOf(CandidateInput("seed_default", CandidateSource.SEED)),
-            reportsDir,
-        )
-        renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
-        exploration.candidates.map(CandidateInput::toProcessInput)
-    } else {
-        listOf(ProcessInput("default"))
-    }
-    val result = try {
-        SecureRepairRuntime.open(
-            RepairRuntimeConfiguration(
-                profileId = "generated-c-make-v1",
-                historyPath = reportsDir.resolve("repair_history.json"),
-                harnessOverride = harnessOverride,
-            ),
-        ).use { runtime ->
+    val exitCode = runRepairCliAction(environment.values) { redactor ->
+        val regressionInputs = if (exploreInputs) {
+            val exploration = AutomaticExplorer().explore(
+                originalBinary,
+                listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+                reportsDir,
+            )
+            renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
+            exploration.candidates.map(CandidateInput::toProcessInput)
+        } else {
+            listOf(ProcessInput("default"))
+        }
+        val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
+        val result = SecureRepairRuntime.open(configuration).use { runtime ->
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
-                runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+                runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
             }
         }
-    } catch (failure: IllegalArgumentException) {
-        repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
-    } catch (failure: Exception) {
-        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor)
-        kotlin.system.exitProcess(1)
+        renderRepairPresentation(presentRepairOutcome(result), environment.values)
     }
-    val presentation = presentRepairOutcome(result)
-    val exitCode = renderRepairPresentation(presentation, environment.values)
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Only validation of the CLI's data-only configuration can produce a usage failure. */
+internal fun prepareRepairCliConfiguration(historyPath: Path, harnessOverride: String?): RepairRuntimeConfiguration = try {
+    RepairRuntimeConfiguration(
+        profileId = "generated-c-make-v1",
+        historyPath = historyPath,
+        harnessOverride = harnessOverride,
+    )
+} catch (failure: IllegalArgumentException) {
+    throw RepairCliConfigurationException(failure)
+}
+
+internal class RepairCliConfigurationException(cause: IllegalArgumentException) : RuntimeException(cause.message, cause)
+
+/** Admit diagnostics before preparation, and keep raw exploration/runtime failures off stderr. */
+internal fun runRepairCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Int,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
+    return try {
+        action(redactor)
+    } catch (failure: RepairCliConfigurationException) {
+        renderWorkflowUsageError(WorkflowCliCommand.REPAIR, failure.message ?: "invalid repair configuration", redactor, output)
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor, output)
+        1
+    }
 }
 
 /** A refused display cannot expose a partial result or rewrite the durable typed outcome. */
@@ -499,6 +531,16 @@ internal fun renderWorkflowUsageError(
     output: PrintStream = System.err,
 ): Int {
     val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    return renderWorkflowUsageError(command, message, redactor, output)
+}
+
+/** Reuse the admitted immutable inventory after a workflow action, including failure paths. */
+private fun renderWorkflowUsageError(
+    command: WorkflowCliCommand,
+    message: String,
+    redactor: ProgressRedactor,
+    output: PrintStream,
+): Int {
     val usage = command.usage
     if (message.length > 16_384 - usage.length - 2) return 2
     // The enum's compiled help is public syntax. Project the complete frame to conceal
