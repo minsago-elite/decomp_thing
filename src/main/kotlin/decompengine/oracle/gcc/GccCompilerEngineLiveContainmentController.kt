@@ -1269,6 +1269,33 @@ internal fun gccSystemLibraryLocations(architecture: String): List<Pair<Path, Pa
     }
 }
 
+/** Resolve and validate every source and the required interpreter before manifest capture. */
+internal fun <T> withGccSystemLibrarySources(
+    architecture: String,
+    resolveDirectory: (Path) -> Path?,
+    isRegularFile: (Path) -> Boolean,
+    capture: (List<Pair<Path, Path>>) -> T,
+): T {
+    val sources = gccSystemLibraryLocations(architecture).mapNotNull { (candidate, destination) ->
+        resolveDirectory(candidate)?.let { source ->
+            if (listOf(Path.of("/lib"), Path.of("/usr/lib")).any { it.startsWith(source) }) {
+                liveContainmentFail("GCC system-library source resolves to an unsupported whole-library root")
+            }
+            source to destination
+        }
+    }
+    val interpreter = when (architecture) {
+        "amd64", "x86_64" -> Path.of("/lib64/ld-linux-x86-64.so.2")
+        "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
+        else -> liveContainmentFail("GCC host has no fixed system-library ABI mapping")
+    }
+    val interpreterSource = sources.singleOrNull { it.second == interpreter.parent }?.first
+    if (interpreterSource == null || !isRegularFile(interpreterSource.resolve(interpreter.fileName))) {
+        liveContainmentFail("GCC system-library interpreter layout is unsupported")
+    }
+    return capture(sources)
+}
+
 internal fun deriveRuntimeConfiguration(
     definition: GccCompilerEngineValidatedContainmentDefinition,
     classPath: List<FullTreeFunctionObservationClassPathEntry>,
@@ -1289,13 +1316,16 @@ internal fun deriveRuntimeConfiguration(
                 calculateFullTreeObservationRuntimeManifestSha256(source)
             },
         )
-    val systemMounts = gccSystemLibraryLocations(System.getProperty("os.arch")).mapNotNull { (libraryDirectory, destination) ->
-        if (!Files.isDirectory(libraryDirectory, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(libraryDirectory)) {
-            null
-        } else {
-            val source = libraryDirectory.toRealPath()
-            runtimeMount(source, destination)
-        }
+    val systemMounts = withGccSystemLibrarySources(
+        System.getProperty("os.arch"),
+        resolveDirectory = { directory ->
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(directory)) {
+                null
+            } else directory.toRealPath()
+        },
+        isRegularFile = { Files.isRegularFile(it) },
+    ) { sources ->
+        sources.map { (source, destination) -> runtimeMount(source, destination) }
     }
     if (systemMounts.isEmpty()) liveContainmentFail("GCC host has no fixed system-library runtime mounts")
     val uid = definition.outputLease.uid
