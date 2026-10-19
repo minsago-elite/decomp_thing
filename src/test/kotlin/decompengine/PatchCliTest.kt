@@ -16,6 +16,39 @@ import kotlin.test.assertTrue
 
 class PatchCliTest {
     @Test
+    fun `unknown command diagnostics admit private values before rendering the complete frame`() {
+        val bytes = ByteArrayOutputStream()
+        PrintStream(bytes, true, Charsets.UTF_8).use { output ->
+            assertEquals(2, renderUnknownCommand("public", emptyList(), output))
+            assertEquals("unknown command: public\n", bytes.toString(Charsets.UTF_8))
+            bytes.reset()
+            val secret = "SYNTHETIC_UNKNOWN_COMMAND"
+            for (value in listOf(secret, "unknown command: $secret", "unknown command: $secret\n")) {
+                assertEquals(2, renderUnknownCommand(secret, listOf(value), output))
+                assertFalse(bytes.toString(Charsets.UTF_8).contains(value))
+                assertTrue(bytes.toString(Charsets.UTF_8).endsWith("\n"))
+                bytes.reset()
+            }
+            assertEquals(2, renderUnknownCommand("Bearer synthetic-token", emptyList(), output))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("synthetic-token"))
+            bytes.reset()
+            assertEquals(2, renderUnknownCommand("private\u000Ccommand", listOf("privatecommand"), output))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("privatecommand"))
+            bytes.reset()
+            val oversized = "q".repeat(16_385)
+            assertEquals(2, renderUnknownCommand(oversized, listOf(oversized), output))
+            assertFalse(bytes.toString(Charsets.UTF_8).contains("qq"))
+            bytes.reset()
+            val rejected = object : AbstractCollection<String>() {
+                override val size: Int = 4097
+                override fun iterator(): Iterator<String> = error("private inventory must not be read")
+            }
+            assertEquals(2, renderUnknownCommand(secret, rejected, output))
+            assertEquals("", bytes.toString(Charsets.UTF_8))
+        }
+    }
+
+    @Test
     fun `usage preserves compiled profile syntax while masking dynamic values and restored boundary collisions`() {
         val bytes = ByteArrayOutputStream()
         PrintStream(bytes, true, Charsets.UTF_8).use { output ->
