@@ -3,7 +3,7 @@ import type { Artifact } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { explorationCasesCopy as copy } from '../copy/attempt';
-import { message } from '../shared/messages';
+import { message, textMessage } from '../shared/messages';
 import { bytePreview, CASE_PAGE_SIZE, parseRetainedCases, textPreview } from './explorationCases';
 import type { RetainedCase, RetainedCases } from './explorationCases';
 import { parseFailureCases } from './explorationFailureCases';
@@ -18,7 +18,7 @@ function caseKey(value: RetainedCase): string {
 }
 function caseName(value: RetainedCase): string {
   const partial = failureCase(value);
-  return partial ? message(copy.sampleCase, { sample: partial.sample, index: partial.index, id: textPreview(value.id).text }) : textPreview(value.id).text;
+  return partial ? textMessage(copy.sampleCase, { sample: partial.sample, index: partial.index, id: textPreview(value.id).text }) : textPreview(value.id).text;
 }
 
 function Preview({ value }: { value: string }) {
