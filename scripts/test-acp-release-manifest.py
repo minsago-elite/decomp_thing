@@ -162,8 +162,10 @@ class RequiredCaseManifestControls(unittest.TestCase):
     def test_credential_free_observations_retain_only_their_actual_boundary_scope(self):
         value = authored_bindings()
         covered = {"initialize", "advertised-capabilities", "clean-shutdown"}
+        value["agents"][0]["providerPolicy"]["mode"] = "credential-free"
         artifact = value["artifacts"][0]
-        artifact.update(scope="credential-free-initialize", cases=sorted(covered))
+        artifact.update(scope="credential-free-initialize", cases=sorted(covered),
+                        contextSha256=MANIFEST.context_digest(value, value["agents"][0]))
         for result in value["agents"][0]["results"]:
             result["outcome"] = "OBSERVED" if result["caseId"] in covered else "UNQUALIFIED"
             if result["caseId"] not in covered:
@@ -174,6 +176,30 @@ class RequiredCaseManifestControls(unittest.TestCase):
         self.assertEqual(3, sum(row["outcome"] == "OBSERVED" for row in report["blockingCases"]))
         artifact["cases"].append("repair")
         self.refuse(value)
+
+    def test_repository_case_alias_cannot_assign_one_physical_artifact_to_both_agents(self):
+        value = authored_bindings()
+        value["artifacts"][1]["repository"] = value["artifacts"][0]["repository"].upper()
+        value["artifacts"][1]["artifactId"] = value["artifacts"][0]["artifactId"]
+        with self.assertRaisesRegex(ValueError, "conflicting-physical-artifact"):
+            self.inspect(value)
+
+    def test_credential_free_scope_rejects_brokered_and_unavailable_provider_labels(self):
+        for scope in ("credential-free-initialize", "credential-free-authentication-boundary"):
+            for mode in ("brokered", "unavailable"):
+                value = authored_bindings()
+                agent = value["agents"][0]
+                agent["providerPolicy"]["mode"] = mode
+                covered = {"initialize", "advertised-capabilities", "clean-shutdown"}
+                value["artifacts"][0].update(scope=scope, cases=sorted(covered),
+                                            contextSha256=MANIFEST.context_digest(value, agent))
+                for result in agent["results"]:
+                    result["outcome"] = "OBSERVED" if result["caseId"] in covered else "UNQUALIFIED"
+                    if result["caseId"] not in covered:
+                        result["artifact"] = None
+                with self.subTest(scope=scope, mode=mode):
+                    with self.assertRaisesRegex(ValueError, "credential-free-provider-policy"):
+                        self.inspect(value)
 
     def test_expected_source_and_definition_trust_anchors_cannot_be_branch_names_or_placeholders(self):
         for commit in ("master", "HEAD", "a" * 39, "0" * 40):

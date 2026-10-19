@@ -324,10 +324,13 @@ this object: `{releaseCommit, definitionSha256, client, sdk, protocolVersion, ag
 Here `agent` is the exact pin object. The verifier's `context_digest` implements that encoding. Each artifact must
 match its agent's full version context and source commit. References across agents/cases, unused artifacts,
 conflicting declarations of the same repository/artifact identity, unknown fields and duplicate JSON keys are
-refused. Inputs are bounded to one MiB; metadata and exception details are not echoed on refusal.
+refused. Repository identity comparisons ignore ASCII casing. Inputs are bounded to one MiB; metadata and exception
+details are not echoed on refusal.
 
 Artifact scopes are `positive-required-case`, `negative-required-case`, `credential-free-initialize`, and
-`credential-free-authentication-boundary`. A `PASS` binding requires the positive scope. Credential-free artifacts
+`credential-free-authentication-boundary`. A `PASS` binding requires the positive scope. A non-null provider policy
+on a credential-free artifact must itself have mode `credential-free`; brokered or unavailable labels are refused.
+Credential-free artifacts
 can retain only initialization, advertisement and their own shutdown boundary; the authentication-boundary scope
 also permits the attempted session-creation case. They cannot bind edits, prompts, permission grants, cancellation,
 reconstruction or repair. `OBSERVED` and `AUTH_REQUIRED` preserve these narrower outcomes and block completeness;

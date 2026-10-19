@@ -223,6 +223,8 @@ def inspect_bindings(definition, definition_sha256, manifest, release_commit):
         require(set(artifact["cases"]) <= set(CASE_IDS), "artifact-cases")
         require(type(artifact["scope"]) is str and artifact["scope"] in SCOPES, "artifact-scope")
         if artifact["scope"].startswith("credential-free-"):
+            provider = agents[artifact["agentId"]]["providerPolicy"]
+            require(provider is None or provider["mode"] == "credential-free", "credential-free-provider-policy")
             covered = {"initialize", "advertised-capabilities", "clean-shutdown"}
             if artifact["scope"] == "credential-free-authentication-boundary":
                 covered.add("session-creation")
@@ -238,7 +240,7 @@ def inspect_bindings(definition, definition_sha256, manifest, release_commit):
         integer(artifact["runAttempt"], 2 ** 31 - 1, "artifact-attempt")
         integer(artifact["bytes"], 1024 ** 4, "artifact-bytes")
         hex_value(artifact["sha256"], 64, "artifact-sha256")
-        location = (artifact["repository"], artifact["artifactId"])
+        location = (artifact["repository"].lower(), artifact["artifactId"])
         binding = {k: v for k, v in artifact.items() if k != "id"}
         require(location not in physical or physical[location] == binding, "conflicting-physical-artifact")
         physical[location] = binding
