@@ -16,12 +16,14 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
         try {
             require(bytes.size <= 1_048_576)
             val root = OracleJson.parse(bytes).jsonObject
-            if (root["schema"]?.jsonPrimitive?.contentOrNull == EXPLORATION_FAILURE_SCHEMA &&
-                root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1
-            ) {
-                limitation = explorationFailureLimitation(root)
-                state = "partial"
-                producerSchemaVersion = 1
+            if (root["schema"]?.jsonPrimitive?.contentOrNull == EXPLORATION_FAILURE_SCHEMA) {
+                if (root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1) {
+                    limitation = explorationFailureLimitation(root)
+                    state = "partial"
+                    producerSchemaVersion = 1
+                } else {
+                    state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
+                }
             } else if ("schemaVersion" in root || "schema_version" in root) {
                 state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
             } else if (!root.keys.containsAll(setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures", "newOutputSignatures", "angr", "confidence", "candidates", "observations"))) {

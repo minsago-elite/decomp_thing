@@ -52,8 +52,13 @@ class WebExplorationReportTest {
             assertEquals("invalid", result.getValue("state").jsonPrimitive.content)
             assertEquals(JsonNull, result.getValue("summary"))
         }
-        val result = report(failed.replace("\"schemaVersion\":1", "\"schemaVersion\":2"))
-        assertEquals("unsupported", result.getValue("state").jsonPrimitive.content)
-        assertEquals(JsonNull, result.getValue("summary"))
+        val legacyWithFailureDeclaration = JsonObject(Json.parseToJsonElement(valid).jsonObject +
+            ("schema" to JsonPrimitive("decomp-exploration-failure"))).toString()
+        for (text in listOf(failed.replace("\"schemaVersion\":1", "\"schemaVersion\":2"),
+            failed.replace("\"schemaVersion\":1,", ""), legacyWithFailureDeclaration)) {
+            val result = report(text)
+            assertEquals("unsupported", result.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, result.getValue("summary"))
+        }
     }
 }

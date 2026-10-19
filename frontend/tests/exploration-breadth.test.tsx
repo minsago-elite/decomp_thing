@@ -112,3 +112,35 @@ it('clears a prior sample summary when its deliberate refresh fails', async () =
   expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
   expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull(); expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+it('accepts a known version-one observation failure through the real decoder without numeric or legacy-case views', async () => {
+  const value = report(); value.state = 'partial'; value.producerSchemaVersion = 1; value.summary = null;
+  value.binding.revisionId = null;
+  if (value.sourceArtifact) value.sourceArtifact.binding.revisionId = null;
+  value.limitations = ['The producer reported a timeout while observing the expanded sample. Coverage and confidence are unavailable.'];
+  const { fetcher } = read(value);
+  expect(await screen.findByText(value.limitations[0]!)).toBeTruthy();
+  expect(screen.getByText(value.reportId)).toBeTruthy(); expect(screen.getByText(value.binding.runId!)).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(value.sourceArtifact!.contentHref);
+  expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
+  expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Read retained case details' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('rejects unknown or authority-changing failure projections through the real decoder before showing their data', async () => {
+  for (const mismatch of ['future', 'available', 'numeric', 'authority', 'acceptance-artifact'] as const) {
+    const value = report(); value.state = 'partial'; value.producerSchemaVersion = 1;
+    if (mismatch !== 'numeric') value.summary = null;
+    if (mismatch === 'future') value.producerSchemaVersion = 2;
+    else if (mismatch === 'available') value.state = 'available';
+    else if (mismatch === 'authority') value.authority = 'canonical-validation';
+    else if (mismatch === 'acceptance-artifact') value.acceptanceArtifactId = 'artifact_claim';
+    const { fetcher, mounted } = read(value);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByText(value.reportId)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Download observed exploration JSON' })).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce(); mounted.unmount();
+  }
+});
