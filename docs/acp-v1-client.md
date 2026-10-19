@@ -144,6 +144,8 @@ Provision the components in this order:
    The configuration stores the source name and provenance, never the value; `inheritParentEnvironment` must remain
    `false`, and no ambient environment is serialized or forwarded. Once a secret binding is configured, preflight
    resolves and forwards that exact variable to the agent even though it never creates a session or sends a prompt.
+   This is a non-provider agent binding, not a provider credential channel; follow the
+   [provider credential ownership boundary](#provider-credentials-and-current-availability) below.
    Host-native execution can export that one name. Compose requires the same explicit one-name opt-in rather than an
    ambient environment file:
 

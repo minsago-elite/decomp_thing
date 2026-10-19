@@ -433,8 +433,11 @@ Install these system tools before running the test suite:
 Optional local integrations:
 
 - Set `ANGR_PYTHON` to an angr-enabled Python executable to run the real symbolic argv/stdin integration test. The Docker image pins angr for production exploration; ordinary JVM tests use a deterministic process-adapter fixture.
-- `ACP_CONFIG_FILE` selects the strict ACP v1 provisioning used by agent-backed workflows. Agent credentials remain in
-  the named secret environment sources declared by that private configuration; they are not serialized into it.
+- `ACP_CONFIG_FILE` selects the strict ACP v1 provisioning used by agent-backed workflows. Explicit non-provider agent
+  secrets remain in the named environment sources declared by that private configuration and are forwarded to the
+  agent, not serialized into the configuration. Provider credentials belong only to the separately qualified operator
+  broker, whose transport is unavailable in the current network-free deployment; see the
+  [provider credential boundary](acp-v1-client.md#provider-credentials-and-current-availability).
 - `BASE_URL`, `API_KEY`, and `MODEL` are deprecated compatibility inputs and are accepted only with exact
   `ACP_HARNESS=legacy-openai` or `--harness legacy-openai`. The pinned MVP fixture retains that explicit legacy path.
 - Ghidra is bundled through its Java API worker. Gradle stages the hash-locked

@@ -10,6 +10,8 @@ zero digest with a value measured during trusted provisioning. The credential-fr
 argv, disables parent-environment inheritance, and bounds protocol, filesystem, process, memory, CPU, file, and
 runtime-closure use. Optional secret provenance is configured explicitly as described in the complete procedure at
 [docs/acp-v1-client.md](docs/acp-v1-client.md#operator-provisioning-and-preflight).
+Those bindings forward non-provider agent secrets; they do not provision provider connectivity. Provider credentials
+remain outside the agent under the [broker ownership boundary](docs/acp-v1-client.md#provider-credentials-and-current-availability).
 
 ```bash
 ./gradlew installDist
