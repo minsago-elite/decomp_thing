@@ -385,22 +385,23 @@ private fun runRepair(args: List<String>) {
         }
     }
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
-    val reportsDir = reports ?: project.resolve("reports")
+    val originalBinary: Path = original
+    val projectDirectory: Path = project
+    val reportsDir = reports ?: projectDirectory.resolve("reports")
     val environment = System.getenv()
-    val redactor = cliDiagnosticRedactor(environment.values) ?: kotlin.system.exitProcess(1)
-    val regressionInputs = if (exploreInputs) {
-        val exploration = AutomaticExplorer().explore(
-            original,
-            listOf(CandidateInput("seed_default", CandidateSource.SEED)),
-            reportsDir,
-        )
-        renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
-        exploration.candidates.map(CandidateInput::toProcessInput)
-    } else {
-        listOf(ProcessInput("default"))
-    }
-    val result = try {
-        SecureRepairRuntime.open(
+    val exitCode = runRepairCliAction(environment.values) { redactor ->
+        val regressionInputs = if (exploreInputs) {
+            val exploration = AutomaticExplorer().explore(
+                originalBinary,
+                listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+                reportsDir,
+            )
+            renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
+            exploration.candidates.map(CandidateInput::toProcessInput)
+        } else {
+            listOf(ProcessInput("default"))
+        }
+        val result = SecureRepairRuntime.open(
             RepairRuntimeConfiguration(
                 profileId = "generated-c-make-v1",
                 historyPath = reportsDir.resolve("repair_history.json"),
@@ -409,18 +410,30 @@ private fun runRepair(args: List<String>) {
         ).use { runtime ->
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
-                runtime.runRepair(project, original, regressionInputs, reportsDir, maxIterations)
+                runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
             }
         }
-    } catch (failure: IllegalArgumentException) {
-        repairUsageError(redactor.text(failure.message ?: "invalid repair configuration"))
-    } catch (failure: Exception) {
-        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor)
-        kotlin.system.exitProcess(1)
+        renderRepairPresentation(presentRepairOutcome(result), environment.values)
     }
-    val presentation = presentRepairOutcome(result)
-    val exitCode = renderRepairPresentation(presentation, environment.values)
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
+}
+
+/** Admit diagnostics before preparation, and keep raw exploration/runtime failures off stderr. */
+internal fun runRepairCliAction(
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+    action: (ProgressRedactor) -> Int,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
+    return try {
+        action(redactor)
+    } catch (failure: IllegalArgumentException) {
+        renderRepairUsageError(failure.message ?: "invalid repair configuration", sensitiveValues, output)
+    } catch (failure: Exception) {
+        if (failure is InterruptedException) Thread.currentThread().interrupt()
+        renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor, output)
+        1
+    }
 }
 
 /** A refused display cannot expose a partial result or rewrite the durable typed outcome. */
