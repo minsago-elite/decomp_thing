@@ -428,7 +428,7 @@ internal fun runRepairCliAction(
     return try {
         action(redactor)
     } catch (failure: IllegalArgumentException) {
-        renderRepairUsageError(failure.message ?: "invalid repair configuration", sensitiveValues, output)
+        renderWorkflowUsageError(WorkflowCliCommand.REPAIR, failure.message ?: "invalid repair configuration", redactor, output)
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()
         renderWorkflowFailure(WorkflowCliCommand.REPAIR, failure.message ?: failure.javaClass.simpleName, redactor, output)
@@ -512,6 +512,16 @@ internal fun renderWorkflowUsageError(
     output: PrintStream = System.err,
 ): Int {
     val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    return renderWorkflowUsageError(command, message, redactor, output)
+}
+
+/** Reuse the admitted immutable inventory after a workflow action, including failure paths. */
+private fun renderWorkflowUsageError(
+    command: WorkflowCliCommand,
+    message: String,
+    redactor: ProgressRedactor,
+    output: PrintStream,
+): Int {
     val usage = command.usage
     if (message.length > 16_384 - usage.length - 2) return 2
     // The enum's compiled help is public syntax. Project the complete frame to conceal

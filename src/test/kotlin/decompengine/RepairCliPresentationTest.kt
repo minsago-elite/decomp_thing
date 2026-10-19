@@ -43,7 +43,9 @@ class RepairCliPresentationTest {
                 assertFalse(diagnostic.contains("Exception"), diagnostic)
                 bytes.reset()
             }
-            assertEquals(2, runRepairCliAction(listOf(secret), output) {
+            val suppliedValues = mutableListOf(secret)
+            assertEquals(2, runRepairCliAction(suppliedValues, output) {
+                suppliedValues.clear()
                 throw IllegalArgumentException("invalid $secret")
             })
             assertTrue(bytes.toString(Charsets.UTF_8).contains(WorkflowCliCommand.REPAIR.usage))
