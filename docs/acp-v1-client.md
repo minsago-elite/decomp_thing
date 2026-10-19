@@ -270,6 +270,80 @@ Production reconstruction and repair continue to use protocol/capability handlin
 added for this matrix. Keep the pins, required-case definition and actual qualified outcomes distinct when
 reviewing an agent, SDK, runtime or provider-policy change; the complete current matrix must be qualified again.
 
+### Machine-readable required-case and result bindings
+
+[`contracts/acp/v1/required-cases.json`](../contracts/acp/v1/required-cases.json) records the same two pins and ten
+required cases per agent. It binds the client version, SDK artifact/reported version and stable protocol. The
+ordinary CI metadata check compares these declarations with the existing Gradle dependency, wire corpus and
+hash-locked agent scripts. It runs only authored data controls; it does not launch an agent or supply a real matrix.
+
+The [metadata verifier](../contracts/acp/v1/verify.py) has four modes:
+
+```bash
+python3 -B contracts/acp/v1/verify.py definition
+# RELEASE_COMMIT is the exact 40-character source commit being qualified.
+mkdir -p ./build/acp-release-bindings
+python3 -B contracts/acp/v1/verify.py template --release-commit "$RELEASE_COMMIT" \
+  > ./build/acp-release-bindings/results.json
+python3 -B contracts/acp/v1/verify.py inspect \
+  --release-commit "$RELEASE_COMMIT" --definition-sha256 "$DEFINITION_SHA256" \
+  --manifest ./build/acp-release-bindings/results.json
+python3 -B contracts/acp/v1/verify.py verify \
+  --release-commit "$RELEASE_COMMIT" --definition-sha256 "$DEFINITION_SHA256" \
+  --manifest ./build/acp-release-bindings/results.json
+```
+
+The release consumer must obtain `RELEASE_COMMIT` and `DEFINITION_SHA256` from its trusted release inputs. The
+digest commits to the exact definition bytes from that release, including whitespace. A branch name, abbreviated
+commit or zero placeholder is refused. Historical consumers may pass the retained definition with `--definition`;
+changing a definition is a new qualification input, not a migration of old results into current evidence.
+
+`template` writes all twenty cases as `UNQUALIFIED`, with null runtime/provider policy and no artifacts. These
+unknowns must remain explicit until evidence exists. `inspect` validates the metadata and lists blocking cases;
+its successful exit means the declarations are well formed. `verify` also requires every required case to have a
+positive binding and exits unsuccessfully for missing, failing, skipped, unsupported, authentication-required or
+observation-only results. A retained failure may have null runtime/provider policy; the context digest binds those
+unknowns and the report lists incomplete contexts. A positive binding requires both exact contexts. Neither mode
+requests a run, fetches an artifact, reads its payload or grants execution,
+credential or network authority. Both inspection reports always say `releaseQualified=false` and
+`artifactPayloadsIndependentlyVerified=false`, even for a structurally complete authored manifest.
+
+The version-one result document has the following closed fields:
+
+| Object | Required fields and meaning |
+|---|---|
+| Root | `schemaVersion=1`, `scope=acp-required-case-result-bindings`, exact `releaseCommit`, `definitionSha256`, identical `client`/`sdk`/`protocolVersion`, both `agents`, and `artifacts`. |
+| Agent | Exact definition `pin`, `runtime`, `providerPolicy`, and exactly one result for each required case. |
+| Runtime | `implementation`, exact `version`, `os`, `architecture`, and `containmentPolicy` with `id`, `version`, and `sha256`. |
+| Provider policy | `id`, exact `version`, `sha256`, and `mode` (`credential-free`, `brokered`, or `unavailable`). A positive required-case result requires the brokered policy. |
+| Case result | `caseId`, `outcome`, and an `artifact` identifier; only `UNQUALIFIED` uses a null reference. Negative outcomes remain negative. |
+| Artifact | Unique `id`, exact `agentId`, covered `cases`, `scope`, matching `sourceCommit` and `contextSha256`, plus `repository`, `runId`, `runAttempt`, immutable `artifactId`, `bytes`, and full-object `sha256`. |
+
+`contextSha256` is SHA-256 of the ASCII JSON produced with sorted keys, compact separators and ASCII escaping for
+this object: `{releaseCommit, definitionSha256, client, sdk, protocolVersion, agent, runtime, providerPolicy}`.
+Here `agent` is the exact pin object. The verifier's `context_digest` implements that encoding. Each artifact must
+match its agent's full version context and source commit. References across agents/cases, unused artifacts,
+conflicting declarations of the same repository/artifact identity, unknown fields and duplicate JSON keys are
+refused. Repository identity comparisons ignore ASCII casing. Inputs are bounded to one MiB; metadata and exception
+details are not echoed on refusal.
+
+Artifact scopes are `positive-required-case`, `negative-required-case`, `credential-free-initialize`, and
+`credential-free-authentication-boundary`. A `PASS` binding requires the positive scope. A non-null provider policy
+on a credential-free artifact must itself have mode `credential-free`; brokered or unavailable labels are refused.
+Credential-free artifacts
+can retain only initialization, advertisement and their own shutdown boundary; the authentication-boundary scope
+also permits the attempted session-creation case. They cannot bind edits, prompts, permission grants, cancellation,
+reconstruction or repair. `OBSERVED` and `AUTH_REQUIRED` preserve these narrower outcomes and block completeness;
+credential-free shutdown does not substitute for shutdown after a positive workflow.
+
+These are declarations and integrity references, not independent attestations of payload contents. The release
+consumer must independently authenticate the producer and exact checkout, retain and hash the actual immutable
+objects, verify their case/outcome and runtime/provider-policy evidence, and enforce all remaining oracle,
+validation, event, lineage and cleanup gates. A hash supplied beside an unverified `PASS` cannot establish any of
+those facts. No completed release result manifest is supplied by this definition or its authored controls. The
+existing positive-agent/provider and full release requirements remain open; updating metadata alone never proves
+the required rerun after a version or policy change.
+
 This is still not the complete compatibility matrix from issue #67. Neither lane proves a successful real-agent
 session, prompt streaming, authorized edit, permission handling, cancellation, or reconstruction/repair smoke. Those
 credentialed cases remain required before B1/B2 can close. The scripted Python fake agent remains a hostile

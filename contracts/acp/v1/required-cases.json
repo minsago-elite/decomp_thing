@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "scope": "acp-required-case-definition",
+  "client": {
+    "implementation": "decomp_engine",
+    "version": "0.1.0"
+  },
+  "sdk": {
+    "artifact": "com.agentclientprotocol:acp:0.30.1",
+    "reportedVersion": "0.30.1-dev-67"
+  },
+  "protocolVersion": 1,
+  "agents": [
+    {
+      "id": "goose",
+      "version": "1.46.0",
+      "archiveBytes": 84957951,
+      "archiveSha256": "a1cf4856a765d07d6b95689a53c7bca21fcc6e6d65c0dfd064fc704052b85a7b"
+    },
+    {
+      "id": "codex-acp",
+      "version": "0.16.0",
+      "archiveBytes": 74262216,
+      "archiveSha256": "0a9ad6c31ec9b2b87dccb7e9da3faf5d387e74470d24dbced75a160ed7b22d06"
+    }
+  ],
+  "requiredCases": [
+    "initialize",
+    "advertised-capabilities",
+    "session-creation",
+    "prompt-streaming",
+    "authorized-file-edits",
+    "permission-handling",
+    "cancellation",
+    "clean-shutdown",
+    "reconstruction",
+    "repair"
+  ]
+}
