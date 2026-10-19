@@ -85,6 +85,6 @@ function preparationCases(root: Record<string, unknown>): PreparationCases {
 export function parsePartialCases(input: string): PreparationCases | FailureRetainedCases {
   const root: unknown = parseBoundedJson(input, MAX_JSON_BYTES, MAX_RETAINED_JSON_NODES);
   if (root && typeof root === 'object' && !Array.isArray(root) && 'schema' in root
-    && root.schema === 'decomp-exploration-preparation-failure') return preparationCases(root as Record<string, unknown>);
+    && root.schema === 'decomp-exploration-preparation-failure') return preparationCases(root);
   return parseFailureCases(input);
 }
