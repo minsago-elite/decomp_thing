@@ -1,3 +1,4 @@
+import { queryCopy as copy } from '../copy/workspace';
 export const JOB_STATUSES = ['uploaded', 'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
 export type JobFilters = { search: string; status: string; createdAfter: string; createdBefore: string; limit: string; sort: string };
 export const DEFAULT_FILTERS: JobFilters = { search: '', status: '', createdAfter: '', createdBefore: '', limit: '50', sort: 'newest' };
@@ -31,17 +32,17 @@ export function jobFilters(search: string): JobFilters {
     values[key as keyof JobFilters] = value;
   }
   if (values.search.length > 256 || [...values.search].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '\ufffd'))
-    throw new JobFilterError('search', 'Use at most 256 characters without control characters.');
-  if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', 'Choose 50, 100 or 200 jobs per page.');
-  if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', 'Choose newest first or oldest first.');
-  if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', 'Choose a listed workflow state.');
+    throw new JobFilterError('search', copy.search);
+  if (!['50', '100', '200'].includes(values.limit)) throw new JobFilterError('limit', copy.limit);
+  if (!['newest', 'oldest'].includes(values.sort)) throw new JobFilterError('sort', copy.sort);
+  if (values.status !== '' && !(JOB_STATUSES as readonly string[]).includes(values.status)) throw new JobFilterError('status', copy.status);
   function date(field: 'createdAfter' | 'createdBefore') {
     try { return filterInstant(values[field]); }
-    catch { throw new JobFilterError(field, 'Enter a valid calendar date and time with a time zone, for example 2026-09-05T00:00:00Z.'); }
+    catch { throw new JobFilterError(field, copy.date); }
   }
   const after = date('createdAfter');
   const before = date('createdBefore');
-  if (after !== null && before !== null && after >= before) throw new JobFilterError('createdBefore', 'Created before must be later than Created at or after.');
+  if (after !== null && before !== null && after >= before) throw new JobFilterError('createdBefore', copy.dateOrder);
   return values;
 }
 

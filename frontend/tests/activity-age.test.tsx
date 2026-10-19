@@ -18,6 +18,8 @@ it('advances a coalesced receipt age without changing the original timestamp or 
   render(<p><ActivityReceiptAge receipt={receipt} visible /></p>);
   expect(screen.getByText(/less than 10 seconds ago/)).toBeTruthy();
   expect(document.querySelector('time')?.dateTime).toBe(receipt.at);
+  expect(document.querySelector('time')?.title).toBe(receipt.at);
+  expect(screen.getByText('2026-09-05 00:00:00 UTC')).toBeTruthy();
   await tick(10000);
   expect(screen.getByText(/about 10 seconds ago/)).toBeTruthy();
   await tick(50000);

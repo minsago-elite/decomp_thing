@@ -1,3 +1,5 @@
+import { activityCopy as copy } from '../copy/attempt';
+import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
@@ -122,13 +124,13 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
         }
         setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 401
-          ? 'The local session expired or is unavailable. Reconnect the session before reading activity.'
+          ? copy.theLocalSessionExpiredOrIsUnavailableReconnectTheSession
           : failure instanceof ApiClientError && failure.status === 403
-          ? 'Activity access was denied. Check the local session and server.'
-          : transient ? 'Activity reconnect attempts were exhausted. Displayed observations may be stale; read a fresh history to retry.'
+          ? copy.activityAccessWasDeniedCheckTheLocalSessionAndServer
+          : transient ? copy.activityReconnectAttemptsWereExhaustedDisplayedObservationsMayBeStale
           : failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '')
-          ? 'Retained history has a gap. Read a fresh history to establish a new position.'
-          : 'Activity could not be verified. Displayed observations may be stale; read a fresh history or check the local session.', failure));
+          ? copy.retainedHistoryHasAGapReadAFreshHistoryTo
+          : copy.activityCouldNotBeVerifiedDisplayedObservationsMayBeStale, failure));
         setFollowing(false);
       }
     };
@@ -138,45 +140,47 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
 
   const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
   return <section aria-labelledby="activity-title">
-    <h2 id="activity-title">Retained activity</h2>
-    <p>Journal observations do not establish validation or acceptance. Message text is withheld because the journal does not certify public visibility.</p>
+    <h2 id="activity-title">{copy.retainedActivity}</h2>
+    <p>{copy.journalObservationsDoNotEstablishValidationOrAcceptanceMessageText}</p>
     <button type="button" disabled={!!error} onClick={() => {
       if (rows.length === capacity) {
         position.current = { ...position.current, rows: [] }; setRows([]); setFollowing(true);
       } else setFollowing(value => !value);
     }}>
-      {rows.length === capacity ? 'Continue activity on next page' : following ? 'Pause activity' : position.current.initialized ? 'Resume activity' : 'Follow activity'}
+      {rows.length === capacity ? copy.continueActivityOnNextPage : following ? copy.pauseActivity : position.current.initialized ? copy.resumeActivity : copy.followActivity}
     </button>{' '}
     <button type="button" onClick={() => {
       position.current = { initialized: false, cursor: null, rows: [], last: null };
       setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
-    }}>Read fresh activity history</button>
+    }}>{copy.readFreshActivityHistory}</button>
     <fieldset class="activity-filters">
-      <legend>Filter this activity page</legend>
-      <label>Observation category
-        <select value={group} onChange={event => setGroup(event.currentTarget.value as 'all' | ActivityGroup)}>
-          <option value="all">All observations</option><option value="stages">Stages</option>
-          <option value="messages">Message metadata</option><option value="plans">Plan metadata</option>
-          <option value="usage">Usage and agent outcomes</option><option value="tools">Tools and changes</option><option value="other">Other observations</option>
+      <legend>{copy.filterThisActivityPage}</legend>
+      <label>{copy.observationCategory}<select value={group} onChange={event => setGroup(event.currentTarget.value as 'all' | ActivityGroup)}>
+          <option value="all">{copy.allObservations}</option><option value="stages">{copy.stages}</option>
+          <option value="messages">{copy.messageMetadata}</option><option value="plans">{copy.planMetadata}</option>
+          <option value="usage">{copy.usageAndAgentOutcomes}</option><option value="tools">{copy.toolsAndChanges}</option><option value="other">{copy.otherObservations}</option>
         </select>
       </label>
-      <label>Task digest contains
-        <input value={taskDigest} maxLength={64} onInput={event => setTaskDigest(event.currentTarget.value)} />
+      <label>{copy.taskDigestContains}<input value={taskDigest} maxLength={64} onInput={event => setTaskDigest(event.currentTarget.value)} />
       </label>
-      <button type="button" onClick={() => { setGroup('all'); setTaskDigest(''); }}>Clear activity filters</button>
-      <p>Filters apply only to the current page and do not change the delivery position.</p>
+      <button type="button" onClick={() => { setGroup('all'); setTaskDigest(''); }}>{copy.clearActivityFilters}</button>
+      <p>{copy.filtersApplyOnlyToTheCurrentPageAndDoNot}</p>
     </fieldset>
-    <p role="status">{!following ? 'Activity paused.' : !availability.online ? 'Browser reports offline. Activity reads are suspended.' : !availability.visible ? 'Background tab: activity reads are suspended.' : retry > 0 ? `Reconnecting activity: retry ${retry} of 4. Displayed observations may be stale.` : 'Following retained activity.'} {periodic && following && 'Using periodic refresh because streaming was unavailable.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>
-    <p>{lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : 'No verified activity page has been received.'} Pausing or losing this connection does not stop server work.</p>
+    <p role="status">{displayMessage(copy.deliveryStatus, {
+      status: !following ? copy.paused : !availability.online ? copy.offline : !availability.visible ? copy.background
+        : retry > 0 ? displayMessage(copy.reconnecting, { retry }) : copy.following,
+      fallback: periodic && following ? copy.periodic : '', visible: visible.length, retained: rows.length, capacity,
+    })}</p>
+    <p>{displayMessage(copy.receipt, { receipt: lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : copy.noPage })}</p>
     {error && <p role="alert">{error}</p>}
-    {rows.length === capacity && <p>Display limit reached. Continue activity on the next page to replace these rows while preserving the cursor.</p>}
+    {rows.length === capacity && <p>{copy.displayLimitReachedContinueActivityOnTheNextPageTo}</p>}
     {snapshot && <>
-      <p>Attempt state at snapshot: {snapshot.run.state}. Acceptance at snapshot: {snapshot.run.acceptance}.</p>
-      {snapshot.progress ? <p>Journal boundary: {snapshot.progress.nextSequence}. Queue omissions: {snapshot.progress.queueDropped}. Retention omissions: {snapshot.progress.historyDropped}. Retained at snapshot: {snapshot.progress.retainedEventCount}.</p>
-        : <p>Omission counts were not supplied. A complete history cannot be established.</p>}
+      <p>{displayMessage(copy.snapshot, { state: snapshot.run.state, acceptance: snapshot.run.acceptance })}</p>
+      {snapshot.progress ? <p>{displayMessage(copy.journal, { boundary: snapshot.progress.nextSequence, queue: snapshot.progress.queueDropped, history: snapshot.progress.historyDropped, retained: snapshot.progress.retainedEventCount })}</p>
+        : <p>{copy.omissionCountsWereNotSuppliedACompleteHistoryCannotBe}</p>}
     </>}
-    {rows.length > 0 && visible.length === 0 && <p>No matching observations on this page. Other retained pages have not been searched.</p>}
-    <ol aria-label="Activity observations">
+    {rows.length > 0 && visible.length === 0 && <p>{copy.noMatchingObservationsOnThisPageOtherRetainedPagesHave}</p>}
+    <ol aria-label={copy.activityObservations}>
       {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} />)}
     </ol>
   </section>;

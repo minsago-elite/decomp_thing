@@ -1,3 +1,5 @@
+import { appCopy as copy } from '../copy/shell';
+import { message as displayMessage, textMessage } from '../shared/messages';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
 import Home from '../routes/Home';
@@ -30,12 +32,12 @@ type ShellProps = {
 function ConnectionNotice() {
   const availability = useBrowserAvailability();
   if (!availability.hasBeenOffline) return null;
-  return <aside class="connection-notice notice" role="status" aria-label="Connection status">
-    <h2>{availability.online ? 'Refresh loaded information' : 'Browser reports offline'}</h2>
+  return <aside class="connection-notice notice" role="status" aria-label={copy.connectionStatus}>
+    <h2>{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
     <p>{availability.online
-      ? 'The browser reports a connection again. Previously loaded information may still be out of date. Refresh this view to check its current state.'
-      : 'Previously loaded information may be out of date. Reconnect and refresh this view before relying on its status.'}</p>
-    {!availability.online && <p>Server work may continue while this page is disconnected.</p>}
+      ? copy.theBrowserReportsAConnectionAgainPreviouslyLoadedInformationMay
+      : copy.previouslyLoadedInformationMayBeOutOfDateReconnectAnd}</p>
+    {!availability.online && <p>{copy.serverWorkMayContinueWhileThisPageIsDisconnected}</p>}
   </aside>;
 }
 
@@ -60,8 +62,8 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const isJob = location.path.startsWith(`${basePath}/jobs/`) && location.path.slice(`${basePath}/jobs/`.length).indexOf('/') < 0;
   const isRun = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+$/.test(location.path);
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
-  const pageTitle = atHome ? 'Jobs' : location.path === uploadPath ? 'Upload a binary'
-    : location.path === runtimePath ? 'Runtime status' : isJob ? 'Job overview' : isRun ? 'Workflow attempt' : isHistory ? 'Attempt history' : 'Page unavailable';
+  const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
+    : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -76,7 +78,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   }
 
   useLayoutEffect(() => {
-    document.title = `${pageTitle} · Decomp Workbench`;
+    document.title = textMessage(copy.documentTitle, { page: pageTitle });
     setNavigationOpen(false);
     focusRouteHeading(location.url);
   }, [pageTitle, location.path]);
@@ -114,20 +116,20 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
 
   return (
     <>
-      <a class="skip-link" href="#main" onClick={() => main.current?.focus()}>Skip to content</a>
+      <a class="skip-link" href="#main" onClick={() => main.current?.focus()}>{copy.skipToContent}</a>
       <header class="app-header">
-        <a class="brand" href={homePath} aria-label="Decomp Workbench home">
+        <a class="brand" href={homePath} aria-label={copy.decompWorkbenchHome}>
           <img src={mark} alt="" width="28" height="28" />
-          <span>Decomp <strong>Workbench</strong></span>
+          <span>{displayMessage(copy.brand, { wordmark: <strong>{copy.workbench}</strong> })}</span>
         </a>
-        <span class="build-label">Early preview</span>
+        <span class="build-label">{copy.earlyPreview}</span>
         <DisplayPreferences />
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
       <ConnectionNotice />
       {session && <SessionStatus session={session} />}
       <div class="app-layout">
-        <nav class="app-nav" aria-label="Main navigation" ref={navigation} onKeyDown={event => {
+        <nav class="app-nav" aria-label={copy.mainNavigation} ref={navigation} onKeyDown={event => {
           if (narrowNavigation && navigationOpen && event.key === 'Escape') {
             event.preventDefault();
             setNavigationOpen(false);
@@ -136,7 +138,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
         }}>
           <button class="navigation-toggle" type="button" ref={navigationToggle} hidden={!narrowNavigation}
             aria-controls="main-navigation-links" aria-expanded={navigationOpen}
-            onClick={() => setNavigationOpen(current => !current)}>Navigation</button>
+            onClick={() => setNavigationOpen(current => !current)}>{copy.navigation}</button>
           <div id="main-navigation-links" hidden={narrowNavigation && !navigationOpen} onClick={event => {
             if (narrowNavigation && navigationOpen && !event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.shiftKey
               && !event.altKey && event.button === 0 && event.target instanceof Element
@@ -145,17 +147,15 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               navigationToggle.current?.focus();
             }
           }}>
-            <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
-            <a href={uploadPath} aria-current={location.path === uploadPath ? 'page' : undefined}>Upload</a>
-            <a href={runtimePath} aria-current={location.path === runtimePath ? 'page' : undefined}>
-              Runtime status
-            </a>
+            <a href={homePath} aria-current={atHome ? 'page' : undefined}>{copy.workspace}</a>
+            <a href={uploadPath} aria-current={location.path === uploadPath ? 'page' : undefined}>{copy.upload}</a>
+            <a href={runtimePath} aria-current={location.path === runtimePath ? 'page' : undefined}>{copy.runtimeStatus}</a>
           </div>
         </nav>
         <main id="main" ref={main} tabIndex={-1} aria-busy={loading}>
-          <p class="sr-only" role="status">{loading ? 'Opening view…' : ''}</p>
-          {!atHome && <nav aria-label="Breadcrumbs">
-            <ol class="breadcrumbs"><li><a href={homePath}>All jobs</a></li><li aria-current="page">{pageTitle}</li></ol>
+          <p class="sr-only" role="status">{loading ? copy.openingView : ''}</p>
+          {!atHome && <nav aria-label={copy.breadcrumbs}>
+            <ol class="breadcrumbs"><li><a href={homePath}>{copy.allJobs}</a></li><li aria-current="page">{pageTitle}</li></ol>
           </nav>}
           <ViewBoundary key={location.path}>
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
@@ -170,7 +170,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
           </ViewBoundary>
         </main>
       </div>
-      <footer class="app-footer">Source and validation evidence stay connected to their revision.</footer>
+      <footer class="app-footer">{copy.sourceAndValidationEvidenceStayConnectedToTheirRevision}</footer>
     </>
   );
 }

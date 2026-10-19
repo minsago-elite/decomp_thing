@@ -1,14 +1,12 @@
+import { commonCopy, jobStatusLabels } from '../copy/common';
+import { textMessage } from '../shared/messages';
 import type { Job } from '../api/generated';
 
-const jobStatusLabels: Record<Job['status'], string> = {
-  uploaded: 'Uploaded', queued: 'Queued', running: 'Running', completed: 'Completed',
-  failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted', unknown: 'Unknown',
-};
 
 export function formatJobStatus(status: Job['status']): string { return jobStatusLabels[status]; }
 
 // Keep the canonical decimal value intact; Number would round valid uint64 values.
-export function formatExactBytes(value: string): string { return `${value} bytes`; }
+export function formatExactBytes(value: string): string { return textMessage(commonCopy.bytes, { value }); }
 
 // Keep the source offset and every fractional digit, while making UTC readable.
 export function formatExactTimestamp(value: string): string {

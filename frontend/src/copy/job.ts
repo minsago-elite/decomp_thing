@@ -1,0 +1,30 @@
+// View-scoped interface copy; protocol values and DOM identities stay in their components.
+
+export const jobCopy = {
+  "identity": "Job identity: {identity}",
+  "loadingJob": "Loading job…",
+  "refreshJob": "Refresh job",
+  "browseAttemptHistory": "Browse attempt history",
+  "openLatestRecordedAttempt": "Open latest recorded attempt",
+  "binaryMetadata": "Binary metadata",
+  "format": "Format",
+  "machine": "Machine",
+  "endianness": "Endianness",
+  "objectType": "Object type",
+  "osABI": "OS ABI",
+  "entryAddress": "Entry address",
+  "inputSHA256": "Input SHA-256",
+  "notReportedByTheJobAPI": "Not reported by the job API",
+  "completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision": "Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.",
+  "theAttemptPageRetainsItsExactIdentityAsNewerWork": "The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.",
+  "startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn": "Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.",
+  "viewReportedWorkflowAvailability": "View reported workflow availability",
+  "jobOverview": "Job overview",
+  "returnToJobs": "Return to jobs",
+  "connectALocalSessionToViewThisJob": "Connect a local session to view this job.",
+  "thisJobIdentityIsInvalid": "This job identity is invalid.",
+  "theServerReturnedADifferentJobIdentity": "The server returned a different job identity.",
+  "thisJobIsUnavailableItMayHaveBeenRemoved": "This job is unavailable. It may have been removed.",
+  "storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts": "Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.",
+  "jobMetadataCouldNotBeLoadedCheckTheLocalSession": "Job metadata could not be loaded. Check the local session and server."
+} as const;

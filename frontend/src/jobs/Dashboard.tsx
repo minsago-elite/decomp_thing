@@ -1,3 +1,6 @@
+import { formatJobStatus } from './metadataFormat';
+import { dashboardCopy as copy } from '../copy/workspace';
+import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
@@ -48,16 +51,16 @@ export function Dashboard({ basePath }: { basePath: string }) {
     setPhase('error');
     if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
       firstPage.current = null;
-      setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
+      setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference(copy.accessToThisJobLibraryIsUnavailableCheckYourLocal, failure));
     } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.', failure));
+      setError(withApiFailureReference(copy.storedJobsCouldNotBeListedCompletelyTheServerHas, failure));
     } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
-      setError(withApiFailureReference('Another job listing is in progress. Wait a moment, then refresh jobs to retry.', failure));
+      setError(withApiFailureReference(copy.anotherJobListingIsInProgressWaitAMomentThen, failure));
     } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
-      setError(withApiFailureReference('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.', failure));
+      setError(withApiFailureReference(copy.thisLibraryExceedsAListingLimitNoPartialResultsWere, failure));
     } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-      setError(withApiFailureReference('This page snapshot expired. Refresh jobs to start a new snapshot.', failure));
-    } else setError(withApiFailureReference('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.', failure));
+      setError(withApiFailureReference(copy.thisPageSnapshotExpiredRefreshJobsToStartANew, failure));
+    } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
   }, []);
   useEffect(() => {
     const restore = () => {
@@ -157,7 +160,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); moveFocus.current = true;
     } catch (failure) {
       if (failure instanceof JobFilterError) setValidationError(failure);
-      else setError('Use valid filter values.');
+      else setError(copy.useValidFilterValues);
     }
   }
   function reload() { moveFocus.current = true; setCursors([null]); setPageIndex(0); setRefresh(value => value + 1); }
@@ -170,60 +173,60 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const retainedEmpty = data?.items.length === 0;
   const retainedNotice = !data ? '' : retainedEmpty
     ? filtered
-      ? ' The previous filtered result had no matches; current results are unknown until refresh succeeds.'
-      : ' The previous library snapshot was empty; current results are unknown until refresh succeeds.'
-    : ' Previously loaded rows are shown below; their state may be outdated.';
-  const loadingStatus = retainedEmpty ? 'Loading jobs… The previous empty result may be outdated.'
-    : data ? 'Loading jobs… Previously loaded rows remain below.' : 'Loading jobs…';
+      ? copy.thePreviousFilteredResultHadNoMatchesCurrentResultsAre
+      : copy.thePreviousLibrarySnapshotWasEmptyCurrentResultsAreUnknown
+    : copy.previouslyLoadedRowsAreShownBelowTheirStateMayBe;
+  const loadingStatus = retainedEmpty ? copy.loadingJobsThePreviousEmptyResultMayBeOutdated
+    : data ? copy.loadingJobsPreviouslyLoadedRowsRemainBelow : copy.loadingJobs;
   return <section aria-labelledby="job-library-title">
-    <h2 id="job-library-title">Uploaded jobs</h2>
+    <h2 id="job-library-title">{copy.uploadedJobs}</h2>
     <RecoverySummary client={client} refresh={refresh} />
     <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
-      <label>Filename search<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
-      <label>Workflow state<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
-        <option value="">All states</option>{JOB_STATUSES.map(status => <option key={status}>{status}</option>)}
+      <label>{copy.filenameSearch}<input {...fieldA11y('search')} value={draft.search} maxLength={256} onInput={event => field('search', event.currentTarget.value)} /></label>
+      <label>{copy.workflowState}<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
+        <option value="">{copy.allStates}</option>{JOB_STATUSES.map(status => <option key={status} value={status}>{formatJobStatus(status)}</option>)}
       </select></label>
-      <label>Created at or after<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
-      <label>Created before<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
-      <label>Sort by<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
-        <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+      <label>{copy.createdAtOrAfter}<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
+      <label>{copy.createdBefore}<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
+      <label>{copy.sortBy}<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
+        <option value="newest">{copy.newestFirst}</option><option value="oldest">{copy.oldestFirst}</option>
       </select></label>
-      <label>Jobs per page<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
+      <label>{copy.jobsPerPage}<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}
       </select></label>
-      <div class="job-actions"><button type="submit">Apply filters</button><button type="button" onClick={() => apply({ ...DEFAULT_FILTERS })}>Reset filters</button></div>
+      <div class="job-actions"><button type="submit">{copy.applyFilters}</button><button type="button" onClick={() => apply({ ...DEFAULT_FILTERS })}>{copy.resetFilters}</button></div>
     </form>
     {validationError && <p id="job-filter-error" role="alert" class="notice notice-error">{validationError.message}</p>}
-    {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
+    {!selection.valid && <p role="alert">{copy.theSavedFiltersAreInvalidResetFiltersToLoadJobs}</p>}
     {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
-    <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>
+    <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>{copy.refreshJobs}</button>
       <button type="button" aria-pressed={livePaused} disabled={phase !== 'ready' || pageIndex !== 0}
-        onClick={() => setLivePaused(value => !value)}>{livePaused ? 'Resume live updates' : 'Pause live updates'}</button>
-      <p>{selection.filters.sort === 'oldest' ? 'Oldest' : 'Newest'} jobs first. Completion does not establish validated reconstruction.</p></div>
-    <p>{livePaused ? 'Live updates are paused. Refresh jobs to read the current list.'
-      : phase !== 'ready' ? 'Live updates pause until the job library is available.'
-      : pageIndex === 0 ? 'The visible first page checks for updates. Row order stays fixed while a job link is focused.'
-      : 'Live updates pause on later pages. Refresh jobs to return to the current first page.'}</p>
-    {phase === 'ready' && liveDeferred && <p role="status">New or changed jobs are available. The displayed rows are an earlier snapshot. Refresh jobs to update this list.</p>}
-    <h3 ref={results} tabIndex={-1}>Job results</h3>
+        onClick={() => setLivePaused(value => !value)}>{livePaused ? copy.resumeLiveUpdates : copy.pauseLiveUpdates}</button>
+      <p>{selection.filters.sort === 'oldest' ? copy.oldestExplanation : copy.newestExplanation}</p></div>
+    <p>{livePaused ? copy.liveUpdatesArePausedRefreshJobsToReadTheCurrent
+      : phase !== 'ready' ? copy.liveUpdatesPauseUntilTheJobLibraryIsAvailable
+      : pageIndex === 0 ? copy.theVisibleFirstPageChecksForUpdatesRowOrderStays
+      : copy.liveUpdatesPauseOnLaterPagesRefreshJobsToReturn}</p>
+    {phase === 'ready' && liveDeferred && <p role="status">{copy.newOrChangedJobsAreAvailableTheDisplayedRowsAre}</p>}
+    <h3 ref={results} tabIndex={-1}>{copy.jobResults}</h3>
     <p role="status">{phase === 'loading' && selection.valid
       ? loadingStatus
-      : phase === 'ready' && data ? `${data.items.length} jobs on this page. No total count is available.` : ''}</p>
-    {phase === 'ready' && retainedEmpty && <p>{filtered ? 'No jobs match these filters.' : 'No uploaded jobs yet.'}</p>}
-    {data && <ul ref={list} class="job-list" aria-label="Uploaded jobs">
+      : phase === 'ready' && data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
+    {phase === 'ready' && retainedEmpty && <p>{filtered ? copy.noJobsMatchTheseFilters : copy.noUploadedJobsYet}</p>}
+    {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>
         <h4><a href={jobPath(basePath, job.jobId)}>{job.displayFilename}</a></h4>
         <JobSummary job={job} />
       </li>)}
     </ul>}
-    <nav class="job-actions" aria-label="Job pages">
-      <button type="button" disabled={phase !== 'ready' || pageIndex === 0} onClick={() => { moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1)); }}>Previous page</button>
-      <span aria-live="polite">{data && displayedPageIndex !== null ? `Page ${displayedPageIndex + 1}`
-        : phase === 'loading' && selection.valid ? `Loading page ${pageIndex + 1}` : 'No page available'}</span>
+    <nav class="job-actions" aria-label={copy.jobPages}>
+      <button type="button" disabled={phase !== 'ready' || pageIndex === 0} onClick={() => { moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1)); }}>{copy.previousPage}</button>
+      <span aria-live="polite">{data && displayedPageIndex !== null ? displayMessage(copy.page, { page: displayedPageIndex + 1 })
+        : phase === 'loading' && selection.valid ? displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
       <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;
         moveFocus.current = true; setCursors(previous => [...previous.slice(0, pageIndex + 1), data.page.nextCursor]); setPageIndex(pageIndex + 1);
-      }}>Next page</button>
+      }}>{copy.nextPage}</button>
     </nav>
   </section>;
 }

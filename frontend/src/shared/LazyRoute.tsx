@@ -1,3 +1,4 @@
+import { lazyRouteCopy as copy } from '../copy/shell';
 import type { ComponentType } from 'preact';
 import lazy from 'preact-iso/lazy';
 import type { AssetRecovery } from '../app/assetRecovery';
@@ -5,8 +6,8 @@ import type { AssetRecovery } from '../app/assetRecovery';
 function UnavailableRoute() {
   return (
     <section aria-labelledby="unavailable-view-title">
-      <h1 id="unavailable-view-title">This view is unavailable</h1>
-      <p>Use the application notice above to reload the current version.</p>
+      <h1 id="unavailable-view-title">{copy.thisViewIsUnavailable}</h1>
+      <p>{copy.useTheApplicationNoticeAboveToReloadTheCurrentVersion}</p>
     </section>
   );
 }

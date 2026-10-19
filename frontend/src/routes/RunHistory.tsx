@@ -1,3 +1,6 @@
+import { runHistoryCopy as copy } from '../copy/history';
+import { message as displayMessage } from '../shared/messages';
+import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
@@ -23,7 +26,7 @@ function History({ jobId, basePath }: { jobId: string; basePath: string }) {
   useEffect(() => {
     const controller = new AbortController();
     setError(''); setLoading(true);
-    if (!validQuery) { setError('The saved history page is invalid. Refresh history to return to the first page.'); setLoading(false); return; }
+    if (!validQuery) { setError(copy.theSavedHistoryPageIsInvalidRefreshHistoryToReturn); setLoading(false); return; }
     const query = new URLSearchParams({ limit: '50' });
     if (cursor) query.set('cursor', cursor);
     void client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal }).then(response => {
@@ -34,31 +37,31 @@ function History({ jobId, basePath }: { jobId: string; basePath: string }) {
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (failure instanceof ApiClientError && [401, 403, 404].includes(failure.status ?? 0)) {
-        setData(null); setError(withApiFailureReference('Attempt history is unavailable. Check the job and local session.', failure));
+        setData(null); setError(withApiFailureReference(copy.attemptHistoryIsUnavailableCheckTheJobAndLocalSession, failure));
       } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-        setError(withApiFailureReference('Attempt history changed or this page expired. Refresh history to begin again.', failure));
-      } else setError(withApiFailureReference('Attempt history could not be loaded. Retry this read.', failure));
+        setError(withApiFailureReference(copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo, failure));
+      } else setError(withApiFailureReference(copy.attemptHistoryCouldNotBeLoadedRetryThisRead, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, cursor, validQuery, refresh]);
   function first() { moveFocus.current = true; location.route(path); setRefresh(value => value + 1); }
   return <>
-    <p>Newest recorded attempts first. This list is not a count of accepted reconstructions.</p>
-    <button type="button" disabled={loading} onClick={first}>Refresh history</button>
-    {error && <p role="alert">{error}{data && ' Previously loaded attempts may be outdated.'}</p>}
-    <h2 ref={heading} tabIndex={-1}>Recorded attempts</h2>
-    <p role="status">{loading ? 'Loading attempt history…' : data ? `${data.items.length} attempts on this page.` : ''}</p>
-    {data?.items.length === 0 && <p>No durable attempts are recorded for this job. Legacy activity does not have invented attempt identities.</p>}
-    {data && <ul aria-label="Recorded attempts">{data.items.map(run => <li key={run.runId}>
+    <p>{copy.newestRecordedAttemptsFirstThisListIsNotACount}</p>
+    <button type="button" disabled={loading} onClick={first}>{copy.refreshHistory}</button>
+    {error && <p role="alert">{error}{data && copy.previouslyLoadedAttemptsMayBeOutdated}</p>}
+    <h2 ref={heading} tabIndex={-1}>{copy.recordedAttempts}</h2>
+    <p role="status">{loading ? copy.loadingAttemptHistory : data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
+    {data?.items.length === 0 && <p>{copy.noDurableAttemptsAreRecordedForThisJobLegacyActivity}</p>}
+    {data && <ul aria-label={copy.recordedAttempts}>{data.items.map(run => <li key={run.runId}>
       <a href={runPath(basePath, jobId, run.runId)}>{run.workflow}: {run.runId}</a>
-      <p>Attempt state: {run.state}. Acceptance: {run.acceptance}.</p>
-      <time dateTime={run.createdAt}>{run.createdAt}</time>
+      <p>{displayMessage(copy.state, { state: run.state, acceptance: run.acceptance })}</p>
+      <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time>
     </li>)}</ul>}
-    <nav aria-label="Attempt history pages">
-      <button type="button" disabled={loading || !cursor} onClick={first}>First page</button>
+    <nav aria-label={copy.attemptHistoryPages}>
+      <button type="button" disabled={loading || !cursor} onClick={first}>{copy.firstPage}</button>
       <button type="button" disabled={loading || !!error || !data?.page.nextCursor} onClick={() => {
         if (data?.page.nextCursor) { moveFocus.current = true; location.route(`${path}?cursor=${encodeURIComponent(data.page.nextCursor)}`); }
-      }}>Next attempts</button>
+      }}>{copy.nextAttempts}</button>
     </nav>
   </>;
 }
@@ -67,10 +70,10 @@ export default function RunHistory({ jobId, basePath, session }: { jobId: string
   const state = useSession(session);
   const valid = /^[0-9a-f]{32}$/.test(jobId);
   return <section aria-labelledby="history-title">
-    <h1 id="history-title">Attempt history</h1>
+    <h1 id="history-title">{copy.attemptHistory}</h1>
     {valid ? <>
-      <a href={jobPath(basePath, jobId)}>Return to job overview</a>
-      {state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} /> : <p>Connect a local session to view attempt history.</p>}
-    </> : <p role="alert">The requested job identity is invalid.</p>}
+      <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
+      {state?.status === 'authenticated' ? <History key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} /> : <p>{copy.connectALocalSessionToViewAttemptHistory}</p>}
+    </> : <p role="alert">{copy.theRequestedJobIdentityIsInvalid}</p>}
   </section>;
 }
