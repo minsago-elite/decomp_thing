@@ -4,6 +4,8 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
 import type { Report } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
+import { ExplorationCases } from './ExplorationCases';
+import { OutputSignatureBreadth } from './OutputSignatureBreadth';
 
 export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
@@ -34,9 +36,15 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
     {error && <p role="alert">{error}</p>}
     {report && <>
       <p>{displayMessage(copy.state, { state: report.state, authority: report.authority })}</p>
+      <dl class="job-facts" aria-label={copy.reportBinding}>
+        <dt>{copy.reportIdentity}</dt><dd><code>{report.reportId}</code></dd>
+        <dt>{copy.reportJob}</dt><dd><code>{report.binding.jobId}</code></dd>
+        <dt>{copy.reportAttempt}</dt><dd><code>{report.binding.runId ?? copy.bindingNotRecorded}</code></dd>
+        <dt>{copy.reportRevision}</dt><dd><code>{report.binding.revisionId ?? copy.bindingNotRecorded}</code></dd>
+      </dl>
       {report.limitations.length > 0 ? <ul aria-label={copy.evidenceLimitations}>{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
         : report.state !== 'available' && <p role="status">{displayMessage(copy.unsuccessful, { state: report.state })}</p>}
-      {summary ? <dl class="job-facts">
+      {summary ? <><p>{copy.heuristicInterpretation}</p><dl class="job-facts">
         <dt>{copy.candidateInputs}</dt><dd>{summary.candidateCount}</dd>
         <dt>{copy.expandedOutputSignatures}</dt><dd>{summary.expandedOutputSignatures}</dd>
         <dt>{copy.producerConfidenceScore}</dt><dd>{summary.confidence.score}</dd>
@@ -46,11 +54,13 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         <dt>{copy.newOutputSignatures}</dt><dd>{summary.confidence.newOutputSignatureCount}</dd>
         <dt>{copy.producerReportsSandboxing}</dt><dd>{summary.confidence.sandboxed ? copy.yes : copy.no}</dd>
         <dt>{copy.producerReportsNetworkIsolation}</dt><dd>{summary.confidence.networkIsolated ? copy.yes : copy.no}</dd>
-      </dl> : <p role="status">{copy.noNumericSummaryIsAvailableFromTheseReportBytesMissing}</p>}
+      </dl><OutputSignatureBreadth summary={summary} /></> : <p role="status">{copy.noNumericSummaryIsAvailableFromTheseReportBytesMissing}</p>}
       {report.sourceArtifact && <>
         <p>{displayMessage(copy.artifact, { bytes: report.sourceArtifact.sizeBytes, digest: <code>{report.sourceArtifact.sha256}</code> })}</p>
         <p>{copy.theDigestIdentifiesTheObservedBytesItDoesNotValidate}</p>
         <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a>
+        {(report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 && report.producerSchemaVersion === null &&
+          <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId} basePath={basePath} />}
       </>}
       <p>{copy.explorationObservationsDoNotEstablishAcceptedReconstruction}</p>
     </>}
