@@ -41,6 +41,13 @@ it('presents frozen repeated-signature sample counts with their real denominator
   expect(screen.getByText(value.binding.revisionId!)).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(value.sourceArtifact!.contentHref);
   expect(screen.getByText(/No branch, statement, function or complete-behavior coverage denominator/)).toBeTruthy();
+  const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
+  const descriptionIds = chart.getAttribute('aria-describedby')!.split(' ');
+  expect(descriptionIds).toContain('exploration-report-binding');
+  expect(descriptionIds).toContain(grid.querySelector('caption')!.id);
+  const binding = document.getElementById('exploration-report-binding')!;
+  expect(binding.textContent).toContain(value.reportId); expect(binding.textContent).toContain(value.binding.runId!);
+  expect(screen.getByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 1.')).toBeTruthy();
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
@@ -54,6 +61,13 @@ it('retains exact uint64 signature counters above JavaScript safe integer precis
   expect(within(added).getByText('9007199254740993')).toBeTruthy();
   expect(within(added).getByText('Expanded observed signatures: 18446744073709551615')).toBeTruthy();
   expect(screen.queryByText(/9007199254740992/)).toBeNull(); expect(fetcher).toHaveBeenCalledOnce();
+  const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
+  expect(document.getElementById('output-signature-chart-counts')!.textContent).toContain('9007199254740993');
+  expect(document.getElementById('output-signature-chart-counts')!.textContent).toContain('18446744073709551615');
+  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%');
+  expect(Number.parseFloat(bars[1]!.style.width)).toBeGreaterThan(0);
+  expect(Number.parseFloat(bars[1]!.style.width)).toBeLessThan(100);
 });
 
 it('keeps an empty sample explicit without a zero denominator fraction or a success percentage', async () => {
@@ -66,6 +80,7 @@ it('keeps an empty sample explicit without a zero denominator fraction or a succ
   expect(within(added).getByText('Unavailable: no expanded signatures reported')).toBeTruthy();
   expect(screen.getByText('No expanded output signatures were reported. A new-signature fraction is unavailable.')).toBeTruthy();
   expect(screen.queryByText(/100%|0%/)).toBeNull();
+  expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
 });
 
 it('shows contradictory reported counts without constructing a combined population', () => {
@@ -78,6 +93,7 @@ it('shows contradictory reported counts without constructing a combined populati
     const mounted = render(<OutputSignatureBreadth summary={counts} />);
     expect(screen.getByText('Unavailable: inconsistent reported counters')).toBeTruthy();
     expect(screen.getByText(/reported signature counters disagree/)).toBeTruthy();
+    expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
     expect(screen.queryByText('Expanded observed signatures: 2')).toBeNull(); mounted.unmount();
   }
 });
@@ -93,6 +109,7 @@ it('rejects an expanded denominator larger than the retained candidates through 
   expect(within(added).getByText('Unavailable: inconsistent reported counters')).toBeTruthy();
   expect(screen.queryByText('Expanded observed signatures: 2')).toBeNull();
   expect(screen.getByText(/reported signature counters disagree/)).toBeTruthy();
+  expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
@@ -102,6 +119,7 @@ it.each(['partial', 'unknown', 'invalid', 'unsupported'] as const)('preserves %s
   expect(await screen.findByText(`This report is ${state}; it cannot establish a successful result.`)).toBeTruthy();
   expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
   expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
+  expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
   expect(screen.getByText(value.reportId)).toBeTruthy();
 });
 
@@ -112,6 +130,55 @@ it('clears a prior sample summary when its deliberate refresh fails', async () =
   const alert = await screen.findByRole('alert'); expect(alert.textContent).not.toContain('private failure body');
   expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
   expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull(); expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
+});
+
+it('charts zero new signatures as an observed count within a nonempty sample', async () => {
+  const value = report(); summary(value).confidence.newOutputSignatureCount = '0';
+  const { fetcher } = read(value); const grid = await table();
+  const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
+  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%'); expect(bars[1]!.style.width).toBe('0%');
+  expect(within(grid).getByRole('row', { name: /New distinct exit\/output signatures/ }).textContent).toContain('0');
+  expect(screen.getByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 0.')).toBeTruthy();
+  expect(screen.getByText(/No branch, statement, function or complete-behavior coverage denominator/)).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('charts all reported signatures as new without presenting a program-coverage percentage', async () => {
+  const value = report(); summary(value).confidence.newOutputSignatureCount = '2';
+  const { fetcher } = read(value); const grid = await table();
+  const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
+  const bars = chart.querySelectorAll<HTMLElement>('.output-signature-bar');
+  expect(bars).toHaveLength(2); expect(bars[0]!.style.width).toBe('100%'); expect(bars[1]!.style.width).toBe('100%');
+  expect(within(grid).getByText('Expanded observed signatures: 2')).toBeTruthy();
+  expect(screen.getByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 2.')).toBeTruthy();
+  expect(screen.queryByText(/100%|0%/)).toBeNull(); expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('rebinds chart table and download to the selected report and run without retaining the previous sample', async () => {
+  const first = report(); const { fetcher, mounted } = read(first); await table();
+  const next = report(); next.reportId = 'report_example_2'; next.binding.runId = 'run_example_2';
+  next.binding.revisionId = 'revision_example_2';
+  const artifact = next.sourceArtifact!; artifact.binding = { ...next.binding };
+  artifact.artifactId = 'artifact_example_2'; artifact.sha256 = 'cd'.repeat(32);
+  artifact.contentHref = `/api/v1/jobs/${next.binding.jobId}/artifacts/${artifact.artifactId}/content`;
+  const counts = summary(next); counts.expandedOutputSignatures = counts.confidence.outputSignatureCount = '3';
+  counts.confidence.newOutputSignatureCount = '2';
+  fetcher.mockResolvedValueOnce(response(next));
+  mounted.rerender(<ExplorationEvidence jobId={next.binding.jobId} runId={next.binding.runId!} basePath="/" />);
+  expect(await screen.findByText(next.reportId)).toBeTruthy(); const grid = await table();
+  const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
+  expect(chart.getAttribute('aria-describedby')!.split(' ')).toContain('exploration-report-binding');
+  const binding = document.getElementById('exploration-report-binding')!;
+  expect(binding.textContent).toContain(next.reportId); expect(binding.textContent).toContain(next.binding.runId!);
+  expect(binding.textContent).toContain(next.binding.revisionId!);
+  expect(screen.queryByText(first.reportId)).toBeNull(); expect(screen.queryByText(first.binding.runId!)).toBeNull();
+  expect(within(grid).getByText('Expanded observed signatures: 3')).toBeTruthy();
+  expect(screen.getByText('Expanded distinct exit/output signatures: 3. New distinct exit/output signatures: 2.')).toBeTruthy();
+  expect(screen.queryByText('Expanded distinct exit/output signatures: 2. New distinct exit/output signatures: 1.')).toBeNull();
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(artifact.contentHref);
+  expect(fetcher).toHaveBeenCalledTimes(2);
 });
 
 it('accepts a known version-one observation failure through the real decoder without numeric or legacy-case views', async () => {
@@ -131,6 +198,7 @@ it('accepts a known version-one observation failure through the real decoder wit
   expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(value.sourceArtifact!.contentHref);
   expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
   expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
+  expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
   const inspect = screen.getByRole('button', { name: 'Read retained case details' });
   expect(screen.queryByRole('table', { name: 'Retained candidate records' })).toBeNull();
   expect(fetcher).toHaveBeenCalledOnce();
@@ -158,6 +226,7 @@ it('rejects unknown or authority-changing failure projections through the real d
     expect(screen.queryByText(value.reportId)).toBeNull();
     expect(screen.queryByRole('link', { name: 'Download observed exploration JSON' })).toBeNull();
     expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
+    expect(screen.queryByRole('img', { name: 'Observed output signature counts' })).toBeNull();
     expect(fetcher).toHaveBeenCalledOnce(); mounted.unmount();
   }
 });
