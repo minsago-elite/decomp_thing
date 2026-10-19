@@ -3495,7 +3495,14 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 FullTreeFunctionObservationClassPathEntry(regular, sha256(regular))
             }
         val manifestCache = mutableMapOf<Path, String>()
-        val libraryMounts = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+        // The worker needs the platform ABI libraries, not every unrelated tool installed
+        // under /usr/lib on the CI image. Keep the production manifest bounds unchanged.
+        val systemAbi = when (System.getProperty("os.arch")) {
+            "amd64", "x86_64" -> "x86_64-linux-gnu"
+            "aarch64", "arm64" -> "aarch64-linux-gnu"
+            else -> error("isolated worker fixture has no system ABI library mapping")
+        }
+        val libraryMounts = listOf("/lib/$systemAbi", "/lib64", "/usr/lib/$systemAbi", "/usr/lib64")
             .map(Path::of)
             .filter { Files.isDirectory(it) }
             .map { destination ->
