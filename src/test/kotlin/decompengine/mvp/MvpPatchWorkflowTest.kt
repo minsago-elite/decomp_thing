@@ -8,6 +8,7 @@ import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairClientInvocation
 import decompengine.repair.RepairRequest
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
 import decompengine.repair.RepairResponse
 import decompengine.repair.SourcePatch
 import decompengine.validation.ProcessInput
@@ -23,9 +24,127 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MvpPatchWorkflowTest {
+    @Test
+    fun `public refusal details retain only a validated producer commitment and fixed path`() {
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "1"), "PRIVATE_HARNESS", "PRIVATE_PROFILE", "a".repeat(64))
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, null, false) }
+        val details = MvpSummaryDetailsFact("1".repeat(64))
+        val text = MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence, details).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.contains("Report detail: redacted details retained"))
+        assertTrue(text.contains("| Redacted report details | `$MVP_SUMMARY_DETAILS_PATH` | `${details.sha256}` |"))
+        assertTrue(text.contains("Explanation is retained in the redacted report details"))
+        assertFalse(text.contains("PRIVATE"))
+        val withheld = MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(withheld.contains("Report detail: withheld"))
+        assertFalse(withheld.contains("| Redacted report details |"))
+        for (value in listOf("PRIVATE", "A".repeat(64), "a".repeat(65), "Bearer " + "a".repeat(64))) {
+            assertFailsWith<IllegalArgumentException> { MvpSummaryDetailsFact(value) }
+        }
+    }
+
+    @Test
+    fun `public refusal facts retain producer categories and commitments without private prose or paths`() {
+        val profile = MvpSummaryProfile.MAKE
+        val evidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to "PRIVATE_VALUE"), "Bearer PRIVATE_HARNESS",
+            profile.id, profile.sha256)
+        evidence.passPhase("verify", "PRIVATE_DETAIL")
+        evidence.passPhase("PRIVATE_PHASE", "PRIVATE_DETAIL")
+        evidence.check("behavior validation", true, "PRIVATE_DETAIL")
+        evidence.check("PRIVATE_CHECK", false, "PRIVATE_DETAIL")
+        evidence.approvalDecision = "approved interactively"
+        evidence.patchDiff = "PRIVATE_DIFF"
+        evidence.patchExplanation = "PRIVATE_EXPLANATION"
+        evidence.findingSourceLocation = "decompiled.c:12:3"
+        val artifacts = MvpSummaryArtifact.entries.map { kind ->
+            MvpSummaryArtifactFact(kind, "a".repeat(64), kind.publicRelativePath != null)
+        }.toMutableList()
+        val facts = MvpSummaryFacts.capture("PASS", false, true, artifacts, evidence)
+        val text = facts.render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.contains("- Result: PASS"))
+        assertTrue(text.contains("approved interactively"))
+        assertTrue(text.contains("| verify | PASS |"))
+        assertTrue(text.contains("| withheld phase label | PASS |"))
+        assertTrue(text.contains("| behavior validation | PASS |"))
+        assertTrue(text.contains("| withheld check label | FAIL |"))
+        assertTrue(text.contains("decompile/decompiled.c:12:3"))
+        assertTrue(text.contains("| Input ELF | withheld | `${"a".repeat(64)}` |"))
+        assertTrue(text.contains("Reconstruction profile: `${profile.id}` (`${profile.sha256}`)"))
+        assertFalse(text.contains("PRIVATE"))
+        for (heading in listOf("Executed Phases", "Artifact Hashes", "CWE-787 Evidence and Source Mapping",
+            "Approved Source Change", "Build and Validation Results", "Output Paths", "Residual Risks")) {
+            assertTrue(text.contains("## $heading"))
+        }
+        artifacts.clear()
+        evidence.phases.clear()
+        evidence.verification.clear()
+        assertEquals(text, facts.render(MVP_SUMMARY_FACTS_BYTES))
+        assertFailsWith<UnsupportedOperationException> { (facts.artifacts as MutableList<*>).clear() }
+        assertFailsWith<UnsupportedOperationException> { (facts.phases as MutableList<*>).clear() }
+        val unknown = MvpRunEvidence(emptyMap(), "PRIVATE_HARNESS", "PRIVATE_PROFILE", "f".repeat(64))
+        unknown.approvalDecision = "PRIVATE_APPROVAL"
+        unknown.findingSourceLocation = "/PRIVATE/decompiled.c:12"
+        val hidden = MvpSummaryFacts.capture("PRIVATE_RESULT", true, true, facts.artifacts, unknown).render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(hidden.contains("- Result: UNAVAILABLE"))
+        assertTrue(hidden.contains("Verified final binary: not published"))
+        assertFalse(hidden.contains("PRIVATE"))
+        assertNull(MvpSummaryProfile.recognize(profile.id, "f".repeat(64)))
+        assertNull(MvpSummarySourceFact.recognize("decompiled.c:2147483648"))
+    }
+
+    @Test
+    fun `public refusal fact admission rejects forged hashes missing slots and oversized collections`() {
+        val evidence = MvpRunEvidence(emptyMap(), "fixture", "fixture", "a".repeat(64))
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, null, false) }
+        for (value in listOf("PRIVATE", "A".repeat(64), "a".repeat(65), "Bearer " + "a".repeat(64))) {
+            assertFailsWith<IllegalArgumentException> { MvpSummaryArtifactFact(MvpSummaryArtifact.INPUT, value, false) }
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryArtifactFact(MvpSummaryArtifact.INPUT, "a".repeat(64), true) }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, artifacts.dropLast(1), evidence) }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, List(15) { artifacts.first() }, evidence) }
+        val rejected = object : AbstractCollection<MvpSummaryArtifactFact>() {
+            override val size: Int = 16
+            override fun iterator(): Iterator<MvpSummaryArtifactFact> = error("oversized facts must not be iterated")
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, rejected, evidence) }
+        val deceptive = object : Collection<MvpSummaryArtifactFact> by artifacts {
+            override fun iterator(): Iterator<MvpSummaryArtifactFact> = (artifacts + artifacts.first()).iterator()
+        }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, deceptive, evidence) }
+        repeat(33) { evidence.passPhase("phase-$it", "PRIVATE") }
+        assertFailsWith<IllegalArgumentException> { MvpSummaryFacts.capture("FAIL", true, false, artifacts, evidence) }
+        for (capacity in listOf(0L, MVP_SUMMARY_FACTS_BYTES - 1, MAXIMUM_REPAIR_PROJECTION_BYTES + 1)) {
+            assertFailsWith<IllegalArgumentException> { requireMvpSummaryCapacity(capacity) }
+        }
+        requireMvpSummaryCapacity(MVP_SUMMARY_FACTS_BYTES)
+        requireMvpSummaryCapacity(MAXIMUM_REPAIR_PROJECTION_BYTES)
+    }
+
+    @Test
+    fun `complete public refusal envelope fits the reserved configured capacity without truncation`() {
+        val profile = MvpSummaryProfile.NINJA
+        val evidence = MvpRunEvidence(emptyMap(), "PRIVATE_HARNESS", profile.id, profile.sha256)
+        repeat(32) { index ->
+            evidence.phases["PRIVATE-$index"] = PhaseEvidence("PRIVATE_PHASE", if (index == 31) EvidenceStatus.FAIL else EvidenceStatus.NOT_RUN, "PRIVATE")
+            evidence.verification += VerificationEvidence(MvpSummaryCheck.RECONSTRUCTION.label, EvidenceStatus.NOT_RUN, "PRIVATE")
+        }
+        evidence.findingSourceLocation = "decompiled.c:2147483647:2147483647"
+        evidence.approvalDecision = "approved by --yes automation"
+        evidence.patchDiff = "PRIVATE_DIFF"
+        val artifacts = MvpSummaryArtifact.entries.map { MvpSummaryArtifactFact(it, "a".repeat(64), it.publicRelativePath != null) }
+        val facts = MvpSummaryFacts.capture("PASS", true, true, artifacts, evidence, MvpSummaryDetailsFact("a".repeat(64)))
+        val text = facts.render(MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.toByteArray(Charsets.UTF_8).size <= MVP_SUMMARY_FACTS_BYTES)
+        assertTrue(text.endsWith("publication decisions.\n"))
+        assertEquals(16, Regex("`" + "a".repeat(64) + "`").findAll(text).count())
+        assertTrue(text.contains("decompile/decompiled.c:2147483647:2147483647"))
+        assertFalse(text.contains("PRIVATE") || text.contains("truncated"))
+        assertFailsWith<IllegalArgumentException> { facts.render(MVP_SUMMARY_FACTS_BYTES - 1) }
+    }
+
     @Test
     fun `public commitments preserve exact digits through normalization and repeated private masking`() {
         val digest = "0123456789abcdef".repeat(4)
@@ -624,6 +743,63 @@ class MvpPatchWorkflowTest {
         for (value in listOf(privateValue, pathValue, "synthetic-basic")) assertFalse(responseText.contains(value))
         assertTrue(responseText.contains(complete.trimEnd()))
         assertEquals(source, response.patches.single().replacement)
+
+        // Every retained field is encoded before opening an existing or absent transcript.
+        val encodingSecret = "a?b"
+        val encodingEvidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to encodingSecret),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        val publicRequest = RepairRequest("fixture", "public objective", mapOf("target.c" to "public body"), emptyList())
+        val publicResponse = RepairResponse("public summary", listOf(SourcePatch("target.c", "public body")))
+        val beforeRequest = Files.readAllBytes(target)
+        val beforeResponse = Files.readAllBytes(responsePath)
+        val absentRequest = root.resolve("refused-request.md")
+        val absentResponse = root.resolve("refused-response.md")
+        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
+            "x".repeat(20_000) + "a\uDC00b")) {
+            assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
+            for (candidate in listOf(publicRequest.copy(prompt = payload), publicRequest.copy(failureKind = payload),
+                publicRequest.copy(projectFiles = publicRequest.projectFiles + ("$payload.c" to "public extra")),
+                publicRequest.copy(projectFiles = mapOf("target.c" to payload)),
+                publicRequest.copy(regressionInputs = listOf(ProcessInput(payload))))) {
+                for (path in listOf(target, absentRequest)) assertFailsWith<MvpPatchException> {
+                    retainMvpCapturedRequest(path, candidate, "target.c", RepairResourceBudget(), encodingEvidence)
+                }
+                assertTrue(Files.readAllBytes(target).contentEquals(beforeRequest))
+                assertFalse(absentRequest.exists())
+            }
+            for (candidate in listOf(publicResponse.copy(summary = payload),
+                publicResponse.copy(patches = listOf(SourcePatch("$payload.c", "public body"))),
+                publicResponse.copy(patches = listOf(SourcePatch("target.c", payload))))) {
+                for (path in listOf(responsePath, absentResponse)) assertFailsWith<MvpPatchException> {
+                    retainMvpCapturedResponse(path, candidate, RepairResourceBudget(), encodingEvidence)
+                }
+                assertTrue(Files.readAllBytes(responsePath).contentEquals(beforeResponse))
+                assertFalse(absentResponse.exists())
+            }
+        }
+        val artifactDirectory = Files.createDirectories(root.resolve("evidence"))
+        val retainedRequest = artifactDirectory.resolve("reconstruction-request.md")
+        val retainedResponse = artifactDirectory.resolve("reconstruction-response.md")
+        val validRequest = publicRequest.copy(prompt = "public a€b 😀 $encodingSecret",
+            projectFiles = mapOf("target.c" to "public λ $encodingSecret"))
+        val validResponse = publicResponse.copy(summary = "public a€b 😀 $encodingSecret",
+            patches = listOf(SourcePatch("target.c", "public λ $encodingSecret")))
+        val unicodeAdmitted = retainMvpCapturedRequest(retainedRequest, validRequest, "target.c", RepairResourceBudget(), encodingEvidence)
+        retainMvpCapturedResponse(retainedResponse, validResponse, RepairResourceBudget(), encodingEvidence)
+        assertEquals(validRequest.prompt, unicodeAdmitted.request.prompt)
+        assertEquals(validRequest.projectFiles, unicodeAdmitted.request.projectFiles)
+        for (path in listOf(retainedRequest, retainedResponse)) {
+            val text = path.readText()
+            assertTrue(text.contains("public a€b 😀") && text.contains("public λ"))
+            assertFalse(text.contains(encodingSecret))
+        }
+        fun commitment(path: Path): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+        val summary = root.resolve("SUMMARY-transcripts.md")
+        val missing = root.resolve("not-produced")
+        writeMvpSummary(summary, root, missing, missing, missing, missing, missing, "FAIL", "not run", encodingEvidence)
+        assertTrue(summary.readText().contains("| Reconstruction request | `evidence/reconstruction-request.md` | `${commitment(retainedRequest)}` |"))
+        assertTrue(summary.readText().contains("| Reconstruction response | `evidence/reconstruction-response.md` | `${commitment(retainedResponse)}` |"))
     }
 
     @Test
@@ -650,6 +826,88 @@ class MvpPatchWorkflowTest {
             "`0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
         assertEquals("public code", source.readText())
         assertEquals(full, evidence.patchDiffPath!!.readText())
+        val profile = MvpSummaryProfile.MAKE
+        val conflict = profile.id + "` (`" + profile.sha256.take(4)
+        val refused = MvpRunEvidence(mapOf("PLAIN_SETTING" to conflict, "PRIVATE" to privateValue),
+            "PRIVATE_HARNESS", profile.id, profile.sha256)
+        refused.patchDiff = full
+        refused.patchDiffPath = evidence.patchDiffPath
+        refused.patchExplanation = "public source-change explanation $privateValue"
+        refused.approvalDecision = "approved interactively"
+        refused.findingPath = source
+        refused.findingSourceLocation = "decompiled.c:12:3"
+        val retained = root.resolve("SUMMARY-refused-detail.md")
+        for (result in listOf("PASS", "FAIL", "NON_RELEASE")) {
+            if (result == "FAIL") refused.failPhase("verify", "public phase detail $privateValue")
+            else refused.passPhase("verify", "public phase detail $privateValue")
+            refused.verification.clear()
+            refused.check("behavior validation", result != "FAIL", "public validation detail $privateValue")
+            writeMvpSummary(retained, root, source, source, source, source, source, result,
+                "verify: public failure $privateValue".takeIf { result == "FAIL" }, refused)
+            val fallback = retained.readText()
+            assertTrue(fallback.contains("- Result: $result"))
+            assertTrue(fallback.contains("Report detail: redacted details retained"))
+            assertTrue(fallback.contains("| Input ELF | withheld | `0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
+            assertTrue(fallback.contains("Reconstruction profile: `${profile.id}` (`${profile.sha256}`)"))
+            assertFalse(fallback.contains(privateValue) || fallback.contains("PRIVATE_HARNESS"))
+            val details = root.resolve(MVP_SUMMARY_DETAILS_PATH).readText()
+            val detailHash = java.security.MessageDigest.getInstance("SHA-256").digest(details.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            assertTrue(fallback.contains("| Redacted report details | `$MVP_SUMMARY_DETAILS_PATH` | `$detailHash` |"))
+            assertTrue(details.contains("public source-change explanation [redacted]"))
+            assertTrue(details.contains("public phase detail [redacted]"))
+            assertTrue(details.contains("public validation detail [redacted]"))
+            if (result == "FAIL") assertTrue(details.contains("verify: public failure [redacted]"))
+            assertFalse(details.contains(privateValue) || details.contains("PRIVATE_HARNESS") || details.contains(conflict))
+            assertEquals("public code", source.readText())
+            assertEquals(full, refused.patchDiffPath!!.readText())
+        }
+        val retainedDetails = root.resolve(MVP_SUMMARY_DETAILS_PATH).readText()
+        refused.patchExplanation = "unpaired \uD800 detail"
+        writeMvpSummary(retained, root, source, source, source, source, source, "FAIL", "public failure", refused)
+        assertTrue(retained.readText().contains("Report detail: withheld"))
+        assertFalse(retained.readText().contains("| Redacted report details |"))
+        assertEquals(retainedDetails, root.resolve(MVP_SUMMARY_DETAILS_PATH).readText())
+
+        // Replacement encoding must never form a configured secret after private projection.
+        val encodingSecret = "a?b"
+        val encodingEvidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to encodingSecret),
+            "fixture-harness", profile.id, profile.sha256)
+        encodingEvidence.patchDiffPath = evidence.patchDiffPath
+        val encodedSummary = root.resolve("SUMMARY-encoding.md")
+        for (payload in listOf("a\uD800b", "a\uDC00b", "a\uD800b" + "x".repeat(1_024),
+            "a\uDC00b" + "x".repeat(1_024))) {
+            assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
+            encodingEvidence.patchDiff = if (payload.length < 1_024) null else full
+            encodingEvidence.patchExplanation = "public explanation $payload"
+            writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+            val encodedText = encodedSummary.readText()
+            assertFalse(encodedText.contains(encodingSecret))
+            assertTrue(encodedText.contains("- Result: PASS"))
+            assertTrue(encodedText.contains("Report detail: withheld"))
+            assertFalse(encodedText.contains("| Redacted report details |"))
+            assertTrue(encodedText.contains("| Input ELF | withheld | `0508a9dc283c9336ac0dc82b721dbf328fa7bc1195988d1dfa61d6a4822113a8` |"))
+            assertEquals(retainedDetails, root.resolve(MVP_SUMMARY_DETAILS_PATH).readText())
+            assertEquals("public code", source.readText())
+            assertEquals(full, evidence.patchDiffPath!!.readText())
+        }
+        encodingEvidence.patchDiff = full
+        for (prefixLength in listOf(1_024, 20_000)) for (omittedTail in listOf("a\uD800b", "a\uDC00b")) {
+            encodingEvidence.patchExplanation = "public explanation " + "x".repeat(prefixLength) + omittedTail
+            writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+            val boundedSummary = encodedSummary.readText()
+            assertFalse(boundedSummary.contains(encodingSecret))
+            assertFalse(boundedSummary.contains("Report detail:"))
+            if (prefixLength < 16_384) assertTrue(boundedSummary.contains("public explanation " + "x".repeat(128)))
+            else assertTrue(boundedSummary.contains("[oversized text omitted]"))
+            assertTrue(boundedSummary.contains(full.trimEnd()))
+            assertEquals("public code", source.readText())
+            assertEquals(full, evidence.patchDiffPath!!.readText())
+        }
+        encodingEvidence.patchExplanation = "public explanation a€b 😀 λ"
+        writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+        assertTrue(encodedSummary.readText().contains(encodingEvidence.patchExplanation))
+        assertFalse(encodedSummary.readText().contains("Report detail:"))
     }
 
     @Test

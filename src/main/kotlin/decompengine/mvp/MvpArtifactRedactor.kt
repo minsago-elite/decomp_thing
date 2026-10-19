@@ -3,6 +3,9 @@ package decompengine.mvp
 import decompengine.jobs.OriginalCredentialSpanCursor
 import decompengine.jobs.ProgressControlPolicy
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.util.Collections
 
 /** Complete display projections only; authoritative source, receipts and hashes are untouched. */
@@ -488,4 +491,13 @@ private class MvpArtifactByteBudget(private val maximum: Long) {
 
 private fun artifactActive() {
     if (Thread.currentThread().isInterrupted) throw InterruptedException("artifact projection interrupted")
+}
+
+/** Strict encoding of an already bounded projection, before an artifact file is opened. */
+internal fun encodeMvpArtifactUtf8(text: String): ByteArray = try {
+    val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text))
+    ByteArray(encoded.remaining()).also { encoded.get(it) }
+} catch (_: CharacterCodingException) {
+    throw MvpPatchException("MVP report text cannot be encoded faithfully")
 }

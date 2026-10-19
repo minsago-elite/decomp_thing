@@ -72,6 +72,7 @@ class MvpPatchWorkflow(
         require(ReconstructionProfiles.builtIn.any { it.id == profile.id && it.sha256 == profile.sha256 }) {
             "MVP patch profile is not admitted by this application"
         }
+        requireMvpSummaryCapacity(resourceBudget.maximumProjectionBytes)
         val compilerPolicy = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
@@ -979,7 +980,7 @@ private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEv
         }
         append("\n")
     }
-    path.writeText(transcript)
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
 }
 
 private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
@@ -992,7 +993,7 @@ private fun retainResponse(path: Path, response: decompengine.repair.RepairRespo
         }
         append("\n")
     }
-    path.writeText(transcript)
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
 }
 
 private fun findSourceLocation(sanitizer: String): String? =
