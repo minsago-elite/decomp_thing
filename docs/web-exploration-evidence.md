@@ -34,6 +34,24 @@ null because this producer does not attest a source revision. Acceptance is alwa
 `not-evaluated`; confidence and observation breadth never imply equivalence or an
 accepted reconstruction. Observed report bytes now have a [digest-bound artifact descriptor and download](web-exploration-artifacts.md). Unreadable bytes retain a null sourceArtifact.
 
+## Observed signature chart and exact counts
+
+The breadth view charts the expanded distinct exit/output signatures and the new
+signatures reported within that same sample. Bar lengths are display approximations;
+the adjacent accessible table and chart description retain the original exact
+unsigned-decimal counters. No baseline signature count, code coverage or behavioral
+equivalence denominator is inferred. A zero new-signature count is displayed only
+within a nonempty, consistent expanded sample; empty or contradictory samples do
+not produce a chart.
+
+The chart references the selected report/job/run/revision binding and its exact-count
+table through accessible descriptions. Chart, table and observed artifact download
+derive from the same selected report object and clear together when a read fails.
+Report refresh/navigation preserves the existing response-decoder and identity checks.
+This presentation adds no request, workflow control or execution. Its pure DOM
+controls require normal Actions qualification; source changes alone do not establish
+rendered visual/zoom or packaged acceptance.
+
 The pinned attempt page offers an explicit Read exploration evidence action.
 Opening the attempt does not fetch the report automatically. Each response must
 match the requested job, run and report type. Reads abort on navigation/unmount;

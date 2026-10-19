@@ -36,7 +36,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
     {error && <p role="alert">{error}</p>}
     {report && <>
       <p>{displayMessage(copy.state, { state: report.state, authority: report.authority })}</p>
-      <dl class="job-facts" aria-label={copy.reportBinding}>
+      <dl id="exploration-report-binding" class="job-facts" aria-label={copy.reportBinding}>
         <dt>{copy.reportIdentity}</dt><dd><code>{report.reportId}</code></dd>
         <dt>{copy.reportJob}</dt><dd><code>{report.binding.jobId}</code></dd>
         <dt>{copy.reportAttempt}</dt><dd><code>{report.binding.runId ?? copy.bindingNotRecorded}</code></dd>
@@ -54,7 +54,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         <dt>{copy.newOutputSignatures}</dt><dd>{summary.confidence.newOutputSignatureCount}</dd>
         <dt>{copy.producerReportsSandboxing}</dt><dd>{summary.confidence.sandboxed ? copy.yes : copy.no}</dd>
         <dt>{copy.producerReportsNetworkIsolation}</dt><dd>{summary.confidence.networkIsolated ? copy.yes : copy.no}</dd>
-      </dl><OutputSignatureBreadth summary={summary} /></> : <p role="status">{copy.noNumericSummaryIsAvailableFromTheseReportBytesMissing}</p>}
+      </dl><OutputSignatureBreadth summary={summary} bindingId="exploration-report-binding" /></> : <p role="status">{copy.noNumericSummaryIsAvailableFromTheseReportBytesMissing}</p>}
       {report.sourceArtifact && <>
         <p>{displayMessage(copy.artifact, { bytes: report.sourceArtifact.sizeBytes, digest: <code>{report.sourceArtifact.sha256}</code> })}</p>
         <p>{copy.theDigestIdentifiesTheObservedBytesItDoesNotValidate}</p>
