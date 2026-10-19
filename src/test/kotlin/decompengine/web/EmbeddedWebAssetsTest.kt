@@ -136,7 +136,10 @@ class EmbeddedWebAssetsTest {
             assertTrue(html.contains("name=\"decomp-base-path\" content=\"/workbench/nested/\""))
             assertTrue(html.contains("name=\"decomp-application-version\" content=\"0.1.0\""))
             assertTrue(html.contains("src=\"/workbench/nested/assets/ui/assets/index-12345678.js\""))
-            assertTrue(html.contains("<script type=\"module\" blocking=\"render\""))
+            val bootstrap = "<script src=\"/workbench/nested/assets/ui/assets/display-preferences-bootstrap-12345678.js\"></script>"
+            assertTrue(html.contains(bootstrap))
+            assertTrue(html.indexOf(bootstrap) < html.indexOf("<link rel=\"stylesheet\""))
+            assertTrue(html.indexOf(bootstrap) < html.indexOf("<script type=\"module\""))
             assertTrue(html.indexOf("<script ") < html.indexOf("</head>"))
             assertTrue(html.contains("href=\"/workbench/nested/assets/ui/assets/index-12345678.css\""))
             assertTrue(html.contains("id=\"app\""))
@@ -282,6 +285,7 @@ class EmbeddedWebAssetsTest {
             "index.html" to "<!doctype html><html><body>private build input</body></html>".toByteArray(),
             "assets/index-12345678.js" to "import './dynamic-12345678.js';\n".toByteArray(),
             "assets/dynamic-12345678.js" to "export const value = 1;\n".toByteArray(),
+            "assets/display-preferences-bootstrap-12345678.js" to "(() => {})();\n".toByteArray(),
             "assets/index-12345678.css" to "body { color: black; }\n".toByteArray(),
             "assets/mark-12345678.svg" to "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n".toByteArray(),
         )
@@ -295,6 +299,10 @@ class EmbeddedWebAssetsTest {
                 put("assets", JsonArray(listOf(JsonPrimitive("assets/mark-12345678.svg"))))
             })
             put("src/dynamic.ts", buildJsonObject { put("file", "assets/dynamic-12345678.js") })
+            put("src/app/display-preferences-bootstrap.js", buildJsonObject {
+                put("file", "assets/display-preferences-bootstrap-12345678.js")
+                put("isEntry", true)
+            })
         }.toString().toByteArray()
         val payload = buildJsonObject {
             put("schemaVersion", 1)

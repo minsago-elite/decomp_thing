@@ -110,6 +110,75 @@ describe('bounded display-only storage', () => {
   });
 });
 
+describe('display preferences before the shell mounts', () => {
+  async function loadBootstrap() {
+    vi.resetModules();
+    await import('../src/app/display-preferences-bootstrap.js');
+  }
+
+  it('applies every saved display choice before mounting the actual shell without startup writes', async () => {
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const removes = vi.spyOn(Storage.prototype, 'removeItem');
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    for (const theme of ['system', 'light', 'dark']) {
+      for (const motion of ['system', 'reduce']) {
+        const raw = JSON.stringify({ version: 1, theme, motion });
+        window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, raw);
+        writes.mockClear(); removes.mockClear();
+        await loadBootstrap();
+        expect(document.documentElement.getAttribute('data-theme')).toBe(theme);
+        expect(document.documentElement.getAttribute('data-motion')).toBe(motion);
+        const view = render(<App />);
+        expect(document.documentElement.getAttribute('data-theme')).toBe(theme);
+        expect(document.documentElement.getAttribute('data-motion')).toBe(motion);
+        expect(writes).not.toHaveBeenCalled();
+        expect(removes).not.toHaveBeenCalled();
+        expect(window.localStorage.getItem(DISPLAY_PREFERENCES_KEY)).toBe(raw);
+        expect(fetch).not.toHaveBeenCalled();
+        view.unmount();
+      }
+    }
+  });
+
+  it('uses the same strict bounded record contract as the shell without rewriting rejected data', async () => {
+    const rawValues = ['{', 'null', '[]', '1', JSON.stringify('dark'),
+      JSON.stringify({ version: 2, ...system }),
+      JSON.stringify({ version: 1, theme: 'unknown', motion: 'system' }),
+      JSON.stringify({ version: 1, theme: 'light', motion: 'full' }),
+      JSON.stringify({ version: 1, theme: 'dark' }),
+      JSON.stringify({ version: 1, ...system, session: privateMarker }),
+      JSON.stringify({ version: 1, ...system, extra: 'x'.repeat(1000) })];
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const removes = vi.spyOn(Storage.prototype, 'removeItem');
+    for (const raw of rawValues) {
+      window.localStorage.setItem(DISPLAY_PREFERENCES_KEY, raw);
+      writes.mockClear(); removes.mockClear();
+      await loadBootstrap();
+      expect(document.documentElement.getAttribute('data-theme')).toBe(readDisplayPreferences().theme);
+      expect(document.documentElement.getAttribute('data-motion')).toBe(readDisplayPreferences().motion);
+      expect(document.documentElement.getAttribute('data-theme')).toBe('system');
+      expect(document.documentElement.getAttribute('data-motion')).toBe('system');
+      expect(window.localStorage.getItem(DISPLAY_PREFERENCES_KEY)).toBe(raw);
+      expect(writes).not.toHaveBeenCalled();
+      expect(removes).not.toHaveBeenCalled();
+    }
+  });
+
+  it('applies system settings when startup storage is denied without leaking or writing anything', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error(privateMarker); });
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const removes = vi.spyOn(Storage.prototype, 'removeItem');
+    const errors = vi.spyOn(console, 'error');
+    await loadBootstrap();
+    expect(document.documentElement.getAttribute('data-theme')).toBe('system');
+    expect(document.documentElement.getAttribute('data-motion')).toBe('system');
+    expect(writes).not.toHaveBeenCalled();
+    expect(removes).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain(privateMarker);
+  });
+});
+
 describe('workbench display controls', () => {
   it('mounts the actual public shell with system preferences without writes or API requests', () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);

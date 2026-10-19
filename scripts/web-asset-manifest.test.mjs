@@ -19,6 +19,7 @@ function fixture(t, report = false) {
   writeFileSync(join(root, 'index.html'), '<!doctype html><main>Fixture</main>');
   writeFileSync(join(root, 'assets/index-abc12345.js'), 'import "./lazy-def67890.js";');
   writeFileSync(join(root, 'assets/lazy-def67890.js'), 'export const fixture = true;');
+  writeFileSync(join(root, 'assets/display-preferences-bootstrap-abc12345.js'), '(() => {})();');
   writeFileSync(join(root, 'assets/base-aaa12345.css'), 'body { color: black; }');
   writeFileSync(join(root, 'assets/index-bbb12345.css'), 'main { color: navy; }');
   writeFileSync(join(root, '.vite/manifest.json'), JSON.stringify({
@@ -26,6 +27,7 @@ function fixture(t, report = false) {
       imports: ['shared'], css: ['assets/index-bbb12345.css'], dynamicImports: ['lazy'] },
     shared: { file: 'assets/lazy-def67890.js', css: ['assets/base-aaa12345.css'] },
     lazy: { file: 'assets/lazy-def67890.js' },
+    'src/app/display-preferences-bootstrap.js': { file: 'assets/display-preferences-bootstrap-abc12345.js', isEntry: true },
   }));
   if (report) {
     mkdirSync(join(root, 'dist'));
@@ -47,7 +49,7 @@ test('inventory binds a complete split bundle deterministically with dependency 
   assert.equal(manifest, readFileSync(join(second, 'asset-manifest.json'), 'utf8'));
   const parsed = JSON.parse(manifest);
   assert.deepEqual(parsed.entryStyles, ['assets/base-aaa12345.css', 'assets/index-bbb12345.css']);
-  assert.equal(parsed.files.length, 6);
+  assert.equal(parsed.files.length, 7);
   assert.deepEqual(parsed.files.filter(file => !file.public).map(file => file.path), ['.vite/manifest.json', 'index.html']);
   assert.equal(command(first, '--verify').status, 0);
 });
