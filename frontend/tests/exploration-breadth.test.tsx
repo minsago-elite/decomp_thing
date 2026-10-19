@@ -1,3 +1,4 @@
+import { createHash, webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fireEvent, render, screen, within } from '@testing-library/preact';
@@ -116,7 +117,13 @@ it('clears a prior sample summary when its deliberate refresh fails', async () =
 it('accepts a known version-one observation failure through the real decoder without numeric or legacy-case views', async () => {
   const value = report(); value.state = 'partial'; value.producerSchemaVersion = 1; value.summary = null;
   value.binding.revisionId = null;
-  if (value.sourceArtifact) value.sourceArtifact.binding.revisionId = null;
+  const legacyDetails = JSON.stringify({ candidateCount: 1, candidates: [{ id: 'legacy_case', source: 'SEED', args: [], stdinHex: '' }], observations: [] });
+  const artifact = value.sourceArtifact;
+  if (!artifact) throw Error('Expected frozen exploration artifact');
+  artifact.binding.revisionId = null;
+  artifact.sizeBytes = Buffer.byteLength(legacyDetails).toString();
+  artifact.sha256 = createHash('sha256').update(legacyDetails).digest('hex');
+  vi.stubGlobal('crypto', webcrypto);
   value.limitations = ['The producer reported a timeout while observing the expanded sample. Coverage and confidence are unavailable.'];
   const { fetcher } = read(value);
   expect(await screen.findByText(value.limitations[0]!)).toBeTruthy();
@@ -124,8 +131,18 @@ it('accepts a known version-one observation failure through the real decoder wit
   expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(value.sourceArtifact!.contentHref);
   expect(screen.queryByRole('table', { name: 'Output signature counts reported by the producer' })).toBeNull();
   expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Read retained case details' })).toBeNull();
+  const inspect = screen.getByRole('button', { name: 'Read retained case details' });
+  expect(screen.queryByRole('table', { name: 'Retained candidate records' })).toBeNull();
   expect(fetcher).toHaveBeenCalledOnce();
+  fetcher.mockResolvedValueOnce(new Response(legacyDetails, { headers: { 'Content-Type': 'application/octet-stream', 'X-Request-ID': frozen.requestId } }));
+  fireEvent.click(inspect);
+  expect((await screen.findByRole('alert')).textContent).toContain('Case details are unavailable');
+  expect(screen.queryByRole('table', { name: 'Retained candidate records' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Inspect case "legacy_case"' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher.mock.calls[1]?.[0]).toBe(artifact.contentHref);
+  expect(fetcher.mock.calls[1]?.[1]).toMatchObject({ method: 'GET' });
+  expect(fetcher.mock.calls[1]?.[1]?.body).toBeUndefined();
 });
 
 it('rejects unknown or authority-changing failure projections through the real decoder before showing their data', async () => {

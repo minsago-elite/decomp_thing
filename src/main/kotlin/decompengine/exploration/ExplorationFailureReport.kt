@@ -205,7 +205,8 @@ internal fun explorationFailureLimitation(root: JsonObject): String {
                 val code = requireNotNull(exit.intOrNull)
                 val stdout = hex(observation, "stdoutHex"); val stderr = hex(observation, "stderrHex")
                 require(text(observation, "signature") == "$code:$stdout:$stderr")
-                require(observation.getValue("networkIsolated").jsonPrimitive.booleanOrNull != null)
+                val isolated = observation.getValue("networkIsolated").jsonPrimitive
+                require(!isolated.isString && isolated.booleanOrNull != null)
             }
         }
         validateSample("baselineInputs", "baselineObservations", baselineCount, baselineObserved)

@@ -91,6 +91,10 @@ Malformed counts, positions, signatures or reason pairs are invalid; future
 versions are unsupported. The record remains producer-reported observation data,
 without independent containment, source-revision or acceptance authority.
 
+Isolation and coverage flags must be JSON boolean literals; quoted booleans are
+invalid rather than coerced. An unknown declared schema remains unsupported even
+when it omits a version and otherwise resembles a complete legacy summary.
+
 The structured viewer reads this partial format only when the selected report
 declares producer version 1 and partial state. Its existing explicit artifact read
 checks attempt/URL binding and observed length/SHA-256 before parsing. Baseline and

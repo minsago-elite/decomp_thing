@@ -24,7 +24,7 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                 } else {
                     state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
                 }
-            } else if ("schemaVersion" in root || "schema_version" in root) {
+            } else if ("schema" in root || "schemaVersion" in root || "schema_version" in root) {
                 state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
             } else if (!root.keys.containsAll(setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures", "newOutputSignatures", "angr", "confidence", "candidates", "observations"))) {
                 state = "partial"; limitation = "Required producer fields are absent; no summary is inferred."
@@ -34,10 +34,15 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                     require(!value.isString && value.content.matches(Regex("0|[1-9][0-9]{0,19}")) && value.content.toULongOrNull() != null)
                     return value.content
                 }
+                fun boolean(objectValue: JsonObject, name: String): Boolean {
+                    val value = objectValue.getValue(name).jsonPrimitive
+                    require(!value.isString)
+                    return requireNotNull(value.booleanOrNull)
+                }
                 val candidateCount = count(root, "candidateCount")
                 require(candidateCount.toULong() == root.getValue("candidates").jsonArray.size.toULong())
                 root.getValue("observations").jsonArray
-                require(root.getValue("coverageIncreased").jsonPrimitive.booleanOrNull != null)
+                boolean(root, "coverageIncreased")
                 count(root, "baselineOutputSignatures")
                 root.getValue("newOutputSignatures").jsonArray.forEach { require(it.jsonPrimitive.isString) }
                 val confidence = root.getValue("confidence").jsonObject
@@ -48,7 +53,7 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                     put("confidence", buildJsonObject {
                         put("score", score)
                         for (name in listOf("inputCount", "sourceCount", "outputSignatureCount", "newOutputSignatureCount")) put(name, count(confidence, name))
-                        for (name in listOf("sandboxed", "networkIsolated")) put(name, requireNotNull(confidence.getValue(name).jsonPrimitive.booleanOrNull))
+                        for (name in listOf("sandboxed", "networkIsolated")) put(name, boolean(confidence, name))
                     })
                 }
                 state = "available"; limitation = "Observed sample breadth and producer-reported isolation are not proof of equivalence or independent containment verification."
