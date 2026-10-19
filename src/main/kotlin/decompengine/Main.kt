@@ -412,13 +412,8 @@ private fun runRepair(args: List<String>) {
         } else {
             listOf(ProcessInput("default"))
         }
-        val result = SecureRepairRuntime.open(
-            RepairRuntimeConfiguration(
-                profileId = "generated-c-make-v1",
-                historyPath = reportsDir.resolve("repair_history.json"),
-                harnessOverride = harnessOverride,
-            ),
-        ).use { runtime ->
+        val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
+        val result = SecureRepairRuntime.open(configuration).use { runtime ->
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
                 runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
@@ -429,6 +424,19 @@ private fun runRepair(args: List<String>) {
     if (exitCode != 0) kotlin.system.exitProcess(exitCode)
 }
 
+/** Only validation of the CLI's data-only configuration can produce a usage failure. */
+internal fun prepareRepairCliConfiguration(historyPath: Path, harnessOverride: String?): RepairRuntimeConfiguration = try {
+    RepairRuntimeConfiguration(
+        profileId = "generated-c-make-v1",
+        historyPath = historyPath,
+        harnessOverride = harnessOverride,
+    )
+} catch (failure: IllegalArgumentException) {
+    throw RepairCliConfigurationException(failure)
+}
+
+internal class RepairCliConfigurationException(cause: IllegalArgumentException) : RuntimeException(cause.message, cause)
+
 /** Admit diagnostics before preparation, and keep raw exploration/runtime failures off stderr. */
 internal fun runRepairCliAction(
     sensitiveValues: Collection<String>,
@@ -438,7 +446,7 @@ internal fun runRepairCliAction(
     val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 1
     return try {
         action(redactor)
-    } catch (failure: IllegalArgumentException) {
+    } catch (failure: RepairCliConfigurationException) {
         renderWorkflowUsageError(WorkflowCliCommand.REPAIR, failure.message ?: "invalid repair configuration", redactor, output)
     } catch (failure: Exception) {
         if (failure is InterruptedException) Thread.currentThread().interrupt()

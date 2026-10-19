@@ -23,14 +23,18 @@ class RepairCliPresentationTest {
         val bytes = ByteArrayOutputStream()
         PrintStream(bytes, true, Charsets.UTF_8).use { output ->
             val stages = listOf("exploration", "runtime", "presentation")
-            for (failedStage in stages) {
+            for (failedStage in stages) for (failure in listOf(
+                java.io.IOException("$failedStage: $secret"),
+                IllegalArgumentException("$failedStage: $secret"),
+                NumberFormatException("$failedStage: $secret"),
+            )) {
                 val entered = mutableListOf<String>()
                 var closed = false
                 assertEquals(1, runRepairCliAction(listOf(secret), output) {
                     AutoCloseable { closed = true }.use {
                         for (stage in stages) {
                             entered += stage
-                            if (stage == failedStage) throw java.io.IOException("$stage: $secret")
+                            if (stage == failedStage) throw failure
                         }
                         0
                     }
@@ -39,14 +43,25 @@ class RepairCliPresentationTest {
                 assertTrue(closed)
                 val diagnostic = bytes.toString(Charsets.UTF_8)
                 assertTrue(diagnostic.startsWith("repair unavailable or failed:"), diagnostic)
+                assertFalse(diagnostic.contains("usage:"), diagnostic)
                 assertFalse(diagnostic.contains(secret), diagnostic)
                 assertFalse(diagnostic.contains("Exception"), diagnostic)
                 bytes.reset()
             }
+            val configurationFailure = assertFailsWith<RepairCliConfigurationException> {
+                prepareRepairCliConfiguration(Path.of("synthetic-repair-history.json"), "invalid-harness")
+            }
+            assertIs<IllegalArgumentException>(configurationFailure.cause)
+            assertEquals(2, runRepairCliAction(emptyList(), output) { throw configurationFailure })
+            assertTrue(bytes.toString(Charsets.UTF_8).contains(WorkflowCliCommand.REPAIR.usage))
+            bytes.reset()
             val suppliedValues = mutableListOf(secret)
+            val originalConfigurationFailure = IllegalArgumentException("invalid $secret")
+            val privateConfigurationFailure = RepairCliConfigurationException(originalConfigurationFailure)
+            assertSame(originalConfigurationFailure, privateConfigurationFailure.cause)
             assertEquals(2, runRepairCliAction(suppliedValues, output) {
                 suppliedValues.clear()
-                throw IllegalArgumentException("invalid $secret")
+                throw privateConfigurationFailure
             })
             assertTrue(bytes.toString(Charsets.UTF_8).contains(WorkflowCliCommand.REPAIR.usage))
             assertFalse(bytes.toString(Charsets.UTF_8).contains(secret))
