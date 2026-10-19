@@ -48,8 +48,10 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                 root.getValue("observations").jsonArray
                 boolean(root, "coverageIncreased")
                 count(root, "baselineOutputSignatures")
-                root.getValue("newOutputSignatures").jsonArray.forEach { require(it.jsonPrimitive.isString) }
+                val newSignatures = root.getValue("newOutputSignatures").jsonArray
+                newSignatures.forEach { require(it.jsonPrimitive.isString) }
                 val confidence = root.getValue("confidence").jsonObject
+                require(count(confidence, "newOutputSignatureCount").toULong() == newSignatures.size.toULong())
                 val score = confidence.getValue("score").jsonPrimitive
                 require(!score.isString && score.doubleOrNull?.let { it.isFinite() && it in 0.0..1.0 } == true)
                 summary = buildJsonObject {
