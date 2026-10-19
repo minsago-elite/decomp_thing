@@ -3230,6 +3230,12 @@ internal data class WorkspaceSnapshotLimits(
 internal class WorkspaceSnapshotLimitExceeded(val dimension: String) : RuntimeException()
 internal class WorkspaceSnapshotInvalidEntry(val reason: String) : RuntimeException()
 
+/** Snapshot admission follows the broker's single-link regular-file policy before capture work. */
+internal fun <T> withSingleLinkWorkspaceSnapshotFile(linkCount: Int, capture: () -> T): T {
+    if (linkCount != 1) throw WorkspaceSnapshotInvalidEntry("unsupported-link-count")
+    return capture()
+}
+
 internal class WorkspaceSnapshotBudget(
     private val cancellation: AgentCancellation,
     private val wallDeadline: MonotonicDeadline,
@@ -3343,11 +3349,13 @@ internal class WorkspaceSnapshot private constructor(
                     val identity = entry.identity
                     if (identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
                     if (identity.isRegularFile) {
-                        val path = AgentWorkspacePath(rootId, relative)
-                        if (path !in states) {
-                            budget.file()
-                            val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
-                            states[path] = hashFile(anchor, relative, budget, identity)
+                        withSingleLinkWorkspaceSnapshotFile(identity.linkCount) {
+                            val path = AgentWorkspacePath(rootId, relative)
+                            if (path !in states) {
+                                budget.file()
+                                val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
+                                states[path] = hashFile(anchor, relative, budget, identity)
+                            }
                         }
                     } else if (identity.isDirectory) {
                         if (recursive) LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name).use { directory ->

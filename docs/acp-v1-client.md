@@ -817,6 +817,13 @@ RESOURCE_EXHAUSTED and a bounded phase/limit diagnostic; no partial change set i
 do not establish aggregate staged-storage/inode quotas, descriptor-bound inventory completeness or concurrent-workflow
 resource accounting. Those broader #63/#71 requirements and stress qualification remain open.
 
+Workspace snapshots admit regular files only when their observed link count is exactly one,
+matching the filesystem broker's read/replacement policy. Other link counts fail with
+`WORKSPACE_VIOLATION` and `unsupported-link-count` before the file-budget/hash callback runs.
+This applies to both initial and final snapshots, including aliases whose names are all
+allowlisted. Existing descriptor/path revalidation, metadata comparisons and mutation authority
+checks still apply to admitted files.
+
 Event consumers are trusted in-process callbacks and must be non-blocking and return promptly. Prompt-update callbacks
 are isolated from lifecycle polling, but post-response message-completion and file-change callbacks run synchronously
 to preserve event ordering. The harness cannot safely preempt arbitrary blocking callback code, so lifecycle deadlines
