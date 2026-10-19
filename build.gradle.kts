@@ -26,6 +26,17 @@ plugins {
 group = "dev.decompengine"
 version = "0.1.0"
 
+// Reuse compilation only. Qualification results must be produced by this build.
+allprojects {
+    tasks.configureEach {
+        if (this !is org.gradle.api.tasks.compile.JavaCompile &&
+            this !is org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+        ) {
+            outputs.doNotCacheIf("Only JVM compilation outputs may use the build cache") { true }
+        }
+    }
+}
+
 kotlin {
     jvmToolchain(21)
 }
