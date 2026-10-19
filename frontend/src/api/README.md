@@ -35,6 +35,12 @@ and revision-validation producer version 2. A future producer version must gain 
 support; an explicit unavailable/unsupported report may carry its version without a summary.
 These client checks validate contract consistency, not the authenticity of execution or acceptance.
 
+Run lifecycle semantics follow the durable store in single-attempt documents, history items and
+progress snapshots. Terminal reasons must match their state; running and completed attempts need
+a recorded start, while queued attempts have none. Cancelling, failed, cancelled and interrupted
+attempts may have no start timestamp when termination precedes execution. The shared Python
+verifier and frontend contract tests exercise all state/reason pairs and both start alternatives.
+
 `createApiClient({basePath})` uses same-origin `/api/v1` URLs, credentials, JSON negotiation and
 `X-Request-ID` correlation. It exposes typed `get`, `post`, `upload` and `deleteSession` calls. `get`/`post`
 return the entire typed response envelope. HTTP errors expose `ApiClientError` with a local `code`,

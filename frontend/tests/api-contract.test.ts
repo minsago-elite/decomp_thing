@@ -5,12 +5,65 @@ import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
 import { ApiClientError } from '../src/api/errors';
 import { parseBoundedJson } from '../src/api/json';
+import type { Run } from '../src/api/generated';
 
 const root = resolve(process.cwd(), '../contracts/web/v1');
 const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.json`), 'utf8');
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('rejects contradictory lifecycle reasons in single runs, history and snapshots', () => {
+    const single = decodeResponse(fixture('run-completed-unaccepted'), 'run');
+    const page = decodeResponse(fixture('runs-page'), 'runs');
+    const snapshot = decodeResponse(fixture('snapshot'), 'snapshot');
+    const expected: Record<Run['state'], readonly Run['terminalReason'][]> = {
+      queued: [null], running: [null], cancelling: [null],
+      completed: ['COMPLETED', 'NO_CHANGES'], failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+      cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
+    };
+    const reasons: Run['terminalReason'][] = [null, 'COMPLETED', 'NO_CHANGES', 'REFUSED', 'CANCELLED', 'LIMIT_EXHAUSTED', 'FAILED', 'PROCESS_INTERRUPTED'];
+    for (const state of Object.keys(expected) as Run['state'][]) {
+      for (const terminalReason of reasons) {
+        const run: Run = { ...single.data, state, terminalReason, resultRevisionId: null, usage: null,
+          startedAt: state === 'queued' ? null : single.data.startedAt,
+          endedAt: ['completed', 'failed', 'cancelled', 'interrupted'].includes(state) ? single.data.endedAt : null };
+        const documents = [{ ...single, data: run }, { ...page, data: { ...page.data, items: [run] } },
+          { ...snapshot, data: { ...snapshot.data, run } }];
+        for (const document of documents) {
+          for (const mode of ['producer', 'response'] as const) {
+            const decode = () => decodeContract(JSON.stringify(document), { mode });
+            if (expected[state].includes(terminalReason)) expect(decode()).toEqual(document);
+            else expect(decode).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+          }
+        }
+      }
+    }
+  });
+  it('requires start timestamps only for the lifecycle states that require them', () => {
+    const single = decodeResponse(fixture('run-completed-unaccepted'), 'run');
+    const page = decodeResponse(fixture('runs-page'), 'runs');
+    const snapshot = decodeResponse(fixture('snapshot'), 'snapshot');
+    const states: Run['state'][] = ['queued', 'running', 'cancelling', 'completed', 'failed', 'cancelled', 'interrupted'];
+    for (const state of states) {
+      for (const startedAt of [null, single.data.startedAt]) {
+        const run: Run = { ...single.data, state, startedAt, resultRevisionId: null, usage: null,
+          endedAt: ['completed', 'failed', 'cancelled', 'interrupted'].includes(state) ? single.data.endedAt : null,
+          terminalReason: state === 'completed' ? 'COMPLETED' : state === 'failed' ? 'FAILED'
+            : state === 'cancelled' ? 'CANCELLED' : state === 'interrupted' ? 'PROCESS_INTERRUPTED' : null };
+        const valid = state === 'queued' ? startedAt === null
+          : state === 'running' || state === 'completed' ? startedAt !== null : true;
+        const documents = [{ ...single, data: run }, { ...page, data: { ...page.data, items: [run] } },
+          { ...snapshot, data: { ...snapshot.data, run } }];
+        for (const document of documents) {
+          for (const mode of ['producer', 'response'] as const) {
+            const decode = () => decodeContract(JSON.stringify(document), { mode });
+            if (valid) expect(decode()).toEqual(document);
+            else expect(decode).toThrow(expect.objectContaining({ code: 'invalid_response' }));
+          }
+        }
+      }
+    }
+  });
   it('projects recovery data without private additive fields and rejects fabricated completeness in responses', () => {
     const original = decodeResponse(fixture('recovery-retained'), 'recovery');
     const projected = decodeResponse(JSON.stringify({ ...original, privateRoot: '/PRIVATE', data: {

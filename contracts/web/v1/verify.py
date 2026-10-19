@@ -67,6 +67,22 @@ def check_outcomes(manifest: dict, validate) -> None:
             raise ValueError(f"{outcome}: outcome fixture contains a private path or credential")
 
 
+def check_run(run: dict) -> None:
+    """Match durable lifecycle metadata without inferring execution or acceptance."""
+    reasons = {
+        "queued": (None,), "running": (None,), "cancelling": (None,),
+        "completed": ("COMPLETED", "NO_CHANGES"),
+        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED"),
+        "cancelled": ("CANCELLED",), "interrupted": ("PROCESS_INTERRUPTED",),
+    }
+    if run["terminalReason"] not in reasons[run["state"]]:
+        raise ValueError("attempt state and terminal reason disagree")
+    if run["state"] == "queued" and run["startedAt"] is not None:
+        raise ValueError("queued attempt has already started")
+    if run["state"] in ("running", "completed") and run["startedAt"] is None:
+        raise ValueError("running or completed attempt has no start timestamp")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -93,12 +109,16 @@ def check_semantics(document: dict) -> None:
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
             raise ValueError("recovery inventory exceeds its bounded inspection")
+    elif kind == "run":
+        check_run(data)
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):
             raise ValueError("invalid attempt page bounds or duplicate identity")
         if any(item["jobId"] != data["jobId"] for item in items):
             raise ValueError("attempt belongs to a different job")
+        for item in items:
+            check_run(item)
     elif kind == "jobs":
         if len(data["items"]) > data["page"]["limit"]:
             raise ValueError("page exceeds its declared record limit")
@@ -134,6 +154,7 @@ def check_semantics(document: dict) -> None:
             if summary is None or summary.get("result") != "passed":
                 raise ValueError("accepted report requires a passed validation summary")
     elif kind == "snapshot":
+        check_run(data["run"])
         if (data["throughCursor"] is None) != (data["throughSequence"] is None):
             raise ValueError("snapshot cursor and sequence must describe the same watermark")
         if "progress" in data:
@@ -180,6 +201,52 @@ def check_semantics(document: dict) -> None:
             raise ValueError("Git object ID is not full length for its repository format")
 
 
+def check_run_lifecycle_controls(validate) -> int:
+    """Exercise every state/reason pair and start alternative in each Run position."""
+    single = json.loads((ROOT / "fixtures/run-completed-unaccepted.json").read_text())
+    page = json.loads((ROOT / "fixtures/runs-page.json").read_text())
+    snapshot = json.loads((ROOT / "fixtures/snapshot.json").read_text())
+    expected = {
+        "queued": {None}, "running": {None}, "cancelling": {None},
+        "completed": {"COMPLETED", "NO_CHANGES"},
+        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED"},
+        "cancelled": {"CANCELLED"}, "interrupted": {"PROCESS_INTERRUPTED"},
+    }
+    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED",
+                   "LIMIT_EXHAUSTED", "FAILED", "PROCESS_INTERRUPTED"]
+    checked = 0
+
+    def check(run, valid):
+        nonlocal checked
+        documents = [
+            {**single, "data": run},
+            {**page, "data": {**page["data"], "items": [run]}},
+            {**snapshot, "data": {**snapshot["data"], "run": run}},
+        ]
+        for document in documents:
+            try:
+                validate(document)
+                check_semantics(document)
+            except (fastjsonschema.JsonSchemaException, ValueError):
+                if valid:
+                    raise ValueError("valid lifecycle metadata was rejected")
+            else:
+                if not valid:
+                    raise ValueError("contradictory lifecycle metadata was accepted")
+            checked += 1
+
+    for state, valid_reasons in expected.items():
+        run = {**single["data"], "state": state, "resultRevisionId": None, "usage": None,
+               "startedAt": None if state == "queued" else single["data"]["startedAt"],
+               "endedAt": single["data"]["endedAt"] if state in ("completed", "failed", "cancelled", "interrupted") else None}
+        for reason in all_reasons:
+            check({**run, "terminalReason": reason}, reason in valid_reasons)
+        for started in (None, single["data"]["startedAt"]):
+            valid = (started is None) if state == "queued" else (started is not None) if state in ("running", "completed") else True
+            check({**run, "terminalReason": next(reason for reason in all_reasons if reason in valid_reasons), "startedAt": started}, valid)
+    return checked
+
+
 def main() -> int:
     manifest = json.loads((ROOT / "fixtures.json").read_text())
     schema = json.loads((ROOT / manifest["schema"]).read_text())
@@ -211,10 +278,15 @@ def main() -> int:
         check_outcomes(manifest, validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
         failures.append(f"outcomes.json: {error}")
+    try:
+        lifecycle_controls = check_run_lifecycle_controls(validate)
+    except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
+        failures.append(f"run lifecycle controls: {error}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(f"v1 design contracts: {accepted} valid fixtures accepted; {rejected} invalid fixtures rejected; {len(OUTCOME_EXPECTATIONS)} web outcomes verified")
+    print(f"run lifecycle metadata: {lifecycle_controls} envelope controls verified")
     return 0
 
 

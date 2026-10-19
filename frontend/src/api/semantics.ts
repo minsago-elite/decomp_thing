@@ -1,4 +1,4 @@
-import type { ContractDocument } from './generated';
+import type { ContractDocument, Run } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -6,6 +6,19 @@ import type { ApiResource } from '../app/paths';
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
+
+function checkRun(run: Run): void {
+  // Match the durable store, including terminal attempts cancelled before start.
+  const reasons: Record<Run['state'], readonly Run['terminalReason'][]> = {
+    queued: [null], running: [null], cancelling: [null],
+    completed: ['COMPLETED', 'NO_CHANGES'],
+    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+    cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
+  };
+  requireValue(reasons[run.state].includes(run.terminalReason));
+  if (run.state === 'queued') requireValue(run.startedAt === null);
+  if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+}
 
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
@@ -30,10 +43,14 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       requireValue((progress.state === 'published') === (progress.jobId !== null));
       break;
     }
+    case 'run':
+      checkRun(document.data);
+      break;
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
       requireValue(items.every(item => item.jobId === jobId));
+      items.forEach(checkRun);
       break;
     }
     case 'recovery': {
@@ -95,6 +112,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       });
       break;
     case 'snapshot':
+      checkRun(document.data.run);
       requireValue((document.data.throughCursor === null) === (document.data.throughSequence === null));
       if (document.data.progress) {
         const { nextSequence, queueDropped, historyDropped, retainedEventCount } = document.data.progress;
