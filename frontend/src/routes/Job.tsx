@@ -5,11 +5,12 @@ import { useEffect, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
-import type { BrowserSession } from '../session/session';
+import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
+import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
 
-function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
+function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: string; runtime: RuntimeSnapshot }) {
   const { client } = usePrivateTransport(basePath);
   const [job, setJob] = useState<JobData | null>(null);
   const [error, setError] = useState('');
@@ -51,6 +52,7 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
+      <WorkflowAvailability runtime={runtime} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
     </>}
   </>;
@@ -61,7 +63,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} />
+    {state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }
