@@ -4,6 +4,7 @@ import com.agentclientprotocol.annotations.UnstableApi
 import com.agentclientprotocol.model.SessionConfigOption
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentFailureKind
+import decompengine.jobs.ProgressRedactor
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
@@ -174,6 +175,109 @@ class AcpCurrentConfigInventoryTest {
             sequenceOf("a", "b", "c", "d", "e"), listOf("(more choices omitted)"),
         ))
         assertEquals("[\"safe\"]", previewSessionChoices(sequenceOf("safe"), listOf("unrelated")))
+    }
+
+    @Test
+    fun `complete current inventory diagnostics protect private boolean literals and fixed labels`() {
+        val cases = listOf(
+            "[false,true]" to booleanInventory(),
+            "Current option ID previews" to booleanInventory(),
+            "value previews" to booleanInventory(),
+            CURRENT_DIAGNOSTIC_BASE to booleanInventory(),
+            "unavailable or ambiguous" to emptyList(),
+        )
+        for ((privateValue, options) in cases) {
+            val preference = AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.Select(privateValue))
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireCurrentSessionConfigPreference(options, preference, 5)
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals(mapOf("preference" to "configOption", "preferenceIndex" to "5",
+                "reason" to "currentInventoryMismatch"), failure.failure.details)
+            assertTrue(failure.failure.message.isNotBlank())
+            assertTrue(failure.failure.message.length < 1024)
+            assertFalse(failure.failure.message.contains(privateValue))
+            assertFalse(failure.stackTraceToString().contains(privateValue))
+        }
+    }
+
+    @Test
+    fun `complete diagnostic scans formatting boundaries and retains unrelated safe choices`() {
+        val base = INITIAL_DIAGNOSTIC_BASE
+        val hint = " Advertised choice previews: [\"safe-choice\"]"
+        assertEquals(base + hint, redactedSessionPreferenceDiagnostic(base, hint, listOf("unrelated"), emptyList()))
+        for (secret in listOf(base.takeLast(12) + hint.take(12), "Advertised choice previews", "[\"safe-choice\"]")) {
+            val message = redactedSessionPreferenceDiagnostic(base, hint, listOf(secret), emptyList())
+            assertTrue(message.isNotBlank()); assertTrue(message.length < 1024)
+            assertFalse(message.contains(secret))
+        }
+    }
+
+    @Test
+    fun `initial rejection base remains private when no choice hint exists`() {
+        for (secrets in listOf(listOf(" "), listOf("ACP", "[redacted]", "[unredactable text omitted]",
+            "[oversized text omitted]", "!", "?", "\u26a0"))) {
+            val message = redactedSessionPreferenceDiagnostic(INITIAL_DIAGNOSTIC_BASE, "", secrets, emptyList())
+            assertTrue(message.isNotBlank()); assertEquals(1, message.length)
+            secrets.forEach { assertFalse(message.contains(it)) }
+        }
+    }
+
+    @Test
+    fun `hostile omission markers retain a typed current rejection with a private nonblank indicator`() {
+        val preference = AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.Select("[false,true]"))
+        val privateValues = listOf(preference.id, "[false,true]", CURRENT_DIAGNOSTIC_BASE,
+            "[redacted]", "[unredactable text omitted]", "[oversized text omitted]", "!", "?", "\u26a0")
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(booleanInventory(), preference, 2, emptyList(), privateValues)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals(mapOf("preference" to "configOption", "preferenceIndex" to "2",
+            "reason" to "currentInventoryMismatch"), failure.failure.details)
+        assertTrue(failure.failure.message.isNotBlank()); assertEquals(1, failure.failure.message.length)
+        privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+    }
+
+    @Test
+    fun `nonblank omission avoids the maximum normalized inventory without an unchecked fixed replacement`() {
+        val markers = listOf("[redacted]", "[unredactable text omitted]", "[oversized text omitted]", "!", "?", "\u26a0")
+        val primaryGlyphCount = 4096 - markers.size
+        val glyphs = List(primaryGlyphCount + 130) { ('\ue000'.code + it).toChar().toString() }
+        val primary = markers + glyphs.take(primaryGlyphCount).mapIndexed { index, glyph ->
+            if (index % 2 == 0) "\u0000$glyph" else glyph
+        }
+        val privateValues = glyphs.drop(primaryGlyphCount)
+        val message = ProgressRedactor(primary, privateValues).nonBlankText(glyphs.first(), 1000)
+        assertEquals(4096, primary.size); assertEquals(130, privateValues.size)
+        assertTrue(message.isNotBlank()); assertEquals(1, message.length)
+        (markers + glyphs).forEach { assertFalse(message.contains(it)) }
+    }
+
+    @Test
+    fun `whole diagnostic preserves full environment and preference budgets together`() {
+        val environment = List(4096) { it.toString().padStart(256, 'x') }
+        val preferences = AcpSessionPreferences("ACP", "Current option ID previews", List(64) {
+            AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val privateValues = preferences.privateIdentifiers()
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(booleanInventory(), preferences.configOptions.first(), 1,
+                environment, privateValues)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals("currentInventoryMismatch", failure.failure.details["reason"])
+        assertEquals("1", failure.failure.details["preferenceIndex"])
+        assertTrue(failure.failure.message.isNotBlank()); assertTrue(failure.failure.message.length < 1024)
+        privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+    }
+
+    private fun booleanInventory(): List<SessionConfigOption> = listOf(Json.decodeFromString<SessionConfigOption>(
+        """{"type":"boolean","id":"telemetry","name":"Telemetry","currentValue":true}""",
+    ))
+
+    private companion object {
+        const val CURRENT_DIAGNOSTIC_BASE = "ACP configured option no longer has an unambiguous match in the current session inventory."
+        const val INITIAL_DIAGNOSTIC_BASE = "ACP configured session preference was not advertised by the exact session/new response"
     }
 
     private fun inventory(name: String): List<SessionConfigOption> {
