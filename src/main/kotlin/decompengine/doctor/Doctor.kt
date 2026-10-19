@@ -67,7 +67,7 @@ internal enum class DoctorToolKind(val label: String, val remediation: String) {
     PYTHON("Python", "Install Python 3 and ensure python3 is on PATH."),
     ANGR("angr", "Install angr for the selected Python interpreter or set ANGR_PYTHON."),
     GHIDRA("Ghidra", "Reinstall the complete application distribution and verify its Java runtime."),
-    SANITIZERS("C sanitizers", "Install sanitizer runtime libraries for the selected C compiler."),
+    SANITIZERS("C sanitizers", "Verify writable temporary storage, the selected compiler, sanitizer runtimes and probe cleanup."),
     BUBBLEWRAP("bubblewrap", "Install bubblewrap; analyzed binary execution requires a sandbox boundary."),
     OUTPUT("output directory", "Choose an existing writable directory with --output."),
     PROFILE("reconstruction profile", "Select a supported reconstruction profile with --profile."),
