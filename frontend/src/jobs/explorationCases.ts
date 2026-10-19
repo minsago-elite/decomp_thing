@@ -1,8 +1,9 @@
-import { parseBoundedJson } from '../api/json';
+import { MAX_JSON_BYTES, parseBoundedJson } from '../api/json';
 import { ApiClientError } from '../api/errors';
 
 export const CASE_PAGE_SIZE = 20;
 export const MAX_RETAINED_CASES = 1000;
+export const MAX_RETAINED_JSON_NODES = 100_000;
 const MAX_ARGUMENTS = 256;
 const MAX_SOURCES = 64;
 const candidateFields = ['id', 'source', 'args', 'stdinHex'];
@@ -46,7 +47,7 @@ function exact(value: Record<string, unknown>, fields: string[]) {
 
 /** Read only the existing unversioned producer. Missing observations remain missing, not successful. */
 export function parseRetainedCases(input: string): RetainedCases {
-  const root = record(parseBoundedJson(input));
+  const root = record(parseBoundedJson(input, MAX_JSON_BYTES, MAX_RETAINED_JSON_NODES));
   if (Object.keys(root).some(key => !reportFields.includes(key))) invalid();
   const candidates = root.candidates;
   const observations = root.observations;

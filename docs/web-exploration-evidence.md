@@ -10,7 +10,7 @@ policy, strict no-query/JSON Accept checks and private no-store headers. It neve
 falls back to legacy shared reports or another attempt's latest output.
 
 Adapter version 1 recognizes the existing unversioned exploration producer and
-the versioned observation-failure record described below. Strict
+the versioned observation-failure and preparation-failure records described below. Strict
 JSON parsing rejects duplicate fields, excessive structure and invalid values.
 Required top-level fields, unsigned counts, candidate-list count, confidence score
 range and boolean isolation fields are checked. This is a summary projection, not
@@ -20,7 +20,7 @@ It does not execute inputs or attest independent containment.
 The typed report distinguishes:
 
 - `available`: the known summary can be projected, with `observations` authority.
-- `partial`: required producer fields are absent or a known observation-failure
+- `partial`: required producer fields are absent or a known failure
   record reports incomplete work; summary remains null.
 - `unsupported`: the declared producer schema or version is not recognized.
 - `invalid`: malformed bytes, invalid summary values or parser limits prevent projection.
@@ -66,6 +66,11 @@ If retaining the record also throws, that exception is suppressed on the origina
 failure instead of replacing it or triggering a retry. Successful exploration
 keeps the existing unversioned representation.
 
+The bounded metadata-retention callback temporarily consumes an already-set thread
+interrupt flag and restores it in a finally block. It does not clear interruptions
+around generation, candidate observation or later work. A new interrupt arriving
+during retention remains set; a failed write is suppressed without retrying.
+
 The record identifies the baseline or expanded sample and the zero-based failed
 input position. Planned and completed sample counts remain separate. Fixed reason
 codes distinguish a typed deadline, unavailable sandbox, output limit, unverified
@@ -105,12 +110,17 @@ as a timeout. Exact planned/completed counts appear separately. The producer's
 reason code and the same retained artifact identify the reported failure without
 inferring launch, cleanup or containment facts.
 
-The viewer preserves its shared 1 MiB, structure and preview limits, 1000-input
+The viewer preserves its 1 MiB, depth and preview limits, 1000-input
 per-sample limit and 256-argument limit. Filters, 20-row pages and selection only
 change the local view. Omitted detail shows exact sample counts and an explicit
 unavailable-bytes message rather than an empty or successful sample. Unsupported
 or inconsistent formats are refused. Format/artifact/session changes discard
 private detail; refresh failures clear previous observations.
+
+Case artifacts use a bounded 100,000-node parser ceiling matching the backend,
+so valid details admitted by the producer's conservative 90,000-node budget remain
+inspectable. General API JSON retains its 50,000-node default. Both ceilings remain
+subject to the same byte/depth limits, duplicate-key refusal and strict values.
 
 ## Failures before candidate observation
 

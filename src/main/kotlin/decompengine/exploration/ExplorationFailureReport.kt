@@ -54,17 +54,30 @@ internal class ExplorationFailureCapture(
         if (phase == ExplorationSamplePhase.BASELINE) baselineCompleted++ else expandedCompleted++
     }
 
-    fun failed(phase: ExplorationSamplePhase, candidateIndex: Int, failure: Exception): Nothing {
-        try {
-            retain(ExplorationFailureRecord(
-                phase, candidateIndex, ExplorationFailureReason.from(failure), baseline, expanded,
-                baselineCompleted, expandedCompleted, baselineObserved.toList(), expandedObserved.toList(),
-            ))
-        } catch (retentionFailure: Exception) {
+    fun failed(phase: ExplorationSamplePhase, candidateIndex: Int, failure: Exception): Nothing = retainExplorationFailure(failure) {
+        retain(ExplorationFailureRecord(
+            phase, candidateIndex, ExplorationFailureReason.from(failure), baseline, expanded,
+            baselineCompleted, expandedCompleted, baselineObserved.toList(), expandedObserved.toList(),
+        ))
+    }
+}
+
+/** Clear only around bounded metadata retention; preserve old and newly arriving interrupts. */
+internal fun retainExplorationFailure(
+    failure: Exception,
+    takeInterrupt: () -> Boolean = { Thread.interrupted() },
+    restoreInterrupt: () -> Unit = { Thread.currentThread().interrupt() },
+    retain: () -> Unit,
+): Nothing {
+    val interrupted = takeInterrupt()
+    try {
+        try { retain() } catch (retentionFailure: Exception) {
             if (retentionFailure !== failure) failure.addSuppressed(retentionFailure)
         }
-        throw failure
+    } finally {
+        if (interrupted) restoreInterrupt()
     }
+    throw failure
 }
 
 internal data class ExplorationFailureRecord(

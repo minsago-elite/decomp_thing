@@ -1,6 +1,6 @@
 import { ApiClientError } from '../api/errors';
-import { parseBoundedJson } from '../api/json';
-import { MAX_RETAINED_CASES } from './explorationCases';
+import { MAX_JSON_BYTES, parseBoundedJson } from '../api/json';
+import { MAX_RETAINED_CASES, MAX_RETAINED_JSON_NODES } from './explorationCases';
 import type { RetainedCase, RetainedCases, RetainedObservation } from './explorationCases';
 
 const reasons = {
@@ -42,7 +42,7 @@ function hex(value: unknown): string {
 
 /** Positional sample identities preserve repeated IDs without inventing observations after failure. */
 export function parseFailureCases(input: string): FailureRetainedCases {
-  const root = record(parseBoundedJson(input), ['schema', 'schemaVersion', 'state', 'failure', 'samples', 'details', 'detailsOmitted', 'coverage', 'confidence']);
+  const root = record(parseBoundedJson(input, MAX_JSON_BYTES, MAX_RETAINED_JSON_NODES), ['schema', 'schemaVersion', 'state', 'failure', 'samples', 'details', 'detailsOmitted', 'coverage', 'confidence']);
   if (root.schema !== 'decomp-exploration-failure' || root.schemaVersion !== 1 || root.state !== 'partial'
     || root.coverage !== null || root.confidence !== null) return invalid();
   const failure = record(root.failure, ['phase', 'candidateIndex', 'kind', 'code']);
