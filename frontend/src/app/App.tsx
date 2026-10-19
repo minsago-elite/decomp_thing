@@ -15,6 +15,7 @@ import type { AssetRecovery } from './assetRecovery';
 import { UNKNOWN_BUILD } from './buildIdentity';
 import type { BuildIdentity } from './buildIdentity';
 import { appPath } from './paths';
+import { DisplayPreferences } from './DisplayPreferences';
 import mark from './mark.svg';
 
 type ShellProps = {
@@ -88,6 +89,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
           <span>Decomp <strong>Workbench</strong></span>
         </a>
         <span class="build-label">Early preview</span>
+        <DisplayPreferences />
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
       <ConnectionNotice />
