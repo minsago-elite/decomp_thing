@@ -3505,8 +3505,15 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
         val libraryMounts = listOf("/lib/$systemAbi", "/lib64", "/usr/lib/$systemAbi", "/usr/lib64")
             .map(Path::of)
             .filter { Files.isDirectory(it) }
-            .map { destination ->
-                val source = destination.toRealPath()
+            .map { libraryDirectory ->
+                val source = libraryDirectory.toRealPath()
+                // AArch64's interpreter is /lib/ld-linux-aarch64.so.1. Expose the
+                // same authenticated ABI directory at /lib for that loader, and at
+                // /usr/lib/aarch64-linux-gnu for the normal multiarch library search.
+                // These destinations remain disjoint; no whole /lib tree is mounted.
+                val destination = if (systemAbi == "aarch64-linux-gnu" &&
+                    libraryDirectory == Path.of("/lib/$systemAbi")
+                ) Path.of("/lib") else libraryDirectory
                 FullTreeFunctionObservationRuntimeMount(
                     source = source,
                     destination = destination,
