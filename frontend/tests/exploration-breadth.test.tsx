@@ -166,13 +166,13 @@ it('rebinds chart table and download to the selected report and run without reta
   const counts = summary(next); counts.expandedOutputSignatures = counts.confidence.outputSignatureCount = '3';
   counts.confidence.newOutputSignatureCount = '2';
   fetcher.mockResolvedValueOnce(response(next));
-  mounted.rerender(<ExplorationEvidence jobId={next.binding.jobId} runId={next.binding.runId!} basePath="/" />);
+  mounted.rerender(<ExplorationEvidence jobId={next.binding.jobId} runId={next.binding.runId} basePath="/" />);
   expect(await screen.findByText(next.reportId)).toBeTruthy(); const grid = await table();
   const chart = screen.getByRole('img', { name: 'Observed output signature counts' });
   expect(chart.getAttribute('aria-describedby')!.split(' ')).toContain('exploration-report-binding');
   const binding = document.getElementById('exploration-report-binding')!;
-  expect(binding.textContent).toContain(next.reportId); expect(binding.textContent).toContain(next.binding.runId!);
-  expect(binding.textContent).toContain(next.binding.revisionId!);
+  expect(binding.textContent).toContain(next.reportId); expect(binding.textContent).toContain(next.binding.runId);
+  expect(binding.textContent).toContain(next.binding.revisionId);
   expect(screen.queryByText(first.reportId)).toBeNull(); expect(screen.queryByText(first.binding.runId!)).toBeNull();
   expect(within(grid).getByText('Expanded observed signatures: 3')).toBeTruthy();
   expect(screen.getByText('Expanded distinct exit/output signatures: 3. New distinct exit/output signatures: 2.')).toBeTruthy();
