@@ -148,7 +148,7 @@ it('refuses evidence for another attempt without presenting its summary', async 
   render(<ExplorationEvidence jobId={data.data.binding.jobId} runId="run_other" basePath="/nested" />);
   fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The report does not belong to the requested attempt.');
-  expect(screen.queryByText('Producer confidence score')).toBeNull();
+  expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
 });
 
 it.each(['invalid', 'partial', 'unknown'] as const)('marks %s exploration reports as unavailable instead of zero metrics', async state => {
@@ -161,7 +161,7 @@ it.each(['invalid', 'partial', 'unknown'] as const)('marks %s exploration report
   expect(await screen.findByText(`This report is ${state}; it cannot establish a successful result.`)).toBeTruthy();
   expect(screen.getByText(/Missing or malformed values are not zero-valued results/)).toBeTruthy();
   expect(screen.queryByText('Candidate inputs')).toBeNull();
-  expect(screen.queryByText('Producer confidence score')).toBeNull();
+  expect(screen.queryByText('Uncalibrated exploration breadth heuristic')).toBeNull();
 });
 
 
