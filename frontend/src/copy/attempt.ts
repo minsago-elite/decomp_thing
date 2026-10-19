@@ -46,6 +46,7 @@ export const activityCopy = {
 
 export const activityReceiptAgeCopy = {
   "received": "Last activity received: {time} ({age} in this tab). This is receipt age, not the age of the source observations.",
+  "lessThan10SecondsAgo": "less than 10 seconds ago",
   "secondsAgo": "about {count} seconds ago",
   "minuteAgo": "about {count} minute ago",
   "minutesAgo": "about {count} minutes ago",
