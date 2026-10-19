@@ -107,6 +107,10 @@ deep links, exact hashes, HEAD/304, private/unknown errors and bounded shutdown.
 The JVM runtime does not invoke the test driver or Node. This HTTP smoke does not
 replace browser-rendered checks.
 
+For deterministic fixture generation, choosing a test layer, investigating a
+packaged-browser failure and retrieving its exact Actions artifacts, use the
+[fixture and failure investigation guide](web-workflow-fixtures.md#generating-and-selecting-development-fixtures).
+
 The dependency-free [browser driver](../scripts/check-packaged-web-browser.mjs)
 uses the pinned Node as a test process, Python 3.11+ for ZIP inspection, a JDK and
 an explicit existing Chrome executable. The driver downloads no tools or packages.
