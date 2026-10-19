@@ -784,10 +784,10 @@ class MvpPatchWorkflowTest {
             projectFiles = mapOf("target.c" to "public λ $encodingSecret"))
         val validResponse = publicResponse.copy(summary = "public a€b 😀 $encodingSecret",
             patches = listOf(SourcePatch("target.c", "public λ $encodingSecret")))
-        val admitted = retainMvpCapturedRequest(retainedRequest, validRequest, "target.c", RepairResourceBudget(), encodingEvidence)
+        val unicodeAdmitted = retainMvpCapturedRequest(retainedRequest, validRequest, "target.c", RepairResourceBudget(), encodingEvidence)
         retainMvpCapturedResponse(retainedResponse, validResponse, RepairResourceBudget(), encodingEvidence)
-        assertEquals(validRequest.prompt, admitted.request.prompt)
-        assertEquals(validRequest.projectFiles, admitted.request.projectFiles)
+        assertEquals(validRequest.prompt, unicodeAdmitted.request.prompt)
+        assertEquals(validRequest.projectFiles, unicodeAdmitted.request.projectFiles)
         for (path in listOf(retainedRequest, retainedResponse)) {
             val text = path.readText()
             assertTrue(text.contains("public a€b 😀") && text.contains("public λ"))
