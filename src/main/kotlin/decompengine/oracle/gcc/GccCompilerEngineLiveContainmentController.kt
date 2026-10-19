@@ -1253,6 +1253,22 @@ internal fun parseBootClassPathManifest(
     })
 }
 
+/** Fixed ABI library sources and loader destinations for the existing contained worker. */
+internal fun gccSystemLibraryLocations(architecture: String): List<Pair<Path, Path>> {
+    val abi = when (architecture) {
+        "amd64", "x86_64" -> "x86_64-linux-gnu"
+        "aarch64", "arm64" -> "aarch64-linux-gnu"
+        else -> liveContainmentFail("GCC host has no fixed system-library ABI mapping")
+    }
+    return listOf("/lib/$abi", "/lib64", "/usr/lib/$abi", "/usr/lib64").map { name ->
+        val source = Path.of(name)
+        // AArch64's interpreter lives directly under /lib. Mount the same authenticated
+        // ABI directory there and at its separate /usr/lib multiarch search location.
+        val destination = if (abi == "aarch64-linux-gnu" && name == "/lib/$abi") Path.of("/lib") else source
+        source to destination
+    }
+}
+
 internal fun deriveRuntimeConfiguration(
     definition: GccCompilerEngineValidatedContainmentDefinition,
     classPath: List<FullTreeFunctionObservationClassPathEntry>,
@@ -1273,11 +1289,11 @@ internal fun deriveRuntimeConfiguration(
                 calculateFullTreeObservationRuntimeManifestSha256(source)
             },
         )
-    val systemMounts = FIXED_SYSTEM_LIBRARY_DESTINATIONS.mapNotNull { destination ->
-        if (!Files.isDirectory(destination, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(destination)) {
+    val systemMounts = gccSystemLibraryLocations(System.getProperty("os.arch")).mapNotNull { (libraryDirectory, destination) ->
+        if (!Files.isDirectory(libraryDirectory, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(libraryDirectory)) {
             null
         } else {
-            val source = destination.toRealPath()
+            val source = libraryDirectory.toRealPath()
             runtimeMount(source, destination)
         }
     }
@@ -1565,8 +1581,6 @@ private const val ROLLBACK_MARKER_FILE = "rollback-pre-attachment.json"
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val PRIVATE_RUN_DIRECTORY = Regex("\\.function-observation-run-[0-9a-f]{32}")
 private val KOTLIN_RUNTIME_DESTINATION = Path.of("/decomp-runtime/java")
-private val FIXED_SYSTEM_LIBRARY_DESTINATIONS = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64")
-    .map(Path::of)
 private val CLASSPATH_MANIFEST_FIELDS = setOf("schemaVersion", "provider", "entries")
 private val CLASSPATH_ENTRY_FIELDS = setOf("path", "bytes", "sha256")
 private val CLASSPATH_JSON_LIMITS = StrictJsonLimits(
