@@ -153,4 +153,14 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .activity-filters input, .activity-filters select { min-width: 0; width: 100%; padding: 0.6rem; border: 1px solid var(--control-line); border-radius: 0.3rem; color: inherit; background: var(--surface); }
 .activity-filters p { grid-column: 1 / -1; margin: 0; }
 .activity-row { overflow-wrap: anywhere; margin-bottom: 1.5rem; }
+.retained-cases { min-width: 0; margin-block: 1.5rem; overflow-wrap: anywhere; }
+.retained-cases button, .retained-cases select { min-height: 44px; max-width: 100%; }
+.retained-cases select { color: inherit; background: var(--surface); }
+.retained-case-table { max-width: 100%; overflow: auto; margin-block: 1rem; }
+.retained-case-table table { border-collapse: collapse; width: 100%; }
+.retained-case-table th, .retained-case-table td { padding: 0.5rem; text-align: start; border-bottom: 1px solid var(--line); }
+.retained-case-table caption { text-align: start; font-weight: 600; }
+.retained-case-detail { min-width: 0; border: 1px solid var(--line); padding: 1rem; margin-block: 1rem; }
+.retained-case-detail dd { margin-inline-start: 0; }
+.retained-case-detail code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-row summary { cursor: pointer; }

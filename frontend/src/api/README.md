@@ -57,6 +57,33 @@ and abort/cancel pending reads at the deadline. Redirects and arbitrary origins 
 The client does not persist session material, generate mutation intent, or infer endpoint
 capabilities from its available schema types.
 
+`readArtifactText(artifact, {jobId, runId}, {signal})` reads one observed JSON artifact through
+the existing private content endpoint. It checks exact attempt identity, raw-evidence role,
+deployment/resource URL, the one-MiB ceiling, actual UTF-8 byte length and SHA-256 before
+returning text. It shares the request deadline, cancellation, same-origin/no-redirect policy,
+correlated error handling and session-failure observer. The hash identifies observed bytes;
+it does not validate their claims. It never retries, persists bytes or submits a workflow.
+
+The exploration case viewer uses that read only after a deliberate button press. It supports
+the existing unversioned candidate/observation layout, bounded to 1,000 candidates, 256 arguments
+per candidate and 64 reported sources. Duplicate/foreign observation identities, unsupported
+record fields, invalid hex and inconsistent signatures are refused. Missing observations remain
+explicitly missing. At most 20 case rows, 32 arguments of the selected case, 160 code points per
+text preview and 128 bytes per binary preview are rendered; truncation and exact retained scope
+are visible. Filters use reported source strings and never infer seed/regression provenance.
+This producer does not record timeout/launch-failure categories, so the viewer leaves those
+classifications unreported. Full outcome-contract and producer qualification remain required.
+
+Exploration summaries label the fixed producer score as an uncalibrated breadth heuristic.
+The accessible signature table names exit-code/stdout/stderr signatures and uses the reported
+expanded distinct-signature count as the reference population for new signatures. Zero totals
+and contradictory summary/heuristic-record totals, including totals larger than either the
+reported input count or retained candidate count, make the combined denominator unavailable;
+no percentage or program-coverage estimate is calculated. Original exact count strings remain
+visible. The baseline signature count is absent from the summary adapter, and no branch,
+statement, function or complete-behavior denominator is inferred. Report/job/attempt/revision
+identities and the existing observed-artifact download remain attached to the same report.
+
 The `recovery` response carries a bounded display-only recovery-file inventory from
 private `GET /recovery`. Counts and observed bytes do not authorize cleanup or source
 acceptance. Active multipart uploads return `503 RECOVERY_INSPECTION_BUSY`; the

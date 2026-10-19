@@ -3495,11 +3495,25 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                 FullTreeFunctionObservationClassPathEntry(regular, sha256(regular))
             }
         val manifestCache = mutableMapOf<Path, String>()
-        val libraryMounts = listOf("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+        // The worker needs the platform ABI libraries, not every unrelated tool installed
+        // under /usr/lib on the CI image. Keep the production manifest bounds unchanged.
+        val systemAbi = when (System.getProperty("os.arch")) {
+            "amd64", "x86_64" -> "x86_64-linux-gnu"
+            "aarch64", "arm64" -> "aarch64-linux-gnu"
+            else -> error("isolated worker fixture has no system ABI library mapping")
+        }
+        val libraryMounts = listOf("/lib/$systemAbi", "/lib64", "/usr/lib/$systemAbi", "/usr/lib64")
             .map(Path::of)
             .filter { Files.isDirectory(it) }
-            .map { destination ->
-                val source = destination.toRealPath()
+            .map { libraryDirectory ->
+                val source = libraryDirectory.toRealPath()
+                // AArch64's interpreter is /lib/ld-linux-aarch64.so.1. Expose the
+                // same authenticated ABI directory at /lib for that loader, and at
+                // /usr/lib/aarch64-linux-gnu for the normal multiarch library search.
+                // These destinations remain disjoint; no whole /lib tree is mounted.
+                val destination = if (systemAbi == "aarch64-linux-gnu" &&
+                    libraryDirectory == Path.of("/lib/$systemAbi")
+                ) Path.of("/lib") else libraryDirectory
                 FullTreeFunctionObservationRuntimeMount(
                     source = source,
                     destination = destination,

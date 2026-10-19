@@ -130,6 +130,13 @@ checks the reviewed official archive digest and repository version pins. Local
 builds need the same toolchain on PATH. Node is a build dependency and is absent
 from the application Docker runtime stage.
 
+The production frontend build also runs the same strict lint gate before emitting
+its bundle. When embedded assets and root Kotlin compilation are already selected
+in one Gradle graph, `frontendBuild` runs before `compileKotlin` and
+`compileTestKotlin`, so frontend validation errors refuse before that Kotlin work.
+This ordering does not select frontend tasks for standalone Kotlin compilation.
+All existing qualification tasks still run; only JVM compiler outputs are cached.
+
 The independent **Frontend contracts and bundle** job runs on pull requests and
 pushes to master or tags. It uses a clean locked npm install, strict type checking, lint, component
 and state tests, the versioned web schema's positive/negative fixtures, a production

@@ -14,7 +14,7 @@
     "typecheck": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit",
     "lint": "node scripts/check-toolchain.mjs && eslint . --max-warnings 0",
     "test": "node scripts/check-toolchain.mjs && vitest run",
-    "build": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit && vite build && node scripts/bundle-report.mjs",
+    "build": "node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit && eslint . --max-warnings 0 && vite build && node scripts/bundle-report.mjs",
     "preview": "node scripts/check-toolchain.mjs && vite preview --host 127.0.0.1",
     "dev:backend": "node scripts/check-toolchain.mjs && vite --mode backend",
     "dev:fixtures": "node scripts/check-toolchain.mjs && vite --mode fixtures",
