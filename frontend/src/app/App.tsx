@@ -46,8 +46,13 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
+  const navigation = useRef<HTMLElement>(null);
+  const navigationToggle = useRef<HTMLButtonElement>(null);
+  const pendingNavigationFocus = useRef<'toggle' | 'link' | null>(null);
   const focusedPath = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [narrowNavigation, setNarrowNavigation] = useState(() => window.matchMedia?.('(width < 48rem)').matches ?? false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const homePath = appPath(basePath, '/');
   const runtimePath = appPath(basePath, '/runtime');
   const atHome = location.path === (basePath || '/') || location.path === homePath;
@@ -72,8 +77,35 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
 
   useLayoutEffect(() => {
     document.title = `${pageTitle} · Decomp Workbench`;
+    setNavigationOpen(false);
     focusRouteHeading(location.url);
   }, [pageTitle, location.path]);
+
+  useLayoutEffect(() => {
+    const media = window.matchMedia?.('(width < 48rem)');
+    if (!media) return;
+    const update = () => {
+      const active = document.activeElement;
+      if (media.matches && navigation.current?.contains(active)) pendingNavigationFocus.current = 'toggle';
+      else if (!media.matches && active === navigationToggle.current) pendingNavigationFocus.current = 'link';
+      setNavigationOpen(false);
+      setNarrowNavigation(media.matches);
+    };
+    media.addEventListener('change', update);
+    update();
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useLayoutEffect(() => {
+    const pending = pendingNavigationFocus.current;
+    pendingNavigationFocus.current = null;
+    if (pending === 'toggle') navigationToggle.current?.focus({ preventScroll: true });
+    if (pending === 'link') {
+      const link = navigation.current?.querySelector<HTMLAnchorElement>('a[aria-current="page"]')
+        ?? navigation.current?.querySelector<HTMLAnchorElement>('a[href]');
+      link?.focus({ preventScroll: true });
+    }
+  }, [narrowNavigation]);
 
   function viewReady(url: string) {
     setLoading(false);
@@ -95,12 +127,30 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
       <ConnectionNotice />
       {session && <SessionStatus session={session} />}
       <div class="app-layout">
-        <nav class="app-nav" aria-label="Main navigation">
-          <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
-          <a href={uploadPath} aria-current={location.path === uploadPath ? 'page' : undefined}>Upload</a>
-          <a href={runtimePath} aria-current={location.path === runtimePath ? 'page' : undefined}>
-            Runtime status
-          </a>
+        <nav class="app-nav" aria-label="Main navigation" ref={navigation} onKeyDown={event => {
+          if (narrowNavigation && navigationOpen && event.key === 'Escape') {
+            event.preventDefault();
+            setNavigationOpen(false);
+            navigationToggle.current?.focus();
+          }
+        }}>
+          <button class="navigation-toggle" type="button" ref={navigationToggle} hidden={!narrowNavigation}
+            aria-controls="main-navigation-links" aria-expanded={navigationOpen}
+            onClick={() => setNavigationOpen(current => !current)}>Navigation</button>
+          <div id="main-navigation-links" hidden={narrowNavigation && !navigationOpen} onClick={event => {
+            if (narrowNavigation && navigationOpen && !event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.shiftKey
+              && !event.altKey && event.button === 0 && event.target instanceof Element
+              && event.target.closest('a[href]')) {
+              setNavigationOpen(false);
+              navigationToggle.current?.focus();
+            }
+          }}>
+            <a href={homePath} aria-current={atHome ? 'page' : undefined}>Workspace</a>
+            <a href={uploadPath} aria-current={location.path === uploadPath ? 'page' : undefined}>Upload</a>
+            <a href={runtimePath} aria-current={location.path === runtimePath ? 'page' : undefined}>
+              Runtime status
+            </a>
+          </div>
         </nav>
         <main id="main" ref={main} tabIndex={-1} aria-busy={loading}>
           <p class="sr-only" role="status">{loading ? 'Opening view…' : ''}</p>
