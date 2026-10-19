@@ -8,8 +8,8 @@ export function formatJobStatus(status: Job['status']): string { return jobStatu
 // Keep the canonical decimal value intact; Number would round valid uint64 values.
 export function formatExactBytes(value: string): string { return textMessage(commonCopy.bytes, { value }); }
 
-// Keep the source offset and every fractional digit, while making UTC readable.
+// Preserve source offsets and fractional digits; the API accepts either marker case.
 export function formatExactTimestamp(value: string): string {
-  const displayed = value.replace('T', ' ');
-  return displayed.endsWith('Z') ? `${displayed.slice(0, -1)} UTC` : displayed;
+  const displayed = value.replace(/[Tt]/, ' ');
+  return /[Zz]$/.test(displayed) ? `${displayed.slice(0, -1)} UTC` : displayed;
 }

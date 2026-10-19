@@ -37,8 +37,8 @@ it('renders technical values as text without interpreting markup or recursive sl
 });
 
 it('shows timezone context and retains nanoseconds, source offsets and large counters in runtime summaries', () => {
-  const utc = '2026-09-08T00:00:00.123456789Z';
-  const offset = '2026-09-08T00:00:00.000000001-03:30';
+  const utc = '2026-09-08t00:00:00.123456789z';
+  const offset = '2026-09-08t00:00:00.000000001-03:30';
   const view = render(<>
     <SchedulerSummary scheduler={{ state: 'unavailable', reasonCode: 'EXTERNAL_EXECUTOR', sampledAt: utc }} />
     <ProgressRetentionSummary retention={{ enabled: true, sampledAt: offset, examined: '18446744073709551615',
