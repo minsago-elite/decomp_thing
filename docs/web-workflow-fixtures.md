@@ -101,9 +101,9 @@ provider execution or acceptance attestation.
 
 ## Generating and selecting development fixtures
 
-Use the exact Node/npm versions and locked installation in
-[frontend development](../frontend/README.md#supported-tools-and-commands).
-Python contract validation uses the pinned dependencies in
+Complete the [repository-local frontend setup](web-packaging.md#repository-local-frontend-setup-and-rebuilds)
+first, retaining its Python and Node directories on `PATH`. It installs the exact
+Node/npm versions, locked frontend packages and Python dependencies from
 [`requirements/oracle-generation.txt`](../requirements/oracle-generation.txt).
 Run the following commands from the repository root with those tools available;
 keep caches, generated data and investigation output inside `build/`:

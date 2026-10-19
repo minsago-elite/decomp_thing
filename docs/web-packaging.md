@@ -324,8 +324,9 @@ For feature extension, use the [route/DTO/event/component workflow](web-architec
 and the [Git adapter and identity contract](web-git-fixtures.md#git-adapter-extension-contract).
 
 This path starts at a clean checkout on a Linux x86-64 build host with the normal
-JVM build prerequisites available: JDK 21, Python 3.12+ and the repository's C/native
-build tools. Ghidra is a bundled Java-API dependency supplied by the normal build.
+JVM build prerequisites available: JDK 21, Python 3.12+ with `venv` support and the
+repository's C/native build tools. Ghidra is a bundled Java-API dependency supplied
+by the normal build.
 The frontend installer supplies the checksum-locked build-only Node distribution.
 Run from the repository root and keep tools, caches and scratch there:
 
@@ -336,8 +337,13 @@ export TMPDIR="$PWD/build/frontend-dev/tmp"
 export XDG_CACHE_HOME="$PWD/build/frontend-dev/cache"
 export XDG_STATE_HOME="$PWD/build/frontend-dev/state"
 export NPM_CONFIG_CACHE="$PWD/build/frontend-dev/cache/npm"
+export PIP_CACHE_DIR="$PWD/build/frontend-dev/cache/pip"
 export GRADLE_USER_HOME="$PWD/build/frontend-dev/gradle"
 export PYTHONDONTWRITEBYTECODE=1
+
+python3 -m venv "$PWD/build/frontend-dev/tools/python"
+export PATH="$PWD/build/frontend-dev/tools/python/bin:$PATH"
+python3 -m pip install --requirement requirements/oracle-generation.txt
 
 bash scripts/install-frontend-node.sh "$PWD/build/frontend-dev/tools/node"
 export PATH="$PWD/build/frontend-dev/tools/node/bin:$PATH"
@@ -368,6 +374,11 @@ installed launcher is `build/install/llm_bin_patch/bin/llm_bin_patch`; ZIP/TAR o
 is under `build/distributions/`. Node remains a development/build tool. The archived
 application serves its inventoried UI from the application JAR.
 
+The Python environment installs the pinned fixture/contract dependencies before
+`npm test`. Frontend development tests invoke `python3` to generate schema-checked
+fixtures, so keep this environment's `bin` on `PATH` for tests and fixture commands;
+Node's package installation does not install these Python packages.
+
 ### Keep resources and runtime references together
 
 The frontend task chain described above ends in `processResources → jar`. Its
@@ -393,7 +404,8 @@ tasks to regenerate them from the final build outputs, then verify the installat
 
 ```sh
 ./gradlew -PfrontendNodeHome="$PWD/build/frontend-dev/tools/node" \
-  verifyAcpGateHelperDistribution verifyLlvmBehaviorHelperDistribution \
+  verifyGhidraDistributionArchives verifyAcpGateHelperDistribution \
+  verifyLlvmBehaviorHelperDistribution \
   verifyKotlinBootClasspathDistribution verifyPackagedWeb
 ```
 
