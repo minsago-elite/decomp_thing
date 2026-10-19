@@ -2,11 +2,36 @@ package decompengine.web
 
 import decompengine.jobs.UploadPublicationUncertain
 import decompengine.jobs.UploadPublicationUncertainException
+import decompengine.jobs.stagedUploadPublicationFailure
 import java.io.IOException
 import kotlin.test.*
 
 /** In-memory publication callbacks only; no job store, filesystem, HTTP server or worker. */
 class WebUploadPublicationOutcomeTest {
+    @Test fun `rename attempt uncertainty composes with service retention without inferring an earlier publication`() {
+        val jobId = "b".repeat(32)
+        val original = IOException("synthetic rename outcome unavailable")
+        assertSame(original, stagedUploadPublicationFailure(jobId, false, original))
+        val uncertain = assertIs<UploadPublicationUncertain>(stagedUploadPublicationFailure(jobId, true, original))
+        assertEquals(jobId, uncertain.jobId)
+        assertSame(original, uncertain.cause)
+        val retained = mutableListOf<WebJobDiagnostic>()
+        var calls = 0
+        val mapped = assertFailsWith<WebJobServiceException> {
+            withWebUploadPublicationOutcome(
+                retainUncertain = { retained += it },
+                publish = { calls++; throw uncertain },
+            )
+        }
+        assertEquals(1, calls)
+        assertSame(uncertain, mapped.cause)
+        assertEquals("RECOVERY_REQUIRED", mapped.code)
+        assertEquals(jobId, retained.single().jobId)
+        assertEquals("RECOVERY_REQUIRED", retained.single().code)
+        assertFalse(mapped.message.orEmpty().contains(original.message!!))
+        assertFalse(retained.single().message.contains(original.message!!))
+    }
+
     @Test fun `both typed upload uncertainties retain identity before returning recovery required without retry`() {
         val jobId = "a".repeat(32)
         val failures = listOf(
