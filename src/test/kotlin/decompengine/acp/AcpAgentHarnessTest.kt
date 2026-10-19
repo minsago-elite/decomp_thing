@@ -2215,7 +2215,28 @@ class AcpAgentHarnessTest {
                     releaseCallback.await()
                 }
             }
-            assertTrue(callbackEntered.await(10, TimeUnit.SECONDS), "fixture never delivered an event")
+            val callbackObserved = callbackEntered.await(10, TimeUnit.SECONDS)
+            if (!callbackObserved) {
+                // Observe only an already completed future; keep the existing waits and wall budget.
+                val completed = execution.isDone
+                var completedWithoutCallback = false
+                var completionFailure: Throwable? = null
+                if (completed) {
+                    try {
+                        execution.get()
+                        completedWithoutCallback = true
+                    } catch (wrapped: ExecutionException) {
+                        completionFailure = wrapped.cause ?: wrapped
+                    } catch (cancelled: java.util.concurrent.CancellationException) {
+                        completionFailure = cancelled
+                    }
+                }
+                val invocation = (completionFailure as? AgentExecutionException)?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+                assertTrue(callbackObserved, "fixture never delivered an event; completed=$completed " +
+                    "completedWithoutCallback=$completedWithoutCallback " +
+                    "invocation=${invocation?.summaryForTest() ?: "unavailable"} " +
+                    "cause=${boundedPreparationCauseForTest(completionFailure)}")
+            }
 
             val failure = try {
                 execution.get(10, TimeUnit.SECONDS)

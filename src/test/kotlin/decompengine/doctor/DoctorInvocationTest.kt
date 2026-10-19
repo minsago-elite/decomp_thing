@@ -19,15 +19,68 @@ class DoctorInvocationTest {
     private val defaultOutput = Path.of("caller-selected-output")
 
     @Test
+    fun `complete doctor frames conceal private line endings and usage bridges with unchanged outcomes`() {
+        val output = ByteArrayOutputStream()
+        val diagnostic = ByteArrayOutputStream()
+        for (passed in listOf(true, false)) {
+            val report = DoctorReport(listOf(DoctorCheck("LLM connectivity", passed, "visible")))
+            val checks = report.checks.toList()
+            val row = "[${if (passed) "ok" else "failed"}] LLM connectivity: visible\n"
+            val total = if (passed) "Environment check passed (1 checks)\n"
+                else "Environment check failed (1 check(s)); resolve each [failed] item above.\n"
+            assertEquals(if (passed) 0 else 1,
+                runDoctorCliAction(listOf(row, total), PrintStream(output), PrintStream(diagnostic)) { report })
+            val text = output.toString() + diagnostic.toString()
+            assertFalse(text.contains(row) || text.contains(total))
+            assertTrue(text.contains("[redacted]") && text.endsWith("\n"))
+            assertEquals(checks, report.checks)
+            output.reset(); diagnostic.reset()
+        }
+        for ((values, expected) in listOf(
+            listOf("doctor failed: visible\n") to "[redacted]\n",
+            listOf("doctor failed: visible\n", "[redacted]\n") to "\n",
+            listOf("\u0000\n") to "",
+        )) {
+            assertEquals(1, runDoctorCliAction(values, PrintStream(output), PrintStream(diagnostic)) {
+                throw IllegalStateException("visible")
+            })
+            assertEquals("", output.toString())
+            assertEquals(expected, diagnostic.toString())
+            diagnostic.reset()
+        }
+        for (value in listOf("visible\nusage:", "[--profile <id>]\n   or:", "[--auth-methods]\n")) {
+            assertEquals(2, renderDoctorUsageError("visible", false, listOf(value), PrintStream(diagnostic)))
+            val text = diagnostic.toString()
+            assertFalse(text.contains(value))
+            assertTrue(text.endsWith("\n"))
+            diagnostic.reset()
+        }
+        val privatePath = "PRIVATE\u0000DIRECTORY"
+        val invalidPath = assertFailsWith<IllegalArgumentException> { Path.of(privatePath) }
+        assertEquals(2, renderDoctorUsageError(requireNotNull(invalidPath.message), false,
+            listOf(privatePath), PrintStream(diagnostic)))
+        assertFalse(diagnostic.toString().contains("PRIVATE") || diagnostic.toString().contains("DIRECTORY"))
+        assertTrue(diagnostic.toString().contains("usage: llm_bin_patch doctor"))
+        diagnostic.reset()
+        val markerAndNewline = "… [preview truncated]\n"
+        assertEquals(1, runDoctorCliAction(listOf(markerAndNewline), PrintStream(output), PrintStream(diagnostic)) {
+            throw IllegalStateException("visible ".repeat(1000))
+        })
+        val text = diagnostic.toString()
+        assertFalse(text.contains(markerAndNewline))
+        assertTrue(text.endsWith("\n"))
+    }
+
+    @Test
     fun `doctor terminal reports redact formatted fields after cleanup with correct exit status`() {
         val output = ByteArrayOutputStream()
         val diagnostic = ByteArrayOutputStream()
         val values = listOf("private-credential", "[ok] project: visible")
         var closed = false
         fun afterCleanup(bytes: ByteArrayOutputStream) = object : PrintStream(bytes) {
-            override fun println(value: String?) {
+            override fun print(value: String?) {
                 assertTrue(closed, "diagnostics must follow action cleanup")
-                super.println(value)
+                super.print(value)
             }
         }
         val status = runDoctorCliAction(values, afterCleanup(output), afterCleanup(diagnostic)) {

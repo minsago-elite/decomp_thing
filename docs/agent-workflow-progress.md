@@ -409,3 +409,20 @@ builder. The 16 Ki-character input/intermediate ceiling, eight passes, primary
 This closes the same delimiter-tail source gap for journal/Doctor/error previews
 without applying full-artifact limits or allocating a large extra index there.
 Ordinary Actions must verify the new metadata regression and all preceding gates.
+
+
+### CLI output encoding admission
+
+Projected reconstruction/repair results, workflow usage and diagnostic frames,
+and Doctor frames must survive the output stream's declared encoding unchanged.
+A bounded strict encoder/decoder round trip precedes printing: malformed input,
+unmappable characters, codec aliases and preflight overflow withhold the frame.
+The preflight uses at most 16,384 encoded bytes and 16,384 characters. It preserves
+the stream's existing encoder state, charset, line framing and public SHA fields.
+
+Usage can retain its compiled help when a diagnostic cannot be displayed. Repair
+returns its existing display-refusal status, and reconstruction reports a display
+refusal before emitting a partial result. Other unsafe diagnostic frames are
+withheld. A Unicode-capable output encoding permits intact non-ASCII diagnostics.
+This boundary still requires own Actions qualification; journal, retained-file
+and transport encoding remain separate parts of the full privacy acceptance.
