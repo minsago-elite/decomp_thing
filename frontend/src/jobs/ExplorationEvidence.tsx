@@ -59,8 +59,10 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         <p>{displayMessage(copy.artifact, { bytes: report.sourceArtifact.sizeBytes, digest: <code>{report.sourceArtifact.sha256}</code> })}</p>
         <p>{copy.theDigestIdentifiesTheObservedBytesItDoesNotValidate}</p>
         <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a>
-        {(report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 && report.producerSchemaVersion === null &&
-          <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId} basePath={basePath} />}
+        {(report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
+          (report.producerSchemaVersion === null || (report.producerSchemaVersion === 1 && report.state === 'partial')) &&
+          <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId}
+            basePath={basePath} producerSchemaVersion={report.producerSchemaVersion} />}
       </>}
       <p>{copy.explorationObservationsDoNotEstablishAcceptedReconstruction}</p>
     </>}

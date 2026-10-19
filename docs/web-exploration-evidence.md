@@ -91,7 +91,24 @@ Malformed counts, positions, signatures or reason pairs are invalid; future
 versions are unsupported. The record remains producer-reported observation data,
 without independent containment, source-revision or acceptance authority.
 
-Generation failures before observation, a structured case view for this new
-format, independently established regression origins and broader integration
-qualification remain outstanding. The historical verification above covers its
-recorded source only; new pure metadata controls require current Actions evidence.
+The structured viewer reads this partial format only when the selected report
+declares producer version 1 and partial state. Its existing explicit artifact read
+checks attempt/URL binding and observed length/SHA-256 before parsing. Baseline and
+expanded sample positions form distinct identities, including repeated candidate
+IDs within either sample. Completed observations, the typed failed position and
+unobserved positions remain distinct; an observed exit code 124 is not relabelled
+as a timeout. Exact planned/completed counts appear separately. The producer's
+reason code and the same retained artifact identify the reported failure without
+inferring launch, cleanup or containment facts.
+
+The viewer preserves its shared 1 MiB, structure and preview limits, 1000-input
+per-sample limit and 256-argument limit. Filters, 20-row pages and selection only
+change the local view. Omitted detail shows exact sample counts and an explicit
+unavailable-bytes message rather than an empty or successful sample. Unsupported
+or inconsistent formats are refused. Format/artifact/session changes discard
+private detail; refresh failures clear previous observations.
+
+Generation failures before observation, independently established regression
+origins and broader integration qualification remain outstanding. The historical
+verification above covers its recorded source only; new pure metadata and
+in-memory fetch/decoder/DOM controls require current Actions evidence.
