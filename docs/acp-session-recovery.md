@@ -13,6 +13,13 @@ also binds the exact configured factory descriptor, initialized protocol version
 peer implementation name/version/title, and negotiated capabilities. A peer's
 self-reported name is identity data, not independent authentication.
 
+An agent, SDK or runtime change follows the
+[upgrade qualification procedure](acp-v1-client.md#qualifying-an-agent-or-runtime-change).
+Retain the recorded combination's identity and accepted-source evidence during
+that change. A new version does not rewrite a retained journal or resolve unknown
+process cleanup; the reconciliation and recorded conversation decisions below
+still govern continued use.
+
 ## Durable state and acceptance
 
 Journals live outside the generated project and its agent grants, under

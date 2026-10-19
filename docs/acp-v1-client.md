@@ -153,6 +153,33 @@ Provision the components in this order:
      -e ACP_AGENT_SECRET llm-bin-patch doctor --workflow all --output /output
    ```
 
+### Provider credentials and current availability
+
+The production outer-agent namespace currently has no network access. Its
+credential-free checkpoints cover the boundaries in the table below. Positive
+provider-backed sessions require the separately qualified transport owned by
+[#238](https://github.com/minsago-elite/decomp_thing/issues/238), which remains
+unavailable in this deployment contract.
+
+That transport requires an operator-owned broker/relay to keep provider
+credentials outside the agent, analyzed program, candidate build and terminal
+children. The agent receives an admitted invocation/session-bound model channel;
+its channel identity, destination policy, bounds, cancellation and revocation
+must be qualified together. Authentication and session lifecycle remain with
+[#70](https://github.com/minsago-elite/decomp_thing/issues/70).
+
+The explicit `provenance: "secret"` environment binding above forwards the named
+value to the agent during initialize. It therefore cannot carry a provider
+credential for the brokered transport contract. The strict schema-v2
+[provisioning parser](../src/main/kotlin/decompengine/acp/AcpHarnessProvisioning.kt)
+accepts `schemaVersion`, `implementationId`, `agent`, `session` and `sandbox` at
+the root; there is no provider-policy or broker-channel setting in this document.
+Changing an environment value, a permission answer or the Compose network cannot
+qualify the missing transport. Provider reachability, an advertised auth method
+and a successful initialize each retain their own limited evidence scope.
+
+### Running the provisioned preflight
+
 Perform the real credential-free initialize preflight before any workflow:
 
 ```bash
@@ -932,6 +959,69 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,
 stderr retention, resource deadlines, cancellation polling, and process-tree cleanup belong to the host application.
+
+### Qualifying an agent or runtime change
+
+Qualification belongs to an exact combination of client, SDK/protocol, agent,
+runtime closure, host, workflow and provider policy. Retain the old combination's
+results with their original identities. An upgrade needs a new result for every
+required case in the [two-agent matrix](#pinned-required-cases-and-unsupported-capability-policy).
+The current pins are SDK `0.30.1`, stable protocol `1`, Goose `1.46.0` and
+`codex-acp` `0.16.0`; these identify the checked contract rather than a claim
+about the newest upstream release.
+
+| Changed input | Owning source and review obligation |
+|---|---|
+| Client SDK/protocol | Update the exact Gradle dependency and [`AcpProcessConfiguration.kt`](../src/main/kotlin/decompengine/acp/AcpProcessConfiguration.kt) together. Review all v1 serializer/capability changes and the scoped optional-v1 opt-ins. |
+| Wire contract | Review the versioned [`wire-contract.json`](../src/test/resources/acp/v1/wire-contract.json) and [`AcpV1WireContractGoldenTest`](../src/test/kotlin/decompengine/acp/AcpV1WireContractGoldenTest.kt). Every changed message needs an explained compatibility result; a changed golden file alone supplies no runtime result. |
+| Independent agent/archive | Review the exact release URL/version, archive/member digests and target metadata in [`ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh) or [`ci-qualify-codex-acp.sh`](../scripts/ci-qualify-codex-acp.sh), plus the corresponding Java probe and acquisition controls. Preserve archive-layout and member verification. |
+| Executable/runtime/helper | Re-provision the reviewed immutable executable/runtime/helper commitments at their final paths, and bind the actual host architecture and containment prerequisites. Keep the existing ownership, mode, resource and cleanup checks. |
+| Factory/session configuration | Review the schema version, canonical factory commitment, ordered argv, explicit environment provenance and advertised preferences. A changed identity must pass [session reconciliation](acp-session-recovery.md#conversation-decisions). |
+| Provider/auth policy | Qualify the broker/channel and advertised auth lifecycle under their owning contracts. Provider credentials stay in the operator broker; the current network-free checkpoints cannot establish a positive model session. |
+
+Use this order for an upgrade proposal:
+
+1. Record the old and proposed exact combination, the intended workflows and the
+   upstream compatibility changes. Keep stable-v1 default negotiation and its
+   explicit v2 boundary. Preserve historical evidence instead of rewriting its
+   identities to the new pins.
+2. Review all affected source owners in the table together. Keep the required
+   case definition, optional capability observations and actual outcomes
+   separate. An untested optional feature remains unknown; a missing required
+   capability remains a blocking outcome for that required case.
+3. Obtain current-source normal Actions evidence for wire serialization,
+   provisioning, advertised preferences, filesystem/terminal/permission
+   enforcement, lifecycle, recovery and packaging. Bind the actual checkout and
+   compiled tree, test selection, raw reports, exact artifact hashes and every
+   failure/skip/truncation. Required checks need fresh execution evidence;
+   retained old reports keep their original source identity.
+4. Obtain the applicable exact-pin credential-free agent checkpoints. Their
+   initialize/authentication-required results retain the limited scopes above.
+   Complete all required positive session, streaming, edit, permission,
+   cancellation, reconstruction and repair cases through the standard factory,
+   admitted provider/auth environment and production validators. Preserve failed,
+   unsupported and cleanup-unverified outcomes; an agent stop reason cannot
+   promote a revision or waive a required result.
+5. Audit persisted identity and recovery against the changed combination before
+   continuing a stored conversation. Retain accepted source and old session
+   evidence, quarantine incompatible identities, and keep unknown process cleanup
+   blocked. Recreating a conversation requires its explicit recorded policy.
+6. Record the release decision against the complete required result population.
+   The machine-readable manifest owned by
+   [#770](https://github.com/minsago-elite/decomp_thing/issues/770) must bind the
+   client/SDK/schema, agent/runtime/provider-policy versions, exact release
+   commits and immutable result artifacts. That manifest and full
+   [#72](https://github.com/minsago-elite/decomp_thing/issues/72) release
+   qualification remain open; this procedure supplies no missing result rows.
+
+Retain any previously qualified distribution, provisioning and identity-bound
+evidence with its original qualification scope for rollback. Record an absent
+qualified rollback combination in the release decision. A rollback selects its
+recorded combination and follows
+the same session/accepted-source reconciliation rules. Reusing a directory name,
+changing a version string or deleting a journal cannot establish compatibility
+or resolve unknown cleanup. The source, runtime and provider trust boundaries
+continue to apply throughout the upgrade.
 
 ### Operator authentication inventory
 
