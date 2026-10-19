@@ -120,6 +120,25 @@ class AcpAgentHarnessTest {
         assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
         assertFalse("PRIVATE" in context || "/" in context, context)
         assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val constructing = "mount-admission-v1 stage=CONSTRUCTING initialMounts=12 initialControls=2 owner=true initialFast=false"
+        val admitted = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true"
+        for (admission in listOf(null, constructing, admitted, "PRIVATE /PRIVATE/path", "x".repeat(257), admitted + "\nPRIVATE")) {
+            val diagnostic = constructor.newInstance(
+                phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val bounded = sessionPreferencePhaseFailureContext("known-case", AgentExecutionException(
+                decompengine.agent.AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), diagnostic), null)
+            assertTrue(requireNotNull(contextMountWitness().message) in bounded, bounded)
+            if (admission == constructing || admission == admitted) assertTrue(requireNotNull(admission) in bounded, bounded)
+            else assertFalse("mount-admission-v1" in bounded, bounded)
+            assertFalse("PRIVATE" in bounded || "/" in bounded, bounded)
+            assertTrue(bounded.length <= 4096 && bounded.all { it.code in 32..126 })
+        }
     }
 
     @Test
@@ -2962,6 +2981,8 @@ class AcpAgentHarnessTest {
         val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
             "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
             "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+            "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
         val pending = java.util.ArrayDeque<Throwable>()
         val seen = ArrayList<Throwable>(8)
         pending.add(failure)
@@ -3008,6 +3029,11 @@ class AcpAgentHarnessTest {
             if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
                 observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
                     append(";witness=").append(it)
+                    val admissionRecord = try {
+                        (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
+                            ?.takeIf { value -> value.length <= 256 && admission.matches(value) }
+                    } catch (_: Throwable) { null }
+                    if (admissionRecord != null) append(";admission=").append(admissionRecord)
                 }
             }
             observed.cause?.let { if (pending.size < 16) pending.add(it) }

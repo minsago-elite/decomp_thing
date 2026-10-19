@@ -199,6 +199,48 @@ artifact digests, and structured production-harness evidence. Receipts bind clie
 and capabilities, elapsed time, containment/tool hashes, resource limits, output accounting, lifecycle boundary,
 complete policy-audit counts, terminal outcome, and cleanup result. A skip is not accepted in either lane.
 
+### Pinned required cases and unsupported capability policy
+
+The release versions and archive commitments above identify the two implementations for this matrix. The
+classification below is the required-case definition, not evidence that a positive agent workflow succeeded.
+`Required` applies to both pins. Missing authentication, provider access or a required capability leaves a case
+unqualified; it does not turn that case into an unsupported exemption or a successful skip.
+
+| Case | Goose `1.46.0`: requirement and retained checkpoint coverage | `codex-acp` `0.16.0`: requirement and retained checkpoint coverage |
+|---|---|---|
+| Initialize | Required; stable ACP v1 initialize is covered by the credential-free checkpoint. | Required; stable ACP v1 initialize is covered by the credential-free checkpoint. |
+| Advertised capabilities | Required; the checkpoint records negotiation. Capabilities needed by each positive workflow still need qualification. | Required; the authentication-boundary verifier checks the pinned advertisement. Positive workflow capability use still needs qualification. |
+| Session creation | Required; a successful session is unqualified and is not attempted by the initialize-only checkpoint. | Required; a successful session is unqualified. The retained `session/new` authentication-required rejection is a negative boundary, not session creation. |
+| Prompt streaming | Required; unqualified. No model prompt is sent by the credential-free checkpoint. | Required; unqualified. No model prompt is sent by the authentication-boundary checkpoint. |
+| Authorized file edits | Required; unqualified. The initialize-only checkpoint exposes no workspace. | Required; unqualified. An unchanged empty workspace and empty audit do not prove an authorized edit. |
+| Permission handling | Required; unqualified. A positive task must exercise the standard permission policy. | Required; unqualified. No permission request or grant occurs in the authentication-boundary checkpoint. |
+| Cancellation | Required; unqualified for an active real-agent turn. Initialize-only shutdown is not turn cancellation. | Required; unqualified for an active real-agent turn. Authentication-required shutdown is not turn cancellation. |
+| Clean shutdown | Required; the credential-free initialize boundary is covered. Shutdown after a positive session/workflow remains unqualified. | Required; the credential-free authentication boundary is covered. Shutdown after a positive session/workflow remains unqualified. |
+| Reconstruction | Required; unqualified. Use the standard factory/workflow and production validators. | Required; unqualified. Use the standard factory/workflow and production validators. |
+| Repair | Required; unqualified. Use the standard factory/workflow and production validators. | Required; unqualified. Use the standard factory/workflow and production validators. |
+
+No agent-specific unsupported waiver is defined for those ten required cases. A required case that cannot run must
+retain its unsupported, authentication-required or failure outcome and continue to block complete qualification.
+The credential-free Codex rejection must not be counted as a positive required session, edit, reconstruction or
+repair result. Positive runs require a separately qualified provider/authentication environment; this table
+adds no permission, credential, network route or execution authority.
+
+Optional capability advertisement is a separate classification:
+
+| Optional advertised feature | Goose `1.46.0` | `codex-acp` `0.16.0` |
+|---|---|---|
+| Audio prompts | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `promptAudio=false`. |
+| MCP over SSE | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `mcpSse=false`. |
+| Additional session directories | No support classification is locked by the initialize-only verifier; inspect the qualified negotiation before use. | Unsupported by the pinned advertisement: the verifier requires `sessionAdditionalDirectories=false`. |
+
+These optional exclusions do not waive a required case. The
+[Codex boundary verifier](../scripts/support/AcpCompatibilityAuthenticationProbe.java) checks those exact false
+flags; the [Goose initialize verifier](../scripts/support/AcpCompatibilityPreflight.java) records negotiation
+without locking those optional values. An untested optional feature is not inferred unsupported or usable.
+Production reconstruction and repair continue to use protocol/capability handling, with no agent-name branch
+added for this matrix. Keep the pins, required-case definition and actual qualified outcomes distinct when
+reviewing an agent, SDK, runtime or provider-policy change; the complete current matrix must be qualified again.
+
 This is still not the complete compatibility matrix from issue #67. Neither lane proves a successful real-agent
 session, prompt streaming, authorized edit, permission handling, cancellation, or reconstruction/repair smoke. Those
 credentialed cases remain required before B1/B2 can close. The scripted Python fake agent remains a hostile

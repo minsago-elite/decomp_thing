@@ -2142,6 +2142,10 @@ private class RuntimePrivateControlScope private constructor(
     private val mountEventCheck = MountEventCheck(mountPoll)
     private var fast = fastEligible(controls)
 
+    init {
+        mountEventCheck.recordAdmissionFacts(mounts.size, controls.size, owner != null, fast)
+    }
+
     private val rootObserver: (Int) -> HostPhysicalLocation = run {
         val descriptor = rootDescriptor
         val identity = rootIdentity
@@ -2171,6 +2175,31 @@ private class RuntimePrivateControlScope private constructor(
         private var firstEventPhase: MountEventPhase? = null
         private var firstEventObservation = 0L
         private var firstEventDiagnostic: MountEventDiagnostic? = null
+        private var initialMounts = -1
+        private var initialControls = 0
+        private var initialOwner = false
+        private var initialFast = false
+        private var admissionComplete = false
+
+        fun recordAdmissionFacts(mounts: Int, controls: Int, owner: Boolean, fast: Boolean) {
+            if (initialMounts >= 0) return
+            initialControls = controls
+            initialOwner = owner
+            initialFast = fast
+            initialMounts = mounts
+        }
+
+        fun markAdmissionComplete() {
+            admissionComplete = true
+        }
+
+        // Already-owned initial scalars only: no refreshed rows, identities, or native queries.
+        private fun admissionContext(): String? = try {
+            if (initialMounts < 0) null else
+                "mount-admission-v1 stage=${if (admissionComplete) "ADMITTED" else "CONSTRUCTING"} " +
+                    "initialMounts=$initialMounts initialControls=$initialControls " +
+                    "owner=$initialOwner initialFast=$initialFast"
+        } catch (_: Throwable) { null }
 
         fun requireUnchanged(phase: MountEventPhase) {
             if (mountChanged) throw eventFailure()
@@ -2200,6 +2229,7 @@ private class RuntimePrivateControlScope private constructor(
                 val diagnostic = firstEventDiagnostic ?: MountEventDiagnostic(
                     checkNotNull(firstEventPhase), MountEventOutcome.EVENT,
                     (firstEventObservation ushr 32).toInt(), firstEventObservation.toInt() and 0xffff, null,
+                    admissionContext(),
                 ).also { firstEventDiagnostic = it }
                 // This exact local IOException is fresh: no graph lookup or existing-list growth.
                 failure.addSuppressed(diagnostic)
@@ -2215,7 +2245,7 @@ private class RuntimePrivateControlScope private constructor(
                     else MountEventOutcome.SYSCALL_ERROR
                 // Only the exact scratch-created, not-yet-annotated exception can reach this line.
                 failure.addSuppressed(MountEventDiagnostic(phase, outcome,
-                    observation.result, observation.events, observation.error))
+                    observation.result, observation.events, observation.error, admissionContext()))
             } catch (_: Throwable) { /* Keep the exact query/closed-handle/native primary. */ }
         }
     }
@@ -2227,12 +2257,17 @@ private class RuntimePrivateControlScope private constructor(
         result: Int?,
         events: Int?,
         error: Int?,
+        private val admissionContext: String?,
     ) : Throwable(
         "mount-event-v1 phase=${phase.name} generation=" +
             (if (phase == MountEventPhase.REFRESH) "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED") +
             " outcome=${outcome.name} rc=${result ?: "NA"} revents=${events ?: "NA"} errno=${error ?: "NA"}",
         null, false, false,
-    )
+    ) {
+        // Preserve the legacy scalar witness constructor and its exact message.
+        constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?) :
+            this(phase, outcome, result, events, error, null)
+    }
 
     private fun requireMountsUnchanged(phase: MountEventPhase) {
         mountEventCheck.requireUnchanged(phase)
@@ -2490,6 +2525,7 @@ private class RuntimePrivateControlScope private constructor(
                                 created.checkpointLocked()
                                 if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
                                 ACTIVE_MANIFEST_SCOPES += created
+                                created.mountEventCheck.markAdmissionComplete()
                                 created
                             }
                         }

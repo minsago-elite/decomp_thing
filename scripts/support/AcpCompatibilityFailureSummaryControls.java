@@ -75,6 +75,18 @@ public final class AcpCompatibilityFailureSummaryControls {
         var witnessSummary = summary(receipt(AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
             AcpExecutionCleanupDisposition.UNVERIFIED, null, witnessed), null);
         require(witnessSummary.contains(closedWitness) && witnessSummary.contains("private-control-checkpoint"));
+        var admissionConstructor = type.getDeclaredConstructor(phase, outcome, Integer.class, Integer.class, Integer.class, String.class);
+        admissionConstructor.setAccessible(true);
+        var constructing = "mount-admission-v1 stage=CONSTRUCTING initialMounts=12 initialControls=2 owner=true initialFast=false";
+        var admitted = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true";
+        for (var admission : new String[] { null, constructing, admitted, "PRIVATE /PRIVATE/path", "x".repeat(257), admitted + "\nPRIVATE" }) {
+            var diagnostic = (Throwable) admissionConstructor.newInstance(enumValue(phase, "CHECKPOINT"),
+                enumValue(outcome, "EVENT"), 1, 10, null, admission);
+            var bounded = summary(null, diagnostic);
+            require(bounded.contains(closedWitness));
+            if (constructing.equals(admission) || admitted.equals(admission)) require(bounded.contains(admission));
+            else require(!bounded.contains("mount-admission-v1"));
+        }
         results.put("attestedClosedMountWitnessPreserved", "PASS");
         var chain = new java.io.IOException("PRIVATE-long-chain");
         for (var index = 0; index < 100; index++) chain = new java.io.IOException("PRIVATE-long-chain", chain);

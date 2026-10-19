@@ -15,6 +15,10 @@ final class AcpCompatibilityFailureSummary {
         "outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
         "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})"
     );
+    private static final Pattern MOUNT_ADMISSION = Pattern.compile(
+        "mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)"
+    );
 
     private AcpCompatibilityFailureSummary() {}
 
@@ -68,6 +72,12 @@ final class AcpCompatibilityFailureSummary {
                 var message = current.getMessage();
                 if (message != null && message.length() <= 512 && MOUNT_WITNESS.matcher(message).matches()) {
                     witness = message;
+                    try {
+                        var field = current.getClass().getDeclaredField("admissionContext");
+                        field.setAccessible(true);
+                        if (field.get(current) instanceof String admission && admission.length() <= 256 &&
+                            MOUNT_ADMISSION.matcher(admission).matches()) witness += "; " + admission;
+                    } catch (Throwable unavailable) { /* Preserve the original scalar witness. */ }
                 }
             }
             var sites = new ArrayList<String>(2);
