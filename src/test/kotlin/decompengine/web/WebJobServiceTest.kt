@@ -84,20 +84,27 @@ class WebJobServiceTest {
 
     @Test fun `scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics`() = withStore { _, root ->
         val absent = root.resolve("absent")
+        lateinit var ownedService: WebJobService
         WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            ownedService = service
+            assertPassiveStatusReadsWithoutServiceMonitor(service)
             assertFailsWith<WebJobServiceException> { service.schedulerSnapshot() }
             service.initializeExistingStorage()
+            assertPassiveStatusReadsWithoutServiceMonitor(service)
             val sample = assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot())
             assertEquals(0, sample.activeWorkers)
             assertEquals(0, sample.queuedTasks)
             assertEquals(2, sample.workerLimit)
             assertEquals(32, sample.queueCapacity)
             service.beginShutdown()
+            assertPassiveStatusReadsWithoutServiceMonitor(service)
             assertTrue(assertIs<WebSchedulerSnapshot.Available>(service.schedulerSnapshot()).stopping)
             assertFalse(Files.exists(absent))
         }
+        assertPassiveStatusReadsWithoutServiceMonitor(ownedService)
         WebJobService(JobStore(absent), JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor, Executor { error("Unexpected task") }).use { service ->
             service.initializeExistingStorage()
+            assertPassiveStatusReadsWithoutServiceMonitor(service)
             assertIs<WebSchedulerSnapshot.Unavailable>(service.schedulerSnapshot())
             assertFalse(Files.exists(absent))
         }
@@ -411,6 +418,46 @@ class WebJobServiceTest {
             assertEquals(setOf(prior.id, uploaded.id), service.list().map { it.id }.toSet())
             kotlin.test.assertContentEquals(before, Files.readAllBytes(metadata))
             kotlin.test.assertContentEquals(input, Files.readAllBytes(prior.binaryPath))
+        }
+    }
+
+    /** Latches exercise only metadata reads on the existing fixture's service instance. */
+    private fun assertPassiveStatusReadsWithoutServiceMonitor(service: WebJobService) {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val expected = java.util.concurrent.atomic.AtomicReference<Pair<Result<WebSchedulerSnapshot>, WebProgressRetentionStatus>>()
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(2)
+        val holder = callers.submit {
+            synchronized(service) {
+                expected.set(runCatching { service.schedulerSnapshot() } to service.progressRetentionStatus())
+                entered.countDown()
+                check(release.await(20, TimeUnit.SECONDS))
+            }
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val actual = callers.submit<Pair<Result<WebSchedulerSnapshot>, WebProgressRetentionStatus>> {
+                runCatching { service.schedulerSnapshot() } to service.progressRetentionStatus()
+            }.get(5, TimeUnit.SECONDS)
+            val captured = expected.get()
+            assertEquals(captured.second, actual.second)
+            if (captured.first.isFailure) {
+                assertEquals(assertIs<WebJobServiceException>(captured.first.exceptionOrNull()).code,
+                    assertIs<WebJobServiceException>(actual.first.exceptionOrNull()).code)
+            } else {
+                val sample = actual.first.getOrThrow()
+                when (val previous = captured.first.getOrThrow()) {
+                    is WebSchedulerSnapshot.Available -> assertEquals(previous.copy(sampledAt = sample.sampledAt), sample)
+                    is WebSchedulerSnapshot.Unavailable -> assertEquals(previous.copy(sampledAt = sample.sampledAt), sample)
+                }
+            }
+        } finally {
+            release.countDown()
+            try { holder.get(5, TimeUnit.SECONDS) }
+            finally {
+                callers.shutdownNow()
+                assertTrue(callers.awaitTermination(10, TimeUnit.SECONDS))
+            }
         }
     }
 

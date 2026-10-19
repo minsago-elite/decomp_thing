@@ -78,20 +78,21 @@ class WebJobService(
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
-    private var initialized = false
-    private var stopping = false
-    private var closed = false
+    @Volatile private var initialized = false
+    @Volatile private var stopping = false
+    @Volatile private var closed = false
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
     private var retentionCycleActive = false
-    private var retentionStatus = WebProgressRetentionStatus(progressRetentionIntervalMs != null, 0, 0, 0, null)
+    @Volatile private var retentionStatus = WebProgressRetentionStatus(progressRetentionIntervalMs != null, 0, 0, 0, null)
     private val retentionWorker = progressRetentionIntervalMs?.let { interval ->
         WebProgressRetentionWorker(interval, ::runProgressRetentionBatch) {
             synchronized(this) { releaseIfQuiescent() }
         }
     }
 
-    @Synchronized internal fun progressRetentionStatus(): WebProgressRetentionStatus = retentionStatus
+    // Immutable observation only: a bootstrap read must not wait for storage work.
+    internal fun progressRetentionStatus(): WebProgressRetentionStatus = retentionStatus
 
     /** At most 32 discovery/attempt units per tick. Release the service monitor between each unit. */
     private fun runProgressRetentionBatch() {
@@ -140,8 +141,9 @@ class WebJobService(
             lastFailureCode = code.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) } ?: "RETENTION_UNAVAILABLE")
     }
 
-    /** Aggregate executor telemetry only; independent readings are approximate, never admission authority. */
-    @Synchronized
+    /** Aggregate executor telemetry only; independent readings are approximate, never admission authority.
+     * Passive sampling does not acquire the monitor used for storage and workflow transitions.
+     */
     fun schedulerSnapshot(): WebSchedulerSnapshot {
         requireInitializedRead()
         val sampledAt = java.time.Instant.now()
