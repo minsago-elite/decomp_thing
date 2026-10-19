@@ -102,7 +102,7 @@ internal class AcpExecutionScheduler(
                 // its admission decisions and the state is re-observed before the next one.
                 var current = true
                 try {
-                    if (!lock.tryLock()) {
+                    if (!lock.tryLock(0L, TimeUnit.NANOSECONDS)) {
                         if (!lock.tryLock(minOf(POLL_NANOS, queueTimeoutNanos - elapsed), TimeUnit.NANOSECONDS)) continue
                         current = false
                     }
