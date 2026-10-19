@@ -30,6 +30,23 @@ sealed interface WebWorkflowAdmission {
     data object Unavailable : WebWorkflowAdmission
 }
 
+/** Both upload adapters must retain uncertainty before returning a recovery-required failure. */
+internal fun <T> withWebUploadPublicationOutcome(
+    retainUncertain: (WebJobDiagnostic) -> Unit,
+    publish: () -> T,
+): T = try {
+    publish()
+} catch (failure: Exception) {
+    val jobId = when (failure) {
+        is decompengine.jobs.UploadPublicationUncertainException -> failure.jobId
+        is decompengine.jobs.UploadPublicationUncertain -> failure.jobId
+        else -> throw failure
+    }
+    retainUncertain(WebJobDiagnostic(jobId, "RECOVERY_REQUIRED",
+        "An upload may have been published. Reopen storage before admitting more work; do not retry blindly."))
+    throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
+}
+
 /**
  * Shared service boundary. HTTP adapters authorize before calling it. Initialization is explicit,
  * runs before requests, and recovers only an existing root; reads never acquire ownership or recover.
@@ -462,8 +479,13 @@ class WebJobService(
     fun upload(filename: String, content: ByteArray): Job {
         writableStore()
         if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload storage is reserved by another transfer.")
-        return store.createFromUpload(filename, content)
+        return publishUpload { store.createFromUpload(filename, content) }
     }
+
+    private fun <T> publishUpload(publish: () -> T): T = withWebUploadPublicationOutcome(
+        retainUncertain = { diagnostic -> synchronized(this) { publicationFailures[diagnostic.jobId] = diagnostic } },
+        publish = publish,
+    )
 
     /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
     fun uploadMultipart(input: java.io.InputStream, contentType: String): Job =
@@ -481,14 +503,11 @@ class WebJobService(
         var reservation: AutoCloseable? = null
         try {
             reservation = uploadStorage.reserve()
-            return uploadPublisher.publish(idempotencyKey) { sink ->
-                StreamingMultipartUpload.copy(input, contentType, sink, onReceived = { progress?.received(it) }).also { progress?.validating() }.filename
+            return publishUpload {
+                uploadPublisher.publish(idempotencyKey) { sink ->
+                    StreamingMultipartUpload.copy(input, contentType, sink, onReceived = { progress?.received(it) }).also { progress?.validating() }.filename
+                }
             }
-        } catch (failure: decompengine.jobs.UploadPublicationUncertain) {
-            synchronized(this) {
-                publicationFailures[failure.jobId] = WebJobDiagnostic(failure.jobId, "RECOVERY_REQUIRED", "An upload may have been published. Reopen storage before admitting more work; do not retry blindly.")
-            }
-            throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
         } finally {
             reservation?.close()
             synchronized(this) { uploads.remove(worker); finished.countDown(); releaseIfQuiescent() }

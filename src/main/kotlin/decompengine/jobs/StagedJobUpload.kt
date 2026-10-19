@@ -24,6 +24,10 @@ internal class UploadIdempotencyConflict : RuntimeException("The idempotency key
 internal class UploadReceiptUnavailable : RuntimeException("The retained upload receipt is unavailable or invalid; inspect storage before retrying")
 internal enum class UploadPublishPoint { AFTER_BINARY_SYNC, AFTER_METADATA_SYNC, BEFORE_RENAME, AFTER_RENAME }
 
+/** An attempted rename can have published even when its provider reports failure. */
+internal fun stagedUploadPublicationFailure(jobId: String, renameAttempted: Boolean, failure: Throwable): Throwable =
+    if (renameAttempted) UploadPublicationUncertain(jobId, failure) else failure
+
 /** Caller holds the job-root ownership lease. Only the final atomic rename makes a complete job visible. */
 internal class StagedJobUpload(
     private val root: Path,
@@ -41,7 +45,7 @@ internal class StagedJobUpload(
         val binary = stage.resolve("input.elf")
         val metadataFile = stage.resolve("job.json")
         val receiptFile = stage.resolve("upload-receipt.json")
-        var renamed = false
+        var renameAttempted = false
         var primary: Throwable? = null
         try {
             val header = ByteArrayOutputStream(64)
@@ -89,18 +93,18 @@ internal class StagedJobUpload(
                 syncDirectory(stage)
                 if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Upload interrupted before publication")
                 fault(UploadPublishPoint.BEFORE_RENAME)
+                renameAttempted = true
                 Files.move(stage, destination, ATOMIC_MOVE)
-                renamed = true
                 fault(UploadPublishPoint.AFTER_RENAME)
                 syncDirectory(root)
                 PublishedJobUpload(job, inputSha)
             }
         } catch (failure: Throwable) {
-            val selected = if (renamed) UploadPublicationUncertain(id, failure) else failure
+            val selected = stagedUploadPublicationFailure(id, renameAttempted, failure)
             primary = selected
             throw selected
         } finally {
-            if (!renamed) {
+            if (!renameAttempted) {
                 try {
                     Files.deleteIfExists(receiptFile)
                     Files.deleteIfExists(metadataFile)
