@@ -754,8 +754,8 @@ class MvpPatchWorkflowTest {
         val beforeResponse = Files.readAllBytes(responsePath)
         val absentRequest = root.resolve("refused-request.md")
         val absentResponse = root.resolve("refused-response.md")
-        for (payload in listOf("a\uD800b", "a\uDC00b", "a\uD800b" + "x".repeat(1_024),
-            "a\uDC00b" + "x".repeat(1_024))) {
+        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
+            "x".repeat(20_000) + "a\uDC00b")) {
             assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
             for (candidate in listOf(publicRequest.copy(prompt = payload), publicRequest.copy(failureKind = payload),
                 publicRequest.copy(projectFiles = publicRequest.projectFiles + ("$payload.c" to "public extra")),
@@ -875,8 +875,8 @@ class MvpPatchWorkflowTest {
             "fixture-harness", profile.id, profile.sha256)
         encodingEvidence.patchDiffPath = evidence.patchDiffPath
         val encodedSummary = root.resolve("SUMMARY-encoding.md")
-        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
-            "x".repeat(20_000) + "a\uDC00b")) {
+        for (payload in listOf("a\uD800b", "a\uDC00b", "a\uD800b" + "x".repeat(1_024),
+            "a\uDC00b" + "x".repeat(1_024))) {
             assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
             encodingEvidence.patchDiff = if (payload.length < 1_024) null else full
             encodingEvidence.patchExplanation = "public explanation $payload"
