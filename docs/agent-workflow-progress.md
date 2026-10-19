@@ -325,6 +325,11 @@ are unchanged. These components still require exact-source Actions qualification
 stream collection, chunk/session privacy, cleanup and real-agent qualification
 remain separate open acceptance.
 
+Retained request and response projections are strictly encoded as UTF-8 before
+opening either transcript file. Malformed text refuses without replacing an
+existing transcript or creating an absent one. Authoritative captured request
+fields and input bytes retain their existing admission and encoding behavior.
+
 MVP reporting requires at least 16,384 projection bytes before a run starts.
 If the complete summary projection or strict UTF-8 encoding refuses, `SUMMARY.md` retains bounded producer
 facts, exact artifact commitments, approval, mapping and separate validation

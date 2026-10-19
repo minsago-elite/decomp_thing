@@ -980,7 +980,7 @@ private fun retainRequest(path: Path, request: RepairRequest, evidence: MvpRunEv
         }
         append("\n")
     }
-    path.writeText(transcript)
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
 }
 
 private fun retainResponse(path: Path, response: decompengine.repair.RepairResponse, evidence: MvpRunEvidence) {
@@ -993,7 +993,7 @@ private fun retainResponse(path: Path, response: decompengine.repair.RepairRespo
         }
         append("\n")
     }
-    path.writeText(transcript)
+    Files.write(path, encodeMvpArtifactUtf8(transcript))
 }
 
 private fun findSourceLocation(sanitizer: String): String? =

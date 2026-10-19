@@ -743,6 +743,63 @@ class MvpPatchWorkflowTest {
         for (value in listOf(privateValue, pathValue, "synthetic-basic")) assertFalse(responseText.contains(value))
         assertTrue(responseText.contains(complete.trimEnd()))
         assertEquals(source, response.patches.single().replacement)
+
+        // Every retained field is encoded before opening an existing or absent transcript.
+        val encodingSecret = "a?b"
+        val encodingEvidence = MvpRunEvidence(mapOf("PLAIN_SETTING" to encodingSecret),
+            "fixture-harness", "fixture-profile", "a".repeat(64))
+        val publicRequest = RepairRequest("fixture", "public objective", mapOf("target.c" to "public body"), emptyList())
+        val publicResponse = RepairResponse("public summary", listOf(SourcePatch("target.c", "public body")))
+        val beforeRequest = Files.readAllBytes(target)
+        val beforeResponse = Files.readAllBytes(responsePath)
+        val absentRequest = root.resolve("refused-request.md")
+        val absentResponse = root.resolve("refused-response.md")
+        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
+            "x".repeat(20_000) + "a\uDC00b")) {
+            assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
+            for (candidate in listOf(publicRequest.copy(prompt = payload), publicRequest.copy(failureKind = payload),
+                publicRequest.copy(projectFiles = publicRequest.projectFiles + ("$payload.c" to "public extra")),
+                publicRequest.copy(projectFiles = mapOf("target.c" to payload)),
+                publicRequest.copy(regressionInputs = listOf(ProcessInput(payload))))) {
+                for (path in listOf(target, absentRequest)) assertFailsWith<MvpPatchException> {
+                    retainMvpCapturedRequest(path, candidate, "target.c", RepairResourceBudget(), encodingEvidence)
+                }
+                assertTrue(Files.readAllBytes(target).contentEquals(beforeRequest))
+                assertFalse(absentRequest.exists())
+            }
+            for (candidate in listOf(publicResponse.copy(summary = payload),
+                publicResponse.copy(patches = listOf(SourcePatch("$payload.c", "public body"))),
+                publicResponse.copy(patches = listOf(SourcePatch("target.c", payload))))) {
+                for (path in listOf(responsePath, absentResponse)) assertFailsWith<MvpPatchException> {
+                    retainMvpCapturedResponse(path, candidate, RepairResourceBudget(), encodingEvidence)
+                }
+                assertTrue(Files.readAllBytes(responsePath).contentEquals(beforeResponse))
+                assertFalse(absentResponse.exists())
+            }
+        }
+        val artifactDirectory = Files.createDirectories(root.resolve("evidence"))
+        val retainedRequest = artifactDirectory.resolve("reconstruction-request.md")
+        val retainedResponse = artifactDirectory.resolve("reconstruction-response.md")
+        val validRequest = publicRequest.copy(prompt = "public a€b 😀 $encodingSecret",
+            projectFiles = mapOf("target.c" to "public λ $encodingSecret"))
+        val validResponse = publicResponse.copy(summary = "public a€b 😀 $encodingSecret",
+            patches = listOf(SourcePatch("target.c", "public λ $encodingSecret")))
+        val admitted = retainMvpCapturedRequest(retainedRequest, validRequest, "target.c", RepairResourceBudget(), encodingEvidence)
+        retainMvpCapturedResponse(retainedResponse, validResponse, RepairResourceBudget(), encodingEvidence)
+        assertEquals(validRequest.prompt, admitted.request.prompt)
+        assertEquals(validRequest.projectFiles, admitted.request.projectFiles)
+        for (path in listOf(retainedRequest, retainedResponse)) {
+            val text = path.readText()
+            assertTrue(text.contains("public a€b 😀") && text.contains("public λ"))
+            assertFalse(text.contains(encodingSecret))
+        }
+        fun commitment(path: Path): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(path)).joinToString("") { "%02x".format(it) }
+        val summary = root.resolve("SUMMARY-transcripts.md")
+        val missing = root.resolve("not-produced")
+        writeMvpSummary(summary, root, missing, missing, missing, missing, missing, "FAIL", "not run", encodingEvidence)
+        assertTrue(summary.readText().contains("| Reconstruction request | `evidence/reconstruction-request.md` | `${commitment(retainedRequest)}` |"))
+        assertTrue(summary.readText().contains("| Reconstruction response | `evidence/reconstruction-response.md` | `${commitment(retainedResponse)}` |"))
     }
 
     @Test

@@ -2,9 +2,6 @@ package decompengine.mvp
 
 import decompengine.jobs.ProgressRedactor
 import decompengine.repair.MAXIMUM_REPAIR_PROJECTION_BYTES
-import java.nio.CharBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -184,11 +181,11 @@ internal fun writeMvpSummary(
             append("\n- Logs: `logs/`\n- Retained evidence: `evidence/`\n\n## Residual Risks\n\n")
             append("Validation covers the retained sanitizer reproducer and observed default behavior; it does not prove correctness for unobserved inputs. Decompiled names and source structure may differ from the original source. A final binary is published only after sanitizer, hardening, security, and behavior checks pass.\n")
         }
-        encodeMvpSummaryUtf8(text)
+        encodeMvpArtifactUtf8(text)
     } catch (_: MvpPatchException) {
         val details = retainMvpSummaryDetails(output, failure, evidence)
         MvpSummaryFacts.capture(result, failure != null, binary.exists() && result == "PASS", artifactFacts, evidence, details)
-            .render(evidence.maximumProjectionBytes).let(::encodeMvpSummaryUtf8)
+            .render(evidence.maximumProjectionBytes).let(::encodeMvpArtifactUtf8)
     }
     Files.write(summaryPath, summary)
 }
@@ -220,7 +217,7 @@ private fun retainMvpSummaryDetails(output: Path, failure: String?, evidence: Mv
         return null
     }
     val bytes = try {
-        encodeMvpSummaryUtf8(detail)
+        encodeMvpArtifactUtf8(detail)
     } catch (_: MvpPatchException) {
         return null
     }
@@ -230,15 +227,6 @@ private fun retainMvpSummaryDetails(output: Path, failure: String?, evidence: Mv
     Files.write(path, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
         StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
     return MvpSummaryDetailsFact(path.sha256())
-}
-
-/** Encoding is part of privacy admission, before either output file is opened. */
-private fun encodeMvpSummaryUtf8(text: String): ByteArray = try {
-    val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
-        .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text))
-    ByteArray(encoded.remaining()).also { encoded.get(it) }
-} catch (_: CharacterCodingException) {
-    throw MvpPatchException("MVP report text cannot be encoded faithfully")
 }
 
 private fun Path.relativeOrAbsolute(root: Path): String =
