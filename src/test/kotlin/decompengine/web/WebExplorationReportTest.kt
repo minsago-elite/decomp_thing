@@ -25,4 +25,35 @@ class WebExplorationReportTest {
             assertEquals(JsonNull, result.getValue("summary"))
         }
     }
+
+    private val failed = """{"schema":"decomp-exploration-failure","schemaVersion":1,"state":"partial","failure":{"phase":"expanded","candidateIndex":0,"kind":"timeout","code":"behavior-deadline-exceeded"},"samples":{"baselineInputs":1,"expandedInputs":1,"baselineObserved":1,"expandedObserved":0},"details":{"baselineInputs":[{"id":"seed","source":"SEED","args":[""],"stdinHex":"00"}],"expandedInputs":[{"id":"generated","source":"MUTATION","args":[],"stdinHex":""}],"baselineObservations":[{"candidateId":"seed","signature":"0::","exitCode":0,"stdoutHex":"","stderrHex":"","networkIsolated":false}],"expandedObservations":[]},"detailsOmitted":null,"coverage":null,"confidence":null}"""
+
+    @Test fun `versioned producer failure retains artifact and attempt binding without a success summary`() {
+        val result = report(failed)
+        assertEquals("partial", result.getValue("state").jsonPrimitive.content)
+        assertEquals(1, result.getValue("producerSchemaVersion").jsonPrimitive.int)
+        assertEquals(JsonNull, result.getValue("summary"))
+        assertEquals("observations", result.getValue("authority").jsonPrimitive.content)
+        assertEquals("not-evaluated", result.getValue("acceptance").jsonPrimitive.content)
+        assertEquals("run_1", result.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content)
+        assertEquals("raw-evidence", result.getValue("sourceArtifact").jsonObject.getValue("role").jsonPrimitive.content)
+        assertTrue(result.getValue("limitations").jsonArray.single().jsonPrimitive.content.contains("a timeout"))
+        assertTrue(result.getValue("limitations").jsonArray.single().jsonPrimitive.content.contains("Coverage and confidence are unavailable"))
+    }
+
+    @Test fun `malformed failed progress is invalid and future producer versions remain unsupported`() {
+        for (text in listOf(
+            failed.replace("\"candidateIndex\":0", "\"candidateIndex\":1"),
+            failed.replace("\"signature\":\"0::\"", "\"signature\":\"1::\""),
+            failed.replace("\"confidence\":null", "\"confidence\":0"),
+            failed.replace("\"baselineObserved\":1", "\"baselineObserved\":0"),
+        )) {
+            val result = report(text)
+            assertEquals("invalid", result.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, result.getValue("summary"))
+        }
+        val result = report(failed.replace("\"schemaVersion\":1", "\"schemaVersion\":2"))
+        assertEquals("unsupported", result.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, result.getValue("summary"))
+    }
 }
