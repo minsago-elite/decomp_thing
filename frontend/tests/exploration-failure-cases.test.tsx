@@ -81,7 +81,7 @@ it('rejects forged progress, mismatched positions, signatures, reason pairs and 
     v => { v.samples.baselineInputs = 2147483648; }, v => { v.failure.code = 'launch-failed'; }, v => { v.failure.kind = 'execution-failure'; },
     v => { v.details.expandedObservations.push(observation()); }, v => { v.details.baselineObservations[0]!.candidateId = 'wrong'; },
     v => { v.details.baselineObservations[0]!.signature = '0:68690a:1b'; }, v => { v.details.expandedInputs[0]!.source = 'REGRESSION'; },
-    v => { v.details.baselineInputs[0]!.stdinHex = 'FF'; }, v => { v.details.baselineInputs[0]!.args = Array(257).fill('x'); },
+    v => { v.details.baselineInputs[0]!.stdinHex = 'FF'; }, v => { v.details.baselineInputs[0]!.args = Array.from({ length: 257 }, () => 'x'); },
   ];
   for (const change of changes) { const value = fixture(); change(value); expect(() => parse(value)).toThrow(); }
   expect(() => parse({ ...fixture(), coverage: 0 })).toThrow(); expect(() => parse({ ...fixture(), confidence: {} })).toThrow();

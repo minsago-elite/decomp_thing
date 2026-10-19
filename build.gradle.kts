@@ -92,7 +92,7 @@ val frontendInstall = tasks.register<Exec>("frontendInstall") {
 
 val frontendBuild = tasks.register<Exec>("frontendBuild") {
     group = "build"
-    description = "Type-checks and builds the pinned Preact application from current frontend inputs"
+    description = "Type-checks, lints and builds the pinned Preact application from current frontend inputs"
     dependsOn(frontendInstall)
     inputs.files(fileTree(frontendDirectory) {
         include("src/**", "tests/**", "dev/**", "public/**", "scripts/**", "index.html", "*config.*", "package*.json", ".npmrc")
@@ -105,6 +105,11 @@ val frontendBuild = tasks.register<Exec>("frontendBuild") {
     outputs.files(layout.buildDirectory.file("frontend/bundle-report.json"),
         layout.buildDirectory.file("frontend/bundle-composition.json"))
     frontendNpm("run", "build")
+}
+
+// Reject frontend validation failures before Kotlin work when both already belong to the graph.
+listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
+    tasks.named(taskName) { mustRunAfter(frontendBuild) }
 }
 
 val generateFrontendAssetManifest = tasks.register<Exec>("generateFrontendAssetManifest") {
