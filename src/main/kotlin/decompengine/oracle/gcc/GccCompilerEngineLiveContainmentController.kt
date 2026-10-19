@@ -1273,6 +1273,8 @@ internal fun gccSystemLibraryLocations(architecture: String): List<Pair<Path, Pa
 internal fun <T> withGccSystemLibrarySources(
     architecture: String,
     resolveDirectory: (Path) -> Path?,
+    symbolicLinkTarget: (Path) -> Path?,
+    isDirectory: (Path) -> Boolean,
     isRegularFile: (Path) -> Boolean,
     capture: (List<Pair<Path, Path>>) -> T,
 ): T {
@@ -1289,11 +1291,61 @@ internal fun <T> withGccSystemLibrarySources(
         "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
         else -> liveContainmentFail("GCC host has no fixed system-library ABI mapping")
     }
-    val interpreterSource = sources.singleOrNull { it.second == interpreter.parent }?.first
-    if (interpreterSource == null || !isRegularFile(interpreterSource.resolve(interpreter.fileName))) {
+    val interpreterSource = mountedGccInterpreterSource(interpreter, sources, symbolicLinkTarget, isDirectory)
+    if (interpreterSource == null || !isRegularFile(interpreterSource)) {
         liveContainmentFail("GCC system-library interpreter layout is unsupported")
     }
     return capture(sources)
+}
+
+/** Walk link components in destination space; host canonical parents can mean different paths. */
+private fun mountedGccInterpreterSource(
+    interpreter: Path,
+    sources: List<Pair<Path, Path>>,
+    symbolicLinkTarget: (Path) -> Path?,
+    isDirectory: (Path) -> Boolean,
+): Path? {
+    fun sourceAt(destination: Path): Path? = sources.singleOrNull { destination.startsWith(it.second) }
+        ?.let { (source, mount) -> source.resolve(mount.relativize(destination)) }
+
+    val root = Path.of("/")
+    var directory = root
+    val remaining = ArrayDeque<Path>()
+    interpreter.forEach { remaining.addLast(it) }
+    var steps = 0
+    var links = 0
+    while (remaining.isNotEmpty()) {
+        if (++steps > 256) return null
+        val component = remaining.removeFirst()
+        when (component.toString()) {
+            "", "." -> continue
+            ".." -> { directory = directory.parent ?: root; continue }
+        }
+        val destination = directory.resolve(component)
+        val source = sourceAt(destination)
+        if (source == null) {
+            // Only ancestors of a selected destination exist as synthetic directories.
+            if (sources.none { (_, mount) -> mount.startsWith(destination) }) return null
+            directory = destination
+            continue
+        }
+        val target = symbolicLinkTarget(source)
+        if (target == null) {
+            if (remaining.isNotEmpty() && !isDirectory(source)) return null
+            directory = destination
+            continue
+        }
+        if (++links > 40 || target.toString().isEmpty()) return null
+        if (target.isAbsolute) directory = root
+        val components = ArrayList<Path>()
+        for (part in target) {
+            if (components.size + remaining.size >= 256) return null
+            components.add(part)
+        }
+        // Do not normalize away parent components before their preceding links are resolved.
+        components.asReversed().forEach { remaining.addFirst(it) }
+    }
+    return sourceAt(directory)
 }
 
 internal fun deriveRuntimeConfiguration(
@@ -1323,7 +1375,9 @@ internal fun deriveRuntimeConfiguration(
                 null
             } else directory.toRealPath()
         },
-        isRegularFile = { Files.isRegularFile(it) },
+        symbolicLinkTarget = { if (Files.isSymbolicLink(it)) Files.readSymbolicLink(it) else null },
+        isDirectory = { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) },
+        isRegularFile = { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) },
     ) { sources ->
         sources.map { (source, destination) -> runtimeMount(source, destination) }
     }
