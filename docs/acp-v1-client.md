@@ -1028,8 +1028,9 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 1. confirm that the SDK still identifies protocol v1 as stable and keeps v2 opt-in;
 2. review the official v1 schema and release notes for wire or capability changes, including the opt-in v1
    additional-directory, usage, and message-id fields;
-3. update the Gradle coordinate, `ACP_KOTLIN_SDK_VERSION`, Java probe/evidence pins and pinning tests together,
-   as identified in the source-owner table below;
+3. update the Gradle coordinate, `ACP_KOTLIN_SDK_VERSION`, Java probe/evidence pins,
+   `contracts/acp/v1/required-cases.json` and pinning tests together, as identified
+   in the source-owner table below;
 4. review and run the versioned golden corpus, operator preference exchanges, scripted subprocess
    tests and full test suite; and
 5. keep v2 disabled until a project issue explicitly adopts it after it becomes stable.
@@ -1053,6 +1054,7 @@ about the newest upstream release.
 | SDK pin assertions and current documentation | Review the literal SDK assertions in [`AcpAgentHarnessTest`](../src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt) and [`AcpOperatorSurfaceContractTest`](../src/test/kotlin/decompengine/acp/AcpOperatorSurfaceContractTest.kt), plus the artifact/reported-version fields in the wire corpus and its golden test below. Update current setup/recovery version references; retain historical evidence with its original pins. |
 | Wire contract | Review the versioned [`wire-contract.json`](../src/test/resources/acp/v1/wire-contract.json) and [`AcpV1WireContractGoldenTest`](../src/test/kotlin/decompengine/acp/AcpV1WireContractGoldenTest.kt). Every changed message needs an explained compatibility result; a changed golden file alone supplies no runtime result. |
 | Independent agent/archive | Review the exact release URL/version, archive/member digests and target metadata in [`ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh) or [`ci-qualify-codex-acp.sh`](../scripts/ci-qualify-codex-acp.sh), plus the corresponding Java probe and acquisition controls. Preserve archive-layout and member verification. |
+| Machine-readable case and result bindings | Update the exact client, SDK artifact/reported version, stable protocol and agent version/archive size/digest pins in [`required-cases.json`](../contracts/acp/v1/required-cases.json) together with their build/wire/probe/script owners. Review the declaration and [`verify.py`](../contracts/acp/v1/verify.py) schema/scope rules plus [`test-acp-release-manifest.py`](../scripts/test-acp-release-manifest.py) when cases or metadata semantics change. The ordinary CI source-pin and data controls must pass. Retain old definition bytes/digests and result identities; a changed definition requires a new digest and fresh source/context-bound results. |
 | Executable/runtime/helper | Re-provision the reviewed immutable executable/runtime/helper commitments at their final paths, and bind the actual host architecture and containment prerequisites. Keep the existing ownership, mode, resource and cleanup checks. |
 | Factory/session configuration | Review the schema version, canonical factory commitment, ordered argv, explicit environment provenance and advertised preferences. A changed identity must pass [session reconciliation](acp-session-recovery.md#conversation-decisions). |
 | Provider/auth policy | Qualify the broker/channel and advertised auth lifecycle under their owning contracts. Provider credentials stay in the operator broker; the current network-free checkpoints cannot establish a positive model session. |
@@ -1067,6 +1069,10 @@ Use this order for an upgrade proposal:
    case definition, optional capability observations and actual outcomes
    separate. An untested optional feature remains unknown; a missing required
    capability remains a blocking outcome for that required case.
+   Update the versioned declaration with any changed literal pins or required
+   cases, then require its ordinary metadata check and data controls. Bind new
+   results to the exact new definition digest and current runtime/provider-policy
+   context; changing metadata cannot requalify retained results from an old combination.
 3. Obtain current-source normal Actions evidence for wire serialization,
    provisioning, advertised preferences, filesystem/terminal/permission
    enforcement, lifecycle, recovery and packaging. Bind the actual checkout and
