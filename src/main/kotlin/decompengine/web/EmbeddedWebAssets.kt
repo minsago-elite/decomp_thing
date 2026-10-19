@@ -49,6 +49,7 @@ class EmbeddedWebAssets private constructor(
     val manifest: WebUiAssetManifest,
     val basePath: String,
     private val source: WebUiResourceSource,
+    private val displayPreferencesScript: String?,
 ) {
     val assetPrefix: String = "${basePath}assets/ui/"
     private val publicAssets = manifest.files.filter(WebUiAsset::isPublic).associateBy(WebUiAsset::path)
@@ -115,6 +116,9 @@ class EmbeddedWebAssets private constructor(
         val styles = manifest.entryStyles.joinToString("\n") { path ->
             "    <link rel=\"stylesheet\" href=\"${htmlAttribute(assetPrefix + path)}\">"
         }
+        val bootstrap = displayPreferencesScript?.let { path ->
+            "    <script src=\"${htmlAttribute(assetPrefix + path)}\"></script>"
+        }.orEmpty()
         val html = """
             <!doctype html>
             <html lang="en">
@@ -127,8 +131,9 @@ class EmbeddedWebAssets private constructor(
                 <meta name="color-scheme" content="light dark">
                 <meta name="referrer" content="no-referrer">
                 <title>Decomp Workbench</title>
+            $bootstrap
             $styles
-                <script type="module" blocking="render" src="${htmlAttribute(assetPrefix + manifest.entryScript)}"></script>
+                <script type="module" src="${htmlAttribute(assetPrefix + manifest.entryScript)}"></script>
               </head>
               <body>
                 <div id="app"></div>
@@ -203,8 +208,8 @@ class EmbeddedWebAssets private constructor(
                 val payload = readSmallResource(source, MANIFEST_PATH)
                 val manifest = parseManifest(payload)
                 manifest.files.forEach { asset -> validateResource(source, asset) }
-                validateViteManifest(source, manifest)
-                return EmbeddedWebAssets(manifest, basePath, source)
+                val displayPreferencesScript = validateViteManifest(source, manifest)
+                return EmbeddedWebAssets(manifest, basePath, source, displayPreferencesScript)
             } catch (failure: EmbeddedWebAssetsException) {
                 throw failure
             } catch (failure: Exception) {
@@ -301,7 +306,7 @@ class EmbeddedWebAssets private constructor(
             }
         }
 
-        private fun validateViteManifest(source: WebUiResourceSource, manifest: WebUiAssetManifest) {
+        private fun validateViteManifest(source: WebUiResourceSource, manifest: WebUiAssetManifest): String? {
             val root = Json.parseToJsonElement(readSmallResource(source, ".vite/manifest.json").decodeToString(throwOnInvalidSequence = true))
                 .objectValue("Vite manifest")
             require(root.size in 1..MAX_FILES) { "Vite manifest entry count exceeds its bound" }
@@ -336,6 +341,19 @@ class EmbeddedWebAssets private constructor(
                 }
             }
             require(css.toList() == manifest.entryStyles) { "Vite and UI manifest entry styles disagree" }
+            // Historical schema-v1 packages without this entry retain their original startup behavior.
+            val bootstrap = entries["src/app/display-preferences-bootstrap.js"] ?: return null
+            require((bootstrap["isEntry"] as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull == true) {
+                "display preference bootstrap is not an entry"
+            }
+            val bootstrapPath = bootstrap.string("file")
+            require(bootstrapPath.endsWith(".js") && bootstrapPath != manifest.entryScript && bootstrapPath in publicPaths) {
+                "display preference bootstrap is missing or private"
+            }
+            require(listOf("imports", "dynamicImports", "css", "assets").all { bootstrap.optionalStringArray(it).isEmpty() }) {
+                "display preference bootstrap must be standalone"
+            }
+            return bootstrapPath
         }
 
         private fun readSmallResource(source: WebUiResourceSource, path: String): ByteArray {
