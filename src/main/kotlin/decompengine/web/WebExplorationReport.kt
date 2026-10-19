@@ -1,7 +1,9 @@
 package decompengine.web
 
 import decompengine.exploration.EXPLORATION_FAILURE_SCHEMA
+import decompengine.exploration.EXPLORATION_PREPARATION_FAILURE_SCHEMA
 import decompengine.exploration.explorationFailureLimitation
+import decompengine.exploration.explorationPreparationFailureLimitation
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
@@ -16,9 +18,11 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
         try {
             require(bytes.size <= 1_048_576)
             val root = OracleJson.parse(bytes).jsonObject
-            if (root["schema"]?.jsonPrimitive?.contentOrNull == EXPLORATION_FAILURE_SCHEMA) {
+            val schema = root["schema"]?.jsonPrimitive?.contentOrNull
+            if (schema == EXPLORATION_FAILURE_SCHEMA || schema == EXPLORATION_PREPARATION_FAILURE_SCHEMA) {
                 if (root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1) {
-                    limitation = explorationFailureLimitation(root)
+                    limitation = if (schema == EXPLORATION_FAILURE_SCHEMA) explorationFailureLimitation(root)
+                        else explorationPreparationFailureLimitation(root)
                     state = "partial"
                     producerSchemaVersion = 1
                 } else {

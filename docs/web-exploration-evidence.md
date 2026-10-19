@@ -10,7 +10,7 @@ policy, strict no-query/JSON Accept checks and private no-store headers. It neve
 falls back to legacy shared reports or another attempt's latest output.
 
 Adapter version 1 recognizes the existing unversioned exploration producer and
-the versioned observation-failure record described below. Strict
+the versioned observation-failure and preparation-failure records described below. Strict
 JSON parsing rejects duplicate fields, excessive structure and invalid values.
 Required top-level fields, unsigned counts, candidate-list count, confidence score
 range and boolean isolation fields are checked. This is a summary projection, not
@@ -20,7 +20,7 @@ It does not execute inputs or attest independent containment.
 The typed report distinguishes:
 
 - `available`: the known summary can be projected, with `observations` authority.
-- `partial`: required producer fields are absent or a known observation-failure
+- `partial`: required producer fields are absent or a known failure
   record reports incomplete work; summary remains null.
 - `unsupported`: the declared producer schema or version is not recognized.
 - `invalid`: malformed bytes, invalid summary values or parser limits prevent projection.
@@ -122,7 +122,34 @@ so valid details admitted by the producer's conservative 90,000-node budget rema
 inspectable. General API JSON retains its 50,000-node default. Both ceilings remain
 subject to the same byte/depth limits, duplicate-key refusal and strict values.
 
-Generation failures before observation, independently established regression
-origins and broader integration qualification remain outstanding. The historical
-verification above covers its recorded source only; new pure metadata and
-in-memory fetch/decoder/DOM controls require current Actions evidence.
+## Failures before candidate observation
+
+The existing Angr, static-hint and mutation callbacks can retain a separate
+`decomp-exploration-preparation-failure` version-1 partial record when they throw.
+Their order and multiplicity are unchanged. The original exception is rethrown
+immediately; retention errors are suppressed once and later stages do not run.
+Completed proposals still use the original deduplication, candidate cap, observation
+calls and successful report writer.
+
+The record names the failed generation stage and reports available provided-seed,
+Angr and static-hint counts. An unreturned group is null, distinct from a returned
+empty group. The final expanded proposal and sample counts remain unknown.
+`observationState: "not-started"` is the producer's pipeline claim, not independent
+execution or containment evidence. Fixed generic, I/O and interruption codes use
+exception types only; an exit124 or message mentioning timeout supplies no timeout,
+tool-availability, launch or cleanup classification. Messages/stacks are omitted.
+
+Optional inputs retain exact reported IDs/sources/argv/stdin bytes under the same
+1000-per-group,256-argument,1,000,000-byte/90,000-node conservative retention budget;
+oversized detail is wholly omitted before JSON allocation. The existing read-only
+adapter and version-one partial viewer validate the separate known namespace,
+stage/availability consistency and unknown counts. Stable group/position identities
+preserve repeated IDs. The viewer keeps its existing byte/node/preview/page limits,
+artifact/attempt/length/digest checks and deliberate read/abort/refresh policy.
+Input inspection never presents an exit code, output or observation that this
+preparation record does not contain.
+
+Independently established regression origins and broader integration qualification
+remain outstanding. The historical verification above covers its recorded source
+only; new pure callback/metadata and in-memory fetch/decoder/DOM controls require
+their own current Actions evidence.

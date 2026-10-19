@@ -6,18 +6,25 @@ import { explorationCasesCopy as copy } from '../copy/attempt';
 import { message, textMessage } from '../shared/messages';
 import { bytePreview, CASE_PAGE_SIZE, parseRetainedCases, textPreview } from './explorationCases';
 import type { RetainedCase, RetainedCases } from './explorationCases';
-import { parseFailureCases } from './explorationFailureCases';
 import type { FailureRetainedCase, FailureRetainedCases } from './explorationFailureCases';
+import { parsePartialCases } from './explorationPreparationCases';
+import type { PreparationCase, PreparationCases } from './explorationPreparationCases';
 
 function failureCase(value: RetainedCase): FailureRetainedCase | null {
   return 'sample' in value ? value as FailureRetainedCase : null;
 }
+function preparationCase(value: RetainedCase): PreparationCase | null {
+  return 'group' in value ? value as PreparationCase : null;
+}
 function caseKey(value: RetainedCase): string {
   const partial = failureCase(value);
-  return partial ? JSON.stringify([partial.sample, partial.index]) : value.id;
+  const preparation = preparationCase(value);
+  return partial ? JSON.stringify([partial.sample, partial.index]) : preparation ? JSON.stringify([preparation.group, preparation.index]) : value.id;
 }
 function caseName(value: RetainedCase): string {
   const partial = failureCase(value);
+  const preparation = preparationCase(value);
+  if (preparation) return textMessage(copy.preparationCase, { group: copy.preparationGroups[preparation.group], index: preparation.index, id: textPreview(value.id).text });
   return partial ? textMessage(copy.sampleCase, { sample: partial.sample, index: partial.index, id: textPreview(value.id).text }) : textPreview(value.id).text;
 }
 
@@ -36,6 +43,7 @@ function Bytes({ label, value }: { label: string; value: string }) {
 }
 function CaseDetail({ value, artifact, jobId, runId, partial }: { value: RetainedCase; artifact: Artifact; jobId: string; runId: string; partial: FailureRetainedCases | null }) {
   const position = failureCase(value);
+  const preparation = preparationCase(value);
   return <section aria-labelledby="retained-case-title" class="retained-case-detail">
     <h4 id="retained-case-title">{copy.caseDetails}</h4>
     <dl class="job-facts"><dt>{copy.caseIdentity}</dt><dd><Preview value={value.id} /></dd>
@@ -43,6 +51,7 @@ function CaseDetail({ value, artifact, jobId, runId, partial }: { value: Retaine
       <dt>{copy.job}</dt><dd><code>{jobId}</code></dd><dt>{copy.attempt}</dt><dd><code>{runId}</code></dd>
       <dt>{copy.artifactDigest}</dt><dd><code>{artifact.sha256}</code></dd>
       {position && <><dt>{copy.samplePosition}</dt><dd>{message(copy.position, { sample: position.sample, index: position.index })}</dd></>}
+      {preparation && <><dt>{copy.preparationPosition}</dt><dd>{caseName(value)}</dd></>}
     </dl>
     <h5>{copy.argumentVector}</h5>
     {value.args.length === 0 ? <p>{copy.noArguments}</p> : <>
@@ -56,9 +65,9 @@ function CaseDetail({ value, artifact, jobId, runId, partial }: { value: Retaine
       <Bytes label={copy.stdout} value={value.observation.stdoutHex} />
       <Bytes label={copy.stderr} value={value.observation.stderrHex} />
     </> : position?.outcome === 'failed' && partial ? <p role="status">{copy.failureReasons[partial.failure.code]} <code>{partial.failure.code}</code></p>
-      : <p role="status">{position ? copy.unobserved : copy.observationMissing}</p>}
+      : <p role="status">{preparation ? copy.preparationUnobserved : position ? copy.unobserved : copy.observationMissing}</p>}
     <a href={artifact.contentHref} download="exploration.json">{copy.retainedRecord}</a>
-    <p>{copy.reference}</p>
+    <p>{preparation ? copy.preparationReference : copy.reference}</p>
   </section>;
 }
 
@@ -75,7 +84,7 @@ export function ExplorationCases(props: CasesProps) {
 function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = null }: CasesProps) {
   const { client } = usePrivateTransport(basePath);
   const [intent, setIntent] = useState<{ client: typeof client } | null>(null);
-  const [data, setData] = useState<RetainedCases | FailureRetainedCases | null>(null);
+  const [data, setData] = useState<RetainedCases | FailureRetainedCases | PreparationCases | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [source, setSource] = useState('');
@@ -87,7 +96,7 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
     const controller = new AbortController();
     setLoading(true); setError(''); setData(null); setSelected(null); setPage(0); setSource('');
     void client.readArtifactText(artifact, { jobId, runId }, { signal: controller.signal }).then(text => {
-      if (!controller.signal.aborted) setData(producerSchemaVersion === 1 ? parseFailureCases(text) : parseRetainedCases(text));
+      if (!controller.signal.aborted) setData(producerSchemaVersion === 1 ? parsePartialCases(text) : parseRetainedCases(text));
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(withApiFailureReference(copy.unavailable, failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -97,6 +106,7 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
   const visible = filtered.slice(page * CASE_PAGE_SIZE, (page + 1) * CASE_PAGE_SIZE);
   const detail = filtered.find(value => caseKey(value) === selected);
   const partial = data && 'failure' in data ? data : null;
+  const preparation = data && 'preparation' in data ? data : null;
   return <section aria-labelledby="retained-cases-title" class="retained-cases">
     <h3 id="retained-cases-title">{copy.title}</h3>
     <p>{copy.scope}</p>
@@ -112,11 +122,20 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
           <tbody>{(['baseline', 'expanded'] as const).map(sample => <tr key={sample}><th scope="row">{sample}</th>
             <td>{partial.samples[sample].planned}</td><td>{partial.samples[sample].completed}</td></tr>)}</tbody></table>
       </>}
-      {partial?.detailsOmitted ? <>
-        <p role="status">{copy.detailsOmitted}</p>
-        <a href={artifact.contentHref} download="exploration.json">{copy.downloadPartial}</a>
+      {preparation && <>
+        <p role="status">{copy.preparationReasons[preparation.preparation.code]} <code>{preparation.preparation.code}</code></p>
+        <p>{message(copy.preparationStage, { stage: copy.preparationStages[preparation.preparation.stage] })}</p>
+        <p>{copy.preparationScope}</p>
+        <table><caption>{copy.preparationAvailability}</caption><thead><tr><th scope="col">{copy.preparationGroup}</th><th scope="col">{copy.availableCount}</th></tr></thead>
+          <tbody>{(['seeds', 'angr', 'staticHints', 'expanded'] as const).map(group => <tr key={group}>
+            <th scope="row">{copy.preparationGroups[group]}</th><td>{preparation.preparation.available[group] ?? copy.unknownCount}</td></tr>)}</tbody></table>
+      </>}
+      {partial?.detailsOmitted || preparation?.detailsOmitted ? <>
+        <p role="status">{preparation ? copy.preparationDetailsOmitted : copy.detailsOmitted}</p>
+        <a href={artifact.contentHref} download="exploration.json">{preparation ? copy.downloadPreparation : copy.downloadPartial}</a>
       </> : <>
-      <p>{message(copy.observationCount, { count: data.observationCount, total: data.cases.length })}</p>
+      <p>{preparation ? message(copy.preparationInputCount, { total: data.cases.length })
+        : message(copy.observationCount, { count: data.observationCount, total: data.cases.length })}</p>
       <label>{copy.filter} <select value={source ? String(data.sources.indexOf(source)) : ''} onChange={event => {
         const value = event.currentTarget.value;
         setSource(value === '' ? '' : data.sources[Number(value)] ?? ''); setPage(0); setSelected(null);
@@ -129,9 +148,10 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
         <div class="retained-case-table" role="region" aria-label={copy.table} tabIndex={0}>
           <table><caption>{copy.table}</caption><thead><tr><th scope="col">{copy.caseIdentity}</th><th scope="col">{copy.reportedSource}</th><th scope="col">{copy.observation}</th><th scope="col">{copy.inspect}</th></tr></thead>
             <tbody>{visible.map(value => <tr key={caseKey(value)}>
-              <th scope="row">{failureCase(value) ? caseName(value) : <Preview value={value.id} />}</th><td><Preview value={value.source} /></td>
+              <th scope="row">{failureCase(value) || preparationCase(value) ? caseName(value) : <Preview value={value.id} />}</th><td><Preview value={value.source} /></td>
               <td>{value.observation ? message(copy.exitCode, { value: value.observation.exitCode })
-                : failureCase(value)?.outcome === 'failed' && partial ? copy.failureReasons[partial.failure.code] : partial ? copy.unobserved : copy.notRecorded}</td>
+                : failureCase(value)?.outcome === 'failed' && partial ? copy.failureReasons[partial.failure.code]
+                  : preparation ? copy.preparationUnobserved : partial ? copy.unobserved : copy.notRecorded}</td>
               <td><button type="button" aria-pressed={selected === caseKey(value)} onClick={() => setSelected(caseKey(value))}>{message(copy.inspectCase, { id: caseName(value) })}</button></td>
             </tr>)}</tbody></table>
         </div>

@@ -429,8 +429,14 @@ class AutomaticExplorer(
 ) {
     fun explore(binaryPath: Path, seedInputs: List<CandidateInput>, reportsDir: Path): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
-        val generated = seedInputs + angrExplorer.generate(binaryPath) + staticHints.generate(binaryPath)
-        val expanded = (generated + mutations.expand(generated))
+        val expanded = proposeExplorationInputs(seedInputs,
+            angr = { angrExplorer.generate(binaryPath) },
+            staticHints = { staticHints.generate(binaryPath) },
+            mutate = mutations::expand,
+            retainFailure = { failure ->
+                reportsDir.createDirectories()
+                writeProjectEvidenceAtomically(reportsDir.resolve("exploration.json"), failure.toJson())
+            })
             .distinctBy(CandidateInput::contentKey)
             .take(maxCandidates)
         val reportPath = reportsDir.resolve("exploration.json")
