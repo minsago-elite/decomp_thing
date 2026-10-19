@@ -301,7 +301,11 @@ Build the application JAR and staged runtime first using the relevant normal bui
 The evidence directory must be new. A successful run records the rendered HTML digest, browser
 version, scenarios and request count, plus a screenshot and Playwright trace. This checks actual
 DOM updates, row limits, separate loss/window warnings, HTTP/network failures, subsequent recovery,
-and peer-text escaping. It does not qualify a real-agent job, server restart, or browser matrix.
+and literal text rendering of displayed fields while peer-authored narrative stays withheld. The fixture
+keeps the production legacy session request layer and mocks only the existing event/status responses;
+other requests remain aborted. It does not qualify authentication, CSRF, a real-agent job, server restart,
+or a browser matrix. Supplying all renderer arguments in the Java fixture does not itself qualify this
+optional browser scenario; the corrected fixture and verifier still require their own authorized run.
 
 New snapshots persist `omittedSequenceRanges` as ordered, nonoverlapping half-open ranges with
 `startInclusive` and `endExclusive` decimal strings. They identify the exact complement of retained
