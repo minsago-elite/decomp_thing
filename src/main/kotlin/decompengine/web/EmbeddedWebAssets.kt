@@ -342,7 +342,12 @@ class EmbeddedWebAssets private constructor(
             }
             require(css.toList() == manifest.entryStyles) { "Vite and UI manifest entry styles disagree" }
             // Historical schema-v1 packages without this entry retain their original startup behavior.
-            val bootstrap = entries["src/app/display-preferences-bootstrap.js"] ?: return null
+            val bootstrapEntries = entries.values.filter { candidate ->
+                (candidate["name"] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content ==
+                    "display-preferences-bootstrap"
+            }
+            require(bootstrapEntries.size <= 1) { "Vite manifest has ambiguous display preference bootstrap entries" }
+            val bootstrap = bootstrapEntries.singleOrNull() ?: return null
             require((bootstrap["isEntry"] as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull == true) {
                 "display preference bootstrap is not an entry"
             }

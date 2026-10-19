@@ -6,6 +6,7 @@ import type { Plugin, UserConfig } from 'vite';
 
 const outputRoot = fileURLToPath(new URL('../build/frontend/', import.meta.url));
 const displayBootstrapSource = fileURLToPath(new URL('./src/app/display-preferences-bootstrap.js', import.meta.url));
+const displayBootstrapName = 'display-preferences-bootstrap';
 
 /** Keep the display-only prelude a classic script, before CSS and the deferred module in both hosts. */
 function displayPreferenceBootstrap(): Plugin {
@@ -21,7 +22,7 @@ function displayPreferenceBootstrap(): Plugin {
           const matches = Object.values(context.bundle).filter(entry =>
             entry.type === 'chunk' && entry.facadeModuleId === displayBootstrapSource);
           const chunk = matches[0];
-          if (matches.length !== 1 || !chunk || chunk.type !== 'chunk' || !chunk.isEntry
+          if (matches.length !== 1 || !chunk || chunk.type !== 'chunk' || !chunk.isEntry || chunk.name !== displayBootstrapName
             || chunk.imports.length || chunk.dynamicImports.length || chunk.exports.length) {
             throw new Error('Display preference bootstrap must be one standalone entry without imports or exports.');
           }
@@ -90,7 +91,7 @@ export default defineConfig(async ({ command, mode, isPreview }): Promise<UserCo
       rolldownOptions: {
         input: {
           index: fileURLToPath(new URL('./index.html', import.meta.url)),
-          'display-preferences-bootstrap': displayBootstrapSource,
+          [displayBootstrapName]: displayBootstrapSource,
         },
       },
     },

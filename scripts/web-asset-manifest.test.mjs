@@ -27,7 +27,7 @@ function fixture(t, report = false) {
       imports: ['shared'], css: ['assets/index-bbb12345.css'], dynamicImports: ['lazy'] },
     shared: { file: 'assets/lazy-def67890.js', css: ['assets/base-aaa12345.css'] },
     lazy: { file: 'assets/lazy-def67890.js' },
-    'src/app/display-preferences-bootstrap.js': { file: 'assets/display-preferences-bootstrap-abc12345.js', isEntry: true },
+    'different-build/prelude.js': { file: 'assets/display-preferences-bootstrap-abc12345.js', name: 'display-preferences-bootstrap', isEntry: true },
   }));
   if (report) {
     mkdirSync(join(root, 'dist'));
