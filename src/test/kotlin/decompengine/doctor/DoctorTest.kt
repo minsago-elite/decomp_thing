@@ -188,6 +188,10 @@ class DoctorTest {
         assertTrue(report.checks.any { it.name == "C sanitizers" && !it.passed && it.detail.contains("libasan") })
         assertFalse(report.checks.any { it.name == "ACP harness" || it.name == "ACP preflight" })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
+        assertEquals(listOf(DoctorToolKind.JAVA, DoctorToolKind.C_COMPILER, DoctorToolKind.MAKE,
+            DoctorToolKind.READELF, DoctorToolKind.STRINGS, DoctorToolKind.PYTHON, DoctorToolKind.ANGR,
+            DoctorToolKind.GHIDRA, DoctorToolKind.SANITIZERS, DoctorToolKind.BUBBLEWRAP, DoctorToolKind.OUTPUT,
+            DoctorToolKind.PROFILE, DoctorToolKind.LIMITS), report.checks.map { it.toolsOnlyKind })
     }
 
     @Test
