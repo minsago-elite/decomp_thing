@@ -163,6 +163,7 @@ The Vite behavior used here is documented in its official
 - `src/app/` contains navigation, local brand SVG and route URL helpers.
 - `src/routes/` contains home, missing-page and lazily loaded runtime views.
 - `src/shared/` contains the native Preact render-error boundary and async wrapper.
+- `src/copy/` contains interface copy scoped to the shell and existing deferred views.
 - `src/api/` contains generated v1 contracts, strict decoding and bounded native fetch.
 - `src/session/` removes bootstrap fragments and owns page-local session state.
 - `src/styles/` contains local CSS; typography uses system fonts.
@@ -192,6 +193,32 @@ The architecture and trust contracts are in
 [web architecture](../docs/web-architecture.md) and
 [web trust](../docs/web-trust.md). Kotlin retains job, workflow, filesystem, archive
 and Git authority. The frontend does not implement these services.
+
+## Interface copy and exact values
+
+Put labels, accessible names, validation feedback and explanatory sentences in
+`src/copy/`. The shell, workspace, attempt, history, job and runtime catalogs keep
+their existing loading boundaries; common formatting and correlation labels have
+a small shared catalog. Keep protocol enums, selectors, routes, storage keys and
+reported technical values separate from translated copy.
+
+Use `message(template, namedValues)` from `src/shared/messages.ts` for sentences
+containing values or existing markup. Named slots let a translation reorder a
+`time`, `code` or interactive element without changing the component. Values are
+ordinary Preact children, and templates do not interpret HTML. `textMessage` is
+the corresponding string-only formatter for document titles and diagnostic text.
+Type checking requires every named slot; changing a locale must preserve those
+slot names. No language selector or locale persistence is introduced by these
+catalogs.
+
+Use `formatExactTimestamp` for reported timestamps and retain the original string
+in both `dateTime` and `title`. It preserves fractional digits and the source
+offset, displaying `Z` as `UTC` without converting through `Date`. Use
+`formatExactBytes` for byte labels and preserve decimal counters and addresses as
+their original strings; `Number` can round valid unsigned 64-bit values. Relative
+receipt age is separately coalesced display text and does not replace the exact
+timestamp or establish source freshness. Filter options use catalog status
+labels with explicit, unchanged protocol values.
 
 ## Verification and bundle evidence
 
