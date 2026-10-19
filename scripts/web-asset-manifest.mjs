@@ -81,8 +81,9 @@ const entry = vite['index.html'];
 if (!entry || entry.isEntry !== true || !entry.file?.endsWith('.js')) {
   throw new Error('Vite manifest has no index.html JavaScript entry');
 }
-const displayBootstrap = vite['src/app/display-preferences-bootstrap.js'];
-if (!displayBootstrap || displayBootstrap.isEntry !== true || !displayBootstrap.file?.endsWith('.js') ||
+const bootstrapEntries = Object.values(vite).filter(chunk => chunk.name === 'display-preferences-bootstrap');
+const displayBootstrap = bootstrapEntries[0];
+if (bootstrapEntries.length !== 1 || !displayBootstrap || displayBootstrap.isEntry !== true || !displayBootstrap.file?.endsWith('.js') ||
     displayBootstrap.file === entry.file ||
     ['imports', 'dynamicImports', 'css', 'assets'].some(key => displayBootstrap[key] !== undefined &&
       (!Array.isArray(displayBootstrap[key]) || displayBootstrap[key].length !== 0))) {

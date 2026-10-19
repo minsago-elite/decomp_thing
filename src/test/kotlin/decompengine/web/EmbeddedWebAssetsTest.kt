@@ -166,6 +166,9 @@ class EmbeddedWebAssetsTest {
     @Test
     fun `startup rejects absent corrupted and inconsistent inventory resources`() {
         val original = fixture()
+        val vite = Json.parseToJsonElement(original.getValue(".vite/manifest.json").decodeToString()).jsonObject
+        val ambiguousBootstrap = JsonObject(vite + ("duplicate-bootstrap" to vite.getValue("different-build/prelude.js")))
+            .toString().toByteArray()
         val variants = listOf(
             original - "asset-manifest.json",
             original - "index.html",
@@ -179,6 +182,7 @@ class EmbeddedWebAssetsTest {
             changeManifest(original) { root -> root + ("entryScript" to JsonPrimitive("assets/missing.js")) },
             changeManifest(original) { root -> root + ("files" to JsonArray((root.getValue("files") as JsonArray).let { it + it.first() })) },
             changeManifest(original) { root -> root + ("secret" to JsonPrimitive("synthetic unexpected field")) },
+            fixture(viteOverride = ambiguousBootstrap),
         )
         variants.forEach { invalid ->
             val failure = assertFailsWith<EmbeddedWebAssetsException> { fromMap(invalid) }
@@ -299,8 +303,9 @@ class EmbeddedWebAssetsTest {
                 put("assets", JsonArray(listOf(JsonPrimitive("assets/mark-12345678.svg"))))
             })
             put("src/dynamic.ts", buildJsonObject { put("file", "assets/dynamic-12345678.js") })
-            put("src/app/display-preferences-bootstrap.js", buildJsonObject {
+            put("different-build/prelude.js", buildJsonObject {
                 put("file", "assets/display-preferences-bootstrap-12345678.js")
+                put("name", "display-preferences-bootstrap")
                 put("isEntry", true)
             })
         }.toString().toByteArray()
