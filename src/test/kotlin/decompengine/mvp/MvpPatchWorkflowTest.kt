@@ -754,8 +754,8 @@ class MvpPatchWorkflowTest {
         val beforeResponse = Files.readAllBytes(responsePath)
         val absentRequest = root.resolve("refused-request.md")
         val absentResponse = root.resolve("refused-response.md")
-        for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
-            "x".repeat(20_000) + "a\uDC00b")) {
+        for (payload in listOf("a\uD800b", "a\uDC00b", "a\uD800b" + "x".repeat(1_024),
+            "a\uDC00b" + "x".repeat(1_024))) {
             assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
             for (candidate in listOf(publicRequest.copy(prompt = payload), publicRequest.copy(failureKind = payload),
                 publicRequest.copy(projectFiles = publicRequest.projectFiles + ("$payload.c" to "public extra")),
@@ -878,7 +878,7 @@ class MvpPatchWorkflowTest {
         for (payload in listOf("a\uD800b", "a\uDC00b", "x".repeat(20_000) + "a\uD800b",
             "x".repeat(20_000) + "a\uDC00b")) {
             assertTrue(String(payload.toByteArray(Charsets.UTF_8), Charsets.UTF_8).contains(encodingSecret))
-            encodingEvidence.patchDiff = if (payload.length < 20_000) null else full
+            encodingEvidence.patchDiff = if (payload.length < 1_024) null else full
             encodingEvidence.patchExplanation = "public explanation $payload"
             writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
             val encodedText = encodedSummary.readText()
@@ -892,6 +892,18 @@ class MvpPatchWorkflowTest {
             assertEquals(full, evidence.patchDiffPath!!.readText())
         }
         encodingEvidence.patchDiff = full
+        for (prefixLength in listOf(1_024, 20_000)) for (omittedTail in listOf("a\uD800b", "a\uDC00b")) {
+            encodingEvidence.patchExplanation = "public explanation " + "x".repeat(prefixLength) + omittedTail
+            writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
+            val boundedSummary = encodedSummary.readText()
+            assertFalse(boundedSummary.contains(encodingSecret))
+            assertFalse(boundedSummary.contains("Report detail:"))
+            if (prefixLength < 16_384) assertTrue(boundedSummary.contains("public explanation " + "x".repeat(128)))
+            else assertTrue(boundedSummary.contains("[oversized text omitted]"))
+            assertTrue(boundedSummary.contains(full.trimEnd()))
+            assertEquals("public code", source.readText())
+            assertEquals(full, evidence.patchDiffPath!!.readText())
+        }
         encodingEvidence.patchExplanation = "public explanation a€b 😀 λ"
         writeMvpSummary(encodedSummary, root, source, source, source, source, source, "PASS", null, encodingEvidence)
         assertTrue(encodedSummary.readText().contains(encodingEvidence.patchExplanation))
