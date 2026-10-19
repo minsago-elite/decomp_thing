@@ -320,6 +320,9 @@ The scan preserves active work, pending publication, durable pins and live write
 
 ## Repository-local frontend setup and rebuilds
 
+For feature extension, use the [route/DTO/event/component workflow](web-architecture.md#route-and-contract-extension-workflow)
+and the [Git adapter and identity contract](web-git-fixtures.md#git-adapter-extension-contract).
+
 This path starts at a clean checkout on a Linux x86-64 build host with the normal
 JVM build prerequisites available: JDK 21, Python 3.12+ and the repository's C/native
 build tools. Ghidra is a bundled Java-API dependency supplied by the normal build.
