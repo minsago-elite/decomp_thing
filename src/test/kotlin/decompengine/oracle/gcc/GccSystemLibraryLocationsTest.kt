@@ -50,6 +50,8 @@ class GccSystemLibraryLocationsTest {
             val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
                 withGccSystemLibrarySources(architecture,
                     resolveDirectory = { if (it == Path.of("/lib/aarch64-linux-gnu")) null else it },
+                    symbolicLinkTarget = { null },
+                    isDirectory = { true },
                     isRegularFile = { interpreterChecks++; true },
                 ) { captures++; error("Unsupported loader mapping must not capture manifests") }
             }
@@ -66,6 +68,8 @@ class GccSystemLibraryLocationsTest {
                 val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
                     withGccSystemLibrarySources("amd64",
                         resolveDirectory = { if (it == Path.of(alias)) Path.of(resolved) else it },
+                        symbolicLinkTarget = { null },
+                        isDirectory = { true },
                         isRegularFile = { interpreterChecks++; true },
                     ) { captures++; error("Broad canonical roots must not capture manifests") }
                 }
@@ -81,6 +85,8 @@ class GccSystemLibraryLocationsTest {
             var captures = 0
             val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
                 withGccSystemLibrarySources(architecture, resolveDirectory = { it },
+                    symbolicLinkTarget = { null },
+                    isDirectory = { true },
                     isRegularFile = { interpreterChecks++; false },
                 ) { captures++; error("Missing interpreters must not capture manifests") }
             }
@@ -98,6 +104,8 @@ class GccSystemLibraryLocationsTest {
                 else Path.of("/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1")
             val result = withGccSystemLibrarySources(architecture,
                 resolveDirectory = { events += "resolve"; it },
+                symbolicLinkTarget = { null },
+                isDirectory = { true },
                 isRegularFile = { assertEquals(interpreter, it); events += "interpreter"; true },
             ) { sources -> assertEquals(selected, sources); events += "capture"; expected }
             assertSame(expected, result)
@@ -112,6 +120,8 @@ class GccSystemLibraryLocationsTest {
             val failure = assertFailsWith<IOException> {
                 withGccSystemLibrarySources("amd64",
                     resolveDirectory = { events += "resolve"; if (stage == "resolve") throw original; it },
+                    symbolicLinkTarget = { null },
+                    isDirectory = { true },
                     isRegularFile = { events += "interpreter"; if (stage == "interpreter") throw original; true },
                 ) { events += "capture"; throw original }
             }
@@ -120,5 +130,146 @@ class GccSystemLibraryLocationsTest {
                 else listOf("resolve", "resolve", "resolve", "resolve", "interpreter") + if (stage == "capture") listOf("capture") else emptyList()
             assertEquals(expected, events)
         }
+    }
+
+    @Test fun `canonical host interpreter cannot substitute for a missing mounted target`() {
+        var regularChecks = 0
+        var captures = 0
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it, includeLibAbi = false) },
+                symbolicLinkTarget = { if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2"))
+                    Path.of("../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2") else null },
+                isDirectory = { true },
+                isRegularFile = { regularChecks++; true },
+            ) { captures++; error("A host-only interpreter must not capture manifests") }
+        }
+        assertEquals("GCC system-library interpreter layout is unsupported", failure.message)
+        assertEquals(0, regularChecks); assertEquals(0, captures)
+    }
+
+    @Test fun `relative and absolute interpreter links use their actual selected destination mounts`() {
+        for ((includeLibAbi, target) in listOf(
+            true to "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            false to "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        )) {
+            var captures = 0
+            var regularChecks = 0
+            val expected = Any()
+            val result = withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it, includeLibAbi) },
+                symbolicLinkTarget = { if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2")) Path.of(target) else null },
+                isDirectory = { true },
+                isRegularFile = { regularChecks++; assertEquals(Path.of("/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"), it); true },
+            ) { sources -> captures++; assertEquals(if (includeLibAbi) 4 else 3, sources.size); expected }
+            assertSame(expected, result); assertEquals(1, captures); assertEquals(1, regularChecks)
+        }
+    }
+
+    @Test fun `absolute interpreter links outside selected mounts refuse before capture`() {
+        var regularChecks = 0
+        var captures = 0
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it) },
+                symbolicLinkTarget = { if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2")) Path.of("/unmounted/loader") else null },
+                isDirectory = { true },
+                isRegularFile = { regularChecks++; true },
+            ) { captures++; error("Unselected interpreter targets must not capture manifests") }
+        }
+        assertEquals("GCC system-library interpreter layout is unsupported", failure.message)
+        assertEquals(0, regularChecks); assertEquals(0, captures)
+    }
+
+    @Test fun `interpreter link cycles consume a fixed walk bound without capture or retry`() {
+        var lookups = 0
+        var captures = 0
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it) },
+                symbolicLinkTarget = {
+                    check(++lookups <= 128) { "Interpreter traversal must remain bounded" }
+                    if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2")) Path.of("ld-linux-x86-64.so.2") else null
+                },
+                isDirectory = { true },
+                isRegularFile = { error("A cyclic interpreter has no resolved regular file") },
+            ) { captures++; error("Cyclic interpreter targets must not capture manifests") }
+        }
+        assertEquals("GCC system-library interpreter layout is unsupported", failure.message)
+        assertTrue(lookups <= 128); assertEquals(0, captures)
+    }
+
+    @Test fun `parent components are applied after preceding mounted directory links`() {
+        val result = withGccSystemLibrarySources("amd64",
+            resolveDirectory = { mergedX86Source(it) },
+            symbolicLinkTarget = {
+                when (it) {
+                    Path.of("/usr/lib64/ld-linux-x86-64.so.2") -> Path.of("../lib/x86_64-linux-gnu/alias/../loader")
+                    Path.of("/usr/lib/x86_64-linux-gnu/alias") -> Path.of("deeper/directory")
+                    else -> null
+                }
+            },
+            isDirectory = { true },
+            isRegularFile = { assertEquals(Path.of("/usr/lib/x86_64-linux-gnu/deeper/loader"), it); true },
+        ) { "captured" }
+        assertEquals("captured", result)
+    }
+
+    @Test fun `oversized interpreter link expansion refuses before walking its target or capturing manifests`() {
+        var lookups = 0
+        var captures = 0
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it) },
+                symbolicLinkTarget = {
+                    lookups++
+                    if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2")) Path.of("part/".repeat(300) + "loader") else null
+                },
+                isDirectory = { true },
+                isRegularFile = { error("Oversized interpreter expansion must not read target metadata") },
+            ) { captures++; error("Oversized interpreter expansion must not capture manifests") }
+        }
+        assertEquals("GCC system-library interpreter layout is unsupported", failure.message)
+        assertEquals(2, lookups); assertEquals(0, captures)
+    }
+
+    @Test fun `non-directory interpreter components cannot be normalized past before capture`() {
+        var regularChecks = 0
+        var captures = 0
+        val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+            withGccSystemLibrarySources("amd64",
+                resolveDirectory = { mergedX86Source(it) },
+                symbolicLinkTarget = { if (it == Path.of("/usr/lib64/ld-linux-x86-64.so.2"))
+                    Path.of("../lib/x86_64-linux-gnu/not-a-directory/../loader") else null },
+                isDirectory = { it != Path.of("/usr/lib/x86_64-linux-gnu/not-a-directory") },
+                isRegularFile = { regularChecks++; true },
+            ) { captures++; error("Non-directory interpreter components must not capture manifests") }
+        }
+        assertEquals("GCC system-library interpreter layout is unsupported", failure.message)
+        assertEquals(0, regularChecks); assertEquals(0, captures)
+    }
+
+    @Test fun `interpreter path metadata failures propagate unchanged without capture or retry`() {
+        for (stage in listOf("symbolic-link", "directory")) {
+            val original = IOException("synthetic interpreter metadata failure")
+            var lookups = 0
+            var directoryChecks = 0
+            var captures = 0
+            val failure = assertFailsWith<IOException> {
+                withGccSystemLibrarySources("amd64", resolveDirectory = { mergedX86Source(it) },
+                    symbolicLinkTarget = { lookups++; if (stage == "symbolic-link") throw original; null },
+                    isDirectory = { directoryChecks++; throw original },
+                    isRegularFile = { error("Failed path metadata must not check regular-file state") },
+                ) { captures++; error("Failed path metadata must not capture manifests") }
+            }
+            assertSame(original, failure); assertEquals(1, lookups); assertEquals(0, captures)
+            assertEquals(if (stage == "directory") 1 else 0, directoryChecks)
+        }
+    }
+
+    private fun mergedX86Source(candidate: Path, includeLibAbi: Boolean = true): Path? = when (candidate) {
+        Path.of("/lib/x86_64-linux-gnu") -> if (includeLibAbi) Path.of("/usr/lib/x86_64-linux-gnu") else null
+        Path.of("/lib64") -> Path.of("/usr/lib64")
+        else -> candidate
     }
 }
