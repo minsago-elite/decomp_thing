@@ -60,11 +60,22 @@ fun main(args: Array<String>) {
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
-            System.err.println("unknown command: ${args.first()}")
+            val exitCode = renderUnknownCommand(args.first(), System.getenv().values)
             printHelp()
-            kotlin.system.exitProcess(2)
+            kotlin.system.exitProcess(exitCode)
         }
     }
+}
+
+/** Reject an unknown selector without exposing its raw argument before workflow dispatch. */
+internal fun renderUnknownCommand(
+    command: String,
+    sensitiveValues: Collection<String>,
+    output: PrintStream = System.err,
+): Int {
+    val redactor = cliDiagnosticRedactor(sensitiveValues) ?: return 2
+    printWorkflowCliLine("unknown command", command, redactor, output)
+    return 2
 }
 
 private fun runRecordedRepairHistory(args: List<String>) {
