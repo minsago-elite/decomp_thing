@@ -1,20 +1,31 @@
 package decompengine.web
 
+import decompengine.exploration.EXPLORATION_FAILURE_SCHEMA
+import decompengine.exploration.explorationFailureLimitation
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
 
-/** Version-one presentation of the existing unversioned exploration producer; never acceptance evidence. */
+/** Version-one presentation of legacy success and versioned failure records; never acceptance evidence. */
 internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray?, basePath: String = "/"): JsonObject {
     var state = "unknown"
     var summary: JsonObject? = null
+    var producerSchemaVersion: Int? = null
     var limitation = "Report bytes are missing, inaccessible or changed during the bounded read."
     if (bytes != null) {
         try {
             require(bytes.size <= 1_048_576)
             val root = OracleJson.parse(bytes).jsonObject
-            if ("schemaVersion" in root || "schema_version" in root) {
-                state = "unsupported"; limitation = "This adapter supports only the existing unversioned exploration producer."
+            if (root["schema"]?.jsonPrimitive?.contentOrNull == EXPLORATION_FAILURE_SCHEMA) {
+                if (root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1) {
+                    limitation = explorationFailureLimitation(root)
+                    state = "partial"
+                    producerSchemaVersion = 1
+                } else {
+                    state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
+                }
+            } else if ("schemaVersion" in root || "schema_version" in root) {
+                state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
             } else if (!root.keys.containsAll(setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures", "newOutputSignatures", "angr", "confidence", "candidates", "observations"))) {
                 state = "partial"; limitation = "Required producer fields are absent; no summary is inferred."
             } else {
@@ -50,7 +61,8 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
     return buildJsonObject {
         put("reportId", "exploration_${digest ?: "unavailable"}")
         put("binding", buildJsonObject { put("jobId", jobId); put("runId", runId); put("revisionId", JsonNull) })
-        put("reportType", "exploration"); put("adapterVersion", 1); put("producerSchemaVersion", JsonNull)
+        put("reportType", "exploration"); put("adapterVersion", 1)
+        put("producerSchemaVersion", producerSchemaVersion?.let { JsonPrimitive(it) } ?: JsonNull)
         put("state", state); put("authority", "observations"); put("sourceArtifact", bytes?.let { WebExplorationArtifact.descriptor(jobId, runId, it, basePath) } ?: JsonNull)
         put("acceptance", "not-evaluated"); put("acceptanceArtifactId", JsonNull)
         put("limitations", JsonArray(listOf(JsonPrimitive(limitation))))

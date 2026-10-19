@@ -9,7 +9,8 @@ reading and refuses a changed attempt. It applies session authorization, GET-onl
 policy, strict no-query/JSON Accept checks and private no-store headers. It never
 falls back to legacy shared reports or another attempt's latest output.
 
-Adapter version 1 recognizes the existing unversioned exploration producer. Strict
+Adapter version 1 recognizes the existing unversioned exploration producer and
+the versioned observation-failure record described below. Strict
 JSON parsing rejects duplicate fields, excessive structure and invalid values.
 Required top-level fields, unsigned counts, candidate-list count, confidence score
 range and boolean isolation fields are checked. This is a summary projection, not
@@ -19,8 +20,9 @@ It does not execute inputs or attest independent containment.
 The typed report distinguishes:
 
 - `available`: the known summary can be projected, with `observations` authority.
-- `partial`: required producer fields are absent; summary remains null.
-- `unsupported`: an explicit producer schema version is present.
+- `partial`: required producer fields are absent or a known observation-failure
+  record reports incomplete work; summary remains null.
+- `unsupported`: the declared producer schema or version is not recognized.
 - `invalid`: malformed bytes, invalid summary values or parser limits prevent projection.
 - `unknown`: the storage reader could not return stable bounded bytes. That reader
   deliberately combines missing/inaccessible/path-change failures; the adapter
@@ -53,3 +55,43 @@ available observation summary, equivalence limitation and unchanged report bytes
 plus the existing populated-history, session and recovery checks.
 [Retained report](evidence/web-exploration-evidence-20260905.json). Pinned Chrome
 used test-only --no-sandbox; no fixture execution or acceptance attestation occurred.
+
+## Observation failures
+
+When candidate observation throws an exception, automatic exploration can retain
+`schema: "decomp-exploration-failure"`, `schemaVersion: 1` at its existing
+`exploration.json` path. The original exception is rethrown immediately: no later
+candidate is executed and no confidence score or coverage population is computed.
+If retaining the record also throws, that exception is suppressed on the original
+failure instead of replacing it or triggering a retry. Successful exploration
+keeps the existing unversioned representation.
+
+The record identifies the baseline or expanded sample and the zero-based failed
+input position. Planned and completed sample counts remain separate. Fixed reason
+codes distinguish a typed deadline, unavailable sandbox, output limit, unverified
+completion, interruption, I/O failure and an unclassified exception. Exit codes
+and arbitrary exception messages are never used to infer these categories.
+The record does not claim whether an ambiguous I/O error occurred before launch,
+inside the program or during cleanup.
+
+When they fit, separate baseline/expanded arrays retain the proposed inputs and
+completed observations. Array position joins each observation to its input; a
+repeated candidate ID does not merge different sample positions. Detail is bounded
+to 1000 inputs per sample, 256 arguments per input, a conservative 1,000,000-byte
+JSON estimate and 90,000 detail nodes. These are retention limits, not new proposal
+or execution limits. Oversized detail is wholly omitted before JSON allocation;
+`details: null` and `detailsOmitted: "detail-budget"` preserve the reason, failed
+position and exact counts without inventing missing input/output bytes. Raw
+exception messages and stack traces are not included.
+
+The existing read-only endpoint validates this known format and projects `partial`
+with producer schema version 1, null numeric summary and the original digest-bound
+artifact/attempt links. Coverage and confidence are always null in this record.
+Malformed counts, positions, signatures or reason pairs are invalid; future
+versions are unsupported. The record remains producer-reported observation data,
+without independent containment, source-revision or acceptance authority.
+
+Generation failures before observation, a structured case view for this new
+format, independently established regression origins and broader integration
+qualification remain outstanding. The historical verification above covers its
+recorded source only; new pure metadata controls require current Actions evidence.
