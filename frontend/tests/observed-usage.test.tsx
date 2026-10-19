@@ -16,6 +16,7 @@ it('preserves exact large reported counters with units, source and unknown measu
   expect(screen.getByText(/Source: agent execution receipt retained by writer writer_usage/)).toBeTruthy();
   expect(screen.getByText(/Provider measurement time: Not reported/)).toBeTruthy();
   expect(screen.getByText(/not cumulative attempt totals/)).toBeTruthy();
+  expect(screen.getByText('2026-09-05 00:00:00 UTC')).toHaveProperty('dateTime', '2026-09-05T00:00:00Z');
 });
 it('keeps absent usage unknown and does not expose an unsupported monetary estimate', () => {
   show({ reportedCostAmount: '123.45', reportedCostCurrency: 'USD' });

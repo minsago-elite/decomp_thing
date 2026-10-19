@@ -300,48 +300,74 @@ class AcpTerminalBrokerTest {
     @Test
     fun `timeout output limit cancellation and close terminate process trees`() {
         runBlocking {
-        val cases = listOf(
-            terminalFixture(
-                mode = "escape",
-                // Launch attestation and the live probe share this wall budget.
-                durationMillis = 2_000,
-            ) to AcpTerminalAuditReason.TIMEOUT,
-            terminalFixture(
-                mode = "terminal-flood",
-                maximumProducedBytes = 1024,
-            ) to AcpTerminalAuditReason.OUTPUT_LIMIT,
-            terminalFixture(
-                mode = "terminal-burst-exit",
-                maximumProducedBytes = 1024,
-            ) to AcpTerminalAuditReason.OUTPUT_LIMIT,
-        )
-        cases.forEach { (fixture, expectedTerminationReason) ->
-            val audit = AcpTerminalAuditRecorder()
-            val broker = broker(fixture, audit)
-            broker.bindSession(SESSION)
-            val terminalId = broker.create(
-                SESSION,
-                fixture.command,
-                fixture.args,
-                fixture.root.path.toString(),
-                emptyList(),
-                null,
-            ).terminalId
-            broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
-            val completion = broker.waitForExit(SESSION, terminalId)
-            broker.release(SESSION, terminalId)
-            broker.close()
-            fixture.boundary.close()
-            val records = audit.snapshot()
-            val authorized = records.single { it.reason == AcpTerminalAuditReason.LAUNCH_AUTHORIZED }
-            val created = records.single { it.reason == AcpTerminalAuditReason.CREATED }
-            assertTrue(authorized.sequence < created.sequence)
-            assertTrue(records.any { it.reason == expectedTerminationReason })
-            if (fixture.args.single() == "terminal-burst-exit") {
-                assertEquals(null, completion.exitCode, "fast overflow must not be reported as a clean root exit")
-                val limited = records.single { it.reason == AcpTerminalAuditReason.OUTPUT_LIMIT }
-                assertTrue(created.sequence < limited.sequence, "CREATED must causally precede output-limit evidence")
+        // Fixture setup is eager: every successfully created boundary needs one close attempt,
+        // including when a later setup or broker admission fails before its case reaches close.
+        val unclosedBoundaries = linkedSetOf<LinuxBubblewrapBoundary>()
+        fun retain(fixture: TerminalFixture): TerminalFixture = fixture.also { unclosedBoundaries.add(it.boundary) }
+        var primaryFailure: Throwable? = null
+        try {
+            val cases = listOf(
+                retain(terminalFixture(
+                    mode = "escape",
+                    // Launch attestation and the live probe share this wall budget.
+                    durationMillis = 2_000,
+                )) to AcpTerminalAuditReason.TIMEOUT,
+                retain(terminalFixture(
+                    mode = "terminal-flood",
+                    maximumProducedBytes = 1024,
+                )) to AcpTerminalAuditReason.OUTPUT_LIMIT,
+                retain(terminalFixture(
+                    mode = "terminal-burst-exit",
+                    maximumProducedBytes = 1024,
+                )) to AcpTerminalAuditReason.OUTPUT_LIMIT,
+            )
+            cases.forEach { (fixture, expectedTerminationReason) ->
+                val audit = AcpTerminalAuditRecorder()
+                val completion = broker(fixture, audit).use { broker ->
+                    broker.bindSession(SESSION)
+                    val terminalId = broker.create(
+                        SESSION,
+                        fixture.command,
+                        fixture.args,
+                        fixture.root.path.toString(),
+                        emptyList(),
+                        null,
+                    ).terminalId
+                    broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
+                    val exited = broker.waitForExit(SESSION, terminalId)
+                    broker.release(SESSION, terminalId)
+                    exited
+                }
+                // Remove before close so this fixture owner never repeats an already-attempted close.
+                unclosedBoundaries.remove(fixture.boundary)
+                fixture.boundary.close()
+                val records = audit.snapshot()
+                val authorized = records.single { it.reason == AcpTerminalAuditReason.LAUNCH_AUTHORIZED }
+                val created = records.single { it.reason == AcpTerminalAuditReason.CREATED }
+                assertTrue(authorized.sequence < created.sequence)
+                assertTrue(records.any { it.reason == expectedTerminationReason })
+                if (fixture.args.single() == "terminal-burst-exit") {
+                    assertEquals(null, completion.exitCode, "fast overflow must not be reported as a clean root exit")
+                    val limited = records.single { it.reason == AcpTerminalAuditReason.OUTPUT_LIMIT }
+                    assertTrue(created.sequence < limited.sequence, "CREATED must causally precede output-limit evidence")
+                }
             }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            var recordedFailure = primaryFailure
+            unclosedBoundaries.forEach { boundary ->
+                try {
+                    boundary.close()
+                } catch (cleanupFailure: Throwable) {
+                    val recorded = recordedFailure
+                    if (recorded == null) recordedFailure = cleanupFailure
+                    else if (recorded !== cleanupFailure) recorded.addSuppressed(cleanupFailure)
+                }
+            }
+            // Preserve the original refusal, including its bounded witness; retain cleanup failures too.
+            if (primaryFailure == null) recordedFailure?.let { throw it }
         }
 
         val cancellation = AgentCancellationSource()

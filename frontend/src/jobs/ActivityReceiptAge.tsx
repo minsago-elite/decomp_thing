@@ -1,3 +1,6 @@
+import { activityReceiptAgeCopy as copy, receiptAge } from '../copy/attempt';
+import { message as displayMessage } from '../shared/messages';
+import { formatExactTimestamp } from './metadataFormat';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 export interface ActivityReceiptTime { at: string; monotonicMs: number; wallClockMs: number }
@@ -36,10 +39,6 @@ export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityRece
     return () => clearInterval(timer);
   }, [receipt.monotonicMs, receipt.wallClockMs, visible]);
   const seconds = Math.max(0, Math.floor((performance.now() - receipt.monotonicMs + clock.current.offsetMs) / 1000));
-  const age = seconds < 10 ? 'less than 10 seconds ago'
-    : seconds < 60 ? `about ${Math.floor(seconds / 10) * 10} seconds ago`
-    : seconds < 3600 ? `about ${Math.floor(seconds / 60)} minute${seconds < 120 ? '' : 's'} ago`
-    : seconds < 86400 ? `about ${Math.floor(seconds / 3600)} hour${seconds < 7200 ? '' : 's'} ago`
-    : `about ${Math.floor(seconds / 86400)} day${seconds < 172800 ? '' : 's'} ago`;
-  return <>Last activity received: <time dateTime={receipt.at}>{receipt.at}</time> ({age} in this tab). This is receipt age, not the age of the source observations.</>;
+  const age = receiptAge(seconds);
+  return <>{displayMessage(copy.received, { time: <time dateTime={receipt.at} title={receipt.at}>{formatExactTimestamp(receipt.at)}</time>, age })}</>;
 }

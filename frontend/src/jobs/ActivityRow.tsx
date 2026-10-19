@@ -1,3 +1,6 @@
+import { activityRowCopy as copy } from '../copy/attempt';
+import { message as displayMessage } from '../shared/messages';
+import { formatExactTimestamp } from './metadataFormat';
 import type { WebEvent } from '../api/generated';
 import { ObservedUsage } from './ObservedUsage';
 import { runPath } from '../app/paths';
@@ -26,27 +29,27 @@ export function matchesActivity(event: WebEvent, group: 'all' | ActivityGroup, t
 
 export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: string }) {
   return <li class="activity-row">
-    <time dateTime={event.occurredAt}>{event.occurredAt}</time>{' '}<span>Sequence {event.sequence}</span>
-    <p><a href={runPath(basePath, event.jobId, event.runId)}>Attempt {event.runId}</a></p>
+    <time dateTime={event.occurredAt} title={event.occurredAt}>{formatExactTimestamp(event.occurredAt)}</time>{' '}<span>{displayMessage(copy.sequence, { sequence: event.sequence })}</span>
+    <p><a href={runPath(basePath, event.jobId, event.runId)}>{displayMessage(copy.attempt, { run: event.runId })}</a></p>
     {event.type === 'workflow.observation' ? <>
-      <p>Observed {event.payload.observationKind}{event.payload.fields.phase ? `: ${event.payload.fields.phase}` : ''}</p>
-      {event.payload.fields.status && <p>Observed status: {event.payload.fields.status}</p>}
-      <p>Writer: {event.payload.writerId}.</p>
-      {event.payload.observationKind === 'plan' && <p>Plan entries reported: {event.payload.fields.entryCount ?? 'Not recorded'}. Entry details are omitted from public activity. {event.payload.fields.entriesTruncated && 'Producer reported truncated plan entries.'}</p>}
-      <p>Fields omitted: {event.payload.omittedFieldCount}. {event.payload.fields.sourceSequenceGap && 'Source sequence gap reported.'} {event.payload.fields.textOmitted && 'Producer omitted text.'} {event.payload.fields.messageTrackingExhausted && 'Producer message tracking limit reached.'}</p>
+      <p>{displayMessage(copy.observed, { kind: event.payload.observationKind, phase: event.payload.fields.phase ? displayMessage(copy.phase, { phase: event.payload.fields.phase }) : '' })}</p>
+      {event.payload.fields.status && <p>{displayMessage(copy.observedStatus, { status: event.payload.fields.status })}</p>}
+      <p>{displayMessage(copy.writer, { writer: event.payload.writerId })}</p>
+      {event.payload.observationKind === 'plan' && <p>{displayMessage(copy.planEntries, { count: event.payload.fields.entryCount ?? copy.notRecorded, truncated: event.payload.fields.entriesTruncated ? copy.truncatedPlan : '' })}</p>}
+      <p>{displayMessage(copy.omitted, { count: event.payload.omittedFieldCount, sequenceGap: event.payload.fields.sourceSequenceGap ? copy.sequenceGap : '', textOmitted: event.payload.fields.textOmitted ? copy.textOmitted : '', trackingExhausted: event.payload.fields.messageTrackingExhausted ? copy.trackingExhausted : '' })}</p>
       <ObservedUsage observation={event.payload} occurredAt={event.occurredAt} sequence={event.sequence} />
       <details>
-        <summary>Correlation details for sequence {event.sequence}</summary>
-        <p>These are recorded references. Task, session and revision evidence pages are not available from this view.</p>
+        <summary>{displayMessage(copy.correlation, { sequence: event.sequence })}</summary>
+        <p>{copy.theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages}</p>
         <dl class="job-facts">
-          <dt>Task digest</dt><dd><code>{event.payload.fields.taskIdSha256 ?? 'Not recorded'}</code></dd>
-          <dt>Session digest</dt><dd><code>{event.payload.fields.sessionIdSha256 ?? 'Not recorded'}</code></dd>
-          <dt>Revision digest</dt><dd><code>{event.payload.fields.revisionIdSha256 ?? 'Not recorded'}</code></dd>
-          <dt>Turn</dt><dd><code>{event.payload.fields.turnId ?? 'Not recorded'}</code></dd>
-          <dt>Request digest</dt><dd><code>{event.payload.fields.requestSha256 ?? 'Not recorded'}</code></dd>
-          <dt>Tool call digest</dt><dd><code>{event.payload.fields.toolCallIdSha256 ?? 'Not recorded'}</code></dd>
+          <dt>{copy.taskDigest}</dt><dd><code>{event.payload.fields.taskIdSha256 ?? copy.notRecorded}</code></dd>
+          <dt>{copy.sessionDigest}</dt><dd><code>{event.payload.fields.sessionIdSha256 ?? copy.notRecorded}</code></dd>
+          <dt>{copy.revisionDigest}</dt><dd><code>{event.payload.fields.revisionIdSha256 ?? copy.notRecorded}</code></dd>
+          <dt>{copy.turn}</dt><dd><code>{event.payload.fields.turnId ?? copy.notRecorded}</code></dd>
+          <dt>{copy.requestDigest}</dt><dd><code>{event.payload.fields.requestSha256 ?? copy.notRecorded}</code></dd>
+          <dt>{copy.toolCallDigest}</dt><dd><code>{event.payload.fields.toolCallIdSha256 ?? copy.notRecorded}</code></dd>
         </dl>
       </details>
-    </> : <p>{event.type} metadata retained; content is not displayed in this observation view.</p>}
+    </> : <p>{displayMessage(copy.otherObservation, { type: event.type })}</p>}
   </li>;
 }

@@ -1,3 +1,4 @@
+import { displayPreferencesCopy as copy } from '../copy/shell';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 export type DisplayPreferenceValues = Readonly<{
@@ -84,30 +85,28 @@ export function DisplayPreferences({ storage = browserStorage }: { storage?: Sto
     }
   }}>
     <button type="button" ref={trigger} aria-expanded={open} aria-controls="display-preferences-panel"
-      onClick={() => setOpen(current => !current)}>Display preferences</button>
+      onClick={() => setOpen(current => !current)}>{copy.displayPreferences}</button>
     <div id="display-preferences-panel" class="display-preferences-panel" hidden={!open}>
       <div class="display-preference-fields">
-        <label>Theme
-          <select value={values.theme} onChange={event => update(event.currentTarget.value, values.motion)}>
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+        <label>{copy.theme}<select value={values.theme} onChange={event => update(event.currentTarget.value, values.motion)}>
+            <option value="system">{copy.system}</option>
+            <option value="light">{copy.light}</option>
+            <option value="dark">{copy.dark}</option>
           </select>
         </label>
-        <label>Reduced motion
-          <select value={values.motion} onChange={event => update(values.theme, event.currentTarget.value)}>
-            <option value="system">System</option>
-            <option value="reduce">Always reduce</option>
+        <label>{copy.reducedMotion}<select value={values.motion} onChange={event => update(values.theme, event.currentTarget.value)}>
+            <option value="system">{copy.system}</option>
+            <option value="reduce">{copy.alwaysReduce}</option>
           </select>
         </label>
       </div>
-      <p>System follows your device settings. Changes are saved in this browser when storage is available.</p>
+      <p>{copy.systemFollowsYourDeviceSettingsChangesAreSavedInThis}</p>
       <button type="button" onClick={() => {
         setValues(defaults);
         setSaved(resetDisplayPreferences(storage) ? 'saved' : 'memory');
-      }}>Reset display preferences</button>
-      <p role="status">{saved === 'saved' ? 'Display preferences saved in this browser.'
-        : saved === 'memory' ? 'Changes apply to this tab, but could not be saved in this browser.' : ''}</p>
+      }}>{copy.resetDisplayPreferences}</button>
+      <p role="status">{saved === 'saved' ? copy.displayPreferencesSavedInThisBrowser
+        : saved === 'memory' ? copy.changesApplyToThisTabButCouldNotBeSaved : ''}</p>
     </div>
   </div>;
 }

@@ -216,10 +216,12 @@ it('opens an authenticated durable job deep link and clears metadata on logout',
     expect(screen.getByText(selected.sizeBytes + ' bytes')).toBeTruthy();
     expect(screen.getByText('Not reported by the job API')).toBeTruthy();
     expect(screen.getByText(/a report-artifact digest identifies different bytes/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Workflow availability for this job' })).toBeTruthy();
     expect(transport.get).toHaveBeenCalledWith('job', '/jobs/' + selected.jobId, expect.anything());
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByText('Connect a local session to view this job.')).toBeTruthy();
     expect(screen.queryByText('program-3.elf')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Workflow availability for this job' })).toBeNull();
   } finally { session.dispose(); }
 });
 

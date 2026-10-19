@@ -1,3 +1,5 @@
+import { recoverySummaryCopy as copy } from '../copy/workspace';
+import { message as displayMessage } from '../shared/messages';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { createApiClient } from '../api/client';
@@ -22,7 +24,7 @@ export function RecoverySummary({ client, refresh }: {
       if (controller.signal.aborted) return;
       const busy = failure instanceof ApiClientError && failure.serverCode === 'RECOVERY_INSPECTION_BUSY';
       setState({ client, refresh, data: null, busy, error: busy ? '' : withApiFailureReference(
-        'Recovery files could not be inspected. Recovery state is unknown; preserve stored data before retrying.', failure) });
+        copy.recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown, failure) });
     });
     return () => { controller.abort(); };
   }, [client, refresh]);
@@ -33,13 +35,13 @@ export function RecoverySummary({ client, refresh }: {
   const busy = current && state.busy;
   if (data?.inventoryComplete && data.retainedUploadStages === 0 && data.retainedMetadataFiles === 0) return null;
   return <section aria-labelledby="recovery-summary-title" class="notice">
-    <h3 id="recovery-summary-title">{busy ? 'Recovery inspection paused' : 'Retained recovery files'}</h3>
-    {busy ? <p role="status">An upload is in progress. Refresh jobs after uploads finish to inspect recovery files.</p>
-      : error ? <p role="status">{error}</p> : !data ? <p role="status">Inspecting recovery files…</p> : <>
-      <p>{data.inventoryComplete ? 'Observed' : 'At least'} {data.retainedUploadStages} upload stages and {data.retainedMetadataFiles} metadata temporary files; {data.observedBytes} observed bytes.</p>
-      {!data.inventoryComplete && <p>Inspection is incomplete. Additional files or bytes may remain.</p>}
-      <p>Preserve these files until recovery has been verified. Counts are a display-only snapshot and do not authorize cleanup or establish accepted source revisions.</p>
-      <p>Refresh jobs to inspect recovery files again.</p>
+    <h3 id="recovery-summary-title">{busy ? copy.recoveryInspectionPaused : copy.retainedRecoveryFiles}</h3>
+    {busy ? <p role="status">{copy.anUploadIsInProgressRefreshJobsAfterUploadsFinish}</p>
+      : error ? <p role="status">{error}</p> : !data ? <p role="status">{copy.inspectingRecoveryFiles}</p> : <>
+      <p>{displayMessage(copy.inventory, { qualifier: data.inventoryComplete ? copy.observed : copy.atLeast, stages: data.retainedUploadStages, metadata: data.retainedMetadataFiles, bytes: data.observedBytes })}</p>
+      {!data.inventoryComplete && <p>{copy.inspectionIsIncompleteAdditionalFilesOrBytesMayRemain}</p>}
+      <p>{copy.preserveTheseFilesUntilRecoveryHasBeenVerifiedCountsAre}</p>
+      <p>{copy.refreshJobsToInspectRecoveryFilesAgain}</p>
     </>}
   </section>;
 }
