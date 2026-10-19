@@ -55,6 +55,22 @@ class AcpDoctorPreflightTest {
         assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
         assertFalse("PRIVATE" in context || "/" in context, context)
         assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+        val admissionConstructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val constructing = "mount-admission-v1 stage=CONSTRUCTING initialMounts=12 initialControls=2 owner=true initialFast=false"
+        val admitted = "mount-admission-v1 stage=ADMITTED initialMounts=7 initialControls=0 owner=false initialFast=true"
+        for (admission in listOf(null, constructing, admitted, "PRIVATE /PRIVATE/path", "x".repeat(257), constructing + "\nPRIVATE")) {
+            val diagnostic = admissionConstructor.newInstance(
+                phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val bounded = doctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), diagnostic))
+            assertTrue(requireNotNull(witness.message) in bounded, bounded)
+            if (admission == constructing || admission == admitted) assertTrue(requireNotNull(admission) in bounded, bounded)
+            else assertFalse("mount-admission-v1" in bounded, bounded)
+            assertFalse("PRIVATE" in bounded || "/" in bounded, bounded)
+            assertTrue(bounded.length <= 4096 && bounded.all { it.code in 32..126 })
+        }
     }
 
     @Test
@@ -313,6 +329,8 @@ class AcpDoctorPreflightTest {
         val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
             "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
             "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+        val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+            "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
         val pending = java.util.ArrayDeque<Throwable>()
         val seen = ArrayList<Throwable>(8)
         val causes = ArrayList<String>(8)
@@ -325,8 +343,13 @@ class AcpDoctorPreflightTest {
             val name = current.javaClass.name
             val record = if (name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
                 current.message?.takeIf { it.length <= 512 && witness.matches(it) } else null
+            val admissionRecord = if (record != null) try {
+                (current.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(current) as? String)
+                    ?.takeIf { it.length <= 256 && admission.matches(it) }
+            } catch (_: Throwable) { null } else null
             val sites = current.stackTrace.asSequence().take(32).mapNotNull { frames[it.className to it.methodName] }.take(2).joinToString(",")
-            causes.add(record ?: "${types[name] ?: "other"}[$sites]")
+            causes.add(if (record != null && admissionRecord != null) "$record; $admissionRecord"
+                else record ?: "${types[name] ?: "other"}[$sites]")
             current.cause?.let { if (pending.size < 16) pending.add(it) }
             current.suppressed.take(2).forEach { if (pending.size < 16) pending.add(it) }
         }
