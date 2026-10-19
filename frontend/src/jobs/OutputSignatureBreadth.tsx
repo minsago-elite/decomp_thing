@@ -7,7 +7,7 @@ export function OutputSignatureBreadth({ summary }: { summary: ExplorationSummar
   const total = summary.confidence.outputSignatureCount;
   const added = summary.confidence.newOutputSignatureCount;
   const inconsistent = summary.expandedOutputSignatures !== total || BigInt(added) > BigInt(total)
-    || BigInt(total) > BigInt(summary.confidence.inputCount);
+    || BigInt(total) > BigInt(summary.confidence.inputCount) || BigInt(total) > BigInt(summary.candidateCount);
   const empty = total === '0';
   return <section aria-labelledby="output-signature-breadth-title">
     <h3 id="output-signature-breadth-title">{copy.signatureBreadth}</h3>

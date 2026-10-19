@@ -68,16 +68,31 @@ it('keeps an empty sample explicit without a zero denominator fraction or a succ
 });
 
 it('shows contradictory reported counts without constructing a combined population', () => {
-  for (const mismatch of ['new-total', 'summary-total', 'sample-total'] as const) {
+  for (const mismatch of ['new-total', 'summary-total', 'sample-total', 'candidate-total'] as const) {
     const counts = summary(report());
     if (mismatch === 'new-total') counts.confidence.newOutputSignatureCount = '3';
     else if (mismatch === 'summary-total') counts.expandedOutputSignatures = '3';
-    else counts.confidence.inputCount = '1';
+    else if (mismatch === 'sample-total') counts.confidence.inputCount = '1';
+    else counts.candidateCount = '1';
     const mounted = render(<OutputSignatureBreadth summary={counts} />);
     expect(screen.getByText('Unavailable: inconsistent reported counters')).toBeTruthy();
     expect(screen.getByText(/reported signature counters disagree/)).toBeTruthy();
     expect(screen.queryByText('Expanded observed signatures: 2')).toBeNull(); mounted.unmount();
   }
+});
+
+it('rejects an expanded denominator larger than the retained candidates through the actual response decoder', async () => {
+  const value = report(); const counts = summary(value);
+  counts.candidateCount = '1'; counts.confidence.inputCount = '2';
+  const { fetcher } = read(value); const grid = await table();
+  const expanded = within(grid).getByRole('row', { name: /Expanded distinct exit\/output signatures/ });
+  const added = within(grid).getByRole('row', { name: /New distinct exit\/output signatures/ });
+  expect(within(expanded).getByText('2')).toBeTruthy();
+  expect(within(added).getByText('1')).toBeTruthy();
+  expect(within(added).getByText('Unavailable: inconsistent reported counters')).toBeTruthy();
+  expect(screen.queryByText('Expanded observed signatures: 2')).toBeNull();
+  expect(screen.getByText(/reported signature counters disagree/)).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledOnce();
 });
 
 it.each(['partial', 'unknown', 'invalid', 'unsupported'] as const)('preserves %s report limitations without numeric coverage or a heuristic', async state => {
