@@ -268,8 +268,10 @@ facts do not authorize execution or qualify provider effectiveness, cleanup or r
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```
 
-Web shutdown marks admission as stopping before draining HTTP requests. Owned workers
-receive one shutdown interruption; the service preserves its job-root lease until
+Web shutdown publishes the job service's volatile admission signal before the server stop flag,
+so queued callbacks observe shutdown even when cleanup is waiting for the service monitor.
+Both stop entry points share this signal phase; retention-worker teardown and resource ownership
+still use their existing locked cleanup checks. Owned workers receive one shutdown interruption; the service preserves its job-root lease until
 workers actually exit. Final legacy status writes clear and restore the interrupt flag
 around atomic metadata publication. Restart projects interrupted legacy work through
 the durable service while preserving its historical job.json bytes. CLI shutdown uses

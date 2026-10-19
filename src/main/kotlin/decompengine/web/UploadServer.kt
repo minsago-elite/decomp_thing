@@ -353,6 +353,7 @@ class UploadServer(
 
     /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
     internal fun requestStop() {
+        jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
         jobs.beginShutdown()
@@ -373,8 +374,7 @@ class UploadServer(
         // Signal recovery and the job service even while start or a queued callback holds
         // lifecycleLock through filesystem operations: no queued operation may begin and no
         // completion may be published after the stop signal is observable.
-        stopRequested.set(true)
-        jobs.beginShutdown()
+        requestStop()
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true

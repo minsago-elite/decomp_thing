@@ -849,10 +849,16 @@ class UploadServerTest {
         val dataDir = createTempDirectory("web-stop-signal-order-")
         val server = UploadServer("127.0.0.1", 0, dataDir)
         server.start()
+        val serviceMonitor = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server)
         val stopThread = Thread { server.stop() }
         try {
             synchronized(server.lifecycleMonitor()) {
-                stopThread.start()
+                synchronized(serviceMonitor) {
+                    stopThread.start()
+                    assertTrue(awaitBlocked(stopThread), "cleanup must wait for the held service monitor")
+                    assertTrue(server.jobServiceStopping(),
+                        "the stop signal must be visible before service-monitor cleanup")
+                }
                 assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
                     "stop() should wait on the lifecycle lock while it is held")
                 // The job service must already be signalled while stop() is still blocked:
