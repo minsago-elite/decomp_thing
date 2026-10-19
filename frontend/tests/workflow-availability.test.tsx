@@ -83,3 +83,49 @@ it('replaces obsolete reports when the authenticated runtime snapshot changes', 
   expect(view.getAllByText('No capability for this workflow was reported. Its availability is unknown.')).toHaveLength(5);
   expect(view.queryByRole('button')).toBeNull();
 });
+
+it('retains the server preview refusal without assigning an undeclared workflow', () => {
+  const preview: Capability = { id: 'workflows', state: 'unavailable', reasonCode: 'PREVIEW_UNAVAILABLE',
+    message: 'Workflow actions are unavailable in this preview.', workflows: [], agentContractVersion: null, limits: null };
+  const view = render(<WorkflowAvailability runtime={snapshot([preview, capability('unsupported')])} />);
+  const general = within(view.getByRole('list', { name: 'General capability reports' }));
+  expect(general.getByText('workflows')).toBeTruthy();
+  expect(general.getByText('unavailable')).toBeTruthy();
+  expect(general.getByText('PREVIEW_UNAVAILABLE')).toBeTruthy();
+  expect(general.getByText(preview.message!)).toBeTruthy();
+  const workflows = within(view.getByRole('list', { name: 'Workflow availability' }));
+  expect(workflows.queryByText('PREVIEW_UNAVAILABLE')).toBeNull();
+  expect(workflows.getByText('SELECTED_HARNESS_NOT_READY')).toBeTruthy();
+  expect(workflows.getAllByText('No capability for this workflow was reported. Its availability is unknown.')).toHaveLength(4);
+  expect(view.getByText(/They do not confirm that this job can start work/)).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+  expect(view.queryByRole('combobox')).toBeNull();
+});
+
+it('preserves every general report state without promoting it to job readiness', () => {
+  const states = ['supported', 'unavailable', 'unsupported', 'unknown'] as const;
+  const reports = states.map(state => ({ ...capability(state, []), id: `general_${state}`,
+    reasonCode: null, message: null }));
+  const view = render(<WorkflowAvailability runtime={{ ...snapshot(reports), readiness: 'ready' }} />);
+  const general = within(view.getByRole('list', { name: 'General capability reports' }));
+  for (const state of states) expect(general.getByText(state)).toBeTruthy();
+  const workflows = within(view.getByRole('list', { name: 'Workflow availability' }));
+  expect(workflows.getAllByText('No capability for this workflow was reported. Its availability is unknown.')).toHaveLength(5);
+  expect(workflows.queryByText('supported')).toBeNull();
+  expect(view.getByText(/Job-specific input and revision prerequisites have not been reported/)).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+});
+
+it('renders general report text literally and replaces it when its declared scope changes', () => {
+  const report = { ...capability('unavailable', []), message: '<img src=x onerror=run()> & unavailable' };
+  const view = render(<WorkflowAvailability runtime={snapshot([report])} />);
+  expect(within(view.getByRole('list', { name: 'General capability reports' })).getByText(report.message)).toBeTruthy();
+  expect(view.container.querySelector('img')).toBeNull();
+  view.rerender(<WorkflowAvailability runtime={snapshot([{ ...report, workflows: ['repair'], message: 'Scoped report.' }])} />);
+  expect(view.queryByRole('list', { name: 'General capability reports' })).toBeNull();
+  expect(view.queryByText(report.message)).toBeNull();
+  const repair = within(view.getByRole('heading', { name: 'Repair' }).closest('li')!);
+  expect(repair.getByText('Scoped report.')).toBeTruthy();
+  expect(repair.getByText('SELECTED_HARNESS_NOT_READY')).toBeTruthy();
+  expect(view.queryByRole('button')).toBeNull();
+});

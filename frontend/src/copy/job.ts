@@ -24,6 +24,8 @@ export const jobCopy = {
   "reportedReadiness": "Last reported server readiness: {readiness}",
   "capabilitiesAreTheLastSessionReport": "These capabilities were reported at the last session check. Opening this job does not run a tool, refresh readiness or select a harness.",
   "jobPrerequisitesNotReported": "Job-specific input and revision prerequisites have not been reported. A supported harness alone does not confirm that this job is ready to start work.",
+  "generalCapabilityReports": "General capability reports",
+  "capabilitiesWithoutWorkflow": "The server did not assign these reports to a workflow. They do not confirm that this job can start work.",
   "startUnavailable": "Starting this workflow is unavailable in this preview.",
   "noCapabilityForThisWorkflow": "No capability for this workflow was reported. Its availability is unknown.",
   "capabilityReport": "Capability {identity}: {state}",
