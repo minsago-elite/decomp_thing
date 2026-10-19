@@ -244,7 +244,7 @@ capability, not on core local Git availability (#200–#215).
 | Server state | Kotlin job/attempt/revision/event/operation stores | Browser holds bounded snapshots/pages, reconciles by identity/version, and never infers acceptance from a completed progress bar |
 | URL state | Router plus typed parse/serialize helpers | Job, run, immutable revision/file, repository/worktree, selected tab, shareable filters/sort/cursor; back/forward restores the same scope |
 | Transient view state | Local hooks/reducers; feature context only when shared | Dialog visibility, dirty form draft, selected rows, expanded nodes and request lifecycle; clear or reconcile on identity change |
-| Persisted preferences | Small versioned localStorage record | Theme, density, wrapping and pane preferences only; bounded values with validation and reset; unavailable storage is recoverable |
+| Persisted preferences | Small versioned localStorage record | Theme, reduced motion, density, wrapping and pane preferences only; bounded values with validation and reset; unavailable storage is recoverable |
 
 Tokens, sessions, CSRF material, source/log bodies, private prompts and job/workflow
 truth never enter localStorage. In-flight request deduplication and AbortController

@@ -128,7 +128,7 @@ class EmbeddedWebAssets private constructor(
                 <meta name="referrer" content="no-referrer">
                 <title>Decomp Workbench</title>
             $styles
-                <script type="module" src="${htmlAttribute(assetPrefix + manifest.entryScript)}"></script>
+                <script type="module" blocking="render" src="${htmlAttribute(assetPrefix + manifest.entryScript)}"></script>
               </head>
               <body>
                 <div id="app"></div>

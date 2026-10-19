@@ -136,6 +136,8 @@ class EmbeddedWebAssetsTest {
             assertTrue(html.contains("name=\"decomp-base-path\" content=\"/workbench/nested/\""))
             assertTrue(html.contains("name=\"decomp-application-version\" content=\"0.1.0\""))
             assertTrue(html.contains("src=\"/workbench/nested/assets/ui/assets/index-12345678.js\""))
+            assertTrue(html.contains("<script type=\"module\" blocking=\"render\""))
+            assertTrue(html.indexOf("<script ") < html.indexOf("</head>"))
             assertTrue(html.contains("href=\"/workbench/nested/assets/ui/assets/index-12345678.css\""))
             assertTrue(html.contains("id=\"app\""))
             assertFalse(html.contains("<base"))

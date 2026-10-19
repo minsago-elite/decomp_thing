@@ -254,7 +254,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
       render(<App basePath="/nested" session={session} />);
       expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
       expect(screen.getByText('Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.')).toBeTruthy();
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out', 'Refresh job']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Refresh job']);
       fireEvent.click(screen.getByRole('link', { name: 'View reported workflow availability' }));
       expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
       if (reported === 'empty') expect(screen.getByText('No capabilities reported.')).toBeTruthy();
@@ -268,7 +268,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
           expect(selectedCapability?.textContent).toContain('The selected harness cannot start these workflows.');
         }
       }
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Sign out']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out']);
       expect(gateway.bootstrap).toHaveBeenCalledOnce();
       expect(gateway.exchange).not.toHaveBeenCalled();
       expect(gateway.logout).not.toHaveBeenCalled();
