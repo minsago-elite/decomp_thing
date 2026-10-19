@@ -48,7 +48,32 @@ data class DoctorCheck(
     val name: String,
     val passed: Boolean,
     val detail: String,
-)
+) {
+    internal var toolsOnlyKind: DoctorToolKind? = null
+        private set
+
+    internal fun withToolsOnlyKind(kind: DoctorToolKind?): DoctorCheck =
+        copy().also { it.toolsOnlyKind = kind }
+}
+
+/** Compiled display facts attached by check producers, independent of private diagnostic text. */
+internal enum class DoctorToolKind(val label: String, val remediation: String) {
+    JAVA("Java", "Install a Java 21 runtime and ensure java is on PATH."),
+    C_COMPILER("C compiler", "Install the selected C compiler and ensure it is executable."),
+    MAKE("Make", "Install Make and ensure it is executable."),
+    NINJA("Ninja", "Install Ninja and ensure it is executable."),
+    READELF("binutils/readelf", "Install binutils and ensure readelf is on PATH."),
+    STRINGS("binutils/strings", "Install binutils and ensure strings is on PATH."),
+    PYTHON("Python", "Install Python 3 and ensure python3 is on PATH."),
+    ANGR("angr", "Install angr for the selected Python interpreter or set ANGR_PYTHON."),
+    GHIDRA("Ghidra", "Reinstall the complete application distribution and verify its Java runtime."),
+    SANITIZERS("C sanitizers", "Install sanitizer runtime libraries for the selected C compiler."),
+    BUBBLEWRAP("bubblewrap", "Install bubblewrap; analyzed binary execution requires a sandbox boundary."),
+    OUTPUT("output directory", "Choose an existing writable directory with --output."),
+    PROFILE("reconstruction profile", "Select a supported reconstruction profile with --profile."),
+    LIMITS("diagnostic limits", "Verify the selected profile and host diagnostic limits."),
+    UNKNOWN("tool check", "Verify the selected profile's toolchain and output settings."),
+}
 
 data class DoctorReport(val checks: List<DoctorCheck>) {
     val passed: Boolean = checks.all(DoctorCheck::passed)
@@ -90,27 +115,33 @@ class Doctor(
             maximumWallClockMillis = minOf(hostProbeLimits.maximumWallClockMillis, profile.budgets.exportWallClockMillis),
         )
         val checks = mutableListOf<DoctorCheck>()
-        checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.")
+        checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.",
+            toolsOnlyKind = DoctorToolKind.JAVA)
         val toolchainBudget = CommandProbeBudget(toolchainLimits)
         val toolchainProbe = boundedProbe(toolchainBudget)
         for (probe in diagnostics.versionProbes) {
-            checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe)
+            checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe, probe.toolsOnlyKind)
         }
         // Run the adapter's compiler/sanitizer capability probe before unrelated host checks
         // can consume the selected profile's contiguous toolchain budget. Keep its authored
         // report position below Ghidra for compatibility with the doctor output contract.
         val capabilityChecks = diagnostics.checkCapabilities(toolchainProbe, toolchainBudget::checkpoint)
-        checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.")
-        checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.")
-        checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.")
+        checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.",
+            toolsOnlyKind = DoctorToolKind.READELF)
+        checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.",
+            toolsOnlyKind = DoctorToolKind.STRINGS)
+        checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.",
+            toolsOnlyKind = DoctorToolKind.PYTHON)
         val angrPython = environment["ANGR_PYTHON"]?.takeIf(String::isNotBlank) ?: "python3"
-        checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.")
-        checks += ghidraCheck(exportLimits)
+        checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.",
+            toolsOnlyKind = DoctorToolKind.ANGR)
+        checks += ghidraCheck(exportLimits).withToolsOnlyKind(DoctorToolKind.GHIDRA)
         checks += capabilityChecks
         requireDoctorActive()
-        checks += bubblewrapCheck()
-        checks += outputCheck(options.outputDir)
+        checks += bubblewrapCheck().withToolsOnlyKind(DoctorToolKind.BUBBLEWRAP)
+        checks += outputCheck(options.outputDir).withToolsOnlyKind(DoctorToolKind.OUTPUT)
         checks += DoctorCheck("reconstruction profile", true, "Selected ${profile.id}; sha256=${profile.sha256}")
+            .withToolsOnlyKind(DoctorToolKind.PROFILE)
         checks += DoctorCheck("diagnostic limits", true,
             "Local command ceiling: ${hostProbeLimits.maximumWallClockMillis} ms and ${hostProbeLimits.maximumOutputBytes} combined output bytes; " +
                 "toolchain group: ${toolchainLimits.maximumWallClockMillis} ms and ${toolchainLimits.maximumOutputBytes} combined output bytes; " +
@@ -118,6 +149,7 @@ class Doctor(
                 "command cleanup allowance: ${hostProbeLimits.cleanupMillis} ms. " +
                 if (commandProbe is BudgetedCommandProbe) "Owned command execution enforces these limits."
                 else "Injected command callbacks receive cooperative before/after checks only.")
+            .withToolsOnlyKind(DoctorToolKind.LIMITS)
         if (!options.toolsOnly) {
             val harnessSelection = runCatching {
                 AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
@@ -141,7 +173,8 @@ class Doctor(
         command: List<String>,
         remediation: String,
         probe: CommandProbe = boundedProbe(CommandProbeBudget(CommandProbeLimits())),
-    ): DoctorCheck = try {
+        toolsOnlyKind: DoctorToolKind? = null,
+    ): DoctorCheck = (try {
         requireDoctorActive()
         val result = probe.run(command, null)
         if (result.exitCode == 0) DoctorCheck(name, true, result.output.firstLineOr("available"))
@@ -149,7 +182,7 @@ class Doctor(
     } catch (failure: Exception) {
         requireDoctorActive(failure)
         DoctorCheck(name, false, "$remediation ${failure.message.orEmpty()}".trim())
-    }
+    }).withToolsOnlyKind(toolsOnlyKind)
 
     private fun boundedProbe(budget: CommandProbeBudget): CommandProbe = CommandProbe { command, directory ->
         budget.checkpoint("before command probe")
@@ -387,7 +420,7 @@ internal class DoctorDiagnostics(values: Collection<String>) {
 
     fun report(report: DoctorReport): DoctorReport = DoctorReport(report.checks.map { check ->
         requireDoctorActive()
-        check.copy(name = preview(check.name), detail = preview(check.detail))
+        check.copy(name = preview(check.name), detail = preview(check.detail)).withToolsOnlyKind(check.toolsOnlyKind)
     })
 
     private fun admit(values: Collection<String>): List<String> = try {

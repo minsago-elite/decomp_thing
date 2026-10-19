@@ -2,6 +2,7 @@ package decompengine.project
 
 import decompengine.doctor.CommandProbe
 import decompengine.doctor.DoctorCheck
+import decompengine.doctor.DoctorToolKind
 
 /** Application-owned toolchain diagnostics prepared before commands or temporary files are used. */
 internal interface ToolchainDiagnosticPolicy {
@@ -18,4 +19,5 @@ internal data class ToolchainVersionProbe(
     val name: String,
     val command: List<String>,
     val remediation: String,
+    val toolsOnlyKind: DoctorToolKind = DoctorToolKind.UNKNOWN,
 )
