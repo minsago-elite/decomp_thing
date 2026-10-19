@@ -42,11 +42,35 @@ internal fun requireCurrentSessionConfigPreference(
     }
     throw AgentExecutionException(AgentFailure(
         AgentFailureKind.CONFIGURATION,
-        "ACP configured option no longer has an unambiguous match in the current session inventory. " +
-            "Current option ID previews: $optionIds; value previews: $values",
+        redactedSessionPreferenceDiagnostic(
+            "ACP configured option no longer has an unambiguous match in the current session inventory.",
+            " Current option ID previews: $optionIds; value previews: $values",
+            sensitiveValues, privatePreferences,
+        ),
         details = mapOf("preference" to "configOption", "preferenceIndex" to index.toString(),
             "reason" to "currentInventoryMismatch"),
     ))
+}
+
+/** Labels, boolean literals and hint boundaries are part of the privacy-checked message. */
+internal fun redactedSessionPreferenceDiagnostic(
+    base: String,
+    hint: String,
+    sensitiveValues: Collection<String>,
+    privatePreferences: Collection<String>,
+): String {
+    val redactor = ProgressRedactor(sensitiveValues, privatePreferences)
+    fun publishable(value: String): Boolean = value.isNotBlank() &&
+        sensitiveValues.none { it.isNotEmpty() && value.contains(it) } &&
+        privatePreferences.none { it.isNotEmpty() && value.contains(it) }
+    // Leave room for the existing truncation marker within a 1,024-character diagnostic.
+    val complete = redactor.text(base + hint, 1000)
+    if (publishable(complete)) return complete
+    val safeBase = redactor.text(base, 1000)
+    if (publishable(safeBase)) return safeBase
+    // Raw whitespace-only environment values are checked above even though the shared
+    // progress policy ignores them. A single nonblank indicator cannot reproduce them.
+    return redactor.nonBlankText("", 1000)
 }
 
 /** Complete configured identifiers used only as additional redaction inputs. */

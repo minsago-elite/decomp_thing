@@ -680,6 +680,22 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
         return safe
     }
 
+    /** For typed failures whose contract requires a nonblank message, even after omission. */
+    fun nonBlankText(value: String, maximumCharacters: Int = 512): String {
+        require(maximumCharacters > 0)
+        val safe = text(value, maximumCharacters)
+        if (safe.isNotBlank()) return safe
+        // The bounded inventory has at most 4,096 + 130 literals. A one-character
+        // indicator can match only a one-character literal, so the 6,400 nonblank
+        // BMP private-use characters guarantee a collision-free choice.
+        val indicators = sequenceOf('!', '?', '\u26a0') + ('\ue000'..'\uf8ff').asSequence()
+        for (character in indicators) {
+            val indicator = character.toString()
+            if (!leaks(indicator)) return indicator
+        }
+        error("bounded redaction inventory exhausted nonblank indicators")
+    }
+
     // Fixed diagnostic text can itself be a configured secret; no fixed replacement is always safe.
     private fun omission(marker: String): String = if (leaks(marker)) "" else marker
 

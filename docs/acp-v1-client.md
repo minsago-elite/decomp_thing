@@ -1264,6 +1264,12 @@ if a replacement marker or formatting recreates any private ID, it withholds the
 an empty string. A fixed replacement cannot be safe for arbitrary configured identifiers. This
 does not change exact-match selection for admitted redaction configurations. The separate allowance
 of at most 130 identifiers of 256 characters is independent of the environment redaction budget.
+The complete rejection message is checked after adding labels, boolean-choice text and hint
+boundaries, for both initial advertisements and current-inventory failures. Unsafe hints can be
+withheld while retaining a separately redacted base message. If all readable output is withheld,
+a bounded, dynamically selected nonblank indicator preserves the typed failure contract without
+using an unchecked fixed fallback. Failure kind, reason and preference-index fields remain unchanged;
+message redaction does not widen selection authority or send a setter request.
 Environment redaction admits at most 4,096 supplied values and 1,048,576 UTF-16 code units in total
 before blank filtering or de-duplication; raw duplicates and blank text count toward those limits.
 Over-budget configuration uses the existing fixed redaction-limit rejection. Each preview replacement
