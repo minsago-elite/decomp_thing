@@ -152,6 +152,32 @@ export const explorationEvidenceCopy = {
   "evidenceLimitations": "Evidence limitations"
 } as const;
 
+export const explorationCasesCopy = {
+  title: 'Retained exploration cases',
+  scope: 'This view reads the selected report artifact only. Filtering and inspecting records never executes an input or starts a workflow.',
+  outcomesUnreported: 'This unversioned format does not record timeout or execution-failure classifications. An observed exit code alone cannot distinguish them.',
+  read: 'Read retained case details', refresh: 'Refresh retained case details', loading: 'Reading retained case details…',
+  unavailable: 'Case details are unavailable or exceed this viewer’s format or limits. Refresh the report or download its observed JSON.',
+  filter: 'Filter reported source', allSources: 'All reported sources',
+  observationCount: 'Retained observation records: {count} of {total} candidate records. These counts describe this artifact, not behavioral coverage.',
+  page: 'Showing {count} of {total} matching retained cases, page {page}. Filters cover this artifact only.',
+  emptyCases: 'No retained candidate records match this selection.',
+  table: 'Retained candidate records', caseIdentity: 'Case identity', reportedSource: 'Reported source',
+  observation: 'Observed result', inspect: 'Inspect', inspectCase: 'Inspect case {id}',
+  notRecorded: 'Not recorded', caseDetails: 'Retained case details',
+  job: 'Job', attempt: 'Attempt', artifactDigest: 'Observed artifact SHA-256',
+  argumentVector: 'Argument vector (zero-based positions)', noArguments: 'The recorded argument vector is empty.',
+  firstArguments: 'Showing the first 32 of {total} arguments. Download the artifact for the complete vector.',
+  stdin: 'Standard input', stdout: 'Standard output', stderr: 'Standard error',
+  bytes: '{count} recorded bytes.', first128Bytes: 'Preview is limited to the first 128 bytes.',
+  hex: 'Hexadecimal bytes', escapedBytes: 'Escaped byte preview', empty: 'Empty', truncated: '(preview truncated)',
+  exitCode: 'Observed exit code: {value}', isolation: 'Producer reports network isolation: {value}', yes: 'Yes', no: 'No',
+  observationMissing: 'No observation record is retained for this candidate. A missing record is not a successful execution.',
+  retainedRecord: 'Download the observed artifact containing this case',
+  reference: 'The job, attempt, artifact digest and recorded case identity identify this observation. Producer claims are not independent validation or accepted reconstruction.',
+  pagination: 'Retained case pages', previous: 'Previous cases', next: 'Next cases',
+} as const;
+
 export const runCopy = {
   "wallClockLimit": "{value} milliseconds",
   "idleLimit": "{value} milliseconds",
