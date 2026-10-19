@@ -16,9 +16,11 @@ self-reported name is identity data, not independent authentication.
 An agent, SDK or runtime change follows the
 [upgrade qualification procedure](acp-v1-client.md#qualifying-an-agent-or-runtime-change).
 Retain the recorded combination's identity and accepted-source evidence during
-that change. A new version does not rewrite a retained journal or resolve unknown
-process cleanup; the reconciliation and recorded conversation decisions below
-still govern continued use.
+that change. A changed version does not migrate the journal's historical identity
+or resolve unknown process cleanup. An identity mismatch persists a quarantine
+phase and decision by atomically replacing `session.json`; it preserves the
+recorded identity and accepted-source commitments. The reconciliation and recorded
+conversation decisions below still govern continued use.
 
 ## Durable state and acceptance
 

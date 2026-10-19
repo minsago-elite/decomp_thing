@@ -952,7 +952,8 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 1. confirm that the SDK still identifies protocol v1 as stable and keeps v2 opt-in;
 2. review the official v1 schema and release notes for wire or capability changes, including the opt-in v1
    additional-directory, usage, and message-id fields;
-3. update the Gradle coordinate and `ACP_KOTLIN_SDK_VERSION` together;
+3. update the Gradle coordinate, `ACP_KOTLIN_SDK_VERSION`, Java probe/evidence pins and pinning tests together,
+   as identified in the source-owner table below;
 4. review and run the versioned golden corpus, operator preference exchanges, scripted subprocess
    tests and full test suite; and
 5. keep v2 disabled until a project issue explicitly adopts it after it becomes stable.
@@ -972,7 +973,8 @@ about the newest upstream release.
 
 | Changed input | Owning source and review obligation |
 |---|---|
-| Client SDK/protocol | Update the exact Gradle dependency and [`AcpProcessConfiguration.kt`](../src/main/kotlin/decompengine/acp/AcpProcessConfiguration.kt) together. Review all v1 serializer/capability changes and the scoped optional-v1 opt-ins. |
+| Client SDK/protocol | Update the exact Gradle dependency and [`AcpProcessConfiguration.kt`](../src/main/kotlin/decompengine/acp/AcpProcessConfiguration.kt) together with the hard-coded SDK evidence fields in [`AcpCompatibilityPreflight.java`](../scripts/support/AcpCompatibilityPreflight.java) and both the provenance check and evidence field in [`AcpCompatibilityAuthenticationProbe.java`](../scripts/support/AcpCompatibilityAuthenticationProbe.java). Review all v1 serializer/capability changes and the scoped optional-v1 opt-ins. |
+| SDK pin assertions and current documentation | Review the literal SDK assertions in [`AcpAgentHarnessTest`](../src/test/kotlin/decompengine/acp/AcpAgentHarnessTest.kt) and [`AcpOperatorSurfaceContractTest`](../src/test/kotlin/decompengine/acp/AcpOperatorSurfaceContractTest.kt), plus the artifact/reported-version fields in the wire corpus and its golden test below. Update current setup/recovery version references; retain historical evidence with its original pins. |
 | Wire contract | Review the versioned [`wire-contract.json`](../src/test/resources/acp/v1/wire-contract.json) and [`AcpV1WireContractGoldenTest`](../src/test/kotlin/decompengine/acp/AcpV1WireContractGoldenTest.kt). Every changed message needs an explained compatibility result; a changed golden file alone supplies no runtime result. |
 | Independent agent/archive | Review the exact release URL/version, archive/member digests and target metadata in [`ci-qualify-goose-acp.sh`](../scripts/ci-qualify-goose-acp.sh) or [`ci-qualify-codex-acp.sh`](../scripts/ci-qualify-codex-acp.sh), plus the corresponding Java probe and acquisition controls. Preserve archive-layout and member verification. |
 | Executable/runtime/helper | Re-provision the reviewed immutable executable/runtime/helper commitments at their final paths, and bind the actual host architecture and containment prerequisites. Keep the existing ownership, mode, resource and cleanup checks. |
