@@ -499,12 +499,15 @@ ancestor confirmation on retry and byte-identical prior evidence. Their bounded
 fixture receipt records the runtime, filesystem provider and observed filesystem
 types; source edits alone do not qualify a host or filesystem.
 
-Current server initialization then reconciles private upload stages and calls
-`WorkflowAttemptStore.recoverAll`. Malformed individual legacy/workflow records
-remain unavailable for inspection; they do not authorize guessed repairs or
-analysis replay. Unknown/unsafe upload staging and store-wide recovery refusals
-fail initialization. Legacy active statuses are projected as interrupted using
-workflow recovery state while the original `job.json` remains unchanged.
+Production server initialization uses `WorkflowAttemptStore.recoverForStartup`.
+It validates every bounded legacy/workflow record and prepares recovery replacements
+before confirming directories, reconciling private upload stages or publishing recovery
+state. Malformed startup records, incomplete reads, exhausted limits and unknown/unsafe
+staging refuse initialization; they do not authorize guessed repairs or analysis replay.
+After initialization, newly unavailable records retain isolated diagnostic rows for
+runtime inspection. Legacy active statuses are projected as interrupted using workflow
+recovery state while the original `job.json` remains unchanged. The separate explicit
+`recoverAll` operation retains its per-record inspection contract.
 
 The separate low-level `JobStore.recoverInterruptedJobs` legacy API retains its
 4,096-entry, 64 MiB aggregate metadata and 256 KiB per-record bounds. It completes
