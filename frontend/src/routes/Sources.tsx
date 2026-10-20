@@ -12,6 +12,8 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { formatExactBytes } from '../jobs/metadataFormat';
 import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage } from '../sources/navigation';
 import type { DirectorySelection, FileSelection, SourceReadState, SourceSnapshot } from '../sources/navigation';
+import { SourcePreview } from '../sources/SourcePreview';
+import { sourcePosition } from '../sources/viewer';
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
@@ -94,9 +96,10 @@ function Directory({ selected, basePath }: { selected: DirectorySelection; baseP
   </>;
 }
 
-function File({ selected, basePath, runtime }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot }) {
+function File({ selected, basePath, runtime, search }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string }) {
   const { client } = usePrivateTransport(basePath);
   const [refresh, setRefresh] = useState(0);
+  const [previewOpened, setPreviewOpened] = useState(false);
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, refresh].join('/');
   const [read, setRead] = useState<SourceReadState<RevisionFile>>({ key, state: 'loading' });
   useEffect(() => beginSourceRead(key, async signal => bindFile(
@@ -107,7 +110,7 @@ function File({ selected, basePath, runtime }: { selected: FileSelection; basePa
   const loading = current.state === 'loading';
   const policy = data ? sourceFilePolicy(data.item, runtime.limits.maxSourceChunkBytes) : null;
   const previewNotice = { 'not-viewable': copy.notViewable, 'too-large': copy.tooLarge,
-    'runtime-disabled': copy.previewDisabled, 'metadata-only': copy.metadataOnly };
+    'runtime-disabled': copy.previewDisabled, available: copy.previewAvailable };
   return <>
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p>
@@ -122,6 +125,10 @@ function File({ selected, basePath, runtime }: { selected: FileSelection; basePa
       </dl>
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
+      {policy.preview === 'available' && (previewOpened || search !== ''
+        ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} />
+        : <button type="button" onClick={() => setPreviewOpened(true)}>{copy.openPreview}</button>)}
       {policy.download
         ? <a href={apiPath(basePath, sourceReadRoute(selected, 'download', selected.fileId))} download="">{copy.download}</a>
         : <p>{policy.downloadNotice === 'too-large' ? copy.tooLarge : copy.notArchivable}</p>}
@@ -136,10 +143,11 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   const state = useSession(session);
   const location = useLocation();
   const selected = { jobId, runId, revisionId };
+  const search = new URL(location.url, 'https://source.invalid').search;
   let valid = true;
   try {
     sourceReadRoute(selected, resource, (resource === 'directory' ? directoryId : fileId) ?? '');
-    if (resource === 'file' && Object.keys(location.query).length > 0) valid = false;
+    if (resource === 'file') sourcePosition(search);
   } catch { valid = false; }
   return <section class="source-navigation" aria-labelledby="source-title">
     <h1 id="source-title">{resource === 'directory' ? copy.title : copy.fileTitle}</h1>
@@ -148,7 +156,7 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
       {session && state?.status === 'authenticated'
         ? resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}`} selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} />
-          : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`} selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} />
+          : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`} selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} />
         : <p>{copy.connect}</p>}
     </> : <><p role="alert">{copy.invalid}</p><a href={appPath(basePath, '/')}>{copy.returnJobs}</a></>}
   </section>;
