@@ -32,6 +32,17 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowAttemptStoreTest {
+    @Test fun `descriptor read requests keep the buffer bound and a single overflow byte`() {
+        assertEquals(8L, decompengine.acp.boundedDescriptorReadRequest(7, 0, 16 * 1024))
+        assertEquals(3L, decompengine.acp.boundedDescriptorReadRequest(8, 4, 3))
+        assertEquals(1L, decompengine.acp.boundedDescriptorReadRequest(8, 8, 16 * 1024))
+        assertEquals(1L, decompengine.acp.boundedDescriptorReadRequest(0, 0, 16 * 1024))
+        assertEquals(1L, decompengine.acp.boundedDescriptorReadRequest(Int.MAX_VALUE, Int.MAX_VALUE.toLong(), 16 * 1024))
+        assertEquals(16L * 1024, decompengine.acp.boundedDescriptorReadRequest(Int.MAX_VALUE, 0, 16 * 1024))
+        assertFailsWith<IllegalArgumentException> { decompengine.acp.boundedDescriptorReadRequest(7, 8, 16 * 1024) }
+        assertFailsWith<IllegalArgumentException> { decompengine.acp.boundedDescriptorReadRequest(7, 0, 0) }
+    }
+
     @Test fun `startup reader exhaustion retains the configured limit classification`() {
         val exhausted = decompengine.repair.RepairBudgetExceededException("authored private byte-count details")
         val limited = workflowStartupReadFailure(exhausted)
