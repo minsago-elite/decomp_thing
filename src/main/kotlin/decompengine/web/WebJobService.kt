@@ -243,6 +243,7 @@ class WebJobService(
     maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
     progressRetentionIntervalMs: Long? = null,
+    sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits,
         val harnessCapabilityId: String?)
@@ -268,7 +269,7 @@ class WebJobService(
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val sourceCatalogEvidence = WebSourceCatalogEvidence(defaultWebSourceProfiles(), ::readSourceCatalogInput, ::readArtifact)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)

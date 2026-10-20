@@ -611,7 +611,9 @@ with `410 CURSOR_EXPIRED` and requires refreshing the first page.
 
 The producer captures only the fixed source manifest and uploaded input through the
 retained-descriptor read boundary, then rechecks their bytes, hashes and identities.
-The manifest must use a host-registered profile and bind to the uploaded input.
+The manifest must use the same configured host profile allowlist as legacy source
+evidence and bind to the uploaded input. Both readers receive one captured copy of
+the server's configuration; the catalog does not restore excluded default profiles.
 Metadata capture admits at most 25,000 files and a 16 MiB manifest; response items
 have a separate 1,000,000-byte ceiling within the existing 1 MiB JSON response limit.
 One catalog capture/page is admitted per controller at a time; concurrent catalog

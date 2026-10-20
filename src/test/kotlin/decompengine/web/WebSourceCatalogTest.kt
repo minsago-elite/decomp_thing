@@ -169,4 +169,21 @@ class WebSourceCatalogTest {
         assertEquals(1, pages.page("owner", jobId, runId, null).getValue("items").jsonArray.size)
         assertEquals(1, pages.page("owner", jobId, runId, null).getValue("items").jsonArray.size)
     }
+
+    @Test fun `configured custom profiles are admitted while excluded defaults remain refused`() {
+        val custom = ReconstructionProfile(profile.schemaVersion, "catalog-custom-test", profile.layout, profile.budgets,
+            profile.adapterConfiguration)
+        val customDocument = captured(SourceTreeManifest(profileId = custom.id, profileSha256 = custom.sha256,
+            inputSha256 = input.sha256, files = listOf(file(0)), unresolvedEntityIds = emptyList()).toJson().toByteArray(), 2)
+        var document = customDocument
+        val configured = mutableListOf(custom)
+        val evidence = WebSourceCatalogEvidence(configured, { input }, { _, _, _ -> document })
+        configured.clear(); configured += profile // Caller mutation cannot replace the reader's captured host policy.
+        assertEquals(customDocument.sha256, evidence.read(jobId, runId).manifestSha256)
+        document = manifest(listOf(file(0)))
+        assertFailsWith<IllegalArgumentException> { evidence.read(jobId, runId) }
+        assertFailsWith<IllegalArgumentException> {
+            WebSourceCatalogEvidence(listOf(profile), { input }, { _, _, _ -> customDocument }).read(jobId, runId)
+        }
+    }
 }

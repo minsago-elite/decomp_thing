@@ -464,6 +464,14 @@
     {
       "file": "fixtures/invalid-source-catalog-path-id.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/source-catalog-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-complete-continuation.json",
+      "valid": false
     }
   ]
 }

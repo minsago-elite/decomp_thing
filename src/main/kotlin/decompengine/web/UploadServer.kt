@@ -246,6 +246,7 @@ class UploadServer(
         throw failure
     }
     private val store = JobStore(dataDir)
+    private val admittedSourceProfiles = sourceProfiles.toList()
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
             // Storage creation is the upgrade point: claim the cross-JVM web lock as the root appears.
@@ -253,8 +254,9 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
-        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
-    private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
+        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
+        sourceProfiles = admittedSourceProfiles)
+    private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
         setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,

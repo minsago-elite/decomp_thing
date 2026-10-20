@@ -57,7 +57,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { items, totalFiles, page, manifestSha256 } = document.data;
       requireValue(page.snapshotVersion === manifestSha256 && items.length <= page.limit && items.length <= totalFiles);
       requireValue(new Set(items.map(item => item.fileId)).size === items.length);
-      requireValue(page.nextCursor === null || items.length > 0);
+      requireValue(page.nextCursor === null || (items.length > 0 && items.length < totalFiles));
       requireValue(items.every(item => item.displayName.split('/').every(part =>
         part.trim().length > 0 && part !== '.' && part !== '..' && part.length <= 255)));
       break;
