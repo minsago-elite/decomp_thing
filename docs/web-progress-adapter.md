@@ -765,3 +765,13 @@ streaming, replay, capacity, focus, source and monetary-withholding behavior kee
 its original regression methods. Physical browser burst/render qualification and
 the broader resource-accounting and measurement-provenance scope remain separate
 requirements.
+
+Additional in-memory activity-consumer controls drive the existing mock SSE
+transport through the real view. They check a 100-observation context burst
+before and after its display window, original receipt time and focus, unchanged
+provided evidence and monetary withholding, pause flushing, reset invalidation,
+and immediate publication of a full 200-record page with the exact continuation
+cursor. The existing fake clock and mock transport are reused; no network,
+listener, provider or native browser process is started. These controls address
+the rendered consumer path, while physical browser burst performance and broader
+resource/measurement qualification remain outstanding.
