@@ -32,6 +32,23 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowAttemptStoreTest {
+    @Test fun `startup reader exhaustion retains the configured limit classification`() {
+        val exhausted = decompengine.repair.RepairBudgetExceededException("authored private byte-count details")
+        val limited = workflowStartupReadFailure(exhausted)
+        assertEquals("STORE_LIMIT", limited.code)
+        assertFalse(limited.outcomeUnknown)
+        assertFalse(limited.message!!.contains("private byte-count"))
+        kotlin.test.assertSame(exhausted, limited.cause)
+        val io = IOException("authored private I/O details")
+        val incomplete = workflowStartupReadFailure(io)
+        assertEquals("STARTUP_RECOVERY_INCOMPLETE", incomplete.code)
+        assertFalse(incomplete.outcomeUnknown)
+        assertFalse(incomplete.message!!.contains("private I/O"))
+        kotlin.test.assertSame(io, incomplete.cause)
+        assertTrue(exhausted.suppressed.isEmpty())
+        assertTrue(io.suppressed.isEmpty())
+    }
+
     @Test fun `startup prepares every bounded record before any recovery mutation`() {
         val events = mutableListOf<String>()
         val budget = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(3, 8, 8))

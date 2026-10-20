@@ -355,8 +355,7 @@ class WorkflowAttemptStore private constructor(
                                     budget.readAllowance(perFile), cancellationCheck = budget::checkpoint).bytes
                             } catch (failure: WorkflowStoreException) { throw failure } catch (failure: Exception) {
                                 budget.checkpoint()
-                                throw WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
-                                    "The bounded startup inspection did not finish; no recovery changes were applied.", cause = failure)
+                                throw workflowStartupReadFailure(failure)
                             }
                             budget.chargeRead(bytes.size.toLong())
                             bytes
@@ -725,6 +724,12 @@ class WorkflowAttemptStore private constructor(
         }
     }
 }
+
+internal fun workflowStartupReadFailure(failure: Exception): WorkflowStoreException =
+    if (failure is decompengine.repair.RepairBudgetExceededException)
+        WorkflowStoreException("STORE_LIMIT", "Startup recovery exceeds its metadata-read limit; no recovery changes were applied.", cause = failure)
+    else WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
+        "The bounded startup inspection did not finish; no recovery changes were applied.", cause = failure)
 
 internal data class WorkflowStartupRecoveryLimits(
     val maximumEntries: Int = 4096, val maximumReadBytes: Long = 64L * 1024 * 1024,
