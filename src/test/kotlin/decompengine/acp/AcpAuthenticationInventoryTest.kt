@@ -85,7 +85,7 @@ class AcpAuthenticationInventoryTest {
         assertEquals("", markerCollision.descriptionPreview)
     }
 
-    @Test fun `invisible supplementary and blank private units cannot bypass preview withholding`() {
+    @Test fun `invisible supplementary and private control units cannot bypass preview withholding`() {
         val secret = "\u200b\u0301\u20dd\ud83d\udd11"
         for (fragment in listOf("\u200b", "\u0301", "\u20dd", "\ud83d\udd11")) {
             val method = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
@@ -103,8 +103,15 @@ class AcpAuthenticationInventoryTest {
         val blank = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
             AuthMethodId("public"), "Public login", "Use\tyour account")), listOf(" ", "\t", "\n")).methods.single()
         assertEquals("public", blank.idPreview)
-        assertEquals("", blank.namePreview)
+        assertEquals("Public login", blank.namePreview)
         assertEquals("", blank.descriptionPreview)
+    }
+
+    @Test fun `blank private values preserve unrelated previews while withholding blank controls`() {
+        val filter = AuthenticationPreviewFragments(listOf(" ", "\t", "\n"))
+        assertEquals("Public login", filter.concealUntrusted("Public login"))
+        assertEquals("", filter.concealUntrusted(" "))
+        assertEquals("", filter.concealUntrusted("Use\tyour account"))
     }
 
     @Test fun `supplementary invisible private code points cannot bypass preview withholding`() {

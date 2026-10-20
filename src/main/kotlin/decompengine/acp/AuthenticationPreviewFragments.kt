@@ -9,6 +9,7 @@ internal class AuthenticationPreviewFragments(
     private val privateUnits = java.util.BitSet(65_536)
     private val privateInvisibles = java.util.BitSet(Character.MAX_CODE_POINT + 1)
     private val normalizedValues: List<String>
+    private val hasPrivateBlankValue: Boolean
     private val shortTokens = HashMap<String, Boolean>()
     private val tokenPattern = Regex("[\\p{L}\\p{N}]+")
     private var remainingSearchUnits = maximumSearchUnits
@@ -21,7 +22,9 @@ internal class AuthenticationPreviewFragments(
             "authentication preview private values exceed the configured limit"
         }
         require(maximumSearchUnits in 0..64L * 1024 * 1024) { "authentication preview search budget is invalid" }
-        normalizedValues = values.map { it.replace(invisibles, "") }.filter(String::isNotEmpty).distinct()
+        val normalized = values.map { it.replace(invisibles, "") }
+        hasPrivateBlankValue = normalized.any { it.isNotEmpty() && it.isBlank() }
+        normalizedValues = normalized.filter(String::isNotBlank).distinct()
         redactionMarkerAllowed = normalizedValues.none { REDACTION_MARKER.contains(it) }
         for (value in values) {
             value.forEach { unit -> privateUnits.set(unit.code) }
@@ -52,6 +55,7 @@ internal class AuthenticationPreviewFragments(
     fun concealUntrusted(preview: String): String {
         if (privateUnits.isEmpty()) return preview
         if (REDACTION_MARKER in preview) return if (redactionMarkerAllowed) REDACTION_MARKER else ""
+        if (hasPrivateBlankValue && preview.isBlank()) return ""
         if (searchExhausted || containsPrivateInvisible(preview)) return ""
         val normalized = preview.replace(invisibles, "")
         if (normalizedValues.any { it.length < 8 && normalized.contains(it) }) return ""
