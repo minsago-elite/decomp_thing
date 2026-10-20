@@ -122,3 +122,98 @@ test('operator mutations preserve action headers and attach private CSRF without
   assert.equal(options.body, '{}');
   assert.equal(window.legacySession.isActive(), false);
 });
+
+// Run the actual dashboard callback with inert responses and elements, without a browser or server.
+const dashboardSource = readFileSync(new URL('../src/main/kotlin/decompengine/web/WebViews.kt', import.meta.url), 'utf8')
+  .match(/    script = """\n([\s\S]*?)\n    """\.trimIndent\(\)/)[1];
+const inspectionId = '00000000-0000-4000-8000-000000000001';
+const replacementInspectionId = '00000000-0000-4000-8000-000000000002';
+const unavailableInspection = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
+const readyInspection = {
+  status: 'ready', inspectionId,
+  methods: [{ idPreview: 'method', variant: 'agent', namePreview: 'Advertised method' }],
+};
+async function inspectionDashboard({ admissionStatus = 202, admissionId = inspectionId, admissionLost = false, updates }) {
+  const state = { starts: 0, reads: 0, timers: 0 };
+  const element = () => ({
+    textContent: '', disabled: false, children: [], listeners: {},
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    replaceChildren() { this.children = []; },
+    append(child) { this.children.push(child); },
+  });
+  const elements = new Map(['#inspect-auth-methods', '#cancel-auth-inspection', '#auth-inspection-status', '#auth-method-list']
+    .map(selector => [selector, element()]));
+  elements.get('#cancel-auth-inspection').disabled = true;
+  const document = { querySelector(selector) { return elements.get(selector) ?? null; }, createElement: element };
+  const window = { legacySession: {
+    async mutate(path, options) {
+      state.starts++;
+      assert.equal(path, '/api/operator/auth-methods');
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['X-Decomp-Operator-Action'], 'inspect-auth');
+      if (admissionLost) throw new Error('Synthetic lost acknowledgement');
+      return { status: admissionStatus, json: async () => ({ status: 'inspecting', inspectionId: admissionId }) };
+    },
+    async request(path, options) {
+      assert.equal(path, '/api/operator/auth-methods');
+      assert.equal(options.cache, 'no-store');
+      const update = updates[state.reads++];
+      assert.ok(update, 'Unexpected additional inspection read');
+      return { ok: true, json: async () => update };
+    },
+  } };
+  vm.runInNewContext(dashboardSource, { document, window, setTimeout(resolve, delay) {
+    assert.equal(delay, 300);
+    assert.ok(state.timers++ < updates.length, 'Unexpected additional inspection timer');
+    resolve();
+  } });
+  await elements.get('#inspect-auth-methods').listeners.click();
+  return { state, elements };
+}
+function finishedInspection(result, text, reads) {
+  assert.equal(result.elements.get('#auth-inspection-status').textContent, text);
+  assert.equal(result.elements.get('#inspect-auth-methods').disabled, false);
+  assert.equal(result.elements.get('#cancel-auth-inspection').disabled, true);
+  assert.deepEqual(result.state, { starts: 1, reads, timers: reads });
+}
+for (const status of ['ready', 'failed', 'cancelled']) {
+  test(`lost admission refuses old ${status} without observing a running identity`, async () => {
+    for (const terminalId of [undefined, inspectionId]) {
+      const result = await inspectionDashboard({ admissionLost: true,
+        updates: [{ ...readyInspection, status, inspectionId: terminalId }] });
+      finishedInspection(result, unavailableInspection, 1);
+      assert.equal(result.elements.get('#auth-method-list').children.length, 0);
+    }
+  });
+}
+test('accepted and attached admissions retain completed inventory without another start', async () => {
+  for (const admissionStatus of [202, 409]) {
+    const result = await inspectionDashboard({ admissionStatus, updates: [readyInspection] });
+    finishedInspection(result, 'Advertised method previews. Login is unsupported; no login attempted.', 1);
+    assert.equal(result.elements.get('#auth-method-list').children[0].textContent, 'method · agent · Advertised method');
+  }
+});
+test('lost admission accepts completion after observing the same running identity', async () => {
+  const result = await inspectionDashboard({ admissionLost: true,
+    updates: [{ status: 'inspecting', inspectionId }, readyInspection] });
+  finishedInspection(result, 'Advertised method previews. Login is unsupported; no login attempted.', 2);
+  assert.equal(result.elements.get('#auth-method-list').children.length, 1);
+});
+test('terminal identity alone cannot recover a missing admission identity', async () => {
+  const result = await inspectionDashboard({ admissionId: null, updates: [readyInspection] });
+  finishedInspection(result, unavailableInspection, 1);
+  assert.equal(result.elements.get('#auth-method-list').children.length, 0);
+});
+test('replacement inspection status cannot populate an admitted inventory', async () => {
+  const result = await inspectionDashboard({ updates: [{ ...readyInspection, inspectionId: replacementInspectionId }] });
+  finishedInspection(result, 'This inspection is no longer active; start a new inspection.', 1);
+  assert.equal(result.elements.get('#auth-method-list').children.length, 0);
+});
+test('observed running identity preserves terminal failure and cancellation', async () => {
+  for (const status of ['failed', 'cancelled']) {
+    const result = await inspectionDashboard({ admissionLost: true,
+      updates: [{ status: 'inspecting', inspectionId }, { status, inspectionId }] });
+    finishedInspection(result, status === 'cancelled' ? 'Inspection cancelled; no login attempted.' : unavailableInspection, 2);
+    assert.equal(result.elements.get('#auth-method-list').children.length, 0);
+  }
+});
