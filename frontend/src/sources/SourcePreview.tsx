@@ -7,8 +7,12 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
 import type { FileSelection, SourceReadState } from './navigation';
 import { bindSourceChunk, sourceChunkMaximum, sourceChunkRoute, sourcePosition, sourcePositionPath, sourceWindow } from './viewer';
+import { sourceHighlightLanguage } from './highlight';
+import { beginSourceHighlight } from './highlightOperation';
+import type { HighlightResult } from './highlightOperation';
+import { sourceHighlightRuntime } from './highlightRuntime';
 
-/** One deliberately opened range, with no prefetch, implicit retry, highlighter or worker. */
+/** One deliberately opened range. Highlighting separately requires an explicit local action. */
 export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search }: {
   selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string;
 }) {
@@ -26,6 +30,17 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   const heading = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(true);
   const copyKey = `${key}/${start}`;
+  const [highlight, setHighlight] = useState<{ key: string; result: HighlightResult | null } | null>(null);
+  const stopHighlight = useRef<{ key: string; stop: () => void } | null>(null);
+  const highlighting = highlight?.key === copyKey ? highlight : null;
+  const highlighted = highlighting?.result?.status === 'ready' ? highlighting.result.value : null;
+  const language = sourceHighlightLanguage(metadata.item.displayName);
+  useEffect(() => {
+    setHighlight(current => current?.key === copyKey ? current : null);
+    return () => {
+      if (stopHighlight.current?.key === copyKey) { stopHighlight.current.stop(); stopHighlight.current = null; }
+    };
+  }, [copyKey]);
   useEffect(() => () => { stopCopy.current?.(); stopCopy.current = null; }, [copyKey]);
   useEffect(() => beginSourceRead(key, async signal => bindSourceChunk(
     (await client.get('sourceChunk', sourceChunkRoute(selected, metadata, position, maximum), { signal })).data,
@@ -51,13 +66,30 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
       {chunk.representation === 'hex' ? <p>{copy.hexFallback[chunk.fallbackReason!]}</p>
         : <><p>{copy.textDisplay}</p>{(chunk.startsMidLine || chunk.endsMidLine) && <p>{copy.partialLines}</p>}</>}
       <p>{message(copy.rowWindow, { count: view.rows.length, total: view.totalRows })}</p>
+      {chunk.representation === 'utf8' && <>
+        <button type="button" disabled={language === 'plain' || highlighting?.result === null} onClick={() => {
+          stopHighlight.current?.stop(); stopHighlight.current = null;
+          const operationKey = copyKey;
+          setHighlight({ key: operationKey, result: null });
+          const stop = beginSourceHighlight(view.rows.map(row => row.display), language, sourceHighlightRuntime,
+            result => setHighlight({ key: operationKey, result }));
+          stopHighlight.current = { key: operationKey, stop };
+        }}>{copy.highlightRows}</button>
+        <p>{copy.highlightBoundary}</p>
+        {language === 'plain' && <p>{copy.highlightUnsupported}</p>}
+        {highlighting && <p role="status">{highlighting.result === null ? copy.highlightLoading
+          : highlighting.result.status === 'failed' ? copy.highlightFailures[highlighting.result.reason]
+          : highlighted?.mode === 'plain' ? copy.highlightPlain : copy.highlightReady}</p>}
+      </>}
       <div class="source-rows" role="region" aria-label={copy.rangeContent} tabIndex={0}>
         {view.rows.map((row, index) => <div class="source-row" key={`${row.offset}/${index}`}>
           {row.line === null ? <span class="source-position"><code>{row.offset}</code></span>
             : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line })}
               onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) moveFocus.current = true; }}
               aria-label={textMessage(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
-          <pre dir="ltr">{row.display}</pre>
+          <pre dir="ltr">{highlighted?.mode === 'formatted'
+            ? highlighted.rows[index]!.map((token, tokenIndex) => <span key={tokenIndex} class={`source-token source-token-${token.kind}`}>{token.text}</span>)
+            : row.display}</pre>
         </div>)}
       </div>
       <nav aria-label={copy.rowNavigation}>

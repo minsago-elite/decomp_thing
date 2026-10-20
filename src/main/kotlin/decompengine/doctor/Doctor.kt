@@ -492,6 +492,7 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
     val pending = java.util.ArrayDeque<Throwable>()
     val seen = ArrayList<Throwable>(8)
     var mountRecord: String? = null
+    var mountAdmissionRecord: String? = null
     pending.add(failure)
     failure.receipt?.failureCause?.let { pending.add(it) }
     while (pending.isNotEmpty() && seen.size < 8) {
@@ -501,6 +502,10 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
         val record = (current as? AcpMountEventWitness)?.diagnosticRecord
         if (record != null && record.length <= 512 && DOCTOR_MOUNT_WITNESS.matches(record)) {
             mountRecord = record
+            val admission = (current as AcpMountEventWitness).admissionRecord
+            if (admission != null && admission.length <= 192 && DOCTOR_MOUNT_ADMISSION.matches(admission)) {
+                mountAdmissionRecord = admission
+            }
             break
         }
         // getSuppressed() clones the complete array. Only bounded cause links are inspected.
@@ -511,7 +516,8 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
         "recordedDiagnostics=${if (diagnostics == null) "MISSING" else "PRESENT"} " +
         "recordedRemainingProcessCount=${diagnostics?.remainingProcessIds?.size ?: "MISSING"} " +
         "recordedOutputOverflow=${diagnostics?.outputLimitExceeded ?: "MISSING"} " +
-        "mountEventRecord=${mountRecord ?: "MISSING"}").take(1024)
+        "mountEventRecord=${mountRecord ?: "MISSING"} " +
+        "mountAdmissionRecord=${mountAdmissionRecord ?: "MISSING"}").take(1024)
 } catch (contextFailure: Throwable) {
     requireDoctorActive(contextFailure)
     "recordedContext=UNAVAILABLE"
@@ -521,6 +527,12 @@ private val DOCTOR_MOUNT_WITNESS = Regex(
     "mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
         "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
         "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})",
+)
+
+private val DOCTOR_MOUNT_ADMISSION = Regex(
+    "mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=(0|[1-9][0-9]{0,9}) initialControls=(0|[1-9][0-9]{0,9}) " +
+        "owner=(true|false) initialFast=(true|false)",
 )
 
 private fun String.firstLineOr(fallback: String): String = lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: fallback

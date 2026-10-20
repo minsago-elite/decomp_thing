@@ -884,13 +884,33 @@ The copy button sends only the currently displayed UTF-8 rows' original string t
 the clipboard: no line numbers, U+ marker substitutions or undisplayed ranges.
 Its offset/length and partial-range status are explicit. Clipboard encoding or line
 ending normalization remains possible; the complete authorized attachment is the
-byte-preserving path. Hex fallback has no text-copy action. No source is executed,
-parsed as markup, highlighted or sent to a worker; no external rendering assets
-are loaded.
+byte-preserving path. Hex fallback has no text-copy action. Source is never executed
+or parsed as markup.
+
+Local highlighting is an additional explicit action for C/C++, JSON and build
+files. It sends only the current displayed rows to one packaged worker, with at
+most 200 rows, 262144 UTF-16 units and 4096 output tokens. The one-second operation
+timer requests termination on timeout; it is not a physical browser latency or
+whole-operation CPU/RSS qualification. Completion, failure, view/range changes
+and unmount detach callbacks, clear the owned timer and terminate the worker.
+The worker also closes after its single response. Invalid, stale, excessive or
+changed results leave the complete original display plain. Every accepted token
+uses a closed presentation class and must concatenate to exactly its original row;
+individual token boundaries cannot split Unicode surrogate pairs. Rendering uses
+escaped text children, never HTML, styles or URLs supplied by the source.
+
+Formatting has local syntax context only within the displayed rows. It changes
+neither original copy data nor revision/byte/line identities and performs no
+additional source read. Unsupported files and hex stay plain. The worker URL is a
+static build reference emitted into the embedded hashed asset inventory, under the
+existing self-only worker CSP. Page and worker module ownership share the same
+production exclusions; the existing all-dist gzip budget also counts worker bytes.
+No external rendering asset or new package is used.
 
 Pure Node DTO/string controls cover the range, identity, representation, Unicode,
-row and copy-span decisions. Actual source HTTP/browser/clipboard/focus/keyboard,
-packaged highlighting and physical D0 workload/time/memory qualification remain
+row and copy-span decisions, plus lexer/response and memory-only worker-owner
+lifetime controls. Actual source HTTP/browser/clipboard/focus/keyboard,
+packaged worker loading/termination and physical D0 workload/time/memory qualification remain
 outstanding. The current zero bootstrap limit remains unchanged, so this consumer
 does not activate previews against that report.
 
