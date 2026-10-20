@@ -24,6 +24,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
+/** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
+internal sealed interface AcpMountEventWitness {
+    val diagnosticRecord: String
+}
+
 /** A fatal failure to prove that a sandbox scope/tree or one of its pinned resources is gone. */
 internal class AcpCleanupProofFailure(
     message: String,
@@ -2233,6 +2238,8 @@ private class RuntimePrivateControlScope private constructor(
                 ).also { firstEventDiagnostic = it }
                 // This exact local IOException is fresh: no graph lookup or existing-list growth.
                 failure.addSuppressed(diagnostic)
+                // A direct, bounded link on this fresh owned failure avoids arbitrary suppressed-list snapshots.
+                failure.initCause(diagnostic)
             } catch (_: Throwable) { /* Diagnostic failure cannot replace the original refusal. */ }
             return failure
         }
@@ -2244,8 +2251,11 @@ private class RuntimePrivateControlScope private constructor(
                 val outcome = if (observation.events != null) MountEventOutcome.INVALID_DESCRIPTOR
                     else MountEventOutcome.SYSCALL_ERROR
                 // Only the exact scratch-created, not-yet-annotated exception can reach this line.
-                failure.addSuppressed(MountEventDiagnostic(phase, outcome,
-                    observation.result, observation.events, observation.error, admissionContext()))
+                val diagnostic = MountEventDiagnostic(phase, outcome,
+                    observation.result, observation.events, observation.error, admissionContext())
+                failure.addSuppressed(diagnostic)
+                // The claimed scratch token proves this exact native primary was freshly constructed.
+                failure.initCause(diagnostic)
             } catch (_: Throwable) { /* Keep the exact query/closed-handle/native primary. */ }
         }
     }
@@ -2263,7 +2273,9 @@ private class RuntimePrivateControlScope private constructor(
             (if (phase == MountEventPhase.REFRESH) "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED") +
             " outcome=${outcome.name} rc=${result ?: "NA"} revents=${events ?: "NA"} errno=${error ?: "NA"}",
         null, false, false,
-    ) {
+    ), AcpMountEventWitness {
+        override val diagnosticRecord: String get() = message.orEmpty()
+
         // Preserve the legacy scalar witness constructor and its exact message.
         constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?) :
             this(phase, outcome, result, events, error, null)
