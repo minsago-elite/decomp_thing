@@ -23,20 +23,25 @@ import kotlin.test.assertTrue
 class DoctorTest {
     @Test
     fun `ACP failure context reports an owned witness while withholding unknown receipt and private cause text`() {
-        val witness = fixedMountWitness()
-        val cause = java.io.IOException("PRIVATE message /PRIVATE/path").apply {
-            initCause(witness)
-            addSuppressed(witness)
-            addSuppressed(IllegalStateException("PRIVATE suppressed"))
+        val observations: List<Triple<String, Int?, Int?>> = listOf(
+            Triple("EVENT", 10, null), Triple("INVALID_DESCRIPTOR", 32, null),
+            Triple("INVALID_DESCRIPTOR", 16, null), Triple("SYSCALL_ERROR", null, 5))
+        for ((outcome, events, error) in observations) {
+            val witness = fixedMountWitness(outcome, if (error == null) 1 else -1, events, error)
+            val cause = java.io.IOException("PRIVATE message /PRIVATE/path").apply {
+                initCause(witness)
+                addSuppressed(witness)
+                addSuppressed(IllegalStateException("PRIVATE suppressed"))
+            }
+            val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure",
+                details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+            val context = acpDoctorFailureContext(failure)
+            assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context, context)
+            assertTrue("recordedDiagnostics=MISSING recordedRemainingProcessCount=MISSING" in context, context)
+            assertTrue("mountEventRecord=${requireNotNull(witness.message)}" in context, context)
+            assertFalse("PRIVATE" in context || "/" in context, context)
+            assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
         }
-        val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure",
-            details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
-        val context = acpDoctorFailureContext(failure)
-        assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context, context)
-        assertTrue("recordedDiagnostics=MISSING recordedRemainingProcessCount=MISSING" in context, context)
-        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
-        assertFalse("PRIVATE" in context || "/" in context, context)
-        assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
     }
 
     @Test
@@ -77,14 +82,34 @@ class DoctorTest {
         assertTrue("mountEventRecord=MISSING" in context(suppressed))
     }
 
-    private fun fixedMountWitness(): Throwable {
+    @Test
+    fun `ACP failure context preserves fatal interruption and cancellation policy during metadata formatting`() {
+        fun contextFor(fault: Throwable): String {
+            val cause = object : RuntimeException("PRIVATE metadata failure") {
+                override val cause: Throwable? get() = throw fault
+            }
+            return acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), cause))
+        }
+        assertEquals("recordedContext=UNAVAILABLE", contextFor(IllegalStateException("PRIVATE recoverable")))
+        val fatalAndCancellation: List<Throwable> = listOf(AssertionError("PRIVATE fatal"),
+            OutOfMemoryError("PRIVATE memory"), java.util.concurrent.CancellationException("PRIVATE cancelled"),
+            InterruptedException("PRIVATE interrupted"))
+        for (fault in fatalAndCancellation) {
+            assertSame(fault, assertFailsWith<Throwable> { contextFor(fault) })
+        }
+    }
+
+    private fun fixedMountWitness(
+        outcomeName: String = "EVENT", result: Int? = 1, events: Int? = 10, error: Int? = null,
+    ): Throwable {
         val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
         val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
         val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
         val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
             java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
         return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
-            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null) as Throwable
+            outcome.enumConstants.single { (it as Enum<*>).name == outcomeName }, result, events, error) as Throwable
     }
 
     @Test

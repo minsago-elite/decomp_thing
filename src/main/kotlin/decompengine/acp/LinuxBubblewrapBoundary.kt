@@ -2251,8 +2251,11 @@ private class RuntimePrivateControlScope private constructor(
                 val outcome = if (observation.events != null) MountEventOutcome.INVALID_DESCRIPTOR
                     else MountEventOutcome.SYSCALL_ERROR
                 // Only the exact scratch-created, not-yet-annotated exception can reach this line.
-                failure.addSuppressed(MountEventDiagnostic(phase, outcome,
-                    observation.result, observation.events, observation.error, admissionContext()))
+                val diagnostic = MountEventDiagnostic(phase, outcome,
+                    observation.result, observation.events, observation.error, admissionContext())
+                failure.addSuppressed(diagnostic)
+                // The claimed scratch token proves this exact native primary was freshly constructed.
+                failure.initCause(diagnostic)
             } catch (_: Throwable) { /* Keep the exact query/closed-handle/native primary. */ }
         }
     }

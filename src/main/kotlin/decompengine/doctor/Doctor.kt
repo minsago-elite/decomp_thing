@@ -512,7 +512,8 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
         "recordedRemainingProcessCount=${diagnostics?.remainingProcessIds?.size ?: "MISSING"} " +
         "recordedOutputOverflow=${diagnostics?.outputLimitExceeded ?: "MISSING"} " +
         "mountEventRecord=${mountRecord ?: "MISSING"}").take(1024)
-} catch (_: Throwable) {
+} catch (contextFailure: Throwable) {
+    requireDoctorActive(contextFailure)
     "recordedContext=UNAVAILABLE"
 }
 
