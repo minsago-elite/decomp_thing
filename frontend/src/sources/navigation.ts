@@ -16,20 +16,21 @@ export function sourceReadMessage(failure: unknown): string {
     if (failure.code === 'invalid_request') text = copy.invalid;
     else if (failure.status === 404) text = copy.noSnapshot;
     else if (failure.status === 429) text = copy.busy;
+    else if (failure.status === 416) text = copy.invalidRange;
     else if (failure.status === 401 || failure.status === 403) text = copy.denied;
     else if (failure.status === 409 || failure.status === 410 || ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) text = copy.expired;
   }
   return withApiFailureReference(text, failure);
 }
 
-export type PreviewNotice = 'not-viewable' | 'too-large' | 'runtime-disabled' | 'metadata-only';
+export type PreviewNotice = 'not-viewable' | 'too-large' | 'runtime-disabled' | 'available';
 export function sourceFilePolicy(item: RevisionFile['item'], maximumChunkBytes: string): {
   preview: PreviewNotice; download: boolean; downloadNotice: 'too-large' | 'not-archivable' | null;
 } {
   const tooLarge = BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
   return {
     preview: !item.declaredViewable ? 'not-viewable' : tooLarge ? 'too-large'
-      : BigInt(maximumChunkBytes) === 0n ? 'runtime-disabled' : 'metadata-only',
+      : BigInt(maximumChunkBytes) < 4n ? 'runtime-disabled' : 'available',
     download: item.declaredArchivable && !tooLarge,
     downloadNotice: !item.declaredArchivable ? 'not-archivable' : tooLarge ? 'too-large' : null,
   };

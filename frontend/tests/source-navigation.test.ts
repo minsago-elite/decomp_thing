@@ -97,7 +97,8 @@ it('does not start a disposed read and retains synchronous failure without an im
 it('explains independent declared preview and download permissions without enabling zero-limit text reads', () => {
   const item = file().item;
   expect(sourceFilePolicy(item, '0')).toEqual({ preview: 'runtime-disabled', download: true, downloadNotice: null });
-  expect(sourceFilePolicy(item, '131072').preview).toBe('metadata-only');
+  expect(sourceFilePolicy(item, '131072').preview).toBe('available');
+  expect(sourceFilePolicy(item, '3').preview).toBe('runtime-disabled');
   expect(sourceFilePolicy({ ...item, declaredViewable: false }, '0').preview).toBe('not-viewable');
   expect(sourceFilePolicy({ ...item, declaredArchivable: false }, '0')).toMatchObject({ download: false, downloadNotice: 'not-archivable' });
   expect(sourceFilePolicy({ ...item, sizeBytes: '8388608' }, '0').download).toBe(true);

@@ -171,3 +171,9 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .activity-row summary { cursor: pointer; }
 
 .source-navigation { min-width: 0; overflow-wrap: anywhere; }
+.source-preview { margin-block: 1.5rem; min-width: 0; }
+.source-rows { max-width: 100%; overflow: auto; border: 1px solid var(--line); margin-block: 1rem; }
+.source-row { display: grid; grid-template-columns: 7rem minmax(0, 1fr); border-bottom: 1px solid var(--line); }
+.source-position { padding: .4rem; overflow-wrap: anywhere; }
+.source-row pre { margin: 0; padding: .4rem; min-height: 1.5em; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
+.source-preview nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }

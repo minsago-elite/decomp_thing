@@ -62,7 +62,7 @@ function checkDirectory(directory: RevisionDirectory): void {
     && directory.parentDirectoryId === breadcrumbs.at(-2)?.directoryId);
 }
 
-function checkSourceChunk(data: SourceChunk): void {
+export function checkSourceChunk(data: SourceChunk): void {
   const size = BigInt(data.sizeBytes), offset = BigInt(data.offsetBytes), length = BigInt(data.lengthBytes);
   const end = offset + length;
   requireValue(size <= 8388608n && length <= 131072n && end <= size

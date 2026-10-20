@@ -772,9 +772,9 @@ routes; bounded JSON offsets provide the chunk operation.
 
 Each chunk currently verifies a complete bounded file before returning its range.
 No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
-from captured-byte controls. The general viewer, all-manifest/log/report families,
-direct UI line links, copying UX, local highlighting and full D0 physical budgets
-remain open. Bootstrap source chunk advertising remains zero pending those gates.
+from captured-byte controls. General viewer qualification, all-manifest/log/report
+families, local highlighting and full D0 physical budgets remain open. Bootstrap
+source chunk advertising remains zero pending those gates.
 
 ## SPA recorded source navigation
 
@@ -803,7 +803,8 @@ to explain an excluded entry nor requests the selected file's body. The UI label
 these as commitments, explains unsupported preview/download declarations and the
 8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
 Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
-under that report. Text/hex preview, line links and copying remain separate viewer work.
+under that report. A capability from 1 to 3 bytes is also too small for the reader's
+minimum UTF-8 range and remains disabled.
 
 Source reads clear the previous selection before a different request can render,
 check job/run/revision/resource bindings, abort on navigation/session replacement,
@@ -817,6 +818,48 @@ obsolete reads and role/size/runtime explanations. They do not qualify actual so
 HTTP/browser navigation, keyboard/layout behavior, physical deep paths, all generated
 manifest/log/report families or D0 timing/memory/workload budgets. Those requirements
 and the original parent acceptance criteria remain open.
+
+### Bounded source preview consumer
+
+When a runtime reports at least four source-chunk bytes, a viewable input within the
+8 MiB file ceiling offers an explicit preview button. Plain metadata navigation does
+not start a body read. Direct range links use the closed document query
+`?byte=O` or `?byte=O&line=L` on the exact job/run/revision/file route. Offsets are
+canonical decimal bytes, not character indices; a linked line must match the
+server's first LF-based line at that offset. Display labels never construct paths.
+The private file-metadata endpoint still receives no query.
+
+One request reads at most the lesser of the reported limit and 64 KiB. Every read
+supplies the observed metadata version and checks job/run/revision/file, source
+commitment, file size/digest, download declaration, exact offset and returned bound.
+Foreign, changed, excessive or mismatched responses are withheld. Refresh and next
+range are explicit; no prefetch, range accumulation or implicit retry occurs.
+Selection/session changes abort and withhold late results through the existing
+callback lifetime. The server still captures/verifies the complete bounded file for
+each range; this UI does not reduce or qualify that physical work.
+
+UTF-8 is escaped plain text, including Markdown and markup-like input. Invisible
+controls, CR, BOM and bidi formatting are displayed as U+ markers, while original
+LF positions and byte offsets identify line links. Tabs remain tabs. At most 200
+line fragments or 16-byte hex rows are rendered at once, with explicit local row
+paging and counts. Binary declarations, invalid UTF-8 and excessive line length
+retain the server's named hex fallback; hex rows have byte offsets, not invented
+text lines. Empty files retain line 1; a trailing LF does not invent an extra
+zero-byte row/link beyond a nonempty file's readable offsets.
+
+The copy button sends only the currently displayed UTF-8 rows' original string to
+the clipboard: no line numbers, U+ marker substitutions or undisplayed ranges.
+Its offset/length and partial-range status are explicit. Clipboard encoding or line
+ending normalization remains possible; the complete authorized attachment is the
+byte-preserving path. Hex fallback has no text-copy action. No source is executed,
+parsed as markup, highlighted or sent to a worker; no external rendering assets
+are loaded.
+
+Pure Node DTO/string controls cover the range, identity, representation, Unicode,
+row and copy-span decisions. Actual source HTTP/browser/clipboard/focus/keyboard,
+packaged highlighting and physical D0 workload/time/memory qualification remain
+outstanding. The current zero bootstrap limit remains unchanged, so this consumer
+does not activate previews against that report.
 
 ## Legacy session migration
 
