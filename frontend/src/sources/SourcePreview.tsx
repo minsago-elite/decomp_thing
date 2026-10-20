@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { RevisionFile, SourceChunk } from '../api/generated';
 import { sourceCopy as copy } from '../copy/sources';
-import { message } from '../shared/messages';
+import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
 import type { FileSelection, SourceReadState } from './navigation';
@@ -56,7 +56,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
           {row.line === null ? <span class="source-position"><code>{row.offset}</code></span>
             : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line })}
               onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) moveFocus.current = true; }}
-              aria-label={message(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
+              aria-label={textMessage(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
           <pre dir="ltr">{row.display}</pre>
         </div>)}
       </div>
