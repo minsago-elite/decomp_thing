@@ -29,6 +29,184 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test fun `dashboard enumerates every root entry before reading and retains compact ordered rows`() {
+        val a = "a".repeat(32); val b = "b".repeat(32); val c = "c".repeat(32)
+        val events = mutableListOf<String>()
+        val names = listOf(b, "retained-layout", a, c)
+        val root = sequence { for (name in names) { events += "root-$name"; yield(name) } }
+        val budget = WebDashboardReadBudget(WebDashboardReadLimits(4, 64, 4096))
+        val first = dashboardFixtureJob(a)
+        val second = dashboardFixtureJob(b, createdAt = "2026-10-20T00:00:01Z")
+        val rows = collectWebDashboardRows(root, budget) { id ->
+            assertEquals(names.map { "root-$it" }, events.take(4))
+            events += "inspect-$id"
+            budget.read(64) { _, check -> check(); ByteArray(3) }
+            if (id == c) WebJobInspection.Unavailable(WebJobDiagnostic(c, "CORRUPT_LEGACY_JOB", "Retained record is unavailable."))
+            else {
+                budget.read(64) { _, check -> check(); ByteArray(2) }
+                val job = if (id == a) first else second
+                val snapshot = decompengine.jobs.WorkflowJobSnapshot(id, "version_fixture",
+                    decompengine.jobs.LegacyWorkflowObservation("ab".repeat(32), "uploaded", false), emptyList(), null)
+                dashboardFixtureRow(job, snapshot)
+            }
+        }
+        assertEquals(listOf("inspect-$a", "inspect-$b", "inspect-$c"), events.drop(4))
+        assertEquals(listOf(b, a), rows.jobs.map { it.id })
+        kotlin.test.assertSame(second, rows.jobs.first())
+        kotlin.test.assertSame(first, rows.jobs.last())
+        assertEquals(listOf(c), rows.unavailable.map { it.jobId })
+        assertEquals(4, budget.entries)
+        assertEquals(13L, budget.readBytes)
+        assertEquals(3, budget.retainedRows)
+    }
+
+    @Test fun `dashboard unknown-entry exhaustion and late enumeration failure cannot read a partial listing`() {
+        var inspections = 0
+        val exhausted = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        val failure = assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequenceOf("unknown-a", "unknown-b", "unknown-c"), exhausted) {
+                inspections++; error("root admission must finish before inspection")
+            }
+        }
+        assertEquals("STORE_LIMIT", failure.code)
+        assertEquals(2, exhausted.entries)
+        val original = java.io.IOException("PRIVATE enumeration details")
+        val incomplete = assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequence { yield("a".repeat(32)); throw original }, WebDashboardReadBudget()) {
+                inspections++; error("incomplete enumeration cannot inspect known rows")
+            }
+        }
+        assertEquals("JOB_STORAGE_UNAVAILABLE", incomplete.code)
+        kotlin.test.assertSame(original, incomplete.cause)
+        assertFalse(incomplete.message!!.contains("PRIVATE"))
+        assertEquals(0, inspections)
+        assertTrue(original.suppressed.isEmpty())
+    }
+
+    @Test fun `dashboard exact byte allowance and incomplete physical reads latch refusal before another read`() {
+        val bounded = WebDashboardReadBudget(WebDashboardReadLimits(2, 5, 4096))
+        val allowances = mutableListOf<Long>()
+        for (size in listOf(3, 2)) bounded.read(64) { allowance, check ->
+            allowances += allowance; check(); ByteArray(size)
+        }
+        val exhausted = assertFailsWith<WebJobServiceException> {
+            bounded.read(64) { _, _ -> error("an exhausted allowance cannot perform another physical read") }
+        }
+        assertEquals("STORE_LIMIT", exhausted.code)
+        assertEquals(listOf(5L, 2L), allowances)
+        assertEquals(5L, bounded.readBytes)
+        assertFailsWith<WebJobServiceException> { bounded.read(64) { _, _ -> error("a refused budget cannot read again") } }
+
+        val incomplete = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        val original = java.io.IOException("PRIVATE failure after physical bytes were read")
+        var inspections = 0
+        var physicalAllowance = 0L
+        val failed = assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequenceOf("a".repeat(32), "b".repeat(32)), incomplete) { id ->
+                inspections++
+                try {
+                    incomplete.read(64) { allowance, _ -> physicalAllowance += allowance; throw original }
+                } catch (_: WebJobServiceException) { /* Model the ordinary per-record diagnostic catch. */ }
+                WebJobInspection.Unavailable(WebJobDiagnostic(id, "JOB_RECORD_UNAVAILABLE", "Retained record is unavailable."))
+            }
+        }
+        assertEquals("JOB_STORAGE_UNAVAILABLE", failed.code)
+        kotlin.test.assertSame(original, failed.cause)
+        assertEquals(8L, physicalAllowance)
+        assertEquals(1, inspections)
+        assertEquals(0, incomplete.retainedRows)
+        assertTrue(original.suppressed.isEmpty())
+    }
+
+    @Test fun `dashboard charges both workflow inspection and legacy presentation before returning any rows`() {
+        val budget = WebDashboardReadBudget(WebDashboardReadLimits(2, 15, 4096))
+        var reads = 0
+        var completed = 0
+        var returned: WebDashboardRows? = null
+        val failure = assertFailsWith<WebJobServiceException> {
+            returned = collectWebDashboardRows(sequenceOf("a".repeat(32), "b".repeat(32)), budget) { id ->
+                repeat(2) {
+                    budget.read(64) { allowance, _ ->
+                        reads++
+                        if (allowance < 4) throw decompengine.repair.RepairBudgetExceededException("PRIVATE oversized metadata")
+                        ByteArray(4)
+                    }
+                }
+                completed++
+                dashboardFixtureRow(dashboardFixtureJob(id))
+            }
+        }
+        assertEquals("STORE_LIMIT", failure.code)
+        assertFalse(failure.message!!.contains("PRIVATE"))
+        assertEquals(4, reads)
+        assertEquals(1, completed)
+        assertEquals(12L, budget.readBytes)
+        assertEquals(1, budget.retainedRows)
+        assertEquals(null, returned)
+    }
+
+    @Test fun `dashboard retention accounts full UTF16 fields and refuses instead of truncating rows`() {
+        val id = "a".repeat(32)
+        val job = dashboardFixtureJob(id, statusMessage = "\ud83d\ude00".repeat(30))
+        val exact = WebDashboardReadBudget(WebDashboardReadLimits(1, 8, 234))
+        val rows = collectWebDashboardRows(sequenceOf(id), exact) { dashboardFixtureRow(job) }
+        // id32 + filename9 + status8 + two timestamps40 + message60 + path50 + ELF category strings35.
+        assertEquals(234L, exact.retainedTextUnits)
+        kotlin.test.assertSame(job, rows.jobs.single())
+        assertEquals(60, rows.jobs.single().statusMessage!!.length)
+        val short = WebDashboardReadBudget(WebDashboardReadLimits(1, 8, 233))
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequenceOf(id), short) { dashboardFixtureRow(job) }
+        }.code)
+        assertEquals(0, short.retainedRows)
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequenceOf(id), WebDashboardReadBudget(WebDashboardReadLimits(1, 8, 1))) {
+                WebJobInspection.Unavailable(WebJobDiagnostic(id, "JOB_RECORD_UNAVAILABLE", "Retained record is unavailable."))
+            }
+        }.code)
+        assertFailsWith<IllegalArgumentException> { WebDashboardReadLimits(4097) }
+        assertFailsWith<IllegalArgumentException> { WebDashboardReadLimits(maximumReadBytes = 64L * 1024 * 1024 + 1) }
+        assertFailsWith<IllegalArgumentException> { WebDashboardReadLimits(maximumRetainedTextUnits = 16L * 1024 * 1024 + 1) }
+    }
+
+    @Test fun `dashboard cancellation before or during the last read cannot return a successful collection`() {
+        val id = "a".repeat(32)
+        var cancelled = true
+        assertEquals("SERVICE_STOPPED", assertFailsWith<WebJobServiceException> {
+            collectWebDashboardRows(sequenceOf(id), WebDashboardReadBudget(cancellation = { cancelled })) {
+                error("a cancelled listing cannot inspect")
+            }
+        }.code)
+        for (duringRead in listOf(true, false)) {
+            cancelled = false
+            val budget = WebDashboardReadBudget(cancellation = { cancelled })
+            val stopped = assertFailsWith<WebJobServiceException> {
+                collectWebDashboardRows(sequenceOf(id), budget) {
+                    if (duringRead) budget.read(64) { _, _ -> cancelled = true; ByteArray(1) }
+                    cancelled = true
+                    dashboardFixtureRow(dashboardFixtureJob(id))
+                }
+            }
+            assertEquals("SERVICE_STOPPED", stopped.code)
+            assertEquals(0, budget.retainedRows)
+        }
+        Thread.currentThread().interrupt()
+        try {
+            val interrupted = assertFailsWith<WebJobServiceException> { WebDashboardReadBudget().checkpoint() }
+            assertEquals("SERVICE_STOPPED", interrupted.code)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
+    }
+
+    private fun dashboardFixtureJob(id: String, createdAt: String = "2026-10-20T00:00:00Z", statusMessage: String? = null) =
+        decompengine.jobs.Job(id, "fixed.elf", "uploaded", createdAt, statusMessage = statusMessage,
+            sizeBytes = 64, binaryPath = Path.of("fixture/$id/input.elf"),
+            metadata = decompengine.binary.ElfMetadata("ELF64", "little", 1u, "System V", "executable", "x86-64",
+                0uL, 64u, 0u, 0u, 0u))
+
+    private fun dashboardFixtureRow(job: decompengine.jobs.Job, snapshot: decompengine.jobs.WorkflowJobSnapshot? = null) =
+        WebJobInspection.Available(WebJobPresentation(job, snapshot, WebReportContext(Path.of("fixture/reports"))))
+
     @Test fun `terminal publication already admitted completes before shutdown can publish its signal`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)

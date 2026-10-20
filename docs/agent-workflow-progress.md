@@ -307,6 +307,27 @@ The ordinary per-record workflow inspection/recovery API and the separate v1 col
 their existing profiles. These bounds assume the documented participating-writer ownership contract;
 they do not attest unrelated host actors or turn partial inspection into recovery success.
 
+The legacy HTML dashboard uses its own complete read-only collection profile: every root entry counts
+toward 4096, and both workflow inspection and the later legacy presentation read charge a shared
+64 MiB metadata budget. Stable reads retain their existing descriptor, path and per-file checks;
+legacy input is capped at 256 KiB and workflow state at 8 MiB. One overflow byte may be read before
+refusal. A physical-read failure latches refusal before another record can be read, including when an
+ordinary per-record diagnostic catch runs. This bounds incomplete reads without guessing how many
+bytes a failed native reader consumed. Enumeration/read failure, exhausted limits or cancellation
+cannot return a successful partial dashboard.
+
+Fully read malformed runtime records retain their safe unavailable-job rows; the completed dashboard
+can still return HTTP 200 with those rows and its separate bounded recovery summary. Collection
+failures return fixed HTTP 503 diagnostics. Missing storage remains empty only when absence is known;
+an inspection failure is not an empty library. GET never acquires ownership, recovers or reclaims data.
+
+Only compact jobs and diagnostics survive each temporary workflow inspection. At most 4096 rows and
+16 Mi UTF-16 text units are retained, accounting for complete job strings, paths, ELF category strings
+and unavailable diagnostics. The bounded identity list is separate; full attempt histories are not
+retained across dashboard rows. This is a text/object-count bound, not an exact JVM heap measurement.
+Ordinary detail/listInspections and the distinct v1 10,000-job, five-second, 16 MiB snapshot profiles
+retain their existing behavior. Metadata reads remain cooperative and cannot preempt blocked kernel I/O.
+
 Persisted display snapshots must account for every allocated sequence through retained events or
 queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation
 markers with bounded diagnostics; counter validation avoids arithmetic overflow. Rejected history

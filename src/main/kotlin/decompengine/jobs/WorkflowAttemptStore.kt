@@ -130,6 +130,11 @@ class WorkflowAttemptStore private constructor(
 
     fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId) { directory -> inspectLocked(jobId, directory) }
 
+    /** Display-only collection inspection; ordinary detail/mutation readers retain their existing profile. */
+    internal fun inspectForListing(jobId: String, read: (String, Int) -> ByteArray): WorkflowJobInspection = withJob(jobId) { directory ->
+        inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) }
+    }
+
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
      * Lifecycle publication and close cannot interleave until the callback has returned.
      */
@@ -767,7 +772,9 @@ internal class WorkflowStartupRecoveryBudget(
     }
     fun readAllowance(perFile: Int): Long {
         checkpoint()
-        return minOf(perFile.toLong(), (limits.maximumReadBytes - readBytes).coerceAtLeast(1L))
+        val remaining = limits.maximumReadBytes - readBytes
+        if (remaining == 0L) fail("STORE_LIMIT", "Startup recovery has exhausted its aggregate metadata-read allowance.")
+        return minOf(perFile.toLong(), remaining)
     }
     fun chargeRead(bytes: Long) {
         require(bytes >= 0)

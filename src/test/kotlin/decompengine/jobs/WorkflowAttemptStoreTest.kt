@@ -41,6 +41,10 @@ class WorkflowAttemptStoreTest {
         assertEquals(16L * 1024, decompengine.acp.boundedDescriptorReadRequest(Int.MAX_VALUE, 0, 16 * 1024))
         assertFailsWith<IllegalArgumentException> { decompengine.acp.boundedDescriptorReadRequest(7, 8, 16 * 1024) }
         assertFailsWith<IllegalArgumentException> { decompengine.acp.boundedDescriptorReadRequest(7, 0, 0) }
+        val startup = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(maximumReadBytes = 4))
+        assertEquals(4L, startup.readAllowance(64))
+        startup.chargeRead(4)
+        assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> { startup.readAllowance(64) }.code)
     }
 
     @Test fun `startup reader exhaustion retains the configured limit classification`() {

@@ -60,6 +60,111 @@ internal fun selectWebLegacyCompletion(status: String, message: String, stopped:
     if (status == "complete" && stopped) "failed" to "Server stopped before the operation reported completion"
     else status to message
 
+internal data class WebDashboardRows(val jobs: List<Job>, val unavailable: List<WebJobDiagnostic>)
+
+internal data class WebDashboardReadLimits(
+    val maximumEntries: Int = 4096,
+    val maximumReadBytes: Long = 64L * 1024 * 1024,
+    val maximumRetainedTextUnits: Long = 16L * 1024 * 1024,
+) {
+    init {
+        require(maximumEntries in 1..4096)
+        require(maximumReadBytes in 1..64L * 1024 * 1024)
+        require(maximumRetainedTextUnits in 1..16L * 1024 * 1024)
+    }
+}
+
+/** Counts successful bytes; the first incomplete physical read latches refusal before any next read. */
+internal class WebDashboardReadBudget(
+    private val limits: WebDashboardReadLimits = WebDashboardReadLimits(),
+    private val cancellation: () -> Boolean = { false },
+) {
+    var entries: Int = 0; private set
+    var readBytes: Long = 0; private set
+    var retainedRows: Int = 0; private set
+    var retainedTextUnits: Long = 0; private set
+    private var failureCode: String? = null
+    private var failureCause: Exception? = null
+
+    private fun refuse(code: String, cause: Exception? = null): Nothing {
+        if (failureCode == null) { failureCode = code; failureCause = cause }
+        val selected = checkNotNull(failureCode)
+        throw WebJobServiceException(selected, when (selected) {
+            "STORE_LIMIT" -> "The complete dashboard listing exceeds its configured inspection limits."
+            "SERVICE_STOPPED" -> "The dashboard listing stopped before completing."
+            else -> "The complete dashboard listing could not be inspected. Preserve storage before retrying."
+        }, failureCause)
+    }
+    fun checkpoint() {
+        failureCode?.let { refuse(it) }
+        if (Thread.currentThread().isInterrupted || cancellation()) refuse("SERVICE_STOPPED")
+    }
+    fun entry() {
+        checkpoint()
+        if (entries >= limits.maximumEntries) refuse("STORE_LIMIT")
+        entries++
+    }
+    fun read(maximum: Int, reader: (Long, () -> Unit) -> ByteArray): ByteArray {
+        require(maximum > 0)
+        checkpoint()
+        val remaining = limits.maximumReadBytes - readBytes
+        if (remaining == 0L) refuse("STORE_LIMIT")
+        val allowance = minOf(maximum.toLong(), remaining)
+        val bytes = try { reader(allowance, ::checkpoint) } catch (failure: Exception) {
+            refuse(if (failure is decompengine.repair.RepairBudgetExceededException) "STORE_LIMIT" else "JOB_STORAGE_UNAVAILABLE", failure)
+        }
+        if (bytes.size.toLong() > allowance || bytes.size.toLong() > limits.maximumReadBytes - readBytes) refuse("STORE_LIMIT")
+        readBytes += bytes.size.toLong()
+        checkpoint()
+        return bytes
+    }
+    fun retain(textUnits: Long) {
+        checkpoint()
+        require(textUnits >= 0)
+        if (retainedRows >= limits.maximumEntries || textUnits > limits.maximumRetainedTextUnits - retainedTextUnits) refuse("STORE_LIMIT")
+        retainedRows++
+        retainedTextUnits += textUnits
+    }
+    fun incomplete(failure: Exception): Nothing = refuse("JOB_STORAGE_UNAVAILABLE", failure)
+}
+
+/** Full enumeration precedes reads; only compact rows survive each temporary workflow snapshot. */
+internal fun collectWebDashboardRows(
+    rootEntries: Sequence<String>, budget: WebDashboardReadBudget, inspect: (String) -> WebJobInspection,
+): WebDashboardRows = try {
+    budget.checkpoint()
+    val jobName = Regex("[0-9a-f]{32}")
+    val ids = ArrayList<String>()
+    for (name in rootEntries) { budget.entry(); if (jobName.matches(name)) ids += name }
+    val jobs = ArrayList<Job>()
+    val unavailable = ArrayList<WebJobDiagnostic>()
+    for (id in ids.sorted()) {
+        budget.checkpoint()
+        val row = inspect(id)
+        budget.checkpoint() // An ordinary per-record catch cannot hide an incomplete physical read.
+        when (row) {
+            is WebJobInspection.Available -> {
+                val job = row.presentation.job
+                check(job.id == id) { "Dashboard job identity changed" }
+                val metadata = job.metadata
+                budget.retain(listOf(job.id, job.filename, job.status, job.createdAt, job.updatedAt,
+                    job.statusMessage.orEmpty(), job.binaryPath.toString(), metadata.format, metadata.endianness,
+                    metadata.osAbi, metadata.objectType, metadata.machine).sumOf { it.length.toLong() })
+                jobs += job
+            }
+            is WebJobInspection.Unavailable -> {
+                val diagnostic = row.diagnostic
+                check(diagnostic.jobId == id) { "Dashboard diagnostic identity changed" }
+                budget.retain(listOf(diagnostic.jobId, diagnostic.code, diagnostic.message).sumOf { it.length.toLong() })
+                unavailable += diagnostic
+            }
+        }
+    }
+    budget.checkpoint()
+    WebDashboardRows(jobs.sortedWith(compareByDescending<Job> { it.createdAt }.thenByDescending { it.id }),
+        unavailable.sortedByDescending { it.jobId })
+} catch (failure: WebJobServiceException) { throw failure } catch (failure: Exception) { budget.incomplete(failure) }
+
 /**
  * Shared service boundary. HTTP adapters authorize before calling it. Initialization is explicit,
  * runs before requests, and recovers only an existing root; reads never acquire ownership or recover.
@@ -280,17 +385,19 @@ class WebJobService(
     }
 
     @Synchronized
-    fun inspect(jobId: String): WebJobInspection {
+    fun inspect(jobId: String): WebJobInspection = inspectJob(jobId)
+
+    private fun inspectJob(jobId: String, read: ((String, Int) -> ByteArray)? = null): WebJobInspection {
         requireInitializedRead()
         publicationFailures[jobId]?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || attempts == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
         return try {
-            val inspected = attempts?.inspect(jobId)
+            val inspected = if (read == null) attempts?.inspect(jobId) else attempts?.inspectForListing(jobId, read)
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
-            val raw = store.get(jobId)
+            val raw = if (read == null) store.get(jobId) else store.getForListing(jobId, read)
             requirePublicElfCategories(raw.metadata)
             if (snapshot != null && snapshot.attempts.isNotEmpty()) {
                 require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
@@ -316,6 +423,32 @@ class WebJobService(
         } catch (_: Exception) {
             WebJobInspection.Unavailable(publicWebDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE"))
         }
+    }
+
+    /** Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories. */
+    @Synchronized
+    internal fun dashboardRows(): WebDashboardRows {
+        requireInitializedRead()
+        val budget = WebDashboardReadBudget(cancellation = { stopping })
+        val read: (String, Int) -> ByteArray = { relative, maximum ->
+            val perFile = if (relative.endsWith("/job.json")) minOf(maximum, 256 * 1024) else maximum
+            budget.read(perFile) { allowance, check ->
+                decompengine.repair.readStableRegularFile(store.storageRoot, relative, allowance, cancellationCheck = check).bytes
+            }
+        }
+        try {
+            budget.checkpoint()
+            if (Files.notExists(store.storageRoot, NOFOLLOW_LINKS)) {
+                budget.checkpoint()
+                return WebDashboardRows(emptyList(), emptyList())
+            }
+            check(Files.isDirectory(store.storageRoot, NOFOLLOW_LINKS)) { "Dashboard storage root is unavailable" }
+            val rows = Files.newDirectoryStream(store.storageRoot).use { entries ->
+                collectWebDashboardRows(entries.asSequence().map { it.fileName.toString() }, budget) { id -> inspectJob(id, read) }
+            }
+            budget.checkpoint()
+            return rows
+        } catch (failure: WebJobServiceException) { throw failure } catch (failure: Exception) { budget.incomplete(failure) }
     }
 
     @Synchronized

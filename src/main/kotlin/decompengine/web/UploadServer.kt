@@ -711,15 +711,15 @@ class UploadServer(
     }
 
     private fun renderJobDashboard(exchange: HttpExchange) {
-        val inspections = jobs.listInspections()
+        val rows = jobs.dashboardRows()
         val recovery = try {
             jobs.recoveryInventory()
         } catch (failure: WebJobServiceException) {
             if (failure.code == "RECOVERY_INSPECTION_BUSY") null else throw failure
         }
         exchange.sendHtml(200, renderDashboardDocument(
-            inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
-            inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+            rows.jobs,
+            rows.unavailable,
             recovery,
         ))
     }
