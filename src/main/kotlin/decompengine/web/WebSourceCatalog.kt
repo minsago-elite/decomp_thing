@@ -11,6 +11,7 @@ import decompengine.repair.StableRegularFile
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.*
@@ -87,8 +88,16 @@ internal class WebSourceCatalogEvidence(
 /** Stateless flat metadata pages. No source body, full-tree JSON response or retained page cache. */
 internal class WebSourceCatalogPages(private val source: (String, String) -> WebSourceCatalogSnapshot) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
+    private val capturing = AtomicBoolean(false)
 
     fun page(owner: String, jobId: String, runId: String, rawQuery: String?): JsonObject {
+        if (!capturing.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source catalog read is in progress. Try this read again later.")
+        }
+        return try { capturedPage(owner, jobId, runId, rawQuery) } finally { capturing.set(false) }
+    }
+
+    private fun capturedPage(owner: String, jobId: String, runId: String, rawQuery: String?): JsonObject {
         if (rawQuery != null && rawQuery.split('&').any { it.substringBefore('=') !in setOf("limit", "cursor") }) {
             throw WebAccessDenied(422, "VALIDATION_FAILED", "Source catalog pages accept only limit and cursor.")
         }
@@ -108,7 +117,7 @@ internal class WebSourceCatalogPages(private val source: (String, String) -> Web
         } ?: 0
         val items = ArrayList<JsonObject>(query.limit)
         var bytes = 0
-        for (file in snapshot.files.drop(offset).take(query.limit)) {
+        for (file in snapshot.files.subList(offset, minOf(snapshot.files.size, offset + query.limit))) {
             val item = buildJsonObject {
                 put("fileId", signature(owner, jobId, runId, "file", snapshot.manifestSha256, file.path))
                 // Display text only. No request accepts this label as a path or resource identity.
@@ -142,12 +151,20 @@ internal class WebSourceCatalogPages(private val source: (String, String) -> Web
 
     private fun signature(vararg fields: Any): String {
         val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(secret, "HmacSHA256")) }
-        return mac.doFinal(fields.joinToString("\u0000").toByteArray(Charsets.UTF_8))
-            .take(16).joinToString("") { "%02x".format(it) }
+        val bytes = mac.doFinal(fields.joinToString("\u0000").toByteArray(Charsets.UTF_8))
+        return buildString(32) {
+            for (index in 0 until 16) {
+                val value = bytes[index].toInt() and 255
+                append(HEX[value ushr 4]); append(HEX[value and 15])
+            }
+        }
     }
 
     private fun invalidCursor(): Nothing = throw WebAccessDenied(400, "INVALID_CURSOR",
         "Use a source catalog cursor from this session, job, run and page size, or refresh its first page.")
 
-    companion object { private const val MAXIMUM_ITEM_BYTES = 1_000_000 }
+    companion object {
+        private const val MAXIMUM_ITEM_BYTES = 1_000_000
+        private const val HEX = "0123456789abcdef"
+    }
 }

@@ -152,4 +152,21 @@ class WebSourceCatalogTest {
             }
         }
     }
+
+    @Test fun `one catalog capture is admitted and failure always releases admission`() {
+        val snapshot = WebSourceCatalogSnapshot("a".repeat(64), listOf(file(0)))
+        lateinit var pages: WebSourceCatalogPages
+        var fail = true
+        pages = WebSourceCatalogPages { _, _ ->
+            assertEquals("SOURCE_CATALOG_BUSY", assertFailsWith<WebAccessDenied> {
+                pages.page("other", jobId, runId, null)
+            }.code)
+            if (fail) throw IllegalStateException("inert capture failure")
+            snapshot
+        }
+        assertFailsWith<IllegalStateException> { pages.page("owner", jobId, runId, null) }
+        fail = false
+        assertEquals(1, pages.page("owner", jobId, runId, null).getValue("items").jsonArray.size)
+        assertEquals(1, pages.page("owner", jobId, runId, null).getValue("items").jsonArray.size)
+    }
 }

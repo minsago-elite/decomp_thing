@@ -614,7 +614,10 @@ retained-descriptor read boundary, then rechecks their bytes, hashes and identit
 The manifest must use a host-registered profile and bind to the uploaded input.
 Metadata capture admits at most 25,000 files and a 16 MiB manifest; response items
 have a separate 1,000,000-byte ceiling within the existing 1 MiB JSON response limit.
-Capture is serialized by the service's existing read lock. There is no retained
+One catalog capture/page is admitted per controller at a time; concurrent catalog
+reads receive `429 SOURCE_CATALOG_BUSY`. Each filesystem read retains the service's
+lifecycle check and read lock, while manifest parsing runs outside the global job
+lock. Admission is released on both success and failure. There is no retained
 catalog cache, directory traversal or manifest-declared source file read. Missing,
 malformed, unregistered or oversized metadata returns a fixed unavailable response;
 changed capture or attempt identity returns a conflict without a partial page.

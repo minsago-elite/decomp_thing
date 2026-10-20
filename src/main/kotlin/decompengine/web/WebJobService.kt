@@ -268,7 +268,7 @@ class WebJobService(
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val sourceCatalogEvidence = WebSourceCatalogEvidence(defaultWebSourceProfiles(), store::readInput, store::readArtifact)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(defaultWebSourceProfiles(), ::readSourceCatalogInput, ::readArtifact)
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
@@ -636,10 +636,15 @@ class WebJobService(
         return store.readRecordedRepairHistory(jobId, selected.runId)
     }
 
-    /** Authorize an exact durable attempt; an observed manifest never supplies revision authority. */
+    /** One existing read unit under lifecycle ownership; manifest parsing never holds this monitor. */
     @Synchronized
-    internal fun readSourceCatalog(jobId: String, runId: String): WebSourceCatalogSnapshot {
+    private fun readSourceCatalogInput(jobId: String): decompengine.repair.StableRegularFile {
         requireInitializedRead()
+        return store.readInput(jobId)
+    }
+
+    /** Authorize before capture and again before returning, without locking jobs during JSON parsing. */
+    internal fun readSourceCatalog(jobId: String, runId: String): WebSourceCatalogSnapshot {
         val attempt = getAttempt(jobId, runId)
         val snapshot = try { sourceCatalogEvidence.read(jobId, attempt.runId) }
             catch (changed: WebAccessDenied) { throw changed }
