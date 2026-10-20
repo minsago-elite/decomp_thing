@@ -59,6 +59,9 @@ it('refuses worker text changes styles extra fields identities and cumulative ou
     { ...value, rows: [[{ kind: 'plain', text: 'x'.repeat(HIGHLIGHT_MAX_CHARACTERS) },
       { kind: 'plain', text: 'x'.repeat(HIGHLIGHT_MAX_CHARACTERS) }]] }];
   for (const response of invalid) expect(() => readHighlightResponse(response, rows)).toThrow();
+  // Sparse arrays must visit missing elements instead of silently skipping validation.
+  expect(() => readHighlightResponse({ ...value, rows: Array(1) }, rows)).toThrow();
+  expect(() => readHighlightResponse({ ...value, rows: [Array(1)] }, [''])).toThrow();
   const astral = ['🐈'];
   expect(() => readHighlightResponse({ type: 'source-highlighted', id: 1, mode: 'formatted', rows: [[
     { kind: 'string', text: '\ud83d' }, { kind: 'comment', text: '\udc08' },

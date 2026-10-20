@@ -149,9 +149,9 @@ export function readHighlightResponse(value: unknown, expected: readonly string[
     throw Error('Invalid highlighting response');
   }
   let total = 0; let characters = 0;
-  const rows = record.rows.map((row: unknown, index) => {
+  const rows = Array.from(record.rows, (row: unknown, index) => {
     if (!Array.isArray(row) || row.length < 1 || row.length > HIGHLIGHT_MAX_TOKENS) throw Error('Invalid highlighting response');
-    const tokens = row.map((token: unknown) => {
+    const tokens = Array.from(row, (token: unknown) => {
       if (++total > HIGHLIGHT_MAX_TOKENS || !token || typeof token !== 'object' || Array.isArray(token)) throw Error('Invalid highlighting response');
       const item = token as Record<string, unknown>;
       if (Object.keys(item).sort().join(',') !== 'kind,text' || typeof item.kind !== 'string' || !kinds.has(item.kind as HighlightKind)
