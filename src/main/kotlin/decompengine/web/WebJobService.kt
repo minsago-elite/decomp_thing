@@ -21,6 +21,8 @@ import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Legacy adapters retain their legacy provenance; they are not durable workflow registrations. */
 enum class WebWorkflow { EXPLORE, RECONSTRUCT }
@@ -46,6 +48,17 @@ internal fun <T> withWebUploadPublicationOutcome(
         "An upload may have been published. Reopen storage before admitting more work; do not retry blindly."))
     throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
 }
+
+/** Terminal publication and shutdown signalling share this fence, independently of cleanup locks. */
+internal class WebCompletionPublicationFence(private val publishShutdown: () -> Unit) {
+    private val mutex = ReentrantLock(true)
+    fun signalShutdown() = mutex.withLock { publishShutdown() }
+    fun <T> publishCompletion(publish: () -> T): T = mutex.withLock { publish() }
+}
+
+internal fun selectWebLegacyCompletion(status: String, message: String, stopped: Boolean): Pair<String, String> =
+    if (status == "complete" && stopped) "failed" to "Server stopped before the operation reported completion"
+    else status to message
 
 /**
  * Shared service boundary. HTTP adapters authorize before calling it. Initialization is explicit,
@@ -98,6 +111,7 @@ class WebJobService(
     @Volatile private var initialized = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
+    private val completionPublication = WebCompletionPublicationFence { stopping = true }
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
     private var retentionCycleActive = false
@@ -169,10 +183,10 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
-    /** Monotonic admission signal, published without acquiring the service or executor monitor. */
-    internal fun signalShutdown() { stopping = true }
+    /** Serialize with terminal publication before acquiring the service, executor or listener cleanup locks. */
+    internal fun signalShutdown() = completionPublication.signalShutdown()
 
-    @Synchronized fun beginShutdown() { stopping = true; retentionWorker?.stop() }
+    @Synchronized fun beginShutdown() { completionPublication.signalShutdown(); retentionWorker?.stop() }
 
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
     internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() && retentionWorker?.isIdle != false }
@@ -749,7 +763,7 @@ class WebJobService(
         var problem: Throwable? = null
         val running = synchronized(this) {
             if (closed) return
-            stopping = true
+            completionPublication.signalShutdown()
             closed = true
             retentionWorker?.stop()
             ownedExecutor?.shutdownNow()
@@ -828,11 +842,12 @@ class WebJobService(
             } finally { synchronized(this@WebJobService) { release() } }
         }
         override fun stopPending() = finish("failed", "Server stopped before the operation started")
-        fun finish(status: String, message: String) {
-            if (terminal || active[jobId] !== this) return
+        fun finish(status: String, message: String) = completionPublication.publishCompletion<Unit> {
+            if (terminal || active[jobId] !== this) return@publishCompletion
             terminal = true
             val restoreInterrupt = Thread.interrupted()
-            try { store.updateStatus(jobId, status, message) }
+            val selected = selectWebLegacyCompletion(status, message, closed || stopping || restoreInterrupt)
+            try { store.updateStatus(jobId, selected.first, selected.second) }
             finally {
                 if (restoreInterrupt) Thread.currentThread().interrupt()
                 if (!started) release()
@@ -875,9 +890,9 @@ class WebJobService(
             } finally { synchronized(this@WebJobService) { release() } }
         }
         override fun stopPending() = finish(interrupted())
-        fun finish(transition: WorkflowTransition.Finish) {
+        fun finish(transition: WorkflowTransition.Finish) = completionPublication.publishCompletion<Unit> {
             publicationFailure?.let { throw it }
-            if (terminal || active[jobId] !== this) return
+            if (terminal || active[jobId] !== this) return@publishCompletion
             // A cooperative worker can return with its interrupt flag set. Decide the outcome first,
             // then clear that flag only around the bounded atomic metadata operation and restore it.
             val restoreInterrupt = Thread.interrupted()

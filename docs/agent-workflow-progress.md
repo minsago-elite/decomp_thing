@@ -270,6 +270,11 @@ facts do not authorize execution or qualify provider effectiveness, cleanup or r
 
 Web shutdown publishes the job service's volatile admission signal before the server stop flag,
 so queued callbacks observe shutdown even when cleanup is waiting for the service monitor.
+Terminal decisions and their complete metadata publication share a separate fence with that signal.
+A terminal publication already admitted to the fence finishes before shutdown publishes the signal;
+if shutdown wins, legacy completion becomes failed and durable completion becomes interrupted.
+This fence never acquires the service or listener cleanup locks while signalling. Waiting for an
+already admitted filesystem publication does not preempt a blocked kernel operation or prove cleanup.
 Both stop entry points share this signal phase; retention-worker teardown and resource ownership
 still use their existing locked cleanup checks. Owned workers receive one shutdown interruption; the service preserves its job-root lease until
 workers actually exit. Final legacy status writes clear and restore the interrupt flag
@@ -288,7 +293,9 @@ Under the exclusive root lease and workflow-store write transaction, startup now
 entry (maximum 4096), charges actual legacy and workflow metadata reads (64 MiB aggregate, with a
 one-byte overflow probe), and freezes at most 64 MiB of encoded replacement state before recovery
 changes begin. Legacy records retain the 256 KiB startup input profile; each workflow record retains
-its 8 MiB parser/persistence bound. Only encoded replacement bytes and bounded identities survive the
+its 8 MiB parser/persistence bound. Stable-reader budget exhaustion retains the `STORE_LIMIT`
+classification; inspection failures keep their distinct incomplete-recovery diagnosis.
+Only encoded replacement bytes and bounded identities survive the
 planning phase, not a collection of full parsed job snapshots. Directory durability and stage cleanup
 follow complete validation. Historical `job.json` is not rewritten, accepted revisions and terminal
 attempts are retained, and no analysis is replayed. Cancellation or failure after the mutating phase

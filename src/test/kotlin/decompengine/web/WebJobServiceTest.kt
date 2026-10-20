@@ -29,6 +29,82 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test fun `terminal publication already admitted completes before shutdown can publish its signal`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val attempted = CountDownLatch(1)
+        val committed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val stopping = java.util.concurrent.atomic.AtomicBoolean(false)
+        val fence = WebCompletionPublicationFence {
+            assertTrue(committed.get(), "a shutdown signal cannot overtake an admitted terminal publication")
+            stopping.set(true)
+        }
+        val publication = java.util.concurrent.FutureTask {
+            fence.publishCompletion {
+                assertFalse(stopping.get())
+                entered.countDown()
+                check(release.await(45, TimeUnit.SECONDS))
+                assertFalse(stopping.get())
+                committed.set(true)
+            }
+        }
+        val shutdown = java.util.concurrent.FutureTask { attempted.countDown(); fence.signalShutdown() }
+        val publisher = Thread(publication, "pure-terminal-publication-fence").apply { isDaemon = true }
+        val stopper = Thread(shutdown, "pure-terminal-shutdown-fence").apply { isDaemon = true }
+        try {
+            publisher.start()
+            assertTrue(entered.await(15, TimeUnit.SECONDS))
+            stopper.start()
+            assertTrue(attempted.await(15, TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+            val blockedStates = setOf(Thread.State.BLOCKED, Thread.State.WAITING)
+            while (stopper.state !in blockedStates &&
+                stopper.isAlive && System.nanoTime() < deadline) Thread.yield()
+            assertTrue(stopper.state in blockedStates)
+            assertFalse(stopping.get())
+            assertFalse(shutdown.isDone)
+            release.countDown()
+            publication.get(15, TimeUnit.SECONDS)
+            shutdown.get(15, TimeUnit.SECONDS)
+            assertTrue(committed.get())
+            assertTrue(stopping.get())
+        } finally {
+            release.countDown()
+            publisher.join(5000)
+            stopper.join(5000)
+        }
+        assertFalse(publisher.isAlive)
+        assertFalse(stopper.isAlive)
+    }
+
+    @Test fun `shutdown first makes the fenced legacy terminal decision fail without changing prior failures`() {
+        var stopping = false
+        var writes = 0
+        val fence = WebCompletionPublicationFence { stopping = true }
+        fence.signalShutdown()
+        val selected = fence.publishCompletion {
+            selectWebLegacyCompletion("complete", "authored completion", stopping).also { writes++ }
+        }
+        assertEquals("failed" to "Server stopped before the operation reported completion", selected)
+        assertEquals("failed" to "authored failure", selectWebLegacyCompletion("failed", "authored failure", true))
+        assertEquals("complete" to "authored completion", selectWebLegacyCompletion("complete", "authored completion", false))
+        assertEquals(1, writes)
+    }
+
+    @Test fun `terminal publication failure releases its fence without mutating retained failure graphs`() {
+        var signalled = false
+        val fence = WebCompletionPublicationFence { signalled = true }
+        val original = IllegalStateException("authored terminal publication failure").apply {
+            addSuppressed(IllegalArgumentException("retained diagnostic"))
+        }
+        val retained = original.suppressed
+        val failure = assertFailsWith<IllegalStateException> { fence.publishCompletion { throw original } }
+        kotlin.test.assertSame(original, failure)
+        kotlin.test.assertContentEquals(retained, original.suppressed)
+        fence.signalShutdown()
+        assertTrue(signalled)
+    }
+
     @Test fun `startup hook precedes construction and normal shutdown reaches the published owner`() {
         val events = mutableListOf<String>()
         val owner = Any()
