@@ -776,6 +776,39 @@ from captured-byte controls. General viewer qualification, all-manifest/log/repo
 families, local highlighting and full D0 physical budgets remain open. Bootstrap
 source chunk advertising remains zero pending those gates.
 
+### Explicit source download digest observation
+
+Successful source `content` GET/HEAD responses now include
+`X-Decomp-Content-Verification: committed-digest`, `X-Decomp-Source-SHA256`,
+`X-Decomp-Metadata-Version`, `X-Decomp-File-ID` and `X-Decomp-Content-SHA256`. These headers describe
+the same captured file that already passed complete size/digest and repeated
+identity/metadata checks. The existing ARCHIVE_PAYLOAD authorization and 8 MiB
+ceiling apply. No compiler, behavior or archive verifier is invoked by this read.
+
+For a downloadable recorded input, the file detail page offers an explicit
+digest check through the existing private attachment HEAD route. The normal
+session transport enforces its existing deadline and cancellation, performs one
+request without retries, and reads no response body. Only status 200, a bodyless
+response, octet-stream/nosniff headers, exact byte length and matching source,
+metadata and file digests can produce the transient matching-byte observation.
+Unknown, missing, changed or combined integrity header values fail closed.
+Bodyless HEAD denials carry `X-Decomp-Session-Error` only for status 401 with
+the exact `SESSION_REQUIRED` or `SESSION_EXPIRED` codes. The client accepts this
+signal only with a valid request identity, JSON/nosniff error headers and no body,
+and preserves it for the existing generation-bound session invalidation observer.
+Other statuses or missing, combined and unknown error codes grant no session signal.
+Navigation, metadata refresh and session removal discard the observation and
+cancel its read. Metadata reads still report `contentVerification: not-performed`;
+they do not start this check. The actual source-chunk bootstrap permission stays
+zero. A matching file digest is separate from compilation, behavioral validation,
+archive verification and accepted reconstruction. The general snapshot artifact
+catalog and its full family/verification requirements remain outstanding.
+
+The new controls use only captured byte arrays, synthetic identities, DTOs and
+injected string lookups. Actual source HTTP/browser qualification and physical
+D0 time/memory/workload evidence remain unproved; no new actual context trial is
+introduced by those controls.
+
 ## SPA recorded source navigation
 
 The attempt page links a recorded result revision to

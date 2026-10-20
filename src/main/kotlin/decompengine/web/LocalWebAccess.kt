@@ -302,6 +302,9 @@ class LocalWebAccess(
     }
 
     internal fun deniedHeaders(exchange: HttpExchange, failure: WebAccessDenied) {
+        headWebSessionErrorCode(exchange.requestMethod, failure.status, failure.code)?.let {
+            exchange.responseHeaders.set("X-Decomp-Session-Error", it)
+        }
         if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
         if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
         if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")

@@ -201,6 +201,7 @@ internal class WebApiController(
                         exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
                         exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
                         exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                        content.verifiedDownloadHeaders().forEach { (name, value) -> exchange.responseHeaders.set(name, value) }
                         try {
                             if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
                             else {
