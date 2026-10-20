@@ -140,6 +140,30 @@ def check_directory(data: dict) -> None:
         raise ValueError("directory parent identity is inconsistent")
 
 
+def check_source_chunk(data: dict) -> None:
+    size, offset, length = int(data["sizeBytes"]), int(data["offsetBytes"]), int(data["lengthBytes"])
+    end = offset + length
+    if size > 8388608 or length > 131072 or end > size or not ((offset == 0 and length == 0) if size == 0 else (offset < size and length > 0)):
+        raise ValueError("source chunk byte range exceeds its limits")
+    if data["completeFile"] != (offset == 0 and end == size):
+        raise ValueError("source chunk completeness is inconsistent")
+    if not ((data["nextOffsetBytes"] is not None and int(data["nextOffsetBytes"]) == end) if end < size else data["nextOffsetBytes"] is None):
+        raise ValueError("source chunk continuation is inconsistent")
+    if data["representation"] == "hex":
+        if data["fallbackReason"] is None or any(data[key] is not None for key in ("firstLine", "startsMidLine", "endsMidLine")):
+            raise ValueError("hex fallback must not invent text line positions")
+        if re.fullmatch(r"[0-9a-f]*", data["text"]) is None or len(data["text"]) != 2 * length:
+            raise ValueError("hex fallback byte length is inconsistent")
+    else:
+        if len(data["text"].encode("utf-8")) != length or data["fallbackReason"] is not None or any(data[key] is None for key in ("firstLine", "startsMidLine", "endsMidLine")):
+            raise ValueError("UTF-8 source byte length or line metadata is inconsistent")
+        first = int(data["firstLine"])
+        if first < 1 or first > offset + 1 or (offset == 0 and (first != 1 or data["startsMidLine"])) or (offset > 0 and first == 1 and not data["startsMidLine"]):
+            raise ValueError("UTF-8 source start line is inconsistent")
+        if data["endsMidLine"] != (end < size and not data["text"].endswith("\n")):
+            raise ValueError("UTF-8 source end line is inconsistent")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -168,6 +192,8 @@ def check_semantics(document: dict) -> None:
         check_source_page(data, data["metadataVersion"])
     elif kind == "revisionDirectory":
         check_directory(data)
+    elif kind == "sourceChunk":
+        check_source_chunk(data)
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:

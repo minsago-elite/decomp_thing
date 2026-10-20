@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -62,6 +62,28 @@ function checkDirectory(directory: RevisionDirectory): void {
     && directory.parentDirectoryId === breadcrumbs.at(-2)?.directoryId);
 }
 
+function checkSourceChunk(data: SourceChunk): void {
+  const size = BigInt(data.sizeBytes), offset = BigInt(data.offsetBytes), length = BigInt(data.lengthBytes);
+  const end = offset + length;
+  requireValue(size <= 8388608n && length <= 131072n && end <= size
+    && (size === 0n ? offset === 0n && length === 0n : offset < size && length > 0n));
+  requireValue(data.completeFile === (offset === 0n && end === size));
+  requireValue(end < size ? data.nextOffsetBytes !== null && BigInt(data.nextOffsetBytes) === end : data.nextOffsetBytes === null);
+  if (data.representation === 'hex') {
+    requireValue(data.fallbackReason !== null && data.firstLine === null && data.startsMidLine === null && data.endsMidLine === null);
+    requireValue(/^[0-9a-f]*$/u.test(data.text) && BigInt(data.text.length) === 2n * length);
+  } else {
+    const encoded = new TextEncoder().encode(data.text);
+    requireValue(BigInt(encoded.length) === length
+      && new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(encoded) === data.text);
+    requireValue(data.fallbackReason === null && data.firstLine !== null && data.startsMidLine !== null && data.endsMidLine !== null);
+    if (data.firstLine !== null) requireValue(BigInt(data.firstLine) >= 1n && BigInt(data.firstLine) <= offset + 1n
+      && (offset !== 0n || data.firstLine === '1') && (offset === 0n || data.firstLine !== '1' || data.startsMidLine === true));
+    if (offset === 0n) requireValue(data.startsMidLine === false);
+    requireValue(data.endsMidLine === (end < size && !data.text.endsWith('\n')));
+  }
+}
+
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
@@ -107,6 +129,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     }
     case 'revisionDirectory':
       checkDirectory(document.data);
+      break;
+    case 'sourceChunk':
+      checkSourceChunk(document.data);
       break;
     case 'recovery': {
       const inventory = document.data;

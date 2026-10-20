@@ -552,6 +552,66 @@
     {
       "file": "fixtures/revision-directory-unicode-order.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-utf8-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-complete-BOM-CRLF.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-hex.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-mid-line.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-length.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-next-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-completeness.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-hex-lines.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-fallback.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-first-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-end-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-oversize.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-surrogate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-numeric-offset.json",
+      "valid": false
     }
   ]
 }

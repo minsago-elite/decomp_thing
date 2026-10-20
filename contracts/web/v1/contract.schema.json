@@ -3296,6 +3296,146 @@
         "page"
       ],
       "additionalProperties": false
+    },
+    "sourceChunk": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sizeBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lengthBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "nextOffsetBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completeFile": {
+          "type": "boolean"
+        },
+        "downloadAvailable": {
+          "type": "boolean"
+        },
+        "representation": {
+          "enum": [
+            "utf8",
+            "hex"
+          ]
+        },
+        "fallbackReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "declared-binary",
+                "invalid-utf8",
+                "line-too-long"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "lineConvention": {
+          "const": "LF"
+        },
+        "firstLine": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startsMidLine": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endsMidLine": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "fileId",
+        "sourceSha256",
+        "metadataVersion",
+        "sha256",
+        "sizeBytes",
+        "offsetBytes",
+        "lengthBytes",
+        "nextOffsetBytes",
+        "completeFile",
+        "downloadAvailable",
+        "representation",
+        "fallbackReason",
+        "text",
+        "lineConvention",
+        "firstLine",
+        "startsMidLine",
+        "endsMidLine"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -3912,6 +4052,30 @@
         },
         "data": {
           "$ref": "#/definitions/revisionDirectory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceChunk"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceChunk"
         }
       },
       "required": [

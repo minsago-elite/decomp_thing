@@ -30,7 +30,7 @@ internal class WebSourceCatalogSnapshot(val manifestSha256: String, files: List<
     companion object { const val MAXIMUM_FILES = 25_000 }
 }
 
-/** Uses the existing retained-descriptor reader. It never opens a manifest-declared source path. */
+/** Shared bounded capture; file bodies are read only for an explicitly selected committed input. */
 internal class WebSourceCatalogEvidence(
     profiles: List<ReconstructionProfile>,
     private val readInput: (String) -> StableRegularFile,
@@ -46,14 +46,33 @@ internal class WebSourceCatalogEvidence(
     }
 
     fun readRevision(reference: WebRevisionSourceReference): WebRevisionSourceSnapshot = capture(reference.jobId, reference.runId) { manifest, captured ->
+        revision(reference, manifest, captured) { it }
+    }
+
+    fun readFile(reference: WebRevisionSourceReference, fileId: String, purpose: WebSourceReadPurpose,
+        expectedMetadataVersion: String?, readSource: (String, String, String, Long) -> StableRegularFile): WebRevisionSourceContent =
+        capture(reference.jobId, reference.runId) { manifest, captured ->
+            revision(reference, manifest, captured) { snapshot ->
+                if (expectedMetadataVersion != null && expectedMetadataVersion != snapshot.metadataVersion) expiredSourceMetadata()
+                val file = selectRevisionSourceFile(snapshot, fileId, purpose)
+                val content = WebRevisionSourceContent(snapshot, fileId, file,
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
+                content.requireSame(readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
+                content
+            }
+        }
+
+    private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
+        captured: StableRegularFile, project: (WebRevisionSourceSnapshot) -> T): T {
         val path = "reports/runs/${reference.runId}/source-tree/reports/build_contract.json"
         val descriptor = readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)
         require(descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
         val document = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
             ?: throw IllegalArgumentException("Source input descriptor is invalid.")
-        val result = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
+        val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
+        val result = project(snapshot)
         requireSame(descriptor, readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES))
-        result
+        return result
     }
 
     private fun <T> capture(jobId: String, runId: String,
