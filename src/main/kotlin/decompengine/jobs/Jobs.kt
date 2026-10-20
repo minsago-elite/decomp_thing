@@ -293,6 +293,19 @@ class JobStore internal constructor(
         }
     }
 
+    /** Exact selected source namespace, using the same pinned-descriptor containment primitive. */
+    internal fun readSourceInput(jobId: String, runId: String, sourcePath: String, maximumBytes: Long): StableRegularFile {
+        jobDirectory(jobId)
+        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
+        decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
+        require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
+        return try {
+            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
+        } catch (_: IOException) {
+            throw JobStoreException("source input is unavailable or its path changed")
+        }
+    }
+
     internal fun sourceArchiveInventory(
         jobId: String,
         layout: ArchiveTransportLayout,

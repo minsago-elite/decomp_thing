@@ -39,6 +39,7 @@ internal class WebApiController(
     private val progressPages = WebProgressPages()
     private val sourceCatalogPages = WebSourceCatalogPages(jobs::readSourceCatalog)
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
+    private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock)
@@ -48,7 +49,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/source-catalog|/revisions/[^/]+/sources|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+/(?:chunk|content))|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -167,6 +168,46 @@ internal class WebApiController(
                             })
                         })
                     } else sendWebApiResponse(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery, "${prefix}jobs/${parts[1]}/runs/${parts[3]}/snapshot"))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+/(?:chunk|content)")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Source reads use explicit chunk offsets and do not support Range or conditional headers.")
+                    }
+                    val parts = resource.split('/')
+                    if (parts[8] == "chunk") {
+                        requireJsonAccept(exchange)
+                        val query = WebSourceChunkQuery.parse(exchange.requestURI.rawQuery)
+                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
+                        sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
+                    } else {
+                        requireNoWebApiQuery(exchange)
+                        if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                            throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                        }
+                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD)
+                        val bytes = content.download()
+                        val name = java.net.URLEncoder.encode(content.downloadName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
+                        webApiHeaders(exchange, UUID.randomUUID().toString())
+                        exchange.responseHeaders.set("Content-Type", "application/octet-stream")
+                        exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
+                        exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
+                        exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                        try {
+                            if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+                            else {
+                                exchange.sendResponseHeaders(200, bytes.size.toLong())
+                                exchange.responseBody.use { it.write(bytes) }
+                            }
+                        } finally { exchange.close() }
+                    }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
+                        parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))

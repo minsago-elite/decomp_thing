@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, Run } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -26,6 +26,62 @@ function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: str
   requireValue(page.nextCursor === null || (items.length > 0 && items.length < totalFiles));
   requireValue(items.every(item => item.displayName.split('/').every(part =>
     part.trim().length > 0 && part !== '.' && part !== '..' && part.length <= 255)));
+}
+
+function isDirectoryLabel(label: string | null): boolean {
+  // Match the host's Kotlin Char.isWhitespace set; JS trim also removes U+FEFF.
+  return label !== null && /[^\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(label)
+    && label !== '.' && label !== '..';
+}
+
+function checkDirectory(directory: RevisionDirectory): void {
+  const { items, page, metadataVersion, sourceFileCount, totalChildren, breadcrumbs, depth, directoryId } = directory;
+  requireValue(page.snapshotVersion === metadataVersion && items.length <= page.limit
+    && items.length <= totalChildren && totalChildren <= sourceFileCount);
+  requireValue(page.nextCursor === null || items.length < totalChildren);
+  const identities = items.map(item => item.kind === 'file' ? item.fileId : item.directoryId);
+  requireValue(new Set(identities).size === items.length
+    && new Set(items.map(item => item.displayName)).size === items.length);
+  let count = 0;
+  for (const [index, item] of items.entries()) {
+    requireValue(isDirectoryLabel(item.displayName));
+    count += item.kind === 'file' ? 1 : item.sourceFileCount;
+    if (item.kind === 'directory') requireValue(!breadcrumbs.some(crumb => crumb.directoryId === item.directoryId));
+    const previous = items[index - 1];
+    if (previous) requireValue((previous.kind === 'directory' && item.kind === 'file')
+      || (previous.kind === item.kind && previous.displayName < item.displayName));
+  }
+  requireValue(count <= sourceFileCount && (items.length !== totalChildren || count === sourceFileCount));
+  requireValue(breadcrumbs.length === 1 + Math.min(depth, 31) && directory.omittedAncestors === Math.max(0, depth - 31));
+  requireValue(breadcrumbs[0]?.directoryId === 'root' && breadcrumbs[0]?.displayName === null);
+  requireValue(new Set(breadcrumbs.map(crumb => crumb.directoryId)).size === breadcrumbs.length);
+  requireValue(breadcrumbs.at(-1)?.directoryId === directoryId && breadcrumbs.at(-1)?.displayName === directory.displayName);
+  requireValue(breadcrumbs.slice(1).every(crumb => isDirectoryLabel(crumb.displayName)));
+  if (depth === 0) requireValue(directoryId === 'root' && directory.parentDirectoryId === null && directory.displayName === null);
+  else requireValue(directoryId !== 'root' && directory.displayName !== null
+    && directory.parentDirectoryId === breadcrumbs.at(-2)?.directoryId);
+}
+
+function checkSourceChunk(data: SourceChunk): void {
+  const size = BigInt(data.sizeBytes), offset = BigInt(data.offsetBytes), length = BigInt(data.lengthBytes);
+  const end = offset + length;
+  requireValue(size <= 8388608n && length <= 131072n && end <= size
+    && (size === 0n ? offset === 0n && length === 0n : offset < size && length > 0n));
+  requireValue(data.completeFile === (offset === 0n && end === size));
+  requireValue(end < size ? data.nextOffsetBytes !== null && BigInt(data.nextOffsetBytes) === end : data.nextOffsetBytes === null);
+  if (data.representation === 'hex') {
+    requireValue(data.fallbackReason !== null && data.firstLine === null && data.startsMidLine === null && data.endsMidLine === null);
+    requireValue(/^[0-9a-f]*$/u.test(data.text) && BigInt(data.text.length) === 2n * length);
+  } else {
+    const encoded = new TextEncoder().encode(data.text);
+    requireValue(BigInt(encoded.length) === length
+      && new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(encoded) === data.text);
+    requireValue(data.fallbackReason === null && data.firstLine !== null && data.startsMidLine !== null && data.endsMidLine !== null);
+    if (data.firstLine !== null) requireValue(BigInt(data.firstLine) >= 1n && BigInt(data.firstLine) <= offset + 1n
+      && (offset !== 0n || data.firstLine === '1') && (offset === 0n || data.firstLine !== '1' || data.startsMidLine === true));
+    if (offset === 0n) requireValue(data.startsMidLine === false);
+    requireValue(data.endsMidLine === (end < size && !data.text.endsWith('\n')));
+  }
 }
 
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
@@ -71,6 +127,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       checkSourcePage(items, totalFiles, page, metadataVersion);
       break;
     }
+    case 'revisionDirectory':
+      checkDirectory(document.data);
+      break;
+    case 'sourceChunk':
+      checkSourceChunk(document.data);
+      break;
     case 'recovery': {
       const inventory = document.data;
       const candidates = inventory.retainedUploadStages + inventory.retainedMetadataFiles;

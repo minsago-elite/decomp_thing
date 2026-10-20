@@ -94,6 +94,76 @@ def check_source_page(data: dict, version: str) -> None:
         raise ValueError("source display label is not a portable relative name")
 
 
+def check_directory(data: dict) -> None:
+    def label_ok(label):
+        # Match Kotlin Char.isWhitespace; Python strip additionally removes U+0085.
+        return label is not None and re.search(r"[^\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]", label) is not None and label not in (".", "..")
+
+    items, page, total = data["items"], data["page"], data["totalChildren"]
+    count = data["sourceFileCount"]
+    if page["snapshotVersion"] != data["metadataVersion"] or len(items) > page["limit"] or not len(items) <= total <= count:
+        raise ValueError("directory page identity or bounds are inconsistent")
+    if page["nextCursor"] is not None and len(items) >= total:
+        raise ValueError("a complete directory page cannot continue")
+    identities = [item["fileId"] if item["kind"] == "file" else item["directoryId"] for item in items]
+    if len(set(identities)) != len(items) or len({item["displayName"] for item in items}) != len(items):
+        raise ValueError("directory children must have unique identities and names")
+    crumbs, depth = data["breadcrumbs"], data["depth"]
+    child_count = 0
+    for index, item in enumerate(items):
+        label = item["displayName"]
+        if not label_ok(label):
+            raise ValueError("invalid directory child label")
+        child_count += 1 if item["kind"] == "file" else item["sourceFileCount"]
+        if item["kind"] == "directory" and any(crumb["directoryId"] == item["directoryId"] for crumb in crumbs):
+            raise ValueError("directory child cannot be an ancestor")
+        if index:
+            previous = items[index - 1]
+            # Kotlin and JavaScript compare UTF-16 code units, including astral labels.
+            if not ((previous["kind"] == "directory" and item["kind"] == "file") or
+                    (previous["kind"] == item["kind"] and previous["displayName"].encode("utf-16-be", "surrogatepass") < label.encode("utf-16-be", "surrogatepass"))):
+                raise ValueError("directory children are out of order")
+    if child_count > count or (len(items) == total and child_count != count):
+        raise ValueError("directory descendant commitments are inconsistent")
+    if len(crumbs) != 1 + min(depth, 31) or data["omittedAncestors"] != max(0, depth - 31):
+        raise ValueError("directory breadcrumb bounds are inconsistent")
+    if crumbs[0] != {"directoryId": "root", "displayName": None} or len({c["directoryId"] for c in crumbs}) != len(crumbs):
+        raise ValueError("directory breadcrumb root or identity is inconsistent")
+    if crumbs[-1] != {"directoryId": data["directoryId"], "displayName": data["displayName"]}:
+        raise ValueError("directory breadcrumb does not identify this directory")
+    if any(not label_ok(c["displayName"]) for c in crumbs[1:]):
+        raise ValueError("invalid directory breadcrumb label")
+    if depth == 0:
+        if data["directoryId"] != "root" or data["parentDirectoryId"] is not None or data["displayName"] is not None:
+            raise ValueError("directory root identity is inconsistent")
+    elif data["directoryId"] == "root" or data["displayName"] is None or data["parentDirectoryId"] != crumbs[-2]["directoryId"]:
+        raise ValueError("directory parent identity is inconsistent")
+
+
+def check_source_chunk(data: dict) -> None:
+    size, offset, length = int(data["sizeBytes"]), int(data["offsetBytes"]), int(data["lengthBytes"])
+    end = offset + length
+    if size > 8388608 or length > 131072 or end > size or not ((offset == 0 and length == 0) if size == 0 else (offset < size and length > 0)):
+        raise ValueError("source chunk byte range exceeds its limits")
+    if data["completeFile"] != (offset == 0 and end == size):
+        raise ValueError("source chunk completeness is inconsistent")
+    if not ((data["nextOffsetBytes"] is not None and int(data["nextOffsetBytes"]) == end) if end < size else data["nextOffsetBytes"] is None):
+        raise ValueError("source chunk continuation is inconsistent")
+    if data["representation"] == "hex":
+        if data["fallbackReason"] is None or any(data[key] is not None for key in ("firstLine", "startsMidLine", "endsMidLine")):
+            raise ValueError("hex fallback must not invent text line positions")
+        if re.fullmatch(r"[0-9a-f]*", data["text"]) is None or len(data["text"]) != 2 * length:
+            raise ValueError("hex fallback byte length is inconsistent")
+    else:
+        if len(data["text"].encode("utf-8")) != length or data["fallbackReason"] is not None or any(data[key] is None for key in ("firstLine", "startsMidLine", "endsMidLine")):
+            raise ValueError("UTF-8 source byte length or line metadata is inconsistent")
+        first = int(data["firstLine"])
+        if first < 1 or first > offset + 1 or (offset == 0 and (first != 1 or data["startsMidLine"])) or (offset > 0 and first == 1 and not data["startsMidLine"]):
+            raise ValueError("UTF-8 source start line is inconsistent")
+        if data["endsMidLine"] != (end < size and not data["text"].endswith("\n")):
+            raise ValueError("UTF-8 source end line is inconsistent")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -120,6 +190,10 @@ def check_semantics(document: dict) -> None:
         check_source_page(data, data["manifestSha256"])
     elif kind == "revisionSources":
         check_source_page(data, data["metadataVersion"])
+    elif kind == "revisionDirectory":
+        check_directory(data)
+    elif kind == "sourceChunk":
+        check_source_chunk(data)
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:

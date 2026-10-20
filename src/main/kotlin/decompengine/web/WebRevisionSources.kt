@@ -113,8 +113,12 @@ private fun revisionSourceHex(bytes: ByteArray, length: Int = bytes.size): Strin
     }
 }
 
-private fun revisionSourceDigest(text: String): String = revisionSourceHex(
+internal fun revisionSourceDigest(text: String): String = revisionSourceHex(
     MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)))
+
+internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: Int, path: String): String =
+    "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,
+        reference.revisionId, reference.sourceSha256, path).joinToString("\u0000"))}"
 
 /** Bounded pages over the canonical input set of one actual persisted candidate. */
 internal class WebRevisionSourcePages(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {
@@ -146,8 +150,7 @@ internal class WebRevisionSourcePages(private val source: (String, String, Strin
             val file = snapshot.files[index]
             val entry = file.evidence
             // Stable across sessions/restarts. Authentication remains separate; the index is never a path selector.
-            val fileId = "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", jobId, runId,
-                revisionId, ref.sourceSha256, entry.path).joinToString("\u0000"))}"
+            val fileId = revisionSourceFileId(ref, index, entry.path)
             val item = buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path)
                 put("sizeBytes", file.sizeBytes.toString()); put("sha256", entry.sha256)

@@ -158,6 +158,9 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
@@ -437,6 +440,8 @@ sanitized derivatives have separate identity, digest and provenance.
 | Source file provenance/digest/module acceptance | `SourceTree.kt: GeneratedFileEvidence`/module checkpoints, project `source_tree_manifest.json` and exact registered source snapshot; #165 obtains byte sizes from that snapshot. Manifest is a compatibility projection after canonical repair publication, see [revision authority](repair-revision-graph.md) |
 | `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
 | `revisionSources.*` | Actual selected `WorkflowAttempt.candidate` plus schema-3 build-contract source inputs, cross-checked against the host-profile-validated manifest and canonical build/repair digest preimage. Sizes are exact descriptor commitments; source bodies and acceptance are not verified by this listing |
+| `revisionDirectory.*` | Immediate-child grouping of those same canonical input commitments. Counts describe recorded input files; empty physical directories are not recorded, and directory IDs are opaque selectors within the selected candidate |
+| `sourceChunk.*` | Captured input bytes match the selected candidate's canonical path/size/digest commitment and configured host declaration. Range and line fields describe those exact bytes; compiler results, graph acceptance and release authority remain separate |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
 | Bootstrap capability/harness descriptors | `selectWebReconstructionStrategy`, `AcpHarnessProvenance` safe fields; #166 performs real readiness checks. The selection report explicitly does not prove execution |
@@ -679,11 +684,95 @@ reference. Missing registration returns 404; inconsistent capture returns 409; m
 malformed, unsupported or oversized metadata has a fixed unavailable response.
 
 This endpoint lists only the canonical build input set. The observed catalog above
-continues to describe other manifest entries. Text/chunk reads, complete downloads,
-directory navigation, file routes and UI/HTTP/performance qualification remain open;
+continues to describe other manifest entries. Reads outside that committed input set,
+UI/HTTP/performance qualification and accepted publication remain open;
 bootstrap source chunk advertising stays zero. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
+
+### Lazy canonical input directories
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-directories/root` returns a
+`revisionDirectory` envelope through the same private read and metadata capture boundaries.
+Only `limit` and `cursor` are accepted, with the same default 50, maximum 200 and
+sub-MiB response ceiling. Each page groups immediate children of the selected prefix;
+directories sort first, then files, each in UTF-16 label order. Selecting a directory
+does not recursively fetch its children. Counts include only canonical input files.
+`emptyDirectories: "not-recorded"` explicitly describes the file-only inventory;
+an unknown directory returns `SOURCE_DIRECTORY_NOT_FOUND`, without asserting physical
+absence. File/directory prefix collisions return a source revision conflict.
+
+Directory IDs bind the job, run, revision, source commitment and canonical prefix.
+They remain stable across sessions and listener restarts for that input set. File IDs
+are identical to those in the flat revision source listing. Display labels are single
+components and never become path selectors. A continuation also binds its directory
+and page size; session mismatch is invalid, and changed metadata expires it explicitly.
+
+The root has a null display label and parent. Other directories include a parent ID,
+depth and breadcrumbs. Breadcrumbs retain the root and at most the last 31 components;
+`omittedAncestors` counts intervening components. Parent IDs retain the complete
+upward navigation chain even when breadcrumbs are shortened. Shared consumers reject
+inconsistent ancestry, counts, duplicate identities, ordering and continuation bounds.
+Pure captured-DTO controls cover 25,000 wide directories, deep Unicode/space paths,
+stable IDs and cursor isolation. These controls do not qualify physical source reads,
+HTTP/browser navigation, empty directory support, timing, memory or the full D0 workload.
+
+### Bounded canonical input source reads
+
+The `source-files/F/chunk` and `source-files/F/content` routes bind `F` to the same
+opaque file ID returned by the revision input and directory listings. The private
+GET/HEAD policy applies before capture. A display label or client path never selects
+the source file. Preview requires the configured `VIEWABLE` role; complete download
+requires `ARCHIVE_PAYLOAD`. Missing permission returns a fixed representation refusal.
+These declarations are checked independently of a file's name or extension.
+
+The reader holds the shared source capture admission through metadata and body reads.
+It selects only the exact job/run `source-tree` namespace, using the existing pinned
+regular-file descriptor reader and its ancestry/identity revalidation. Source project
+paths use the host's normalized grammar, including deep paths; the generic report
+artifact reader retains its separate limits. At most 8 MiB is captured for one input.
+The byte count and actual SHA-256 must match the selected commitment. A second body
+capture must match bytes and identity, followed by descriptor, manifest, input and
+persisted candidate/version rechecks. No path, stream or mutable cached source body
+is handed to a later request. Missing/unreadable data has an unavailable response;
+changed observed data returns a conflict. This is captured-byte verification, not an
+immutable archival registry or accepted graph publication.
+
+Chunk queries accept canonical decimal `offset` (default 0), `maxBytes` (default
+65,536; 4–131,072) and optional `metadataVersion`. Unknown/repeated keys are rejected
+before capture. A changed requested metadata version expires explicitly. A UTF-8
+offset must be at a character boundary; out-of-file or split-character offsets return
+416. The emitted end is shortened when necessary to preserve a complete character.
+Empty files have one empty complete representation; nonempty files reject an EOF-only
+range. `offsetBytes`, `lengthBytes`, `sizeBytes` and `nextOffsetBytes` are exact decimal
+strings. `completeFile` is true only for a response containing the entire original file.
+Clients must retain the binding, file/source digests and metadata version when joining
+ranges; a final range alone is not a complete-file copy.
+
+Declared UTF-8 is validated without retaining a decoded whole-file string. Valid text
+with lines at most 256 KiB before LF is returned unchanged as `representation: "utf8"`.
+The line byte ceiling includes a CR before LF. CRLF, BOM, Unicode and markup-like text
+are preserved. `firstLine` counts LF bytes before the offset plus one; `startsMidLine`
+and `endsMidLine` explicitly describe partial lines, with EOF ending the final line.
+This JSON text grants no HTML/Markdown execution or remote highlighting authority.
+Declared binary content, malformed UTF-8 and overlong lines select `hex`, with a fixed
+fallback reason and two lowercase digits per original byte. Text line fields are null
+for hex. Both representations keep the response below 1 MiB and expose the complete
+byte range and continuation explicitly. Shared consumers reject inconsistent byte
+lengths, completeness, continuations and line metadata, including malformed surrogates.
+
+The `content` route accepts no query and returns the complete verified bytes as a
+no-store, nosniff `application/octet-stream` attachment. The ASCII fallback filename
+and encoded UTF-8 basename cannot insert header syntax; the response also carries a
+sandbox/default-deny CSP. HEAD verifies the same captured file and returns its length
+without a body. Range and conditional HTTP headers are explicitly unsupported on both
+routes; bounded JSON offsets provide the chunk operation.
+
+Each chunk currently verifies a complete bounded file before returning its range.
+No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
+from captured-byte controls. The general viewer, all-manifest/log/report families,
+direct UI line links, copying UX, local highlighting and full D0 physical budgets
+remain open. Bootstrap source chunk advertising remains zero pending those gates.
 
 ## Legacy session migration
 

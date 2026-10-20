@@ -504,6 +504,114 @@
     {
       "file": "fixtures/invalid-revision-sources-authority.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-child-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-descendant-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-omitted-ancestors.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-path-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/revision-directory-deep.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-unicode-order.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-utf8-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-complete-BOM-CRLF.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-hex.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-chunk-mid-line.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-length.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-next-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-completeness.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-hex-lines.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-fallback.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-first-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-end-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-oversize.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-surrogate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-chunk-numeric-offset.json",
+      "valid": false
     }
   ]
 }

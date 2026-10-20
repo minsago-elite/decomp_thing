@@ -677,6 +677,27 @@ class WebJobService(
         return snapshot
     }
 
+    /** Source body capture shares metadata admission and rechecks the actual persisted candidate. */
+    internal fun readRevisionSourceFile(jobId: String, runId: String, revisionId: String, fileId: String,
+        purpose: WebSourceReadPurpose, expectedMetadataVersion: String? = null): WebRevisionSourceContent {
+        revisionSourceFileIndex(fileId) // Reject malformed selectors before metadata or source IO.
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val content = try { sourceCatalogEvidence.readFile(reference, fileId, purpose, expectedMetadataVersion, ::readSourceInput) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (_: Exception) {
+                throw WebAccessDenied(503, "SOURCE_FILE_UNAVAILABLE", "The selected source file is unavailable or cannot be captured within its limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return content
+    }
+
+    @Synchronized
+    private fun readSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
+        requireInitializedRead()
+        getAttempt(jobId, runId)
+        return store.readSourceInput(jobId, runId, path, maximumBytes)
+    }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {
