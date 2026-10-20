@@ -5,6 +5,8 @@ import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpHarnessSelection
 import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
+import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpMountEventWitness
 import decompengine.acp.AuthenticationPreviewFragments
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
@@ -294,6 +296,8 @@ class Doctor(
                 append("; ")
                 append(safeDetails)
             }
+            append("; ")
+            append(acpDoctorFailureContext(execution))
             append(". Verify the configured agent's stable-v1 support, required capabilities, and sandbox cleanup.")
         }
     }
@@ -480,6 +484,43 @@ private class HttpConnectivityProbe(
         return "authenticated GET /models succeeded with HTTP ${response.statusCode()}"
     }
 }
+
+/** Already-captured, failure-only scalars. Missing records never mean successful cleanup or process absence. */
+internal fun acpDoctorFailureContext(failure: AgentExecutionException): String = try {
+    val evidence = failure.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+    val diagnostics = evidence?.diagnostics
+    val pending = java.util.ArrayDeque<Throwable>()
+    val seen = ArrayList<Throwable>(8)
+    var mountRecord: String? = null
+    pending.add(failure)
+    failure.receipt?.failureCause?.let { pending.add(it) }
+    while (pending.isNotEmpty() && seen.size < 8) {
+        val current = pending.removeFirst()
+        if (seen.any { it === current }) continue
+        seen.add(current)
+        val record = (current as? AcpMountEventWitness)?.diagnosticRecord
+        if (record != null && record.length <= 512 && DOCTOR_MOUNT_WITNESS.matches(record)) {
+            mountRecord = record
+            break
+        }
+        current.cause?.let { if (pending.size < 16) pending.add(it) }
+        current.suppressed.asSequence().take(2).forEach { if (pending.size < 16) pending.add(it) }
+    }
+    ("recordedPhase=${evidence?.phaseReached?.name ?: "MISSING"} " +
+        "recordedCleanup=${evidence?.cleanupDisposition?.name ?: "MISSING"} " +
+        "recordedDiagnostics=${if (diagnostics == null) "MISSING" else "PRESENT"} " +
+        "recordedRemainingProcessCount=${diagnostics?.remainingProcessIds?.size ?: "MISSING"} " +
+        "recordedOutputOverflow=${diagnostics?.outputLimitExceeded ?: "MISSING"} " +
+        "mountEventRecord=${mountRecord ?: "MISSING"}").take(1024)
+} catch (_: Throwable) {
+    "recordedContext=UNAVAILABLE"
+}
+
+private val DOCTOR_MOUNT_WITNESS = Regex(
+    "mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+        "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+        "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})",
+)
 
 private fun String.firstLineOr(fallback: String): String = lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: fallback
 

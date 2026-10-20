@@ -1,5 +1,16 @@
 package decompengine.doctor
 
+import decompengine.acp.AcpExecutionCleanupDisposition
+import decompengine.acp.AcpExecutionEvidenceCompleteness
+import decompengine.acp.AcpExecutionLifecyclePhase
+import decompengine.acp.AcpInvocationEvidenceSnapshot
+import decompengine.acp.AcpProcessDiagnostics
+import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentExecutionOutcome
+import decompengine.agent.AgentExecutionReceipt
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentFailure
+import decompengine.agent.AgentFailureKind
 import java.net.URI
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -10,6 +21,70 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DoctorTest {
+    @Test
+    fun `ACP failure context reports an owned witness while withholding unknown receipt and private cause text`() {
+        val cause = java.io.IOException("PRIVATE message /PRIVATE/path").apply {
+            addSuppressed(fixedMountWitness())
+            addSuppressed(IllegalStateException("PRIVATE suppressed"))
+        }
+        val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure",
+            details = mapOf("PRIVATE-key" to "PRIVATE-value")), cause)
+        val context = acpDoctorFailureContext(failure)
+        assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context, context)
+        assertTrue("recordedDiagnostics=MISSING recordedRemainingProcessCount=MISSING" in context, context)
+        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context, context)
+        assertFalse("PRIVATE" in context || "/" in context, context)
+        assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
+    }
+
+    @Test
+    fun `ACP failure context uses the invocation receipt without exposing process ids stderr or peer text`() {
+        val failure = AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure")
+        val diagnostics = AcpProcessDiagnostics(123456789L, null, "PRIVATE stderr", false, 0, 100, false,
+            true, true, listOf(234567891L, 345678912L), "PRIVATE containment", false, false)
+        val evidence = AcpInvocationEvidenceSnapshot(null, AcpExecutionLifecyclePhase.SANDBOX_LAUNCH,
+            AcpExecutionCleanupDisposition.UNVERIFIED, null, null, diagnostics, emptyList(), emptyList(),
+            emptyList(), null, AcpExecutionEvidenceCompleteness(false, false, false), null)
+        val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(1, "a".repeat(64), "b".repeat(64)),
+            AgentExecutionOutcome.Failed(failure), evidence, fixedMountWitness())
+        val context = acpDoctorFailureContext(AgentExecutionException(failure, receipt = receipt))
+        assertTrue("recordedPhase=SANDBOX_LAUNCH recordedCleanup=UNVERIFIED" in context, context)
+        assertTrue("recordedDiagnostics=PRESENT recordedRemainingProcessCount=2 recordedOutputOverflow=false" in context, context)
+        assertTrue("mountEventRecord=mount-event-v1" in context, context)
+        assertFalse(listOf("PRIVATE", "123456789", "234567891", "345678912").any { it in context }, context)
+    }
+
+    @Test
+    fun `ACP failure context bounds cycles depth and suppression and rejects forged witness text`() {
+        val first = java.io.IOException("PRIVATE first")
+        val second = IllegalStateException("PRIVATE second")
+        first.initCause(second); second.initCause(first)
+        first.addSuppressed(Throwable(fixedMountWitness().message))
+        fun context(cause: Throwable) = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), cause))
+        val cycle = context(first)
+        assertTrue("mountEventRecord=MISSING" in cycle, cycle)
+        assertFalse("PRIVATE" in cycle || "mount-event-v1" in cycle, cycle)
+        var deep: Throwable = fixedMountWitness()
+        repeat(9) { deep = IllegalStateException("PRIVATE wrapper", deep) }
+        assertTrue("mountEventRecord=MISSING" in context(deep))
+        val suppressed = java.io.IOException("PRIVATE primary").apply {
+            addSuppressed(Throwable("PRIVATE one")); addSuppressed(Throwable("PRIVATE two"))
+            addSuppressed(fixedMountWitness())
+        }
+        assertTrue("mountEventRecord=MISSING" in context(suppressed))
+    }
+
+    private fun fixedMountWitness(): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null) as Throwable
+    }
+
     @Test
     fun `doctor report diagnostics snapshot supplied secrets and mask fields before projection`() {
         val fragmentSecret = "0123456789abcdefghijklmnopqrstuv"
