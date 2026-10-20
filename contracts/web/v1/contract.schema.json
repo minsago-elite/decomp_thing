@@ -3514,6 +3514,15 @@
         "parentDirectoryId": {
           "$ref": "#/definitions/id"
         },
+        "implementationDeclaration": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "unaccepted",
+            "not-classified"
+          ],
+          "description": "Recorded manifest claim only; not content verification or accepted-revision authority."
+        },
         "item": {
           "$ref": "#/definitions/revisionFileDetail"
         },

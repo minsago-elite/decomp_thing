@@ -10,7 +10,7 @@ const selected = { jobId: 'a'.repeat(32), runId: 'run_1', revisionId: 'revision_
 function observed(text = 'int main() { return 0; }\r\n'): { metadata: RevisionFile; chunk: SourceChunk } {
   const size = String(new TextEncoder().encode(text).length);
   const metadata: RevisionFile = { binding: { jobId: selected.jobId, runId: selected.runId, revisionId: selected.revisionId },
-    authority: 'source-input-commitments', contentVerification: 'not-performed', sourceSha256: 'c'.repeat(64), metadataVersion: 'd'.repeat(64), parentDirectoryId: 'root',
+    authority: 'source-input-commitments', contentVerification: 'not-performed', implementationDeclaration: 'not-classified', sourceSha256: 'c'.repeat(64), metadataVersion: 'd'.repeat(64), parentDirectoryId: 'root',
     item: { fileId: selected.fileId, displayName: 'src/é space.c', sizeBytes: size, sha256: 'e'.repeat(64), declaredUtf8Text: true, declaredViewable: true, declaredArchivable: true } };
   const chunk: SourceChunk = { binding: { ...metadata.binding }, fileId: selected.fileId, sourceSha256: metadata.sourceSha256,
     metadataVersion: metadata.metadataVersion, sha256: metadata.item.sha256, sizeBytes: size, offsetBytes: '0', lengthBytes: size,

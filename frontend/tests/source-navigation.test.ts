@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import type { RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
+import { decodeContract, decodeResponse } from '../src/api/decode';
 import { sourceDirectoryPath, sourceFilePath, sourceReadRoute } from '../src/app/paths';
 import { sourceCopy as copy } from '../src/copy/sources';
 import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage } from '../src/sources/navigation';
@@ -70,6 +71,42 @@ it('keeps direct file metadata tied to the exact requested file and full revisio
   const state: SourceReadState<RevisionFile> = { key: 'old', state: 'ready', value: dto };
   expect(currentSourceRead(state, 'old')).toBe(state);
   expect(currentSourceRead(state, 'new')).toEqual({ key: 'new', state: 'loading' });
+});
+
+it('retains explicit implementation declarations without promoting them to content verification or read permission', () => {
+  const dto = file();
+  const policy = sourceFilePolicy(dto.item, '0');
+  for (const declaration of ['accepted', 'unaccepted', 'not-classified'] as const) {
+    const document = { apiVersion: 1, kind: 'revisionFile', requestId: 'request_revision_file_1',
+      data: { ...dto, implementationDeclaration: declaration } };
+    const decoded = decodeResponse(JSON.stringify(document), 'revisionFile').data;
+    expect(decoded.implementationDeclaration).toBe(declaration);
+    expect(decoded.authority).toBe('source-input-commitments');
+    expect(decoded.contentVerification).toBe('not-performed');
+    expect(bindFile(decoded, { ...selected, fileId: dto.item.fileId })).toBe(decoded);
+    expect(sourceFilePolicy(decoded.item, '0')).toEqual(policy);
+  }
+});
+
+it('keeps legacy v1 file metadata readable with an unclassified display when the declaration is absent', () => {
+  const legacy = file(); delete legacy.implementationDeclaration;
+  const document = JSON.stringify({ apiVersion: 1, kind: 'revisionFile', requestId: 'request_revision_file_1', data: legacy });
+  const decoded = decodeResponse(document, 'revisionFile').data;
+  expect(decoded.implementationDeclaration).toBeUndefined();
+  expect(copy.implementationDeclarations[decoded.implementationDeclaration ?? 'not-classified'])
+    .toBe(copy.implementationDeclarations['not-classified']);
+  expect(bindFile(decoded, { ...selected, fileId: legacy.item.fileId })).toBe(decoded);
+  expect(sourceFilePolicy(decoded.item, '0')).toEqual(sourceFilePolicy(legacy.item, '0'));
+  expect(decodeContract(document, { mode: 'producer' }).kind).toBe('revisionFile');
+});
+
+it('rejects unknown or non-text implementation declarations in producer and response documents', () => {
+  for (const declaration of [null, true, 0, '', 'verified', 'accepted-revision']) {
+    const document = JSON.stringify({ apiVersion: 1, kind: 'revisionFile', requestId: 'request_revision_file_1',
+      data: { ...file(), implementationDeclaration: declaration } });
+    expect(() => decodeResponse(document, 'revisionFile')).toThrow(ApiClientError);
+    expect(() => decodeContract(document, { mode: 'producer' })).toThrow(ApiClientError);
+  }
 });
 
 it('cancels obsolete reads even when a callback ignores cancellation and resolves after its replacement', async () => {

@@ -47,6 +47,16 @@ describe('generated v1 contract pipeline', () => {
         validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64), compilation: value } } } };
       expect(() => decodeContract(JSON.stringify(document), { mode })).toThrow(ApiClientError);
     }
+    for (const validation of [
+      { authority: 'verified-validation', checkpointSha256: 'f'.repeat(64), compilation },
+      { authority: 'reported-module-validation', checkpointSha256: 'PRIVATE-CHECKPOINT', compilation },
+      { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64),
+        compilation: { ...compilation, outcome: 'failed', returnCode: 1 } },
+    ]) {
+      const document = { ...original, data: { ...original.data, implementationDeclaration: 'accepted',
+        recordedModule: { ...recorded, validation } } };
+      expect(() => decodeResponse(JSON.stringify(document), 'revisionFile')).toThrow(ApiClientError);
+    }
     for (const returnCode of [-2147483648, 2147483647, null]) {
       const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
         validation: { authority: 'reported-module-validation', checkpointSha256: 'f'.repeat(64),

@@ -148,6 +148,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
           requireValue(compilation.sourceSha256 === recorded.implementationSha256);
           requireValue(compilation.outcome !== 'passed' || compilation.returnCode === 0);
           requireValue(compilation.outcome !== 'failed-to-start' || compilation.returnCode === null);
+          requireValue(document.data.implementationDeclaration !== 'accepted' || compilation.outcome === 'passed');
         }
       }
       break;
