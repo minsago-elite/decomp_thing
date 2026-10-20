@@ -137,6 +137,13 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { item, parentDirectoryId } = document.data;
       requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));
       requireValue((parentDirectoryId === 'root') === !item.displayName.includes('/'));
+      const recorded = document.data.recordedModule;
+      if (recorded) {
+        requireValue(item.declaredUtf8Text && recorded.implementationSha256 === item.sha256);
+        const used = recorded.promptCharacters; const maximum = recorded.promptBudgetCharacters;
+        requireValue((used === null) === (maximum === null));
+        if (used !== null && maximum !== null) requireValue(BigInt(maximum) > 0n && BigInt(used) <= BigInt(maximum));
+      }
       break;
     }
     case 'recovery': {
