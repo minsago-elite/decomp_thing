@@ -49,6 +49,35 @@ internal class WebSourceCatalogEvidence(
         revision(reference, manifest, captured) { it }
     }
 
+    /** Selected metadata only; the source body, private checkpoints and execution receipts are never read. */
+    fun readFileMetadata(reference: WebRevisionSourceReference, fileId: String): WebRevisionFileMetadataSnapshot {
+        revisionSourceFileIndex(fileId)
+        return capture(reference.jobId, reference.runId) { manifest, captured ->
+            revision(reference, manifest, captured) { snapshot ->
+                val selected = resolveRevisionSourceFile(snapshot, fileId)
+                val profile = profiles.getValue(manifest.profileId to manifest.profileSha256)
+                val files = WebRecordedModuleProvenance.evidenceFiles(profile, manifest, selected)
+                val recorded = files?.let { declarations ->
+                    fun read(entry: GeneratedFileEvidence): StableRegularFile {
+                        val path = "reports/runs/${reference.runId}/source-tree/${entry.path}"
+                        val record = readArtifact(reference.jobId, path, WebRecordedModuleProvenance.MAXIMUM_BYTES.toLong())
+                        val detached = record.copy(bytes = record.bytes.copyOf())
+                        require(detached.bytes.size <= WebRecordedModuleProvenance.MAXIMUM_BYTES)
+                        if (detached.sha256 != entry.sha256 || WebExplorationArtifact.sha256(detached.bytes) != entry.sha256) revisionSourceChanged()
+                        return detached
+                    }
+                    val plan = read(declarations.plan)
+                    val generation = read(declarations.generation)
+                    val result = WebRecordedModuleProvenance.project(profile, manifest, selected, plan.bytes, generation.bytes)
+                    requireSame(plan, read(declarations.plan))
+                    requireSame(generation, read(declarations.generation))
+                    result
+                }
+                WebRevisionFileMetadataSnapshot(snapshot, recorded)
+            }
+        }
+    }
+
     fun readFile(reference: WebRevisionSourceReference, fileId: String, purpose: WebSourceReadPurpose,
         expectedMetadataVersion: String?, readSource: (String, String, String, Long) -> StableRegularFile): WebRevisionSourceContent =
         capture(reference.jobId, reference.runId) { manifest, captured ->

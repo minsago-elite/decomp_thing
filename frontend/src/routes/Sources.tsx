@@ -123,6 +123,17 @@ function File({ selected, basePath, runtime, search }: { selected: FileSelection
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
       </dl>
+      {data.recordedModule ? <section aria-label={copy.moduleGeneration}>
+        <h3>{copy.moduleGeneration}</h3>
+        <p>{copy.moduleGenerationNotice}</p>
+        <dl class="job-facts">
+          <dt>{copy.module}</dt><dd><bdi>{data.recordedModule.moduleId}</bdi></dd>
+          <dt>{copy.promptCharacters}</dt><dd>{data.recordedModule.promptCharacters ?? copy.notReported}</dd>
+          <dt>{copy.promptBudget}</dt><dd>{data.recordedModule.promptBudgetCharacters ?? copy.notReported}</dd>
+          <dt>{copy.planDigest}</dt><dd><code>{data.recordedModule.planSha256}</code></dd>
+          <dt>{copy.generationDigest}</dt><dd><code>{data.recordedModule.generationEvidenceSha256}</code></dd>
+        </dl>
+      </section> : <p>{copy.moduleUnavailable}</p>}
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && (previewOpened || search !== ''

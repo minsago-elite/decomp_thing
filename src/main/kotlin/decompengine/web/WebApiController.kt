@@ -40,7 +40,7 @@ internal class WebApiController(
     private val sourceCatalogPages = WebSourceCatalogPages(jobs::readSourceCatalog)
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
-    private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionSources)
+    private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock)

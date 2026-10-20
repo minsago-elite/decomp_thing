@@ -677,6 +677,21 @@ class WebJobService(
         return snapshot
     }
 
+    /** Generation declarations use the same current-candidate and bounded metadata capture boundary. */
+    internal fun readRevisionFileMetadata(jobId: String, runId: String, revisionId: String,
+        fileId: String): WebRevisionFileMetadataSnapshot {
+        revisionSourceFileIndex(fileId)
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val captured = try { sourceCatalogEvidence.readFileMetadata(reference, fileId) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "The revision metadata is unavailable or exceeds its limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return captured
+    }
+
     /** Source body capture shares metadata admission and rechecks the actual persisted candidate. */
     internal fun readRevisionSourceFile(jobId: String, runId: String, revisionId: String, fileId: String,
         purpose: WebSourceReadPurpose, expectedMetadataVersion: String? = null): WebRevisionSourceContent {
