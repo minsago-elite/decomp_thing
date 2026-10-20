@@ -3549,6 +3549,9 @@ class AcpAgentHarnessTest {
         failure: AgentExecutionException? = null,
         events: Collection<AgentExecutionEvent> = emptyList(),
     ) {
+        // Keep every assertion and process observation below unchanged; enrich only its message.
+        @Suppress("NAME_SHADOWING")
+        val context = if (failure == null) context else safeCleanupFailureContext(context, failure)
         val invocation = failure?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
         if (failure != null) {
             assertNotNull(invocation, "$context invocation evidence")

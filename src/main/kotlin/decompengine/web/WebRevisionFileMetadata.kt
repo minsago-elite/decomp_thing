@@ -5,10 +5,16 @@ import decompengine.project.ProjectFileRole
 import kotlinx.serialization.json.*
 
 /** One recorded input declaration. This operation never requests the selected file's body. */
-internal class WebRevisionFileMetadata(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {
+internal class WebRevisionFileMetadata(
+    private val source: (String, String, String, String) -> WebRevisionFileMetadataSnapshot,
+) {
+    constructor(source: (String, String, String) -> WebRevisionSourceSnapshot) :
+        this({ job, run, revision, _ -> WebRevisionFileMetadataSnapshot(source(job, run, revision), null) })
+
     fun read(jobId: String, runId: String, revisionId: String, fileId: String): JsonObject {
         revisionSourceFileIndex(fileId)
-        val snapshot = source(jobId, runId, revisionId)
+        val captured = source(jobId, runId, revisionId, fileId)
+        val snapshot = captured.source
         val ref = snapshot.reference
         check(ref.jobId == jobId && ref.runId == runId && ref.revisionId == revisionId)
         val file = resolveRevisionSourceFile(snapshot, fileId)
@@ -25,6 +31,7 @@ internal class WebRevisionFileMetadata(private val source: (String, String, Stri
                 false -> "unaccepted"
                 null -> "not-classified"
             })
+            put("recordedModule", captured.recordedModule ?: JsonNull)
             put("item", buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path); put("sizeBytes", file.sizeBytes.toString())
                 put("sha256", entry.sha256); put("declaredUtf8Text", entry.contentKind == ProjectContentKind.UTF8_TEXT)

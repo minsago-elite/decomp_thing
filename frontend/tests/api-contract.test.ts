@@ -12,6 +12,38 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('keeps older file metadata readable and projects only admitted reported-generation fields', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    expect(decodeContract(JSON.stringify(original), { mode: 'producer' })).toEqual(original);
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: '7', promptBudgetCharacters: '10' };
+    for (const value of [null, recorded, { ...recorded, promptCharacters: null, promptBudgetCharacters: null }]) {
+      const document = { ...original, data: { ...original.data, recordedModule: value } };
+      expect(decodeContract(JSON.stringify(document), { mode: 'producer' })).toEqual(document);
+      expect(decodeResponse(JSON.stringify(document), 'revisionFile')).toEqual(document);
+    }
+    const document = { ...original, data: { ...original.data, recordedModule: { ...recorded,
+      rawGenerator: 'PRIVATE-PROVENANCE', checkpointPath: '/PRIVATE-CHECKPOINT', prompt: 'PRIVATE-PROMPT' } } };
+    const projected = decodeResponse(JSON.stringify(document), 'revisionFile');
+    expect(projected.data.recordedModule).toEqual(recorded);
+    expect(JSON.stringify(projected)).not.toContain('PRIVATE');
+    expect(() => decodeContract(JSON.stringify(document), { mode: 'producer' })).toThrow(ApiClientError);
+  });
+  it('refuses reported module digest drift contradictory counts and invented execution authority', () => {
+    const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
+    const recorded = { authority: 'reported-generation', moduleId: 'module_1', implementationSha256: original.data.item.sha256,
+      planSha256: 'c'.repeat(64), generationEvidenceSha256: 'd'.repeat(64), promptCharacters: '7', promptBudgetCharacters: '10' };
+    const invalid = [{ ...recorded, implementationSha256: 'a'.repeat(64) }, { ...recorded, authority: 'verified-execution' },
+      { ...recorded, moduleId: '../private' }, { ...recorded, promptCharacters: null }, { ...recorded, promptBudgetCharacters: null },
+      { ...recorded, promptBudgetCharacters: '0' }, { ...recorded, promptCharacters: '11' },
+      { ...recorded, promptCharacters: 7 }, { ...recorded, promptCharacters: '07' }];
+    for (const value of invalid) for (const mode of ['producer', 'response'] as const) {
+      expect(() => decodeContract(JSON.stringify({ ...original, data: { ...original.data, recordedModule: value } }), { mode }))
+        .toThrow(ApiClientError);
+    }
+    expect(() => decodeResponse(JSON.stringify({ ...original, data: { ...original.data,
+      item: { ...original.data.item, declaredUtf8Text: false }, recordedModule: recorded } }), 'revisionFile')).toThrow(ApiClientError);
+  });
   it('rejects contradictory lifecycle reasons in single runs, history and snapshots', () => {
     const single = decodeResponse(fixture('run-completed-unaccepted'), 'run');
     const page = decodeResponse(fixture('runs-page'), 'runs');
