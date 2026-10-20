@@ -194,6 +194,13 @@ def check_semantics(document: dict) -> None:
         check_directory(data)
     elif kind == "sourceChunk":
         check_source_chunk(data)
+    elif kind == "revisionFile":
+        path = data["item"]["displayName"]
+        for part in path.split("/"):
+            if part in (".", "..") or len(part.encode("utf-16-le", "surrogatepass")) // 2 > 255 or re.search(r"[^\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]", part) is None:
+                raise ValueError("invalid recorded source path component")
+        if (data["parentDirectoryId"] == "root") != ("/" not in path):
+            raise ValueError("recorded source parent is inconsistent")
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:

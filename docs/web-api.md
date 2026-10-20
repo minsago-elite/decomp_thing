@@ -159,6 +159,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
@@ -441,6 +442,7 @@ sanitized derivatives have separate identity, digest and provenance.
 | `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
 | `revisionSources.*` | Actual selected `WorkflowAttempt.candidate` plus schema-3 build-contract source inputs, cross-checked against the host-profile-validated manifest and canonical build/repair digest preimage. Sizes are exact descriptor commitments; source bodies and acceptance are not verified by this listing |
 | `revisionDirectory.*` | Immediate-child grouping of those same canonical input commitments. Counts describe recorded input files; empty physical directories are not recorded, and directory IDs are opaque selectors within the selected candidate |
+| `revisionFile.*` | One exact committed input declaration and server-derived parent selector. `contentVerification: "not-performed"` explicitly excludes selected-file body verification by this metadata read |
 | `sourceChunk.*` | Captured input bytes match the selected candidate's canonical path/size/digest commitment and configured host declaration. Range and line fields describe those exact bytes; compiler results, graph acceptance and release authority remain separate |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
@@ -773,6 +775,48 @@ No timing, RSS, physical deep-path or actual HTTP/browser qualification is infer
 from captured-byte controls. The general viewer, all-manifest/log/report families,
 direct UI line links, copying UX, local highlighting and full D0 physical budgets
 remain open. Bootstrap source chunk advertising remains zero pending those gates.
+
+## SPA recorded source navigation
+
+The attempt page links a recorded result revision to
+`jobs/J/runs/R/revisions/V/sources/root`. Directory links retain that exact selection
+and an opaque directory ID; file links use
+`jobs/J/runs/R/revisions/V/source-files/F`. The embedded shell admits these exact
+GET/HEAD document routes and keeps its existing trailing-slash redirect policy.
+The source API still verifies an actual retained candidate; a displayed result
+reference alone does not establish source availability or accepted publication.
+
+Each directory view requests one 50-entry metadata page. Expanding a directory or
+opening the next page is explicit navigation; no recursive walk, body request or
+download runs in the background. A continuation lives in the documented `cursor`
+query so back/forward can restore the page within its valid session/snapshot.
+Changed/expired continuations require first-page refresh. The rendered list contains
+only the selected page, with an explicit count and next-page state. Breadcrumbs use
+server selectors and show omitted ancestors; parent navigation retains the complete
+chain. All display labels are escaped text with bidi isolation, separate from URLs.
+
+Direct file links read `revisionFile` metadata through the same private bounded
+transport. That endpoint accepts no query, resolves the opaque file ID, and returns
+the recorded relative label, exact size/digest, host encoding/view/archive flags,
+binding, metadata version and opaque parent ID. It neither requires body permissions
+to explain an excluded entry nor requests the selected file's body. The UI labels
+these as commitments, explains unsupported preview/download declarations and the
+8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
+Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
+under that report. Text/hex preview, line links and copying remain separate viewer work.
+
+Source reads clear the previous selection before a different request can render,
+check job/run/revision/resource bindings, abort on navigation/session replacement,
+and withhold late callback results even if cancellation is ignored. Directory
+continuations also retain the observed source/metadata identity across loaded pages.
+Failures use fixed recovery copy plus a canonical reference ID, never raw diagnostics.
+Authenticated state owns the views; expiry or logout removes their private metadata.
+
+Pure DTO/path/callback controls cover these bindings, page bounds, opaque URLs,
+obsolete reads and role/size/runtime explanations. They do not qualify actual source
+HTTP/browser navigation, keyboard/layout behavior, physical deep paths, all generated
+manifest/log/report families or D0 timing/memory/workload budgets. Those requirements
+and the original parent acceptance criteria remain open.
 
 ## Legacy session migration
 

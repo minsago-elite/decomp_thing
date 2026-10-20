@@ -13,11 +13,16 @@ internal fun revisionSourceFileIndex(fileId: String): Int {
     return match.groupValues[1].toInt().also { if (it >= WebSourceCatalogSnapshot.MAXIMUM_FILES) sourceFileNotFound() }
 }
 
-internal fun selectRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileId: String,
-    purpose: WebSourceReadPurpose): WebRevisionSourceFile {
+internal fun resolveRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileId: String): WebRevisionSourceFile {
     val index = revisionSourceFileIndex(fileId)
     val file = snapshot.files.getOrNull(index) ?: sourceFileNotFound()
     if (!MessageDigest.isEqual(revisionSourceFileId(snapshot.reference, index, file.evidence.path).toByteArray(), fileId.toByteArray())) sourceFileNotFound()
+    return file
+}
+
+internal fun selectRevisionSourceFile(snapshot: WebRevisionSourceSnapshot, fileId: String,
+    purpose: WebSourceReadPurpose): WebRevisionSourceFile {
+    val file = resolveRevisionSourceFile(snapshot, fileId)
     val role = if (purpose == WebSourceReadPurpose.PREVIEW) ProjectFileRole.VIEWABLE else ProjectFileRole.ARCHIVE_PAYLOAD
     if (role !in file.evidence.roles) throw WebAccessDenied(403, "SOURCE_REPRESENTATION_UNAVAILABLE",
         "The configured source declaration does not permit this representation.")

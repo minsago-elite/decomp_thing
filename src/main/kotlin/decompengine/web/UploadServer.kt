@@ -53,6 +53,19 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executor
 import kotlin.io.path.pathString
 
+/** Classify document paths only; the shell still enforces its existing method and asset policy. */
+internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
+    val id = "[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
+    return when (path) {
+        base, "${base}runtime", "${base}upload" -> path
+        base.removeSuffix("/").ifEmpty { "/" } -> base
+        "${base}runtime/" -> "${base}runtime"
+        "${base}upload/" -> "${base}upload"
+        else -> path.takeIf { it.startsWith("${base}jobs/") &&
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/revisions/$id/(?:sources|source-files)/$id)?)?)?/?")) }?.removeSuffix("/")
+    }
+}
+
 fun interface JobAnalyzer {
     fun analyze(job: Job, reportsDir: Path)
 }
@@ -733,14 +746,7 @@ class UploadServer(
             return
         }
         val base = assets.basePath
-        val canonical = when (path) {
-            base, "${base}runtime", "${base}upload" -> path
-            base.removeSuffix("/").ifEmpty { "/" } -> base
-            "${base}runtime/" -> "${base}runtime"
-            "${base}upload/" -> "${base}upload"
-            else -> path.takeIf { it.startsWith("${base}jobs/") &&
-                it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/[A-Za-z0-9][A-Za-z0-9_-]{0,127})?)?/?")) }?.removeSuffix("/")
-        }
+        val canonical = canonicalSpaDocumentPath(base, path)
         if (canonical != null) {
             if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
                 val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
