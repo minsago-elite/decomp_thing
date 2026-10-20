@@ -268,6 +268,7 @@ class WebJobService(
     private val active = mutableMapOf<String, OwnedTask>()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(defaultWebSourceProfiles(), store::readInput, store::readArtifact)
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
@@ -633,6 +634,22 @@ class WebJobService(
         requireInitializedRead()
         val selected = reportContext(jobId, runId)
         return store.readRecordedRepairHistory(jobId, selected.runId)
+    }
+
+    /** Authorize an exact durable attempt; an observed manifest never supplies revision authority. */
+    @Synchronized
+    internal fun readSourceCatalog(jobId: String, runId: String): WebSourceCatalogSnapshot {
+        requireInitializedRead()
+        val attempt = getAttempt(jobId, runId)
+        val snapshot = try { sourceCatalogEvidence.read(jobId, attempt.runId) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (_: Exception) {
+                throw WebAccessDenied(503, "SOURCE_CATALOG_UNAVAILABLE", "The source catalog is unavailable or exceeds its metadata limits.")
+            }
+        if (getAttempt(jobId, runId).version != attempt.version) {
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "The attempt changed during capture. Refresh its source catalog.")
+        }
+        return snapshot
     }
 
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */

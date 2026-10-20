@@ -156,6 +156,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/events` | `200 text/event-stream` | Resume with `Last-Event-ID` or `after`, never both; #174 |
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
+| `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
@@ -433,6 +434,7 @@ sanitized derivatives have separate identity, digest and provenance.
 | Validation summary `result/casesCompared/sourceSha256` | #165 adapter derives scoped result/count from `BehaviorComparisonReport`; binds the canonical node's `sourceRevisionSha256`. These are new presentation names, not fields parsed from `RepairEvidence.summary` |
 | `report.acceptance`, validation status | Existing canonical graph/validation strategy and receipt authority, exposed by #165. No inference from `Job.status == complete`, source-tree existence or a confidence threshold |
 | Source file provenance/digest/module acceptance | `SourceTree.kt: GeneratedFileEvidence`/module checkpoints, project `source_tree_manifest.json` and exact registered source snapshot; #165 obtains byte sizes from that snapshot. Manifest is a compatibility projection after canonical repair publication, see [revision authority](repair-revision-graph.md) |
+| `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
 | Bootstrap capability/harness descriptors | `selectWebReconstructionStrategy`, `AcpHarnessProvenance` safe fields; #166 performs real readiness checks. The selection report explicitly does not prove execution |
@@ -594,6 +596,41 @@ configured limits, lifecycle, source and server sample time. Borrowed executors
 report unavailable metrics without zero values. Runtime uses the session-time
 snapshot; it neither polls these counts nor infers workflow availability from
 capacity. See [scheduler summary and verification](web-scheduler-summary.md).
+
+## Current source catalog metadata
+
+`GET /api/v1/jobs/{jobId}/runs/{runId}/source-catalog` requires the existing private
+session and an exact durable attempt belonging to that job. It accepts only `limit`
+(default 50, maximum 200) and `cursor`. It returns a flat, deterministic path-sorted
+metadata page with opaque session/job/run/manifest-bound `fileId` values. `displayName`
+is a portable relative display label; no endpoint accepts it as a filesystem selector.
+`nextCursor` explicitly identifies more records, including when the response byte
+ceiling admits fewer rows than the requested limit. A cursor from another session,
+job, run or page size is rejected. A changed manifest expires a valid continuation
+with `410 CURSOR_EXPIRED` and requires refreshing the first page.
+
+The producer captures only the fixed source manifest and uploaded input through the
+retained-descriptor read boundary, then rechecks their bytes, hashes and identities.
+The manifest must use a host-registered profile and bind to the uploaded input.
+Metadata capture admits at most 25,000 files and a 16 MiB manifest; response items
+have a separate 1,000,000-byte ceiling within the existing 1 MiB JSON response limit.
+Capture is serialized by the service's existing read lock. There is no retained
+catalog cache, directory traversal or manifest-declared source file read. Missing,
+malformed, unregistered or oversized metadata returns a fixed unavailable response;
+changed capture or attempt identity returns a conflict without a partial page.
+
+The `sourceCatalog` contract has `authority: "manifest-metadata"` and a null
+`binding.revisionId`. `manifestSha256`/`page.snapshotVersion` identify the observed
+manifest bytes. File hashes and the `declaredUtf8Text`/`declaredViewable` flags are
+manifest declarations; this read does not verify source bodies, text encoding or
+acceptance. It creates no immutable project revision or release relationship.
+The planned revision-scoped source routes above remain separate work. Bootstrap's
+source chunk limit remains zero until a source text producer is implemented.
+
+In-memory controls exercise the 25,000-record capture/page workload, scoped cursor
+refusal, byte-limited continuation and changed capture refusal. They do not qualify
+HTTP/controller behavior, the source tree UI, 8 MiB source delivery, the 256 KiB line,
+latency or memory budgets. Those remaining obligations stay open under #490/#188/#189.
 
 ## Legacy session migration
 

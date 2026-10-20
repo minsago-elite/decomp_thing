@@ -1,0 +1,153 @@
+package decompengine.web
+
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
+import decompengine.project.GeneratedFileEvidence
+import decompengine.project.ProjectContentKind
+import decompengine.project.ProjectFileRole
+import decompengine.project.ReconstructionProfile
+import decompengine.project.SourceTreeManifestReader
+import decompengine.repair.StableRegularFile
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Collections
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import kotlinx.serialization.json.*
+
+/** Manifest metadata only: neither captured source bytes nor a registered project revision. */
+internal class WebSourceCatalogSnapshot(val manifestSha256: String, files: List<GeneratedFileEvidence>) {
+    val files: List<GeneratedFileEvidence>
+
+    init {
+        require(manifestSha256.matches(Regex("[a-f0-9]{64}")))
+        require(files.size <= MAXIMUM_FILES)
+        require(files.map { it.path }.distinct().size == files.size)
+        this.files = Collections.unmodifiableList(files.sortedBy { it.path })
+    }
+
+    companion object { const val MAXIMUM_FILES = 25_000 }
+}
+
+/** Uses the existing retained-descriptor reader. It never opens a manifest-declared source path. */
+internal class WebSourceCatalogEvidence(
+    profiles: List<ReconstructionProfile>,
+    private val readInput: (String) -> StableRegularFile,
+    private val readArtifact: (String, String, Long) -> StableRegularFile,
+) {
+    private val profiles = profiles.associateBy { it.id to it.sha256 }
+
+    init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
+
+    fun read(jobId: String, runId: String): WebSourceCatalogSnapshot {
+        val path = "reports/runs/$runId/source-tree/source_tree_manifest.json"
+        canonicalReportSegments(path)
+        val input = readInput(jobId)
+        val captured = readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES)
+        // Check the callback contract too; test adapters cannot silently bypass the production ceiling.
+        require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+        val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
+            ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+        val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val profile = profiles[profileId to profileSha256]
+            ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
+        val declaredFiles = document["files"] as? JsonArray
+            ?: throw IllegalArgumentException("Source catalog files are invalid.")
+        require(declaredFiles.size <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+        val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+        require(manifest.inputSha256 == input.sha256)
+        val result = WebSourceCatalogSnapshot(captured.sha256, manifest.files)
+        requireSame(captured, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
+        requireSame(input, readInput(jobId))
+        return result
+    }
+
+    private fun requireSame(expected: StableRegularFile, current: StableRegularFile) {
+        if (expected.identity != current.identity || expected.sha256 != current.sha256 ||
+            !expected.bytes.contentEquals(current.bytes)) {
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+        }
+    }
+
+    companion object {
+        // Separate metadata budget; legacy whole-tree capture retains its existing 1 MiB/4096-file limits.
+        const val MAXIMUM_MANIFEST_BYTES = 16L * 1024 * 1024
+        private val JSON_LIMITS = StrictJsonLimits(
+            maximumInputBytes = MAXIMUM_MANIFEST_BYTES.toInt(),
+            maximumCanonicalBytes = MAXIMUM_MANIFEST_BYTES.toInt(),
+            maximumDepth = 32,
+            maximumNodes = 1_000_000,
+            maximumStringBytes = 16 * 1024,
+            maximumTotalStringBytes = MAXIMUM_MANIFEST_BYTES.toInt(),
+        )
+    }
+}
+
+/** Stateless flat metadata pages. No source body, full-tree JSON response or retained page cache. */
+internal class WebSourceCatalogPages(private val source: (String, String) -> WebSourceCatalogSnapshot) {
+    private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
+
+    fun page(owner: String, jobId: String, runId: String, rawQuery: String?): JsonObject {
+        if (rawQuery != null && rawQuery.split('&').any { it.substringBefore('=') !in setOf("limit", "cursor") }) {
+            throw WebAccessDenied(422, "VALIDATION_FAILED", "Source catalog pages accept only limit and cursor.")
+        }
+        val (query, cursor) = WebJobQuery.parse(rawQuery)
+        val continuation = cursor?.split('_')?.also { parts ->
+            if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{64}")) ||
+                !parts[1].matches(Regex("[1-9][0-9]{0,4}")) || !parts[2].matches(Regex("[a-f0-9]{32}")) ||
+                !MessageDigest.isEqual(signature(owner, jobId, runId, query.limit, parts[0], parts[1]).toByteArray(),
+                    parts[2].toByteArray())) invalidCursor()
+        }
+        val snapshot = source(jobId, runId)
+        val offset = continuation?.let { parts ->
+            if (parts[0] != snapshot.manifestSha256) {
+                throw WebAccessDenied(410, "CURSOR_EXPIRED", "Source catalog changed. Refresh its first page.")
+            }
+            parts[1].toInt().also { if (it >= snapshot.files.size) invalidCursor() }
+        } ?: 0
+        val items = ArrayList<JsonObject>(query.limit)
+        var bytes = 0
+        for (file in snapshot.files.drop(offset).take(query.limit)) {
+            val item = buildJsonObject {
+                put("fileId", signature(owner, jobId, runId, "file", snapshot.manifestSha256, file.path))
+                // Display text only. No request accepts this label as a path or resource identity.
+                put("displayName", file.path)
+                put("sha256", file.sha256)
+                put("declaredUtf8Text", file.contentKind == ProjectContentKind.UTF8_TEXT)
+                put("declaredViewable", ProjectFileRole.VIEWABLE in file.roles)
+            }
+            val itemBytes = item.toString().toByteArray(Charsets.UTF_8).size + 1
+            if (bytes + itemBytes > MAXIMUM_ITEM_BYTES) break
+            items += item
+            bytes += itemBytes
+        }
+        check(items.isNotEmpty() || snapshot.files.isEmpty())
+        val next = offset + items.size
+        return buildJsonObject {
+            put("binding", buildJsonObject { put("jobId", jobId); put("runId", runId); put("revisionId", JsonNull) })
+            put("authority", "manifest-metadata")
+            put("manifestSha256", snapshot.manifestSha256)
+            put("totalFiles", snapshot.files.size)
+            put("items", JsonArray(items))
+            put("page", buildJsonObject {
+                put("limit", query.limit)
+                put("snapshotVersion", snapshot.manifestSha256)
+                put("nextCursor", if (next < snapshot.files.size) JsonPrimitive(
+                    "${snapshot.manifestSha256}_${next}_${signature(owner, jobId, runId, query.limit, snapshot.manifestSha256, next)}"
+                ) else JsonNull)
+            })
+        }
+    }
+
+    private fun signature(vararg fields: Any): String {
+        val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(secret, "HmacSHA256")) }
+        return mac.doFinal(fields.joinToString("\u0000").toByteArray(Charsets.UTF_8))
+            .take(16).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun invalidCursor(): Nothing = throw WebAccessDenied(400, "INVALID_CURSOR",
+        "Use a source catalog cursor from this session, job, run and page size, or refresh its first page.")
+
+    companion object { private const val MAXIMUM_ITEM_BYTES = 1_000_000 }
+}

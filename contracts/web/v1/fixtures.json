@@ -440,6 +440,30 @@
       "file": "fixtures/invalid-recovery-candidate-bound.json",
       "valid": false,
       "reason": "Combined retained candidates cannot exceed 128."
+    },
+    {
+      "file": "fixtures/source-catalog.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-revision.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-catalog-path-id.json",
+      "valid": false
     }
   ]
 }
