@@ -411,4 +411,52 @@ class DoctorTest {
         assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
         assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
     }
+
+    @Test
+    fun `ACP failure context retains captured admission metadata from its selected typed witness`() {
+        for (stage in listOf("CONSTRUCTING", "ADMITTED")) {
+            val admission = "mount-admission-v1 stage=$stage initialMounts=29 initialControls=1 owner=false initialFast=true"
+            val witness = fixedMountAdmissionWitness(admission)
+            val context = acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), witness))
+            assertTrue("mountEventRecord=${requireNotNull(witness.message)}" in context, context)
+            assertTrue("mountAdmissionRecord=$admission" in context, context)
+            assertTrue("recordedCleanup=MISSING" in context, context)
+            assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
+            assertFalse("PRIVATE" in context || "/" in context, context)
+        }
+        val legacy = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), fixedMountWitness()))
+        assertTrue("mountAdmissionRecord=MISSING" in legacy, legacy)
+    }
+
+    @Test
+    fun `ACP admission display refuses forged private oversized and noncanonical records without extra graph traversal`() {
+        val valid = "mount-admission-v1 stage=ADMITTED initialMounts=29 initialControls=1 owner=false initialFast=true"
+        val invalid = listOf("PRIVATE /private/path", valid + " private=PRIVATE", valid.replace("29", "-1"),
+            valid.replace("29", "029"), valid.replace("ADMITTED", "UNKNOWN"), valid.repeat(4))
+        for (admission in invalid) {
+            val context = acpDoctorFailureContext(AgentExecutionException(
+                AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), fixedMountAdmissionWitness(admission)))
+            assertTrue("mountEventRecord=mount-event-v1" in context, context)
+            assertTrue("mountAdmissionRecord=MISSING" in context, context)
+            assertFalse("PRIVATE" in context || "/" in context, context)
+        }
+        val forged = Throwable(valid).apply { addSuppressed(fixedMountAdmissionWitness(valid)) }
+        val context = acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure"), forged))
+        assertTrue("mountEventRecord=MISSING" in context && "mountAdmissionRecord=MISSING" in context, context)
+        assertFalse(valid in context, context)
+    }
+
+    /** Constructs an owned diagnostic Throwable only; no scope, descriptor, syscall or context. */
+    private fun fixedMountAdmissionWitness(admission: String): Throwable {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val type = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = type.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        return constructor.newInstance(phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+            outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+    }
 }

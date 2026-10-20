@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicReference
 /** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
 internal sealed interface AcpMountEventWitness {
     val diagnosticRecord: String
+    /** Already captured optional display data; no refreshed identity or native query. */
+    val admissionRecord: String? get() = null
 }
 
 /** A fatal failure to prove that a sandbox scope/tree or one of its pinned resources is gone. */
@@ -2275,6 +2277,7 @@ private class RuntimePrivateControlScope private constructor(
         null, false, false,
     ), AcpMountEventWitness {
         override val diagnosticRecord: String get() = message.orEmpty()
+        override val admissionRecord: String? get() = admissionContext
 
         // Preserve the legacy scalar witness constructor and its exact message.
         constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?) :
