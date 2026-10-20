@@ -158,6 +158,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
@@ -437,6 +438,7 @@ sanitized derivatives have separate identity, digest and provenance.
 | Source file provenance/digest/module acceptance | `SourceTree.kt: GeneratedFileEvidence`/module checkpoints, project `source_tree_manifest.json` and exact registered source snapshot; #165 obtains byte sizes from that snapshot. Manifest is a compatibility projection after canonical repair publication, see [revision authority](repair-revision-graph.md) |
 | `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
 | `revisionSources.*` | Actual selected `WorkflowAttempt.candidate` plus schema-3 build-contract source inputs, cross-checked against the host-profile-validated manifest and canonical build/repair digest preimage. Sizes are exact descriptor commitments; source bodies and acceptance are not verified by this listing |
+| `revisionDirectory.*` | Immediate-child grouping of those same canonical input commitments. Counts describe recorded input files; empty physical directories are not recorded, and directory IDs are opaque selectors within the selected candidate |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
 | Bootstrap capability/harness descriptors | `selectWebReconstructionStrategy`, `AcpHarnessProvenance` safe fields; #166 performs real readiness checks. The selection report explicitly does not prove execution |
@@ -680,10 +682,37 @@ malformed, unsupported or oversized metadata has a fixed unavailable response.
 
 This endpoint lists only the canonical build input set. The observed catalog above
 continues to describe other manifest entries. Text/chunk reads, complete downloads,
-directory navigation, file routes and UI/HTTP/performance qualification remain open;
+file routes and UI/HTTP/performance qualification remain open;
 bootstrap source chunk advertising stays zero. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
+
+### Lazy canonical input directories
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-directories/root` returns a
+`revisionDirectory` envelope through the same private read and metadata capture boundaries.
+Only `limit` and `cursor` are accepted, with the same default 50, maximum 200 and
+sub-MiB response ceiling. Each page groups immediate children of the selected prefix;
+directories sort first, then files, each in UTF-16 label order. Selecting a directory
+does not recursively fetch its children. Counts include only canonical input files.
+`emptyDirectories: "not-recorded"` explicitly describes the file-only inventory;
+an unknown directory returns `SOURCE_DIRECTORY_NOT_FOUND`, without asserting physical
+absence. File/directory prefix collisions return a source revision conflict.
+
+Directory IDs bind the job, run, revision, source commitment and canonical prefix.
+They remain stable across sessions and listener restarts for that input set. File IDs
+are identical to those in the flat revision source listing. Display labels are single
+components and never become path selectors. A continuation also binds its directory
+and page size; session mismatch is invalid, and changed metadata expires it explicitly.
+
+The root has a null display label and parent. Other directories include a parent ID,
+depth and breadcrumbs. Breadcrumbs retain the root and at most the last 31 components;
+`omittedAncestors` counts intervening components. Parent IDs retain the complete
+upward navigation chain even when breadcrumbs are shortened. Shared consumers reject
+inconsistent ancestry, counts, duplicate identities, ordering and continuation bounds.
+Pure captured-DTO controls cover 25,000 wide directories, deep Unicode/space paths,
+stable IDs and cursor isolation. These controls do not qualify physical source reads,
+HTTP/browser navigation, empty directory support, timing, memory or the full D0 workload.
 
 ## Legacy session migration
 

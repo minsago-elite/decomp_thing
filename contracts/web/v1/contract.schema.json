@@ -3078,6 +3078,224 @@
         "page"
       ],
       "additionalProperties": false
+    },
+    "revisionDirectoryLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\\\u0000-\\u001f\\u007f:]+$"
+    },
+    "revisionDirectoryFile": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "file"
+        },
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "$ref": "#/definitions/revisionDirectoryLabel"
+        },
+        "sizeBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "declaredUtf8Text": {
+          "type": "boolean"
+        },
+        "declaredViewable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "fileId",
+        "displayName",
+        "sizeBytes",
+        "sha256",
+        "declaredUtf8Text",
+        "declaredViewable"
+      ],
+      "additionalProperties": false
+    },
+    "revisionDirectoryChild": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "directory"
+        },
+        "directoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "$ref": "#/definitions/revisionDirectoryLabel"
+        },
+        "sourceFileCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25000
+        }
+      },
+      "required": [
+        "kind",
+        "directoryId",
+        "displayName",
+        "sourceFileCount"
+      ],
+      "additionalProperties": false
+    },
+    "revisionDirectoryEntry": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/revisionDirectoryChild"
+        },
+        {
+          "$ref": "#/definitions/revisionDirectoryFile"
+        }
+      ]
+    },
+    "revisionDirectoryBreadcrumb": {
+      "type": "object",
+      "properties": {
+        "directoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/revisionDirectoryLabel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "directoryId",
+        "displayName"
+      ],
+      "additionalProperties": false
+    },
+    "revisionDirectory": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "directoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "parentDirectoryId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/revisionDirectoryLabel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2047
+        },
+        "breadcrumbs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/revisionDirectoryBreadcrumb"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "omittedAncestors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2016
+        },
+        "emptyDirectories": {
+          "const": "not-recorded"
+        },
+        "sourceFileCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25000
+        },
+        "totalChildren": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25000
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/revisionDirectoryEntry"
+          },
+          "minItems": 1,
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "directoryId",
+        "parentDirectoryId",
+        "displayName",
+        "depth",
+        "breadcrumbs",
+        "omittedAncestors",
+        "emptyDirectories",
+        "sourceFileCount",
+        "totalChildren",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -3670,6 +3888,30 @@
         },
         "data": {
           "$ref": "#/definitions/revisionSources"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "revisionDirectory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/revisionDirectory"
         }
       },
       "required": [

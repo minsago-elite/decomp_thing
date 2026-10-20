@@ -94,6 +94,52 @@ def check_source_page(data: dict, version: str) -> None:
         raise ValueError("source display label is not a portable relative name")
 
 
+def check_directory(data: dict) -> None:
+    def label_ok(label):
+        # Match Kotlin Char.isWhitespace; Python strip additionally removes U+0085.
+        return label is not None and re.search(r"[^\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]", label) is not None and label not in (".", "..")
+
+    items, page, total = data["items"], data["page"], data["totalChildren"]
+    count = data["sourceFileCount"]
+    if page["snapshotVersion"] != data["metadataVersion"] or len(items) > page["limit"] or not len(items) <= total <= count:
+        raise ValueError("directory page identity or bounds are inconsistent")
+    if page["nextCursor"] is not None and len(items) >= total:
+        raise ValueError("a complete directory page cannot continue")
+    identities = [item["fileId"] if item["kind"] == "file" else item["directoryId"] for item in items]
+    if len(set(identities)) != len(items) or len({item["displayName"] for item in items}) != len(items):
+        raise ValueError("directory children must have unique identities and names")
+    crumbs, depth = data["breadcrumbs"], data["depth"]
+    child_count = 0
+    for index, item in enumerate(items):
+        label = item["displayName"]
+        if not label_ok(label):
+            raise ValueError("invalid directory child label")
+        child_count += 1 if item["kind"] == "file" else item["sourceFileCount"]
+        if item["kind"] == "directory" and any(crumb["directoryId"] == item["directoryId"] for crumb in crumbs):
+            raise ValueError("directory child cannot be an ancestor")
+        if index:
+            previous = items[index - 1]
+            # Kotlin and JavaScript compare UTF-16 code units, including astral labels.
+            if not ((previous["kind"] == "directory" and item["kind"] == "file") or
+                    (previous["kind"] == item["kind"] and previous["displayName"].encode("utf-16-be", "surrogatepass") < label.encode("utf-16-be", "surrogatepass"))):
+                raise ValueError("directory children are out of order")
+    if child_count > count or (len(items) == total and child_count != count):
+        raise ValueError("directory descendant commitments are inconsistent")
+    if len(crumbs) != 1 + min(depth, 31) or data["omittedAncestors"] != max(0, depth - 31):
+        raise ValueError("directory breadcrumb bounds are inconsistent")
+    if crumbs[0] != {"directoryId": "root", "displayName": None} or len({c["directoryId"] for c in crumbs}) != len(crumbs):
+        raise ValueError("directory breadcrumb root or identity is inconsistent")
+    if crumbs[-1] != {"directoryId": data["directoryId"], "displayName": data["displayName"]}:
+        raise ValueError("directory breadcrumb does not identify this directory")
+    if any(not label_ok(c["displayName"]) for c in crumbs[1:]):
+        raise ValueError("invalid directory breadcrumb label")
+    if depth == 0:
+        if data["directoryId"] != "root" or data["parentDirectoryId"] is not None or data["displayName"] is not None:
+            raise ValueError("directory root identity is inconsistent")
+    elif data["directoryId"] == "root" or data["displayName"] is None or data["parentDirectoryId"] != crumbs[-2]["directoryId"]:
+        raise ValueError("directory parent identity is inconsistent")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -120,6 +166,8 @@ def check_semantics(document: dict) -> None:
         check_source_page(data, data["manifestSha256"])
     elif kind == "revisionSources":
         check_source_page(data, data["metadataVersion"])
+    elif kind == "revisionDirectory":
+        check_directory(data)
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
