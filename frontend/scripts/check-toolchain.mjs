@@ -6,10 +6,13 @@ if (process.versions.node !== expected.engines.node || npmVersion !== expected.e
   throw new Error(
     `Frontend requires Node ${expected.engines.node} and npm ${expected.engines.npm}; ` +
       `found Node ${process.versions.node} and npm ${npmVersion ?? 'unknown'}. ` +
-      'From the repository root, provision once into an absent directory with ' +
+      'If a verified pinned installation already exists, select its bin directory. ' +
+      'Otherwise, from the repository root, provision into a fresh repository-local directory with ' +
       '`mkdir -p build && export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache" && ' +
-      'bash scripts/install-frontend-node.sh "$PWD/build/frontend-node"`. ' +
-      'Then select it with `export PATH="$PWD/build/frontend-node/bin:$PATH"` and use npm. ' +
-      'For an existing installation, select its bin directory and repository-local npm cache; see frontend/README.md.',
+      `frontend_node_parent="$(mktemp -d "$PWD/build/frontend-node-${expected.engines.node}-npm-${expected.engines.npm}.XXXXXX")" && ` +
+      'bash scripts/install-frontend-node.sh "$frontend_node_parent/node" && ' +
+      'export PATH="$frontend_node_parent/node/bin:$PATH"` and use npm. ' +
+      'This leaves any stale installation in place and supplies an absent destination to the installer. ' +
+      'Keep the actual installation path for future shells; see frontend/README.md.',
   );
 }

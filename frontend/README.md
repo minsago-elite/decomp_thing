@@ -27,8 +27,8 @@ From the repository root, install once into an absent directory:
 ```sh
 mkdir -p build
 export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
-bash scripts/install-frontend-node.sh "$PWD/build/frontend-node"
-export PATH="$PWD/build/frontend-node/bin:$PATH"
+bash scripts/install-frontend-node.sh "$PWD/build/frontend-node-24.20.0-npm-11.19.0"
+export PATH="$PWD/build/frontend-node-24.20.0-npm-11.19.0/bin:$PATH"
 ```
 
 The installation, temporary staging directory and npm cache stay under the ignored
@@ -37,13 +37,31 @@ a successful installation, select the same tools and cache in each new shell:
 
 ```sh
 export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
-export PATH="$PWD/build/frontend-node/bin:$PATH"
+export PATH="$PWD/build/frontend-node-24.20.0-npm-11.19.0/bin:$PATH"
 ```
+
+After a pin change, leave any stale installation in place. Use the new versioned
+directory above if it is absent. If that destination already exists and is not the
+verified installation you intend to select, the toolchain error supplies this
+fresh-directory recovery path instead:
+
+```sh
+mkdir -p build
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+frontend_node_parent="$(mktemp -d "$PWD/build/frontend-node-24.20.0-npm-11.19.0.XXXXXX")"
+bash scripts/install-frontend-node.sh "$frontend_node_parent/node"
+export PATH="$frontend_node_parent/node/bin:$PATH"
+```
+
+The new parent is inside `build/`; its `node` destination is absent even when
+older installations exist. Keep the actual installation path for future shells
+and use that path in the PATH-selection command instead of the fixed example.
 
 An existing version manager that honors `.node-version` is also supported. For
 manual installation, verify the exact [official distribution](https://nodejs.org/download/release/v24.20.0/)
 against its [published checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt)
-before selecting its `bin` directory. Frontend commands retain exact pin checks
+before selecting its `bin` directory. Keep the repository-local npm cache setting
+above for these setups as well. Frontend commands retain exact pin checks
 and do not silently download or select a fallback runtime.
 
 ### Run the frontend commands
@@ -82,13 +100,17 @@ never a browser-exposed `VITE_*` variable or an environment-file credential.
 
 ```sh
 # Terminal 1: normal JVM task, with the explicit development browser origin.
-./gradlew "-PfrontendNodeHome=$PWD/build/frontend-node" run \
+./gradlew run \
   --args='web --ui spa --host 127.0.0.1 --port 8000 --base-path /nested/ --dev-frontend-origin http://127.0.0.1:5173'
 
 # Terminal 2: Preact HMR, same base path; no manual asset copy or rebuild per edit.
 DECOMP_DEV_BACKEND_ORIGIN=http://127.0.0.1:8000 \
 DECOMP_DEV_BASE_PATH=/nested/ npm --prefix frontend run dev:backend
 ```
+
+Gradle uses the pinned Node/npm selected on PATH by any of the supported setup
+methods. `-PfrontendNodeHome` is optional; pass it only when it names the actual
+absolute installation directory you selected, rather than an assumed local path.
 
 Open `http://127.0.0.1:5173/nested/`. The JVM flag adds only the exact explicitly
 configured loopback browser origin to its local access policy. Vite proxies

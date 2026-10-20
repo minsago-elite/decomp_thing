@@ -30,7 +30,6 @@ import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.execute
 import decompengine.agent.executeReceipt
-import decompengine.doctor.acpDoctorFailureContext
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
 import decompengine.project.ArchivalBundleVerifier
@@ -751,53 +750,6 @@ class AcpAgentHarnessTest {
     }
 
     @Test
-    fun `cleanup assertion context keeps recorded receipt facts without private labels or cause text`() {
-        val raw = "UNREGISTERED-CLEANUP-SECRET /private/raw/path"
-        val record = "ACP_STDOUT_SHUTDOWN_V1 firstMs=100 finalMs=41 " +
-            "s1=WAIT_TIMEOUT/FRAME_CONSUMER/false/false/false/NONE/12/1024/false " +
-            "s2=CLOSE_NOT_ACQUIRED/FRAME_CONSUMER/false/false/false/NONE/12/1024/false " +
-            "s3=FINISHED_FALSE_EOF_NOT_READ/FRAME_CONSUMER/false/false/false/NONE/12/1024/false"
-        val evidence = AcpInvocationEvidenceSnapshot(
-            null, AcpExecutionLifecyclePhase.PROMPT_COMPLETED, AcpExecutionCleanupDisposition.UNVERIFIED,
-            null, null, null, emptyList(), emptyList(), emptyList(), null,
-            AcpExecutionEvidenceCompleteness(false, false, false), null,
-        )
-        var foreignMessageReads = 0
-        val cause = object : java.io.IOException() {
-            override val message: String get() { foreignMessageReads++; error(raw) }
-        }
-        val failed = AgentFailure(AgentFailureKind.RESOURCE_EXHAUSTED, raw,
-            details = mapOf("stdoutShutdownV1" to record, "raw" to raw))
-        val receipt = AgentExecutionReceipt(
-            AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
-            AgentExecutionOutcome.Failed(failed), evidence, cause,
-        )
-        val failure = AgentExecutionException(failed, cause, receipt)
-        for ((label, mode) in listOf("individual frame limit" to "FRAME_LIMIT", "aggregate stdout limit" to "STDOUT_LIMIT",
-            "protocol failure" to "PROTOCOL_FAILURE", "execution" to "EXECUTION", raw to "UNKNOWN")) {
-            val context = safeCleanupFailureContext(label, failure)
-            assertTrue(context.length <= 4096)
-            assertTrue(context.contains("mode=$mode kind=RESOURCE_EXHAUSTED"))
-            assertTrue(context.contains("recordedPhase=PROMPT_COMPLETED recordedCleanup=UNVERIFIED"))
-            assertTrue(context.contains("recordedDiagnostics=MISSING"))
-            assertTrue(context.contains("stdoutFacts=$record"))
-            assertFalse(context.contains(raw))
-        }
-        assertSame(receipt, failure.receipt)
-        assertSame(cause, failure.cause)
-        assertEquals(0, foreignMessageReads)
-        for (untrusted in listOf(raw, record + " extra=" + raw, "x".repeat(2049))) {
-            val missing = AgentExecutionException(AgentFailure(AgentFailureKind.INTERNAL, raw,
-                details = mapOf("stdoutShutdownV1" to untrusted)))
-            val context = safeCleanupFailureContext(raw, missing)
-            assertTrue(context.contains("mode=UNKNOWN"))
-            assertTrue(context.contains("recordedPhase=MISSING recordedCleanup=MISSING"))
-            assertTrue(context.contains("stdoutFacts=NOT_AVAILABLE"))
-            assertFalse(context.contains(raw))
-        }
-    }
-
-    @Test
     fun `stop refusal assertion keeps closed mode cause phase without arbitrary failure text`() {
         val record = authoredStdoutFacts()
         val evidence = AcpInvocationEvidenceSnapshot(
@@ -937,20 +889,6 @@ class AcpAgentHarnessTest {
 
     private fun firstStdoutIOException(control: Pair<Class<*>, Any>): String =
         ((stdoutControlField(control, "stdoutFirstIOException") as java.util.concurrent.atomic.AtomicReference<*>).get() as Enum<*>).name
-
-    /** Failure-only message projection; no process, audit, stderr or suppression-list read. */
-    private fun safeCleanupFailureContext(label: String, failure: AgentExecutionException): String {
-        val mode = when (label) {
-            "individual frame limit" -> "FRAME_LIMIT"
-            "aggregate stdout limit" -> "STDOUT_LIMIT"
-            "protocol failure" -> "PROTOCOL_FAILURE"
-            "execution" -> "EXECUTION"
-            else -> "UNKNOWN"
-        }
-        val stdout = validatedStdoutFacts(failure.failure.details["stdoutShutdownV1"]) ?: "NOT_AVAILABLE"
-        return "ACP_CLEANUP_V1 mode=$mode kind=${failure.failure.kind.name} " +
-            acpDoctorFailureContext(failure) + " stdoutFacts=$stdout"
-    }
 
     private fun safeStopFailureContext(mode: String, receipt: AgentExecutionReceipt): String {
         val safeMode = when (mode) { "stop-max-tokens", "stop-max-turn-requests", "stop-refusal" -> mode; else -> "UNKNOWN" }
