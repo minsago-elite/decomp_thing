@@ -169,6 +169,9 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
+    /** Monotonic admission signal, published without acquiring the service or executor monitor. */
+    internal fun signalShutdown() { stopping = true }
+
     @Synchronized fun beginShutdown() { stopping = true; retentionWorker?.stop() }
 
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
