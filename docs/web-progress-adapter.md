@@ -266,6 +266,18 @@ entry counts remain observation metadata. Missing plan counts or entry metadata
 read **Not recorded**, not zero. Message and plan text remain withheld pending a
 producer public-visibility contract.
 
+The **More correlation references** disclosure reads only the selected row's
+already loaded observation. It exposes the workflow-run identity, reported
+accepted source, message identity, permission request, message chunk and changed
+file digests. Each is shown with its own label; equal digests do not collapse
+different reference dimensions. Missing or malformed SHA-256 values read **Not
+recorded**. Expanding adds at most six rows; closing the disclosure releases
+those rows. No request, cursor movement or evidence link is introduced.
+These are observation references, separate from the attempt's durable acceptance
+and revision. Existing monetary-estimate withholding and public-prose policy are
+unchanged. Actual expanded browser/screen-reader and physical D0 qualification
+remain outstanding.
+
 The packaged history journey additionally verifies local category/task filtering,
 no additional polling requests while filtering a paused page, restoration of all
 200 rows, exact attempt links, expandable correlation references and 320-pixel
