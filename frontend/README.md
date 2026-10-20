@@ -12,11 +12,41 @@ server shell when that metadata is available.
 
 Use **Node 24.20.0 and npm 11.19.0**. The root `.node-version`, package engines and
 `packageManager` record the exact versions. Node 24.20.0 ships the selected npm.
-Use an existing version manager that honors `.node-version`, or obtain the exact
-[official Node distribution](https://nodejs.org/download/release/v24.20.0/) and
-verify its [published checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt)
-before putting its `bin` directory on PATH. Repository commands do not download a
-replacement runtime or silently use a different installed Node version.
+
+### Provision the pinned tools inside the repository
+
+The existing [CI and Docker installer](../scripts/install-frontend-node.sh) also
+supports developer setup on Linux x86-64. It needs Bash, curl, sha256sum, tar with
+gzip support, mktemp, awk and uname. It uses the reviewed official archive digest
+in [frontend-node-sha256.txt](../scripts/frontend-node-sha256.txt), checks that digest
+before extraction or running Node, and validates Node/npm and all repository pins
+before publishing the installation. It does not need an existing Node installation.
+
+From the repository root, install once into an absent directory:
+
+```sh
+mkdir -p build
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+bash scripts/install-frontend-node.sh "$PWD/build/frontend-node"
+export PATH="$PWD/build/frontend-node/bin:$PATH"
+```
+
+The installation, temporary staging directory and npm cache stay under the ignored
+`build/` directory. The installer refuses an existing destination or symlink. After
+a successful installation, select the same tools and cache in each new shell:
+
+```sh
+export NPM_CONFIG_CACHE="$PWD/build/npm-download-cache"
+export PATH="$PWD/build/frontend-node/bin:$PATH"
+```
+
+An existing version manager that honors `.node-version` is also supported. For
+manual installation, verify the exact [official distribution](https://nodejs.org/download/release/v24.20.0/)
+against its [published checksums](https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt)
+before selecting its `bin` directory. Frontend commands retain exact pin checks
+and do not silently download or select a fallback runtime.
+
+### Run the frontend commands
 
 From the repository root:
 
@@ -52,7 +82,7 @@ never a browser-exposed `VITE_*` variable or an environment-file credential.
 
 ```sh
 # Terminal 1: normal JVM task, with the explicit development browser origin.
-./gradlew -PfrontendNodeHome=/absolute/node-v24.20.0-linux-x64 run \
+./gradlew "-PfrontendNodeHome=$PWD/build/frontend-node" run \
   --args='web --ui spa --host 127.0.0.1 --port 8000 --base-path /nested/ --dev-frontend-origin http://127.0.0.1:5173'
 
 # Terminal 2: Preact HMR, same base path; no manual asset copy or rebuild per edit.
