@@ -202,4 +202,37 @@ class WebRevisionSourceContentTest {
         val forged = captured("wrong!".toByteArray()).copy(sha256 = file.evidence.sha256)
         assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> { WebRevisionSourceContent(snapshot, id, file, forged) }.code)
     }
+
+    @Test fun `download integrity headers identify the exact captured commitment without adding acceptance authority`() {
+        for (original in listOf(byteArrayOf(), "<script>source</script>".toByteArray(), byteArrayOf(0x80.toByte(), 0))) {
+            val snapshot = makeSnapshot(original, ProjectContentKind.BINARY); val file = snapshot.files.single()
+            val id = revisionSourceFileId(snapshot.reference, 0, file.evidence.path)
+            val content = WebRevisionSourceContent(snapshot, id, file, captured(original))
+            val headers = content.verifiedDownloadHeaders()
+            assertEquals(mapOf(
+                "X-Decomp-Content-Verification" to "committed-digest",
+                "X-Decomp-File-ID" to id,
+                "X-Decomp-Source-SHA256" to snapshot.reference.sourceSha256,
+                "X-Decomp-Metadata-Version" to snapshot.metadataVersion,
+                "X-Decomp-Content-SHA256" to file.evidence.sha256,
+            ), headers)
+            assertContentEquals(original, content.download())
+            original.fill(0)
+            assertEquals(headers, content.verifiedDownloadHeaders())
+            assertTrue(headers.values.none { it.contains("<script>") || it.contains("accepted") || it.contains("/private/") })
+        }
+    }
+
+    @Test fun `download integrity headers cannot bypass archive role or actual byte verification`() {
+        val original = "source".toByteArray()
+        val snapshot = makeSnapshot(original, selectedRoles = roles - ProjectFileRole.ARCHIVE_PAYLOAD)
+        val file = snapshot.files.single(); val id = revisionSourceFileId(snapshot.reference, 0, file.evidence.path)
+        val content = WebRevisionSourceContent(snapshot, id, file, captured(original))
+        assertEquals("SOURCE_REPRESENTATION_UNAVAILABLE", assertFailsWith<WebAccessDenied> { content.verifiedDownloadHeaders() }.code)
+        assertEquals("SOURCE_REPRESENTATION_UNAVAILABLE", assertFailsWith<WebAccessDenied> { content.download() }.code)
+        val forged = captured("wrong!".toByteArray()).copy(sha256 = file.evidence.sha256)
+        assertEquals("SOURCE_REVISION_CHANGED", assertFailsWith<WebAccessDenied> {
+            WebRevisionSourceContent(snapshot, id, file, forged).verifiedDownloadHeaders()
+        }.code)
+    }
 }
