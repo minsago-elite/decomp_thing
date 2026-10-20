@@ -133,6 +133,19 @@ function File({ selected, basePath, runtime, search }: { selected: FileSelection
           <dt>{copy.planDigest}</dt><dd><code>{data.recordedModule.planSha256}</code></dd>
           <dt>{copy.generationDigest}</dt><dd><code>{data.recordedModule.generationEvidenceSha256}</code></dd>
         </dl>
+        {data.recordedModule.validation ? <section aria-label={copy.validationReference}>
+          <h4>{copy.validationReference}</h4>
+          <p>{copy.validationNotice}</p>
+          <dl class="job-facts">
+            <dt>{copy.checkpointDigest}</dt><dd><code>{data.recordedModule.validation.checkpointSha256}</code></dd>
+          </dl>
+          {data.recordedModule.validation.compilation ? <dl class="job-facts">
+            <dt>{copy.compilationOutcome}</dt><dd>{copy.compilationOutcomes[data.recordedModule.validation.compilation.outcome]}</dd>
+            <dt>{copy.compilerReturnCode}</dt><dd>{data.recordedModule.validation.compilation.returnCode ?? copy.notReported}</dd>
+            <dt>{copy.diagnosticsDigest}</dt><dd><code>{data.recordedModule.validation.compilation.diagnosticsSha256}</code></dd>
+            <dt>{copy.diagnosticsSize}</dt><dd>{formatExactBytes(data.recordedModule.validation.compilation.diagnosticsBytes)}</dd>
+          </dl> : <p>{copy.compilationUnavailable}</p>}
+        </section> : <p>{copy.validationUnavailable}</p>}
       </section> : <p>{copy.moduleUnavailable}</p>}
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>

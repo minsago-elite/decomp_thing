@@ -3559,6 +3559,82 @@
                       "type": "null"
                     }
                   ]
+                },
+                "validation": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "authority": {
+                          "const": "reported-module-validation"
+                        },
+                        "checkpointSha256": {
+                          "$ref": "#/definitions/sha256"
+                        },
+                        "compilation": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "sourceSha256": {
+                                  "$ref": "#/definitions/sha256"
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed",
+                                    "failed-to-start",
+                                    "timed-out",
+                                    "output-limit-exceeded",
+                                    "source-changed"
+                                  ]
+                                },
+                                "returnCode": {
+                                  "anyOf": [
+                                    {
+                                      "type": "integer",
+                                      "minimum": -2147483648,
+                                      "maximum": 2147483647
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "diagnosticsSha256": {
+                                  "$ref": "#/definitions/sha256"
+                                },
+                                "diagnosticsBytes": {
+                                  "$ref": "#/definitions/uint64"
+                                }
+                              },
+                              "required": [
+                                "sourceSha256",
+                                "outcome",
+                                "returnCode",
+                                "diagnosticsSha256",
+                                "diagnosticsBytes"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "authority",
+                        "checkpointSha256",
+                        "compilation"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
