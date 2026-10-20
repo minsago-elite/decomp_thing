@@ -8,6 +8,22 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
 
+/** Resolve existing ancestors without creating storage or guessing that an unreadable path is absent. */
+internal fun canonicalWebJobStoreRoot(
+    root: Path, knownAbsent: (Path) -> Boolean, realPath: (Path) -> Path,
+): Path {
+    require(root.isAbsolute) { "Web job storage path must be absolute" }
+    var existing = root.normalize()
+    val missing = java.util.ArrayDeque<Path>()
+    while (knownAbsent(existing)) {
+        missing.addFirst(checkNotNull(existing.fileName) { "Web job storage path has no existing ancestor" })
+        existing = checkNotNull(existing.parent) { "Web job storage path has no existing ancestor" }
+    }
+    var canonical = realPath(existing)
+    for (name in missing) canonical = canonical.resolve(name)
+    return canonical.normalize()
+}
+
 /** Cooperative web-server ownership; the lock file must never be unlinked while in use. */
 internal class WebJobStoreOwnership private constructor(
     private val root: Path,
@@ -46,7 +62,8 @@ internal class WebJobStoreOwnership private constructor(
         private val owners = mutableMapOf<Path, WebJobStoreOwnership>()
 
         fun acquire(root: Path): WebJobStoreOwnership {
-            val canonicalRoot = if (Files.exists(root, NOFOLLOW_LINKS)) root.toRealPath() else root.toAbsolutePath().normalize()
+            val canonicalRoot = canonicalWebJobStoreRoot(root.toAbsolutePath().normalize(),
+                knownAbsent = { Files.notExists(it, NOFOLLOW_LINKS) }, realPath = { it.toRealPath() })
             return synchronized(owners) {
                 // Some platforms release process locks when any channel to that file closes.
                 // Reject local contenders before opening a second channel.
