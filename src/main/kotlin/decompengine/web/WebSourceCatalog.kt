@@ -7,6 +7,7 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
+import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -57,12 +58,14 @@ internal class WebSourceCatalogEvidence(
                 val selected = resolveRevisionSourceFile(snapshot, fileId)
                 val profile = profiles.getValue(manifest.profileId to manifest.profileSha256)
                 val files = WebRecordedModuleProvenance.evidenceFiles(profile, manifest, selected)
-                val recorded = files?.let { declarations ->
+                val recorded = try { files?.let { declarations ->
                     fun read(entry: GeneratedFileEvidence): StableRegularFile {
                         val path = "reports/runs/${reference.runId}/source-tree/${entry.path}"
                         val record = readArtifact(reference.jobId, path, WebRecordedModuleProvenance.MAXIMUM_BYTES.toLong())
+                        if (record.bytes.size > WebRecordedModuleProvenance.MAXIMUM_BYTES) {
+                            throw RepairBudgetExceededException("Optional generation record exceeds its metadata byte limit.")
+                        }
                         val detached = record.copy(bytes = record.bytes.copyOf())
-                        require(detached.bytes.size <= WebRecordedModuleProvenance.MAXIMUM_BYTES)
                         if (detached.sha256 != entry.sha256 || WebExplorationArtifact.sha256(detached.bytes) != entry.sha256) revisionSourceChanged()
                         return detached
                     }
@@ -72,7 +75,7 @@ internal class WebSourceCatalogEvidence(
                     requireSame(plan, read(declarations.plan))
                     requireSame(generation, read(declarations.generation))
                     result
-                }
+                } } catch (_: RepairBudgetExceededException) { null }
                 WebRevisionFileMetadataSnapshot(snapshot, recorded)
             }
         }

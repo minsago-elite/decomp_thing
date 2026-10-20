@@ -9,6 +9,7 @@ import decompengine.project.PlannedModule
 import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.SourceTreeManifest
+import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
 import kotlinx.serialization.json.*
 import kotlin.test.*
@@ -234,5 +235,32 @@ class WebRecordedModuleProvenanceTest {
         assertEquals(3, control.reads.size)
         assertTrue(control.reads.values.all { it == 2 })
         assertFalse(control.reads.keys.any { it.endsWith("/reports/module_plan.json") || it.endsWith("/reports/confidence.json") })
+    }
+
+    @Test fun `optional report byte refusals preserve committed metadata during first read or recheck`() {
+        for (name in listOf("module_plan.json", "confidence.json")) for (refusedRead in 1..2) {
+            val control = captureControl { path, count, record ->
+                if (path.endsWith("/reports/$name") && count == refusedRead) throw RepairBudgetExceededException(privateText)
+                record
+            }
+            val result = control.source.readFileMetadata(control.reference, control.fileId)
+            assertNull(result.recordedModule)
+            assertEquals(control.reference, result.source.reference)
+            assertEquals(implementationSha, resolveRevisionSourceFile(result.source, control.fileId).evidence.sha256)
+            assertEquals(2, control.reads["input"])
+            assertEquals(2, control.reads["reports/runs/run_1/source-tree/source_tree_manifest.json"])
+            assertEquals(2, control.reads["reports/runs/run_1/source-tree/reports/build_contract.json"])
+        }
+    }
+
+    @Test fun `optional capture fallback never swallows unrelated failures cancellation interruption or fatal errors`() {
+        for (failure in listOf(IllegalStateException(privateText), WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Changed"),
+            java.util.concurrent.CancellationException(privateText), InterruptedException(privateText), AssertionError(privateText))) {
+            val control = captureControl { path, _, record ->
+                if (path.endsWith("/reports/confidence.json")) throw failure
+                record
+            }
+            assertSame(failure, assertFails { control.source.readFileMetadata(control.reference, control.fileId) })
+        }
     }
 }
