@@ -775,3 +775,25 @@ cursor. The existing fake clock and mock transport are reused; no network,
 listener, provider or native browser process is started. These controls address
 the rendered consumer path, while physical browser burst performance and broader
 resource/measurement qualification remain outstanding.
+
+
+Job and attempt metadata refreshes retain only the last checked response for the
+same transport, deployment path and requested identities. A transient read
+failure leaves those details explicitly labelled as potentially outdated and
+keeps independent attempt panels and their current filters mounted. Retry remains
+one explicit safe GET; refreshing metadata does not restart activity or read
+independent evidence. A new transport, session/identity selection, access denial,
+missing record, malformed/unsupported response, corrupt storage or mismatched
+response binding clears the prior details. The retained snapshot establishes no
+current readiness, workflow result or acceptance authority. In-memory consumer
+controls cover pending refresh, transient failure/recovery, panel/focus continuity,
+refusals, navigation and late responses; full D11 browser and accessibility
+qualification remains outstanding.
+
+Metadata read failures use distinct fixed recovery messages for session loss,
+access denial, a missing record, an incompatible response format and unverifiable
+metadata. Raw server text and codes never become presentation copy; the existing
+canonical correlation-ID filter is retained. Unsupported formats and unverified
+metadata clear old details rather than presenting a transient-server-failure
+snapshot. The rendered refusal controls include both distinct response-format
+failures, for sixteen new physical in-memory cases across the two routes.

@@ -3,6 +3,11 @@
 export const jobCopy = {
   "identity": "Job identity: {identity}",
   "loadingJob": "Loading job…",
+  "refreshingJob": "Refreshing job… Previously loaded metadata may be outdated.",
+  "previousJobMetadataMayBeOutdated": "Previously loaded job metadata may be outdated. Refresh the job to read current details.",
+  "reconnectToReadThisJob": "The local session expired or is unavailable. Reconnect the session to read this job.",
+  "jobAccessDenied": "Access to this job was denied. Check the local session and server permissions.",
+  "incompatibleJobResponse": "This interface cannot read the server's response format. Refresh the page before trying to read this job again.",
   "refreshJob": "Refresh job",
   "browseAttemptHistory": "Browse attempt history",
   "openLatestRecordedAttempt": "Open latest recorded attempt",

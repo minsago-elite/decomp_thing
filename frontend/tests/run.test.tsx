@@ -183,3 +183,90 @@ it('clears activity and cancels its reads on explicit session logout', async () 
     expect(signal.aborted).toBe(true);
   } finally { auth.dispose(); }
 });
+
+
+it('retains attempt panels and filter focus through a transient metadata refresh and explicit recovery', async () => {
+  const auth = await session();
+  let rejectRefresh: (reason: unknown) => void = () => undefined;
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce({ data: sample })
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
+    .mockResolvedValueOnce({ data: sample });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('9007199254740993')).toBeTruthy();
+    const filter = screen.getByLabelText('Task digest contains') as HTMLInputElement;
+    fireEvent.input(filter, { target: { value: 'abc123' } });
+    const evidence = screen.getByRole('button', { name: 'Read exploration evidence' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    filter.focus();
+    expect(screen.getByText('Refreshing attempt… Previously loaded metadata may be outdated.')).toBeTruthy();
+    expect(screen.getByLabelText('Task digest contains')).toBe(filter);
+    expect(filter.value).toBe('abc123');
+    expect(screen.getByRole('button', { name: 'Read exploration evidence' })).toBe(evidence);
+    await act(async () => { rejectRefresh(new ApiClientError('http_error', { status: 503, serverCode: 'PRIVATE_DIAGNOSTIC', requestId })); });
+    expect((await screen.findByRole('alert')).textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(document.body.textContent).not.toContain('PRIVATE_DIAGNOSTIC');
+    expect(screen.getByText(/Previously loaded attempt metadata may be outdated/)).toBeTruthy();
+    expect(screen.getByText('9007199254740993')).toBeTruthy();
+    expect(filter.value).toBe('abc123');
+    expect(document.activeElement).toBe(filter);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh attempt' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText(/Previously loaded attempt metadata may be outdated/)).toBeNull();
+    expect(screen.getByLabelText('Task digest contains')).toBe(filter);
+    expect(filter.value).toBe('abc123');
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['run', 'run', 'run']);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['401', new ApiClientError('http_error', { status: 401 }), 'Reconnect the session to read this attempt'],
+  ['403', new ApiClientError('http_error', { status: 403 }), 'Access to this attempt was denied'],
+  ['404', new ApiClientError('http_error', { status: 404 }), 'This attempt is unavailable for this job'],
+  ['corrupt-storage', new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_WORKFLOW_STATE' }), 'Attempt metadata could not be verified'],
+  ['invalid-response', new ApiClientError('invalid_response'), 'Attempt metadata could not be verified'],
+  ['unsupported-contract', new ApiClientError('unsupported_contract'), "This interface cannot read the server's response format"],
+] as const)('discards retained attempt metadata and panels after a %s refresh refusal', async (_label, failure, expected) => {
+  const auth = await session();
+  transport.get.mockResolvedValueOnce({ data: sample }).mockRejectedValueOnce(failure);
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('9007199254740993')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(expected);
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+    expect(screen.queryByLabelText('Task digest contains')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Read exploration evidence' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded attempt metadata may be outdated/)).toBeNull();
+    expect(transport.get).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
+it('clears retained attempt data on navigation and ignores a late obsolete refresh response', async () => {
+  const auth = await session();
+  let finishRefresh: (response: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce({ data: { ...sample, previousRunId: 'run_other' } })
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }))
+    .mockResolvedValueOnce({ data: { ...sample, runId: 'run_other', usage: null, limits: { ...sample.limits, wallClockMs: '42' } } });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('9007199254740993')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    const obsolete = transport.get.mock.calls[1]![2].signal;
+    fireEvent.click(screen.getByRole('link', { name: 'Open previous attempt' }));
+    expect(await screen.findByText('42 milliseconds')).toBeTruthy();
+    expect(obsolete.aborted).toBe(true);
+    await act(async () => { finishRefresh({ data: sample }); });
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+    expect(screen.getByText('42 milliseconds')).toBeTruthy();
+    expect(transport.get).toHaveBeenCalledTimes(3);
+  } finally { auth.dispose(); }
+});
