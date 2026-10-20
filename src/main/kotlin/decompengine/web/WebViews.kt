@@ -152,6 +152,10 @@ internal fun renderDashboardDocument(jobs: List<Job>, diagnostics: List<WebJobDi
                   status.textContent = 'Inspecting advertised methods…';
                 }
               }
+              if (observed.status !== 'inspecting' && !validInspectionId(authInspectionId)) {
+                status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
+                return;
+              }
               inventory = observed;
               if (inventory.status === 'inspecting' && status.textContent.startsWith(
                   'Inspection status is unavailable; retrying.'))
