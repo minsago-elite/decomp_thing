@@ -1122,13 +1122,21 @@ Names/descriptions are bounded before redacted previews are retained. Removable 
 characters are normalized in both preview input and private values before literal and credential-pattern
 matching, so later stripping cannot reconstruct a secret. Raw input/private-value limits still apply
 before normalization.
-Authentication ID/name/description previews also pass a bounded private-fragment filter after
-redaction and truncation. Non-overlapping eight-UTF-16-unit blocks from normalized private values
-are indexed (at most 131,072 entries under the existing 1 MiB allowance). Every contiguous private
-fragment of at least 15 units contains one such block; a matching preview is withheld as an empty
-string. Some shorter matches are conservatively withheld too. Ordinary full-value redaction remains
-in place; arbitrary fragments below this threshold are not claimed to be confidential. The private
-index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
+Authentication ID/name/description previews also conceal normalized private values and delimited
+private fragments after redaction and truncation. The existing 4096-value and 1,048,576-unit input
+bounds apply before filtering or duplicate suppression. Short normalized private values match
+anywhere; one-to-seven-unit letter/number tokens are checked against the complete normalized private
+values, including fragments split across methods/fields and format/combining insertions. Private
+invisible units are withheld too. Existing eight-unit blocks retain the guarantee for every contiguous
+private fragment of at least 15 units. A shared character alone does not classify an otherwise
+unrelated identifier as private: public advertised identifiers still have useful redacted previews.
+Two 65,536-bit indexes prefilter character membership. Short-token searches charge at most 64 Mi
+private-value units per capture, with a 4096-entry cache; exhaustion withholds unchecked text.
+A literal fixed `[redacted]` marker is reduced to that constant alone, unless it contains a normalized
+whole private value. Arbitrary encodings and undelimited short substrings inside unrelated words
+are outside this matching guarantee. Exact IDs remain private inventory data, never public selection
+authority. The separate long-fragment diagnostic projector retains its existing policy.
+The private index is local to capture and never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
 surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
 another replacement can expand inserted markers; exceeding it produces an omission marker. A single
 replacement can transiently allocate up to ten times that limit. The complete SDK-serialized
