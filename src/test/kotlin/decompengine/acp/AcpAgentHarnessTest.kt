@@ -107,6 +107,94 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `durable session failure context retains only bounded owned facts and the original receipt`() {
+        val phaseType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcomeType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val diagnosticType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = diagnosticType.getDeclaredConstructor(phaseType, outcomeType, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        for (phase in DurableSessionPhase.entries) {
+            for (stage in listOf("CONSTRUCTING", "ADMITTED")) {
+                val admission = "mount-admission-v1 stage=$stage initialMounts=12 initialControls=2 owner=true initialFast=false"
+                val witness = constructor.newInstance(
+                    phaseType.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                    outcomeType.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+                val native = java.io.IOException("PRIVATE-cause /PRIVATE/path").apply { addSuppressed(witness) }
+                val originalSuppressed = native.suppressed
+                val facts = AgentFailure(AgentFailureKind.UNAVAILABLE, "PRIVATE-failure", details = mapOf("PRIVATE" to "PRIVATE"))
+                val outcome = AgentExecutionOutcome.Failed(facts)
+                val evidence = AcpInvocationEvidenceSnapshot(
+                    null, AcpExecutionLifecyclePhase.REQUEST_BOUND, AcpExecutionCleanupDisposition.UNVERIFIED,
+                    null, null, null, emptyList(), emptyList(), emptyList(), null,
+                    AcpExecutionEvidenceCompleteness(false, false, false), null,
+                )
+                val receipt = AgentExecutionReceipt(AgentExecutionRequestBinding(AGENT_EXECUTION_CONTRACT_VERSION,
+                    "a".repeat(64), "b".repeat(64)), outcome, evidence, native)
+                var calls = 0
+                var original: AgentExecutionException? = null
+                val asserted = assertFailsWith<AssertionError> {
+                    withDurableSessionFailureContext(phase) {
+                        calls++
+                        try { receipt.requireResult() } catch (failure: AgentExecutionException) {
+                            original = failure
+                            throw failure
+                        }
+                    }
+                }
+                assertEquals(1, calls)
+                val retained = assertNotNull(original)
+                assertSame(retained, asserted.cause)
+                assertSame(receipt, retained.receipt)
+                assertSame(facts, retained.failure)
+                assertSame(native, retained.cause)
+                assertSame(outcome, receipt.outcome)
+                assertSame(evidence, receipt.providerEvidence)
+                assertSame(native, receipt.failureCause)
+                assertContentEquals(originalSuppressed, native.suppressed)
+                assertTrue(retained.suppressed.isEmpty())
+                val context = asserted.message.orEmpty()
+                assertTrue(context.startsWith(phase.label + " [phase=REQUEST_BOUND;kind=UNAVAILABLE;cleanup=UNVERIFIED"), context)
+                assertTrue(requireNotNull(contextMountWitness().message) in context, context)
+                assertTrue(admission in context, context)
+                assertFalse("PRIVATE" in context || "/" in context, context)
+                assertTrue(context.length <= 4096 && context.all { it.code in 32..126 })
+            }
+        }
+    }
+
+    @Test
+    fun `durable session context never retries and preserves unexpected or unrenderable failures`() {
+        for (phase in DurableSessionPhase.entries) {
+            val returned = Any()
+            var calls = 0
+            assertSame(returned, withDurableSessionFailureContext(phase) { calls++; returned })
+            assertEquals(1, calls)
+            val unexpected = listOf(java.io.IOException("PRIVATE"), InterruptedException("PRIVATE"),
+                java.util.concurrent.CancellationException("PRIVATE"), AssertionError("PRIVATE"))
+            for (original in unexpected) {
+                calls = 0
+                val thrown = assertFailsWith<Throwable> {
+                    withDurableSessionFailureContext(phase) { calls++; throw original }
+                }
+                assertSame(original, thrown)
+                assertEquals(1, calls)
+            }
+            val opaque = object : java.io.IOException("PRIVATE") {
+                override fun getStackTrace(): Array<StackTraceElement> = throw AssertionError("PRIVATE-rendering")
+            }
+            val original = AgentExecutionException(AgentFailure(AgentFailureKind.UNAVAILABLE, "PRIVATE"), opaque)
+            calls = 0
+            val thrown = assertFailsWith<AgentExecutionException> {
+                withDurableSessionFailureContext(phase) { calls++; throw original }
+            }
+            assertSame(original, thrown)
+            assertSame(opaque, thrown.cause)
+            assertTrue(thrown.suppressed.isEmpty())
+            assertEquals(1, calls)
+        }
+    }
+
+    @Test
     fun `session preference failure context retains only the existing closed mount witness`() {
         val cause = java.io.IOException("PRIVATE-message /PRIVATE/path").apply {
             stackTrace = arrayOf(StackTraceElement("decompengine.acp.PRIVATE-class", "PRIVATE-method", "PRIVATE-file", 123))
@@ -2887,8 +2975,12 @@ class AcpAgentHarnessTest {
         val fixture = fixture(wallMillis = 15_000, idleMillis = 3_000)
         val continuation = continuation(fixture)
         val request = fixture.request.withContinuation(continuation)
-        harness("session-persistence", sentinel = "expect-new").executeReceipt(request).requireResult()
-        val restored = harness("session-persistence", sentinel = "expect-load").executeReceipt(request).requireResult()
+        withDurableSessionFailureContext(DurableSessionPhase.NEW) {
+            harness("session-persistence", sentinel = "expect-new").executeReceipt(request).requireResult()
+        }
+        val restored = withDurableSessionFailureContext(DurableSessionPhase.LOAD) {
+            harness("session-persistence", sentinel = "expect-load").executeReceipt(request).requireResult()
+        }
         assertTrue(restored.summary.orEmpty().contains("session/load"))
         assertEquals("fixture-session", restored.session?.resumeReference)
         decompengine.agent.AgentSessionJournal.open(continuation).use { journal ->
@@ -2972,6 +3064,23 @@ class AcpAgentHarnessTest {
                 maxOutputBytes = 128L * 1024,
             ),
         )
+
+    private enum class DurableSessionPhase(val label: String) {
+        NEW("durable-session-new"), LOAD("durable-session-load"),
+    }
+
+    // Same operation exactly once. Rendering failure must leave the original typed failure intact.
+    private fun <T> withDurableSessionFailureContext(phase: DurableSessionPhase, operation: () -> T): T = try {
+        operation()
+    } catch (failure: AgentExecutionException) {
+        val context = try {
+            sessionPreferencePhaseFailureContext(phase.label, failure,
+                failure.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot)
+        } catch (_: Throwable) {
+            throw failure
+        }
+        throw AssertionError(context, failure)
+    }
 
     // Failure-only context: fixed labels/sites and an existing closed scalar mount witness.
     // Stack/suppressed accessors snapshot arrays; inspected entries and rendered output are bounded.
