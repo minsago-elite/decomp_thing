@@ -277,6 +277,29 @@ around atomic metadata publication. Restart projects interrupted legacy work thr
 the durable service while preserving its historical job.json bytes. CLI shutdown uses
 the bounded shutdown hook and reports incomplete cleanup explicitly.
 
+Production CLI startup registers that hook before its single server construction. The same cancellation
+signal reaches constructor recovery, bounded metadata reads, private-stage reconciliation and the final
+listener checks. Cancellation is cooperative between bounded units; no blocked kernel operation is
+claimed to be preempted. Failed construction retains its existing listener and ownership cleanup, and
+a shutdown racing late publication cannot start a new owner. Cleanup diagnostics use a fresh bounded
+wrapper rather than growing a retained primary failure's exception graph.
+
+Under the exclusive root lease and workflow-store write transaction, startup now counts every root
+entry (maximum 4096), charges actual legacy and workflow metadata reads (64 MiB aggregate, with a
+one-byte overflow probe), and freezes at most 64 MiB of encoded replacement state before recovery
+changes begin. Legacy records retain the 256 KiB startup input profile; each workflow record retains
+its 8 MiB parser/persistence bound. Only encoded replacement bytes and bounded identities survive the
+planning phase, not a collection of full parsed job snapshots. Directory durability and stage cleanup
+follow complete validation. Historical `job.json` is not rewritten, accepted revisions and terminal
+attempts are retained, and no analysis is replayed. Cancellation or failure after the mutating phase
+begins reports that changes may have occurred; it does not promise rollback across all jobs.
+
+Incomplete or malformed existing recovery data refuses startup. Corruption observed after successful
+initialization remains visible through the existing safe isolated diagnostic rows and detail errors.
+The ordinary per-record workflow inspection/recovery API and the separate v1 collection limits keep
+their existing profiles. These bounds assume the documented participating-writer ownership contract;
+they do not attest unrelated host actors or turn partial inspection into recovery success.
+
 Persisted display snapshots must account for every allocated sequence through retained events or
 queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation
 markers with bounded diagnostics; counter validation avoids arithmetic overflow. Rejected history

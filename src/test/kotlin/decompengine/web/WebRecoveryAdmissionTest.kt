@@ -20,9 +20,10 @@ import kotlin.test.*
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebRecoveryAdmissionTest {
     @Test fun `queued request cannot deadlock failed startup cleanup`() = withRoot { root ->
+        val server = UploadServer("127.0.0.1", 0, root)
+        // Runtime corruption is separate from strict construction-time recovery admission.
         val broken = root.resolve("a".repeat(32)).createDirectory()
         broken.resolve("job.json").writeText("invalid fixture")
-        val server = UploadServer("127.0.0.1", 0, root)
         val port = server.serverPort
         java.net.Socket("127.0.0.1", port).use { client ->
             client.getOutputStream().apply {
@@ -79,8 +80,7 @@ class WebRecoveryAdmissionTest {
         store.updateStatus(job.id, "analyzing")
         val metadata = root.resolve(job.id).resolve("job.json")
         val before = Files.readAllBytes(metadata)
-        // Corrupt legacy jobs are quarantined by the shared service; an unknown versioned
-        // upload stage is an actual initialization refusal before a listener may serve work.
+        // An unknown versioned upload stage refuses initialization before a listener may serve work.
         val broken = Files.createDirectory(root.resolve(".upload-stream-v1-96901"),
             java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
                 java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")))

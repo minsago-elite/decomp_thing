@@ -32,6 +32,153 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowAttemptStoreTest {
+    @Test fun `startup prepares every bounded record before any recovery mutation`() {
+        val events = mutableListOf<String>()
+        val budget = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(3, 8, 8))
+        val a = "a".repeat(32)
+        val b = "b".repeat(32)
+        executeWorkflowStartupRecovery(sequenceOf(b, "retained-layout", a), budget, prepare = { id ->
+            events += "inspect-$id"
+            budget.chargeRead(2)
+            WorkflowStartupRecoveryMutation(2) { events += "write-$id" }
+        }, beforeChanges = { events += "maintenance" })
+        assertEquals(listOf("inspect-$a", "inspect-$b", "maintenance", "write-$a", "write-$b"), events)
+        assertEquals(3, budget.entries)
+        assertEquals(4L, budget.readBytes)
+        assertEquals(4L, budget.planBytes)
+        assertTrue(budget.changesStarted)
+    }
+
+    @Test fun `late invalid records and complete root or byte exhaustion cannot begin recovery changes`() {
+        val ids = listOf("a".repeat(32), "b".repeat(32))
+        var writes = 0
+        var maintenance = 0
+        val invalid = WorkflowStoreException("CORRUPT_LEGACY_JOB", "authored invalid final record")
+        val budget = WorkflowStartupRecoveryBudget()
+        val failure = assertFailsWith<WorkflowStoreException> {
+            executeWorkflowStartupRecovery(ids.asSequence(), budget, prepare = { id ->
+                if (id == ids.last()) throw invalid
+                WorkflowStartupRecoveryMutation(1) { writes++ }
+            }, beforeChanges = { maintenance++ })
+        }
+        kotlin.test.assertSame(invalid, failure)
+        assertFalse(budget.changesStarted)
+        assertEquals(0, writes)
+        assertEquals(0, maintenance)
+        val rootLimit = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2, 8, 8))
+        assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
+            executeWorkflowStartupRecovery(sequenceOf("unknown-a", "unknown-b", "unknown-c"), rootLimit,
+                prepare = { error("root admission must precede record reads") }, beforeChanges = { maintenance++ })
+        }.code)
+        for (readLimited in listOf(true, false)) {
+            val bounded = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2,
+                if (readLimited) 3 else 8, if (readLimited) 8 else 3))
+            assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
+                executeWorkflowStartupRecovery(ids.asSequence(), bounded, prepare = {
+                    bounded.chargeRead(2)
+                    WorkflowStartupRecoveryMutation(2) { writes++ }
+                }, beforeChanges = { maintenance++ })
+            }.code)
+            assertFalse(bounded.changesStarted)
+        }
+        assertEquals(0, writes)
+        assertEquals(0, maintenance)
+    }
+
+    @Test fun `startup cancellation distinguishes before changes from admitted or completed mutations`() {
+        val id = "a".repeat(32)
+        var cancelled = true
+        var writes = 0
+        val before = WorkflowStartupRecoveryBudget(cancellation = { cancelled })
+        val early = assertFailsWith<WorkflowStoreException> {
+            executeWorkflowStartupRecovery(sequenceOf(id), before,
+                prepare = { error("cancelled inspection must not run") }, beforeChanges = { error("cancelled maintenance must not run") })
+        }
+        assertEquals("RECOVERY_CANCELLED", early.code)
+        assertFalse(early.outcomeUnknown)
+        for (cancelAfterWrite in listOf(false, true)) {
+            cancelled = false
+            val budget = WorkflowStartupRecoveryBudget(cancellation = { cancelled })
+            val late = assertFailsWith<WorkflowStoreException> {
+                executeWorkflowStartupRecovery(sequenceOf(id), budget,
+                    prepare = { WorkflowStartupRecoveryMutation(0) { writes++; cancelled = true } },
+                    beforeChanges = { if (!cancelAfterWrite) cancelled = true })
+            }
+            assertEquals("RECOVERY_CANCELLED", late.code)
+            assertTrue(late.outcomeUnknown)
+        }
+        assertEquals(1, writes)
+        for (original in listOf(WorkflowStoreException("PERSISTENCE_FAILED", "authored later publication failure"),
+            IOException("authored directory confirmation failure"))) {
+            val budget = WorkflowStartupRecoveryBudget()
+            var completed = 0
+            val failed = assertFailsWith<WorkflowStoreException> {
+                executeWorkflowStartupRecovery(sequenceOf("a".repeat(32), "b".repeat(32)), budget,
+                    prepare = { name -> WorkflowStartupRecoveryMutation(0) {
+                        if (name.startsWith("b")) throw original
+                        completed++
+                    } }, beforeChanges = {})
+            }
+            assertTrue(failed.outcomeUnknown)
+            kotlin.test.assertSame(original, failed.cause)
+            assertEquals(1, completed)
+            assertTrue(original.suppressed.isEmpty())
+        }
+        val interrupted = WorkflowStartupRecoveryBudget()
+        Thread.currentThread().interrupt()
+        try {
+            val failure = assertFailsWith<WorkflowStoreException> { interrupted.checkpoint() }
+            assertEquals("RECOVERY_CANCELLED", failure.code)
+            assertFalse(failure.outcomeUnknown)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
+    }
+
+    @Test fun `startup snapshot projection interrupts only active work and preserves acceptance and legacy provenance`() {
+        val job = "a".repeat(32)
+        val now = CLOCK.instant()
+        val reference = WorkflowAcceptanceReference(job, "run_done", "revision_accepted", SHA,
+            "graph_node", "artifact_accepted", "cd".repeat(32))
+        val terminal = WorkflowAttempt(runId = "run_done", jobId = job, workflow = WorkflowKind.RECONSTRUCT,
+            state = WorkflowRunState.COMPLETED, version = "version_done", createdAt = now.minusSeconds(30),
+            startedAt = now.minusSeconds(20), endedAt = now.minusSeconds(10), previousRunId = null,
+            inputRevisionId = null, harnessCapabilityId = null, limits = LIMITS,
+            terminalReason = WorkflowTerminalReason.COMPLETED, usage = null,
+            candidate = WorkflowCandidate("revision_accepted", SHA), acceptedRevision = reference, progressRetentionPinned = true)
+        val active = terminal.copy(runId = "run_live", state = WorkflowRunState.RUNNING, version = "version_live",
+            endedAt = null, previousRunId = terminal.runId, terminalReason = null, candidate = null,
+            acceptedRevision = null, progressRetentionPinned = false)
+        val current = WorkflowJobSnapshot(job, "version_job", LegacyWorkflowObservation(SHA, "queued", false),
+            listOf(terminal, active), reference)
+        var ids = 0
+        var clocks = 0
+        val recovered = assertNotNull(recoveredWorkflowSnapshot(current, { clocks++; now }, { "${it}_${++ids}" }))
+        kotlin.test.assertSame(terminal, recovered.attempts.first())
+        kotlin.test.assertSame(reference, recovered.acceptedRevision)
+        assertEquals(current.pinAudit, recovered.pinAudit)
+        assertEquals(current.cancellationReceipts, recovered.cancellationReceipts)
+        assertEquals(SHA, recovered.legacy.originalJobSha256)
+        assertEquals("queued", recovered.legacy.status)
+        assertTrue(recovered.legacy.recoveredInterrupted)
+        assertEquals(WorkflowRunState.INTERRUPTED, recovered.latestRun!!.state)
+        assertEquals(WorkflowTerminalReason.PROCESS_INTERRUPTED, recovered.latestRun!!.terminalReason)
+        assertEquals(now, recovered.latestRun!!.endedAt)
+        assertEquals(2, ids)
+        assertEquals(1, clocks)
+        assertEquals(WorkflowRunState.RUNNING, current.latestRun!!.state)
+        assertFalse(current.legacy.recoveredInterrupted)
+    }
+
+    @Test fun `already reconciled startup snapshots need no rewrite clock or replacement identity`() {
+        val current = WorkflowJobSnapshot("a".repeat(32), "version_job", LegacyWorkflowObservation(SHA, "queued", true),
+            emptyList(), null)
+        assertNull(recoveredWorkflowSnapshot(current, { error("unchanged records do not read the clock") },
+            { error("unchanged records do not allocate replacement identities") }))
+        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(4097) }
+        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(maximumReadBytes = 64L * 1024 * 1024 + 1) }
+        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(maximumPlanBytes = 64L * 1024 * 1024 + 1) }
+    }
+
     @Test
     fun `legacy records remain readable without inventing attempts or changing original bytes`() = withRoot { root ->
         val job = upload(root)

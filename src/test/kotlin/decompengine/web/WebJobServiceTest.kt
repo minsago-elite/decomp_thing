@@ -29,6 +29,107 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test fun `startup hook precedes construction and normal shutdown reaches the published owner`() {
+        val events = mutableListOf<String>()
+        val owner = Any()
+        lateinit var shutdown: () -> Unit
+        lateinit var cancelled: () -> Boolean
+        val returned = startWebServerLifecycle(registerShutdown = { action ->
+            events += "register"
+            shutdown = action
+            val remove: () -> Unit = { events += "remove" }
+            remove
+        }, create = { cancellation ->
+            events += "construct"
+            cancelled = cancellation
+            assertFalse(cancellation())
+            owner
+        }, start = { events += "start" }, stop = { events += "stop" })
+        kotlin.test.assertSame(owner, returned)
+        assertEquals(listOf("register", "construct", "start"), events)
+        shutdown()
+        assertTrue(cancelled())
+        assertEquals(listOf("register", "construct", "start", "stop"), events)
+    }
+
+    @Test fun `shutdown during construction prevents start and cleans only a late published owner`() {
+        for (failConstruction in listOf(false, true)) {
+            lateinit var shutdown: () -> Unit
+            var constructions = 0
+            var starts = 0
+            var stops = 0
+            var removals = 0
+            val original = IllegalStateException("authored constructor cancellation")
+            val failure = assertFailsWith<IllegalStateException> {
+                startWebServerLifecycle(registerShutdown = { action ->
+                    shutdown = action
+                    val remove: () -> Unit = { removals++ }
+                    remove
+                }, create = { cancellation ->
+                    constructions++
+                    shutdown()
+                    assertTrue(cancellation())
+                    if (failConstruction) throw original
+                    Any()
+                }, start = { starts++ }, stop = { stops++ })
+            }
+            if (failConstruction) kotlin.test.assertSame(original, failure)
+            else assertEquals("Web server startup cancelled", failure.message)
+            assertEquals(1, constructions)
+            assertEquals(0, starts)
+            assertEquals(if (failConstruction) 0 else 1, stops)
+            assertEquals(1, removals)
+        }
+    }
+
+    @Test fun `startup cleanup failures use fresh bounded wrappers without growing the original failure graph`() {
+        val original = IllegalStateException("authored start failure").apply { addSuppressed(IllegalArgumentException("retained")) }
+        val retained = original.suppressed
+        val removal = IllegalArgumentException("authored hook cleanup failure")
+        val stop = IllegalStateException("authored owner cleanup failure")
+        var first: Throwable? = null
+        repeat(2) {
+            var starts = 0
+            var stops = 0
+            val failure = assertFailsWith<IllegalStateException> {
+                startWebServerLifecycle(registerShutdown = {
+                    val remove: () -> Unit = { throw removal }
+                    remove
+                }, create = { Any() }, start = { starts++; throw original }, stop = { stops++; throw stop })
+            }
+            kotlin.test.assertSame(original, failure.cause)
+            kotlin.test.assertContentEquals(arrayOf<Throwable>(removal, stop), failure.suppressed)
+            kotlin.test.assertContentEquals(retained, original.suppressed)
+            assertEquals(1, starts)
+            assertEquals(1, stops)
+            if (first != null) assertTrue(first !== failure)
+            first = failure
+        }
+    }
+
+    @Test fun `cancelled or refused hook registration cannot construct a startup owner`() {
+        var constructions = 0
+        var removals = 0
+        val cancelled = assertFailsWith<IllegalStateException> {
+            startWebServerLifecycle(registerShutdown = { action ->
+                action()
+                val remove: () -> Unit = { removals++ }
+                remove
+            }, create = { constructions++; Any() }, start = { error("cancelled startup must not run") },
+                stop = { error("no owner exists to stop") })
+        }
+        assertEquals("Web server startup cancelled", cancelled.message)
+        assertEquals(0, constructions)
+        assertEquals(1, removals)
+        val original = IllegalStateException("authored registration refusal")
+        val refused = assertFailsWith<IllegalStateException> {
+            startWebServerLifecycle(registerShutdown = { throw original }, create = { constructions++; Any() },
+                start = { error("unregistered startup must not run") }, stop = { error("no owner exists to stop") })
+        }
+        kotlin.test.assertSame(original, refused)
+        assertEquals(0, constructions)
+    }
+
     @Test
     fun `recovery inspection excludes a live multipart stage and resumes after publication`() = withStore { store, root ->
         val boundary = "recovery-overlap"

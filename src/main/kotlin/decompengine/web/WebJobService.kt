@@ -181,26 +181,40 @@ class WebJobService(
     internal var onQuiescent: (() -> Unit)? = null
 
     @Synchronized
-    fun initializeExistingStorage() {
+    fun initializeExistingStorage() = initializeExistingStorage { false }
+
+    @Synchronized
+    internal fun initializeExistingStorage(cancellation: () -> Boolean) {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
-        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover()
+        fun checkCancellation() {
+            if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+                "RECOVERY_CANCELLED", "Startup recovery was cancelled; preserve any already reconciled storage.", attempts != null)
+        }
+        checkCancellation()
+        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover(cancellation)
+        checkCancellation()
         initialized = true
         if (!stopping) retentionWorker?.start()
     }
 
-    private fun acquireAndRecover(): WorkflowAttemptStore {
+    private fun acquireAndRecover(cancellation: () -> Boolean = { false }): WorkflowAttemptStore {
         attempts?.let { return it }
+        if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+            "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
-            try {
-                store.prepareStorageDirectories()
-            } catch (failure: Exception) {
-                throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
-                    "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+            acquired.recoverForStartup(cancellation = { stopping || cancellation() }) { check ->
+                check()
+                try {
+                    store.prepareStorageDirectories()
+                } catch (failure: Exception) {
+                    throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
+                        "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+                }
+                check()
+                decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
             }
-            decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
-            acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
             return acquired
         } catch (failure: Throwable) {

@@ -199,10 +199,12 @@ class UploadServer(
     private val requestDiagnosticOutput: (String) -> Unit = System.err::println,
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
+    private val startupCancellation: () -> Boolean = { false },
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
         require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
+        check(!Thread.currentThread().isInterrupted && !startupCancellation()) { "Web server startup cancelled" }
     }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
@@ -292,7 +294,7 @@ class UploadServer(
             }
         }
         try {
-            jobs.initializeExistingStorage()
+            jobs.initializeExistingStorage { stopRequested.get() || startupCancellation() }
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
@@ -332,7 +334,7 @@ class UploadServer(
                 try {
                     // Recovery never rewrites historical metadata here; startup must not report
                     // success when a cancellation signal or a late interrupt preceded the listener.
-                    check(!stopRequested.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
+                    check(!stopRequested.get() && !startupCancellation() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
                     server.start()
                     started = true
                 } catch (failure: Exception) {
@@ -1079,6 +1081,61 @@ internal fun handleAuthorizedUploadRequest(
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }
     }
+}
+
+/** Pure lifecycle coordinator: registration precedes the same single construction and start. */
+internal fun <T : Any> startWebServerLifecycle(
+    registerShutdown: (() -> Unit) -> (() -> Unit), create: (() -> Boolean) -> T,
+    start: (T) -> Unit, stop: (T) -> Unit,
+): T {
+    val stopping = java.util.concurrent.atomic.AtomicBoolean(false)
+    val published = java.util.concurrent.atomic.AtomicReference<T>()
+    val removeHook = registerShutdown {
+        stopping.set(true)
+        published.get()?.let(stop)
+    }
+    fun cancelled() = stopping.get() || Thread.currentThread().isInterrupted
+    try {
+        check(!cancelled()) { "Web server startup cancelled" }
+        val server = create(::cancelled)
+        published.set(server)
+        check(!cancelled()) { "Web server startup cancelled" }
+        start(server)
+        check(!cancelled()) { "Web server startup cancelled" }
+        return server
+    } catch (failure: Throwable) {
+        var removeFailure: Throwable? = null
+        var stopFailure: Throwable? = null
+        try { removeHook() } catch (problem: Throwable) { removeFailure = problem }
+        published.get()?.let { server -> try { stop(server) } catch (problem: Throwable) { stopFailure = problem } }
+        if (removeFailure == null && stopFailure == null) throw failure
+        // Never grow a retained primary failure's suppression list. Cleanup diagnostics own a fresh wrapper.
+        val incomplete = try {
+            IllegalStateException("Web startup cleanup did not complete; preserve storage before retrying.", failure).also { wrapper ->
+                removeFailure?.let { if (it !== failure) wrapper.addSuppressed(it) }
+                stopFailure?.let { if (it !== failure) wrapper.addSuppressed(it) }
+            }
+        } catch (_: Throwable) { throw failure }
+        throw incomplete
+    }
+}
+
+/** CLI factory form makes constructor recovery observe shutdown before the server exists. */
+internal fun startWebServerWithShutdownHook(create: (() -> Boolean) -> UploadServer): UploadServer {
+    val runtime = Runtime.getRuntime()
+    return startWebServerLifecycle(registerShutdown = { action ->
+        val hook = Thread({
+            try { action() } catch (_: Exception) {
+                System.err.println("Web shutdown did not complete cleanly; recovery is required")
+            }
+        }, "decomp-web-shutdown")
+        runtime.addShutdownHook(hook)
+        val remove: () -> Unit = {
+            try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
+            Unit
+        }
+        remove
+    }, create = create, start = { it.start() }, stop = { it.stop() })
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */

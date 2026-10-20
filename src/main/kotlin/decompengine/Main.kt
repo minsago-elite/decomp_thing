@@ -923,12 +923,14 @@ private fun runWeb(args: List<String>) {
     }
     require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
     val server = try {
-        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
+        decompengine.web.startWebServerWithShutdownHook { cancellation ->
+            UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
+                listenBacklog = listenBacklog, startupCancellation = cancellation)
+        }
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
         kotlin.system.exitProcess(2)
     }
-    decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
     val bootstrap = server.issueBrowserBootstrap()
