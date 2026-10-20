@@ -7,6 +7,31 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class AcpAuthenticationInventoryTest {
+    @Test fun `public identifiers survive shared characters while delimited private fragments are withheld`() {
+        val privateValues = listOf("/fixture/auth/config.json", "fixture-credential", "legacy-transport-must-not-run")
+        val exposed = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("operator-login"), "Public login", "Use your account")), privateValues).methods.single()
+        assertEquals("operator-login", exposed.idPreview)
+        assertEquals("Public login", exposed.namePreview)
+        assertEquals("Use your account", exposed.descriptionPreview)
+        val concealed = AcpAuthenticationInventory.capture(listOf(AuthMethod.AgentAuth(
+            AuthMethodId("method-r"), "prefix roo", "prefix r\u200bo\u0301o")), listOf("root")).methods.single()
+        assertEquals("", concealed.idPreview)
+        assertEquals("", concealed.namePreview)
+        assertEquals("", concealed.descriptionPreview)
+    }
+
+    @Test fun `short fragment search exhaustion withholds unchecked text within its fixed work budget`() {
+        val filter = AuthenticationPreviewFragments(listOf("abcdefghij"), maximumSearchUnits = 8)
+        assertEquals("", filter.concealUntrusted("ace"))
+        assertEquals("", filter.concealUntrusted("Public login"))
+        val ordinary = AuthenticationPreviewFragments(listOf("abcdefghij"))
+        assertEquals("Public login", ordinary.concealUntrusted("Public login"))
+        assertFailsWith<IllegalArgumentException> {
+            AuthenticationPreviewFragments(emptyList(), maximumSearchUnits = 64L * 1024 * 1024 + 1)
+        }
+    }
+
     @Test fun `short private values cannot hide behind format or combining characters`() {
         for (secret in listOf("root", "api", "key", "ab")) {
             for (invisible in listOf("\u200b", "\u2060", "\u0301", "\u20dd")) {

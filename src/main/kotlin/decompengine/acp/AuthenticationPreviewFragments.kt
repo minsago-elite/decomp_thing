@@ -1,10 +1,18 @@
 package decompengine.acp
 
 /** Private, bounded membership index; fragments never leave the capture operation. */
-internal class AuthenticationPreviewFragments(values: Collection<String>) {
+internal class AuthenticationPreviewFragments(
+    values: Collection<String>, maximumSearchUnits: Long = 64L * 1024 * 1024,
+) {
     private val invisibles = Regex("[\\p{Cntrl}\\p{Cf}\\p{Mn}\\p{Me}&&[^\\n\\t]]")
     private val blocks: Set<String>
     private val privateUnits = java.util.BitSet(65_536)
+    private val privateInvisibles = java.util.BitSet(65_536)
+    private val normalizedValues: List<String>
+    private val shortTokens = HashMap<String, Boolean>()
+    private val tokenPattern = Regex("[\\p{L}\\p{N}]+")
+    private var remainingSearchUnits = maximumSearchUnits
+    private var searchExhausted = false
     private var redactionMarkerAllowed = true
 
     init {
@@ -12,10 +20,15 @@ internal class AuthenticationPreviewFragments(values: Collection<String>) {
         require(values.size <= 4096 && values.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "authentication preview private values exceed the configured limit"
         }
-        for (value in values) {
-            value.forEach { privateUnits.set(it.code) }
-            val normalized = value.replace(invisibles, "")
-            if (normalized.isNotEmpty() && REDACTION_MARKER.contains(normalized)) redactionMarkerAllowed = false
+        require(maximumSearchUnits in 0..64L * 1024 * 1024) { "authentication preview search budget is invalid" }
+        normalizedValues = values.map { it.replace(invisibles, "") }.filter(String::isNotEmpty).distinct()
+        redactionMarkerAllowed = normalizedValues.none { REDACTION_MARKER.contains(it) }
+        for (value in values) value.forEach { unit ->
+            privateUnits.set(unit.code)
+            when (Character.getType(unit)) {
+                Character.CONTROL.toInt(), Character.FORMAT.toInt(),
+                Character.NON_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt() -> privateInvisibles.set(unit.code)
+            }
         }
         val selected = values.filter { it.isNotBlank() }.distinct()
         require(selected.size <= 4096 && selected.sumOf { it.length.toLong() } <= 1024 * 1024) {
@@ -30,27 +43,36 @@ internal class AuthenticationPreviewFragments(values: Collection<String>) {
         }
     }
 
-    /**
-     * Advertised fields may split private values into arbitrarily short fragments. Only a
-     * fixed public marker can bypass the unit index; overlapping peer text is withheld.
-     * This intentionally suppresses ordinary labels that share any private UTF-16 unit.
-     */
+    /** Keep unrelated identifiers while concealing normalized values and short delimited private fragments. */
     fun concealUntrusted(preview: String): String {
         if (privateUnits.isEmpty()) return preview
-        var position = 0
-        var hasMarker = false
-        var hasPrivateUnit = false
-        while (position < preview.length) {
-            if (preview.startsWith(REDACTION_MARKER, position)) {
-                if (!redactionMarkerAllowed) return ""
-                hasMarker = true
-                position += REDACTION_MARKER.length
-            } else {
-                if (privateUnits.get(preview[position].code)) hasPrivateUnit = true
-                position++
+        if (REDACTION_MARKER in preview) return if (redactionMarkerAllowed) REDACTION_MARKER else ""
+        if (searchExhausted || preview.any { privateInvisibles.get(it.code) }) return ""
+        val normalized = preview.replace(invisibles, "")
+        if (normalizedValues.any { it.length < 8 && normalized.contains(it) }) return ""
+        for (match in tokenPattern.findAll(normalized)) {
+            val token = match.value
+            if (token.length in 1..7 && token.all { privateUnits.get(it.code) } && privateToken(token)) return ""
+        }
+        return conceal(preview)
+    }
+
+    private fun privateToken(token: String): Boolean {
+        shortTokens[token]?.let { return it }
+        for (value in normalizedValues) {
+            // Bound worst-case negative searches; exhaustion withholds instead of publishing unchecked text.
+            if (value.length > remainingSearchUnits) {
+                searchExhausted = true
+                return true
+            }
+            remainingSearchUnits -= value.length
+            if (value.contains(token)) {
+                if (shortTokens.size < 4096) shortTokens[token] = true
+                return true
             }
         }
-        return if (!hasPrivateUnit) preview else if (hasMarker) REDACTION_MARKER else ""
+        if (shortTokens.size < 4096) shortTokens[token] = false
+        return false
     }
 
     private companion object {
