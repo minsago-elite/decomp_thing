@@ -7,7 +7,7 @@ internal class AuthenticationPreviewFragments(
     private val invisibles = Regex("[\\p{Cntrl}\\p{Cf}\\p{Mn}\\p{Me}&&[^\\n\\t]]")
     private val blocks: Set<String>
     private val privateUnits = java.util.BitSet(65_536)
-    private val privateInvisibles = java.util.BitSet(65_536)
+    private val privateInvisibles = java.util.BitSet(Character.MAX_CODE_POINT + 1)
     private val normalizedValues: List<String>
     private val shortTokens = HashMap<String, Boolean>()
     private val tokenPattern = Regex("[\\p{L}\\p{N}]+")
@@ -23,11 +23,16 @@ internal class AuthenticationPreviewFragments(
         require(maximumSearchUnits in 0..64L * 1024 * 1024) { "authentication preview search budget is invalid" }
         normalizedValues = values.map { it.replace(invisibles, "") }.filter(String::isNotEmpty).distinct()
         redactionMarkerAllowed = normalizedValues.none { REDACTION_MARKER.contains(it) }
-        for (value in values) value.forEach { unit ->
-            privateUnits.set(unit.code)
-            when (Character.getType(unit)) {
-                Character.CONTROL.toInt(), Character.FORMAT.toInt(),
-                Character.NON_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt() -> privateInvisibles.set(unit.code)
+        for (value in values) {
+            value.forEach { unit -> privateUnits.set(unit.code) }
+            var offset = 0
+            while (offset < value.length) {
+                val codePoint = value.codePointAt(offset)
+                when (Character.getType(codePoint)) {
+                    Character.CONTROL.toInt(), Character.FORMAT.toInt(),
+                    Character.NON_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt() -> privateInvisibles.set(codePoint)
+                }
+                offset += Character.charCount(codePoint)
             }
         }
         val selected = values.filter { it.isNotBlank() }.distinct()
@@ -47,7 +52,7 @@ internal class AuthenticationPreviewFragments(
     fun concealUntrusted(preview: String): String {
         if (privateUnits.isEmpty()) return preview
         if (REDACTION_MARKER in preview) return if (redactionMarkerAllowed) REDACTION_MARKER else ""
-        if (searchExhausted || preview.any { privateInvisibles.get(it.code) }) return ""
+        if (searchExhausted || containsPrivateInvisible(preview)) return ""
         val normalized = preview.replace(invisibles, "")
         if (normalizedValues.any { it.length < 8 && normalized.contains(it) }) return ""
         for (match in tokenPattern.findAll(normalized)) {
@@ -55,6 +60,16 @@ internal class AuthenticationPreviewFragments(
             if (token.length in 1..7 && token.all { privateUnits.get(it.code) } && privateToken(token)) return ""
         }
         return conceal(preview)
+    }
+
+    private fun containsPrivateInvisible(value: String): Boolean {
+        var offset = 0
+        while (offset < value.length) {
+            val codePoint = value.codePointAt(offset)
+            if (privateInvisibles.get(codePoint)) return true
+            offset += Character.charCount(codePoint)
+        }
+        return false
     }
 
     private fun privateToken(token: String): Boolean {

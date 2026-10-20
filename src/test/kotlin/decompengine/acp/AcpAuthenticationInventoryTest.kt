@@ -107,6 +107,15 @@ class AcpAuthenticationInventoryTest {
         assertEquals("", blank.descriptionPreview)
     }
 
+    @Test fun `supplementary invisible private code points cannot bypass preview withholding`() {
+        // U+E0100 is a supplementary non-spacing mark; U+E0001 is a supplementary format character.
+        for (invisible in listOf("\udb40\udd00", "\udb40\udc01")) {
+            val filter = AuthenticationPreviewFragments(listOf(invisible))
+            assertEquals("", filter.concealUntrusted(invisible))
+            assertEquals("Public login", filter.concealUntrusted("Public login"))
+        }
+    }
+
     @Test fun `long private fragments are withheld at every alignment in operator previews`() {
         val secret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
         val fragments = listOf(secret.dropLast(1), secret.drop(1)) +
