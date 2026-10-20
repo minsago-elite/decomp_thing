@@ -503,8 +503,8 @@ internal fun acpDoctorFailureContext(failure: AgentExecutionException): String =
             mountRecord = record
             break
         }
+        // getSuppressed() clones the complete array. Only bounded cause links are inspected.
         current.cause?.let { if (pending.size < 16) pending.add(it) }
-        current.suppressed.asSequence().take(2).forEach { if (pending.size < 16) pending.add(it) }
     }
     ("recordedPhase=${evidence?.phaseReached?.name ?: "MISSING"} " +
         "recordedCleanup=${evidence?.cleanupDisposition?.name ?: "MISSING"} " +

@@ -23,8 +23,10 @@ import kotlin.test.assertTrue
 class DoctorTest {
     @Test
     fun `ACP failure context reports an owned witness while withholding unknown receipt and private cause text`() {
+        val witness = fixedMountWitness()
         val cause = java.io.IOException("PRIVATE message /PRIVATE/path").apply {
-            addSuppressed(fixedMountWitness())
+            initCause(witness)
+            addSuppressed(witness)
             addSuppressed(IllegalStateException("PRIVATE suppressed"))
         }
         val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE failure",
@@ -55,7 +57,7 @@ class DoctorTest {
     }
 
     @Test
-    fun `ACP failure context bounds cycles depth and suppression and rejects forged witness text`() {
+    fun `ACP failure context bounds cause cycles and depth without traversing arbitrary suppression lists`() {
         val first = java.io.IOException("PRIVATE first")
         val second = IllegalStateException("PRIVATE second")
         first.initCause(second); second.initCause(first)
@@ -69,8 +71,8 @@ class DoctorTest {
         repeat(9) { deep = IllegalStateException("PRIVATE wrapper", deep) }
         assertTrue("mountEventRecord=MISSING" in context(deep))
         val suppressed = java.io.IOException("PRIVATE primary").apply {
-            addSuppressed(Throwable("PRIVATE one")); addSuppressed(Throwable("PRIVATE two"))
             addSuppressed(fixedMountWitness())
+            repeat(64) { addSuppressed(Throwable("PRIVATE suppressed $it")) }
         }
         assertTrue("mountEventRecord=MISSING" in context(suppressed))
     }

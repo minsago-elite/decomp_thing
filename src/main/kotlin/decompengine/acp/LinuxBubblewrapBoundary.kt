@@ -2238,6 +2238,8 @@ private class RuntimePrivateControlScope private constructor(
                 ).also { firstEventDiagnostic = it }
                 // This exact local IOException is fresh: no graph lookup or existing-list growth.
                 failure.addSuppressed(diagnostic)
+                // A direct, bounded link on this fresh owned failure avoids arbitrary suppressed-list snapshots.
+                failure.initCause(diagnostic)
             } catch (_: Throwable) { /* Diagnostic failure cannot replace the original refusal. */ }
             return failure
         }
