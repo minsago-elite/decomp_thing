@@ -33,7 +33,7 @@ function browser(fetch) {
   return { state, window, document };
 }
 const credentials = (expiresAt = new Date(Date.now() + 60000).toISOString()) => ({ status: 200, ok: true,
-  json: async () => ({ data: { csrfToken: 'synthetic-csrf', expiresAt } }) });
+  json: async () => ({ data: { csrfToken: 'synthetic-csrf', idleExpiresAt: expiresAt } }) });
 
 test('expired restoration clears private content without mutation or retry', async () => {
   const { state, window, document } = browser(async () => credentials('2000-01-01T00:00:00Z'));
