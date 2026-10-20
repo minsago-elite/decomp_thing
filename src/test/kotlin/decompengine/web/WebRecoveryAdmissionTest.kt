@@ -19,6 +19,60 @@ import kotlin.test.*
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebRecoveryAdmissionTest {
+    @Test fun `missing-root ownership keys match later existing keys through a stable parent alias`() {
+        val requested = Path.of("/alias/jobs")
+        val expected = Path.of("/physical/jobs")
+        val checked = mutableListOf<Path>()
+        val resolved = mutableListOf<Path>()
+        val beforeCreation = canonicalWebJobStoreRoot(requested,
+            knownAbsent = { checked.add(it); it == requested },
+            realPath = { resolved.add(it); assertEquals(Path.of("/alias"), it); Path.of("/physical") })
+        val afterCreation = canonicalWebJobStoreRoot(requested,
+            knownAbsent = { false }, realPath = { assertEquals(requested, it); expected })
+        assertEquals(expected, beforeCreation)
+        assertEquals(beforeCreation, afterCreation)
+        assertEquals(listOf(requested, Path.of("/alias")), checked)
+        assertEquals(listOf(Path.of("/alias")), resolved)
+    }
+
+    @Test fun `ownership key discovery preserves missing names and resolves only the nearest existing ancestor`() {
+        val requested = Path.of("/alias/new/inner/../jobs")
+        val visited = mutableListOf<Path>()
+        val resolved = mutableListOf<Path>()
+        val actual = canonicalWebJobStoreRoot(requested,
+            knownAbsent = { visited.add(it); it != Path.of("/alias") },
+            realPath = { resolved.add(it); Path.of("/physical") })
+        assertEquals(Path.of("/physical/new/jobs"), actual)
+        assertEquals(listOf(Path.of("/alias/new/jobs"), Path.of("/alias/new"), Path.of("/alias")), visited)
+        assertEquals(listOf(Path.of("/alias")), resolved)
+        val existing = Path.of("/already-present")
+        assertEquals(Path.of("/canonical-present"), canonicalWebJobStoreRoot(existing,
+            knownAbsent = { assertEquals(existing, it); false },
+            realPath = { assertEquals(existing, it); Path.of("/canonical-present") }))
+    }
+
+    @Test fun `indeterminate ownership paths and invalid roots cannot fall back to an unverified key`() {
+        val requested = Path.of("/alias/jobs")
+        val original = java.io.IOException("PRIVATE unresolved path")
+        val visited = mutableListOf<Path>()
+        val failure = assertFailsWith<java.io.IOException> {
+            canonicalWebJobStoreRoot(requested,
+                knownAbsent = { visited.add(it); false }, realPath = { throw original })
+        }
+        assertSame(original, failure)
+        assertEquals(listOf(requested), visited)
+        assertTrue(original.suppressed.isEmpty())
+        assertFailsWith<IllegalArgumentException> {
+            canonicalWebJobStoreRoot(Path.of("relative/jobs"),
+                knownAbsent = { error("invalid input cannot inspect storage") },
+                realPath = { error("invalid input cannot resolve storage") })
+        }
+        assertFailsWith<IllegalStateException> {
+            canonicalWebJobStoreRoot(Path.of("/"), knownAbsent = { true },
+                realPath = { error("a missing filesystem root cannot resolve") })
+        }
+    }
+
     @Test fun `queued request cannot deadlock failed startup cleanup`() = withRoot { root ->
         val server = UploadServer("127.0.0.1", 0, root)
         // Runtime corruption is separate from strict construction-time recovery admission.

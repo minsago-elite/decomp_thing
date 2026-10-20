@@ -480,7 +480,12 @@ listener. The workflow store also retains `.workflow-owner.lock`; the two files
 serve distinct ownership layers. Same-JVM web owners use the canonical existing
 store path to reject contenders before opening another lock channel (see the
 [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
-A missing root initially has in-process web exclusion only; creating it upgrades
+A missing root is keyed by resolving its nearest existing ancestor and appending
+the missing names. A stable parent alias therefore uses the same key after root
+creation. Only known absence permits walking to a parent; an indeterminate lookup
+must resolve or fail instead of selecting an unverified lexical key. Discovery
+does not create storage. A missing root initially has in-process web exclusion only;
+creating it upgrades
 to the cross-JVM lock before application work. Neither lock file is deleted or
 replaced as a stale-lock cleanup operation. A pathname, PID or leftover lock file
 alone never proves that another writer is absent. Provisioning/durability of
