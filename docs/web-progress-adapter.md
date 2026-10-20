@@ -739,3 +739,29 @@ Private bootstrap reports optional `runtime.progressRetention`: whether periodic
 Production HTTP tests seed expired, pinned and recent inert histories, verify actual default expiry and private counters, and check that workflow metadata and protected journals are preserved. A legacy-mode fixture verifies that old progress is retained. The packaged history fixture now uses recent timestamps so its replay/pin journey intentionally stays within the production retention window; separate production tests exercise expiry. Browser qualification verifies the Runtime explanation and process-local sampled counters.
 
 All 298 selected JVM tests, 342 frontend tests, lint/typechecked bundle, 49 valid/41 invalid contract fixtures and distZip pass. The [retained production manifest and browser report](evidence/web-production-retention-20260908/manifest.json) verify default expiry, protection, private status, packaged Runtime/pin/replay behavior, and confirmed shutdown/cleanup. Preliminary frontend and date-fixture errors were corrected before final verification; their scope is recorded in the manifest.
+
+## Live context-usage display coalescing
+
+The activity consumer checks every streamed observation and updates its bounded
+position before scheduling display work. Consecutive live `context_usage` records
+publish the first display snapshot immediately and retain only the latest complete
+snapshot for the next 100 ms display window. All checked rows remain in the
+existing 200-record page; this does not merge, discard or rewrite journal events.
+The latest snapshot carries its original browser receipt time, rather than the
+later display callback time. Provider measurement time remains unreported.
+
+Polling pages, replayed duplicates, non-usage records and the full-page boundary
+display immediately. Agent outcomes therefore do not wait behind a metric timer.
+Pause, background suspension and teardown flush a pending snapshot only while its
+position and private transport/job/attempt binding are still current. Reset or
+access-denial clearing invalidates that snapshot; cancelled callbacks cannot
+restore it. One display timer and one pending snapshot are retained, with no
+second event queue, request, retry, cursor, provider or acceptance authority.
+
+The scheduling controls use frozen DTOs and injected synchronous callbacks to
+check burst coalescing, unchanged records and receipt time, immediate barriers,
+pause flushing, reset/scope invalidation and late cancelled callbacks. Existing
+streaming, replay, capacity, focus, source and monetary-withholding behavior keeps
+its original regression methods. Physical browser burst/render qualification and
+the broader resource-accounting and measurement-provenance scope remain separate
+requirements.
