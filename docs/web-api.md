@@ -338,6 +338,19 @@ harness selection is not evidence that a session ran. Missing binaries/configura
 unavailable; unfinished built-in/ACP resume/permission/Git features remain unsupported or unknown.
 Never enable controls from a fixture, environment variable name, endpoint guess or frontend flag.
 
+The job's workflow availability view displays the contract version and execution
+limits in that last authenticated capability report. Wall-clock and idle limits
+retain their exact decimal millisecond values; output bytes and tool-call counts
+also retain every decimal digit, including values above JavaScript's exact integer
+range. Missing metadata is labelled not reported. A reported zero stays zero;
+the view assigns it no unlimited or unsupported meaning. Reports without an
+assigned workflow stay in the general capability section.
+
+These are report-level observations, separate from an individual attempt's
+recorded limits and job-specific admission. Displaying them performs no new
+request, preflight, provider selection or workflow action. Implementation-version,
+deprecation, selection and full workflow qualification requirements remain open.
+
 Runtime information uses allowlisted implementation/version/platform names and effective limit
 values. It excludes absolute installations/worktrees, environment values, credential-bearing
 URLs, agent resume secrets and raw process command lines. The session response carries a CSRF
