@@ -14,6 +14,12 @@ export const sourceCopy = {
   sourceDigest: 'Source commitment',
   fileDigest: 'Committed SHA-256',
   size: 'Committed size',
+  implementationDeclaration: 'Manifest implementation declaration',
+  implementationDeclarations: {
+    accepted: 'The manifest declares an accepted implementation. Acceptance has not been verified for this revision.',
+    unaccepted: 'The manifest declares an unaccepted implementation. This source is not presented as validated code.',
+    'not-classified': 'The manifest does not classify implementation acceptance for this file.',
+  },
   metadataNotice: 'These metadata are recorded input commitments. Metadata alone does not verify file bytes or establish accepted reconstruction.',
   emptyDirectories: 'Empty physical directories are not recorded in this input inventory.',
   loading: 'Loading recorded inputs…',

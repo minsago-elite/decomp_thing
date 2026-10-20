@@ -13,6 +13,7 @@
     "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "parentDirectoryId": "dir_1_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "implementationDeclaration": "unaccepted",
     "item": {
       "fileId": "file_1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "displayName": "src/\u00e9.c",
