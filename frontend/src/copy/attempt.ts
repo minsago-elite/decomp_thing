@@ -78,6 +78,14 @@ export const activityRowCopy = {
   "revisionDigest": "Revision digest",
   "turn": "Turn",
   "requestDigest": "Request digest",
+  "additionalReferences": "More correlation references",
+  "referenceBoundary": "These digests describe recorded observations. Acceptance is shown separately in the attempt's recorded outcome and revision.",
+  "workflowRunDigest": "Workflow run identity digest",
+  "reportedAcceptedSourceDigest": "Reported accepted source SHA-256",
+  "messageDigest": "Message identity digest",
+  "permissionDigest": "Permission request digest",
+  "messageChunkDigest": "Message chunk SHA-256",
+  "changedFileDigest": "Reported changed-file SHA-256",
   "toolCallDigest": "Tool call digest"
 } as const;
 
