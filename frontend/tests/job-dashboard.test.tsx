@@ -481,7 +481,7 @@ it('retains job navigation through a transient metadata refresh and explicit rec
     historyLink.focus();
     expect(screen.getByText('Refreshing job… Previously loaded metadata may be outdated.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
-    await act(async () => { rejectRefresh(new ApiClientError('timeout')); });
+    await act(async () => { rejectRefresh(new ApiClientError('timeout')); await Promise.resolve(); });
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.getByText('Previously loaded job metadata may be outdated. Refresh the job to read current details.')).toBeTruthy();
     expect(screen.getByRole('heading', { name: selected.displayFilename })).toBeTruthy();
@@ -489,7 +489,7 @@ it('retains job navigation through a transient metadata refresh and explicit rec
     expect(transport.get).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh job' }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh job' }).disabled).toBe(false));
     expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
     expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
     expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job', 'job']);
@@ -536,7 +536,7 @@ it('discards old job metadata when the requested identity changes during a refre
     view.rerender(<JobView basePath="/nested" jobId={next.jobId} session={auth} />);
     expect(await screen.findByRole('heading', { name: next.displayFilename })).toBeTruthy();
     expect(obsolete.aborted).toBe(true);
-    await act(async () => { finishRefresh({ data: first }); });
+    await act(async () => { finishRefresh({ data: first }); await Promise.resolve(); });
     expect(screen.queryByRole('heading', { name: first.displayFilename })).toBeNull();
     expect(screen.getByRole('heading', { name: next.displayFilename })).toBeTruthy();
     expect(transport.get).toHaveBeenCalledTimes(3);

@@ -196,7 +196,7 @@ it('retains attempt panels and filter focus through a transient metadata refresh
   try {
     render(<App basePath="/nested" session={auth} />);
     expect(await screen.findByText('9007199254740993')).toBeTruthy();
-    const filter = screen.getByLabelText('Task digest contains') as HTMLInputElement;
+    const filter = screen.getByLabelText<HTMLInputElement>('Task digest contains');
     fireEvent.input(filter, { target: { value: 'abc123' } });
     const evidence = screen.getByRole('button', { name: 'Read exploration evidence' });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
@@ -206,7 +206,7 @@ it('retains attempt panels and filter focus through a transient metadata refresh
     expect(screen.getByLabelText('Task digest contains')).toBe(filter);
     expect(filter.value).toBe('abc123');
     expect(screen.getByRole('button', { name: 'Read exploration evidence' })).toBe(evidence);
-    await act(async () => { rejectRefresh(new ApiClientError('http_error', { status: 503, serverCode: 'PRIVATE_DIAGNOSTIC', requestId })); });
+    await act(async () => { rejectRefresh(new ApiClientError('http_error', { status: 503, serverCode: 'PRIVATE_DIAGNOSTIC', requestId })); await Promise.resolve(); });
     expect((await screen.findByRole('alert')).textContent).toContain(`Reference ID: ${requestId}.`);
     expect(document.body.textContent).not.toContain('PRIVATE_DIAGNOSTIC');
     expect(screen.getByText(/Previously loaded attempt metadata may be outdated/)).toBeTruthy();
@@ -216,7 +216,7 @@ it('retains attempt panels and filter focus through a transient metadata refresh
     expect(transport.get).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh attempt' }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh attempt' }).disabled).toBe(false));
     expect(screen.queryByText(/Previously loaded attempt metadata may be outdated/)).toBeNull();
     expect(screen.getByLabelText('Task digest contains')).toBe(filter);
     expect(filter.value).toBe('abc123');
@@ -264,7 +264,7 @@ it('clears retained attempt data on navigation and ignores a late obsolete refre
     fireEvent.click(screen.getByRole('link', { name: 'Open previous attempt' }));
     expect(await screen.findByText('42 milliseconds')).toBeTruthy();
     expect(obsolete.aborted).toBe(true);
-    await act(async () => { finishRefresh({ data: sample }); });
+    await act(async () => { finishRefresh({ data: sample }); await Promise.resolve(); });
     expect(screen.queryByText('9007199254740993')).toBeNull();
     expect(screen.getByText('42 milliseconds')).toBeTruthy();
     expect(transport.get).toHaveBeenCalledTimes(3);
