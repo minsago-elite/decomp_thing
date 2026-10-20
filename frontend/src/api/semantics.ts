@@ -1,4 +1,4 @@
-import type { ContractDocument, Run } from './generated';
+import type { ContractDocument, Page, Run } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -18,6 +18,14 @@ function checkRun(run: Run): void {
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+}
+
+function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
+  requireValue(page.snapshotVersion === version && items.length <= page.limit && items.length <= totalFiles);
+  requireValue(new Set(items.map(item => item.fileId)).size === items.length);
+  requireValue(page.nextCursor === null || (items.length > 0 && items.length < totalFiles));
+  requireValue(items.every(item => item.displayName.split('/').every(part =>
+    part.trim().length > 0 && part !== '.' && part !== '..' && part.length <= 255)));
 }
 
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
@@ -55,11 +63,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     }
     case 'sourceCatalog': {
       const { items, totalFiles, page, manifestSha256 } = document.data;
-      requireValue(page.snapshotVersion === manifestSha256 && items.length <= page.limit && items.length <= totalFiles);
-      requireValue(new Set(items.map(item => item.fileId)).size === items.length);
-      requireValue(page.nextCursor === null || (items.length > 0 && items.length < totalFiles));
-      requireValue(items.every(item => item.displayName.split('/').every(part =>
-        part.trim().length > 0 && part !== '.' && part !== '..' && part.length <= 255)));
+      checkSourcePage(items, totalFiles, page, manifestSha256);
+      break;
+    }
+    case 'revisionSources': {
+      const { items, totalFiles, page, metadataVersion } = document.data;
+      checkSourcePage(items, totalFiles, page, metadataVersion);
       break;
     }
     case 'recovery': {

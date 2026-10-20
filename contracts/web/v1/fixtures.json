@@ -472,6 +472,38 @@
     {
       "file": "fixtures/invalid-source-catalog-complete-continuation.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/revision-sources.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-sources-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-null-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-complete-continuation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-sources-authority.json",
+      "valid": false
     }
   ]
 }
