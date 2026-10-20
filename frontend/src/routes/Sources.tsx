@@ -122,7 +122,7 @@ function File({ selected, basePath, runtime, search }: { selected: FileSelection
       <h2><bdi>{data.item.displayName}</bdi></h2>
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
-        <dt>{copy.implementationDeclaration}</dt><dd>{copy.implementationDeclarations[data.implementationDeclaration]}</dd>
+        <dt>{copy.implementationDeclaration}</dt><dd>{copy.implementationDeclarations[data.implementationDeclaration ?? 'not-classified']}</dd>
       </dl>
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>

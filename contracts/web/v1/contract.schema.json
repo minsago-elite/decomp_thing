@@ -3534,7 +3534,6 @@
         "sourceSha256",
         "metadataVersion",
         "parentDirectoryId",
-        "implementationDeclaration",
         "item"
       ],
       "additionalProperties": false

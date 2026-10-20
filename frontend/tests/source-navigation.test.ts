@@ -88,8 +88,20 @@ it('retains explicit implementation declarations without promoting them to conte
   }
 });
 
-it('rejects absent unknown or non-text implementation declarations in producer and response documents', () => {
-  for (const declaration of [undefined, null, true, 0, '', 'verified', 'accepted-revision']) {
+it('keeps legacy v1 file metadata readable with an unclassified display when the declaration is absent', () => {
+  const legacy = file(); delete legacy.implementationDeclaration;
+  const document = JSON.stringify({ apiVersion: 1, kind: 'revisionFile', requestId: 'request_revision_file_1', data: legacy });
+  const decoded = decodeResponse(document, 'revisionFile').data;
+  expect(decoded.implementationDeclaration).toBeUndefined();
+  expect(copy.implementationDeclarations[decoded.implementationDeclaration ?? 'not-classified'])
+    .toBe(copy.implementationDeclarations['not-classified']);
+  expect(bindFile(decoded, { ...selected, fileId: legacy.item.fileId })).toBe(decoded);
+  expect(sourceFilePolicy(decoded.item, '0')).toEqual(sourceFilePolicy(legacy.item, '0'));
+  expect(decodeContract(document, { mode: 'producer' }).kind).toBe('revisionFile');
+});
+
+it('rejects unknown or non-text implementation declarations in producer and response documents', () => {
+  for (const declaration of [null, true, 0, '', 'verified', 'accepted-revision']) {
     const document = JSON.stringify({ apiVersion: 1, kind: 'revisionFile', requestId: 'request_revision_file_1',
       data: { ...file(), implementationDeclaration: declaration } });
     expect(() => decodeResponse(document, 'revisionFile')).toThrow(ApiClientError);
