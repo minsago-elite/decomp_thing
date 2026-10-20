@@ -199,6 +199,7 @@ export const explorationCasesCopy = {
   preparationDetailsOmitted: 'Input details were omitted by the producer’s detail budget. Reported availability counts remain visible; omitted bytes cannot be inspected.',
   downloadPreparation: 'Download the partial generation record',
   preparationReference: 'The job, attempt, artifact digest and input position identify this retained input. No candidate observation, independent containment or accepted reconstruction is established.',
+  sampleLabels: { baseline: 'baseline', expanded: 'expanded' },
   sampleCase: '{sample} position {index}: {id}', samplePosition: 'Sample position', position: '{sample}, zero-based position {index}',
   failurePosition: 'Reported failure in the {sample} sample at zero-based position {index}.',
   sample: 'Sample', progress: 'Recorded sample progress', planned: 'Planned inputs', completed: 'Completed observations',

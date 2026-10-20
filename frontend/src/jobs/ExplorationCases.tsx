@@ -25,7 +25,7 @@ function caseName(value: RetainedCase): string {
   const partial = failureCase(value);
   const preparation = preparationCase(value);
   if (preparation) return textMessage(copy.preparationCase, { group: copy.preparationGroups[preparation.group], index: preparation.index, id: textPreview(value.id).text });
-  return partial ? textMessage(copy.sampleCase, { sample: partial.sample, index: partial.index, id: textPreview(value.id).text }) : textPreview(value.id).text;
+  return partial ? textMessage(copy.sampleCase, { sample: copy.sampleLabels[partial.sample], index: partial.index, id: textPreview(value.id).text }) : textPreview(value.id).text;
 }
 
 function Preview({ value }: { value: string }) {
@@ -50,7 +50,7 @@ function CaseDetail({ value, artifact, jobId, runId, partial }: { value: Retaine
       <dt>{copy.reportedSource}</dt><dd><Preview value={value.source} /></dd>
       <dt>{copy.job}</dt><dd><code>{jobId}</code></dd><dt>{copy.attempt}</dt><dd><code>{runId}</code></dd>
       <dt>{copy.artifactDigest}</dt><dd><code>{artifact.sha256}</code></dd>
-      {position && <><dt>{copy.samplePosition}</dt><dd>{message(copy.position, { sample: position.sample, index: position.index })}</dd></>}
+      {position && <><dt>{copy.samplePosition}</dt><dd>{message(copy.position, { sample: copy.sampleLabels[position.sample], index: position.index })}</dd></>}
       {preparation && <><dt>{copy.preparationPosition}</dt><dd>{caseName(value)}</dd></>}
     </dl>
     <h5>{copy.argumentVector}</h5>
@@ -117,9 +117,9 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
     {active && data && <>
       {partial && <>
         <p role="status">{copy.failureReasons[partial.failure.code]} <code>{partial.failure.code}</code></p>
-        <p>{message(copy.failurePosition, { sample: partial.failure.phase, index: partial.failure.candidateIndex })}</p>
+        <p>{message(copy.failurePosition, { sample: copy.sampleLabels[partial.failure.phase], index: partial.failure.candidateIndex })}</p>
         <table><caption>{copy.progress}</caption><thead><tr><th scope="col">{copy.sample}</th><th scope="col">{copy.planned}</th><th scope="col">{copy.completed}</th></tr></thead>
-          <tbody>{(['baseline', 'expanded'] as const).map(sample => <tr key={sample}><th scope="row">{sample}</th>
+          <tbody>{(['baseline', 'expanded'] as const).map(sample => <tr key={sample}><th scope="row">{copy.sampleLabels[sample]}</th>
             <td>{partial.samples[sample].planned}</td><td>{partial.samples[sample].completed}</td></tr>)}</tbody></table>
       </>}
       {preparation && <>
