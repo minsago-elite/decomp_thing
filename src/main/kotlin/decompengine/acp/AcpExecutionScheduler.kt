@@ -103,12 +103,7 @@ internal class AcpExecutionScheduler(
         var granted = false
         var refusal: AgentExecutionException? = null
         try {
-            if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos)) {
-                ingress.release()
-                ownsIngress = false
-                if (!observe()) return null
-                throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
-            }
+            if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos, ::observe)) return null
             try {
                 when {
                     quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive ->
@@ -148,7 +143,7 @@ internal class AcpExecutionScheduler(
                     ownsIngress = false // The permit retains this slot through verified cleanup.
                     return permit
                 }
-                if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos)) continue
+                if (!enterBeforeDeadline(queueStartedAt, queueTimeoutNanos, ::observe)) return null
                 try {
                     val left = remaining()
                     if (left <= 0) continue
@@ -185,17 +180,23 @@ internal class AcpExecutionScheduler(
         }
     }
 
-    private fun enterBeforeDeadline(startedAt: Long, timeoutNanos: Long): Boolean {
+    private fun enterBeforeDeadline(startedAt: Long, timeoutNanos: Long, observe: () -> Boolean): Boolean {
         while (true) {
             if (Thread.currentThread().isInterrupted) return false
             val remaining = timeoutNanos - (nanoTime() - startedAt).coerceAtLeast(0)
-            if (remaining <= 0) return false
+            if (remaining <= 0) {
+                if (!observe()) return false
+                throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+            }
             try {
                 if (lock.tryLock(minOf(POLL_NANOS, remaining), TimeUnit.NANOSECONDS)) return true
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return false
             }
+            // A missed timed slice owns no mutex; explicit cancellation and the request
+            // deadline must remain observable before another fair-lock wait starts.
+            if (!observe()) return false
         }
     }
 

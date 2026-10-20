@@ -402,6 +402,10 @@ at most the active-plus-queued limits combined may be held. The waiting limits s
 queued work, so a busy workspace with a full waiting queue cannot consume an independent free slot.
 
 Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum.
+Every missed initial lock polling slice checks explicit cancellation and the request deadline before
+starting another wait. Cancellation and request expiry can leave that initial wait without acquiring
+the mutex or consuming the full queue deadline.
+
 Caller-provided cancellation/deadline observers run outside the shared scheduler lock. Initial lock
 acquisition uses fair interruptible bounded polling slices, and elapsed observer/lock time is checked
 against the original queue deadline before admission, even if capacity is available. Cancellation and

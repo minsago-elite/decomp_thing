@@ -656,6 +656,84 @@ class AcpExecutionSchedulerTest {
         assertEmpty(scheduler)
     }
 
+    @Test
+    fun `explicit cancellation leaves initial mutex admission without acquiring that mutex`() = withWorkers { workers ->
+        val attempting = java.util.concurrent.atomic.AtomicReference(CountDownLatch(0))
+        val held = object : java.util.concurrent.locks.ReentrantLock(true) {
+            override fun tryLock(timeout: Long, unit: TimeUnit): Boolean {
+                attempting.get().countDown()
+                return super.tryLock(timeout, unit)
+            }
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        val scheduler = AcpExecutionScheduler(AcpSchedulingLimits(maximumActive = 1,
+            maximumQueued = 1, maximumQueuedPerWorkspace = 1), lock = held, nanoTime = clock::get)
+        held.lock()
+        try {
+            // Exceed the two ingress slots sequentially: each cancelled call must release its slot.
+            repeat(3) {
+                val entered = CountDownLatch(1)
+                attempting.set(entered)
+                val cancellation = AgentCancellationSource()
+                val pending = workers.submit(Callable {
+                    scheduler.acquire("workspace-a", AgentCancellation {
+                        assertFalse(held.isHeldByCurrentThread)
+                        cancellation.cancellation.isCancellationRequested()
+                    }) { false }
+                })
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                cancellation.cancel()
+                assertNull(pending.get(2, TimeUnit.SECONDS))
+                assertTrue(held.isHeldByCurrentThread)
+                assertEmpty(scheduler)
+            }
+        } finally {
+            held.unlock()
+        }
+        scheduler.admit("workspace-fresh").finish()
+        assertEmpty(scheduler)
+    }
+
+    @Test
+    fun `request expiry leaves initial mutex admission without consuming the queue deadline`() = withWorkers { workers ->
+        val attempting = java.util.concurrent.atomic.AtomicReference(CountDownLatch(0))
+        val held = object : java.util.concurrent.locks.ReentrantLock(true) {
+            override fun tryLock(timeout: Long, unit: TimeUnit): Boolean {
+                attempting.get().countDown()
+                return super.tryLock(timeout, unit)
+            }
+        }
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        val scheduler = AcpExecutionScheduler(AcpSchedulingLimits(maximumActive = 1,
+            maximumQueued = 1, maximumQueuedPerWorkspace = 1), lock = held, nanoTime = clock::get)
+        held.lock()
+        try {
+            repeat(3) {
+                val entered = CountDownLatch(1)
+                attempting.set(entered)
+                val expired = AtomicBoolean()
+                val pending = workers.submit(Callable {
+                    scheduler.acquire("workspace-a", AgentCancellation.NONE) {
+                        assertFalse(held.isHeldByCurrentThread)
+                        expired.get()
+                    }
+                })
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                expired.set(true)
+                val thrown = assertFailsWith<ExecutionException> { pending.get(2, TimeUnit.SECONDS) }
+                val failure = assertIs<AgentExecutionException>(thrown.cause)
+                assertEquals(AgentFailureKind.TIMEOUT, failure.failure.kind)
+                assertEquals(mapOf("phase" to "scheduler", "reason" to "requestDeadline"), failure.failure.details)
+                assertTrue(held.isHeldByCurrentThread)
+                assertEmpty(scheduler)
+            }
+        } finally {
+            held.unlock()
+        }
+        scheduler.admit("workspace-fresh").finish()
+        assertEmpty(scheduler)
+    }
+
     private class SyntheticWorkFailure : RuntimeException()
 
     private fun scheduler(
