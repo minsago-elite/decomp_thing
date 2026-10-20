@@ -658,6 +658,25 @@ class WebJobService(
         return snapshot
     }
 
+    @Synchronized
+    private fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
+        when (val inspected = inspectDurableJob(jobId)) {
+            is WorkflowJobInspection.Available -> selectWebRevisionSource(inspected.snapshot, jobId, runId, revisionId)
+            is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspected.diagnostic.code, inspected.diagnostic.message)
+        }
+
+    /** The persisted candidate supplies identity; bounded descriptors supply only source commitments. */
+    internal fun readRevisionSources(jobId: String, runId: String, revisionId: String): WebRevisionSourceSnapshot {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val snapshot = try { sourceCatalogEvidence.readRevision(reference) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (_: Exception) {
+                throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "The revision source input metadata is unavailable or exceeds its limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return snapshot
+    }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {

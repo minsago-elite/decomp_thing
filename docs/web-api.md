@@ -157,6 +157,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
+| `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
@@ -435,6 +436,7 @@ sanitized derivatives have separate identity, digest and provenance.
 | `report.acceptance`, validation status | Existing canonical graph/validation strategy and receipt authority, exposed by #165. No inference from `Job.status == complete`, source-tree existence or a confidence threshold |
 | Source file provenance/digest/module acceptance | `SourceTree.kt: GeneratedFileEvidence`/module checkpoints, project `source_tree_manifest.json` and exact registered source snapshot; #165 obtains byte sizes from that snapshot. Manifest is a compatibility projection after canonical repair publication, see [revision authority](repair-revision-graph.md) |
 | `sourceCatalog.*` | Fixed selected-run manifest/input capture; host-profile-validated `GeneratedFileEvidence` metadata only. Manifest SHA-256 is an observation version; file IDs are scoped HMAC identities, labels are display text, flags/digests are unverified declarations, and revision binding is null |
+| `revisionSources.*` | Actual selected `WorkflowAttempt.candidate` plus schema-3 build-contract source inputs, cross-checked against the host-profile-validated manifest and canonical build/repair digest preimage. Sizes are exact descriptor commitments; source bodies and acceptance are not verified by this listing |
 | Event `agentInvocationId/agentSequence/type/payload` | Shared `AgentExecutionEvent` variants above; #69 stream mapping; #174 durable publication and redaction |
 | Event cursor/sequence/time/gap, snapshot watermark; page cursor/version | New #174 journal and #162 snapshot pagination metadata, not existing agent timestamps or `JobStore.list()` offsets |
 | Bootstrap capability/harness descriptors | `selectWebReconstructionStrategy`, `AcpHarnessProvenance` safe fields; #166 performs real readiness checks. The selection report explicitly does not prove execution |
@@ -636,6 +638,52 @@ In-memory controls exercise the 25,000-record capture/page workload, scoped curs
 refusal, byte-limited continuation and changed capture refusal. They do not qualify
 HTTP/controller behavior, the source tree UI, 8 MiB source delivery, the 256 KiB line,
 latency or memory budgets. Those remaining obligations stay open under #490/#188/#189.
+
+## Candidate revision source input listings
+
+`GET`/`HEAD /api/v1/jobs/{jobId}/runs/{runId}/revisions/{revisionId}/sources`
+uses the private session boundary and accepts only `limit` and `cursor`. The selected
+terminal attempt must contain that actual persisted candidate reference. The reader
+never creates a revision ID from a manifest digest. Conflicting reuse of a revision
+ID with a different source digest in another retained attempt returns a conflict.
+Other attempts containing the same revision/digest retain their explicit run namespace.
+
+The common metadata capture reads the fixed manifest, uploaded input and
+`source-tree/reports/build_contract.json` through the retained-descriptor boundary.
+Only build-contract schema 3 is supported. Its unique, sorted `sourceInputs`
+must exactly match the manifest's host-declared `BUILD_INPUT` paths and file digests,
+include a build definition, and reproduce the persisted candidate's source digest
+using the existing `path.length:path:byteLength:fileSha256` plus newline preimage.
+The build and repair producers use UTF-16 path length and exact decimal byte counts;
+wire `sizeBytes` values remain decimal strings. The reader does not use the legacy
+job-record digest as an ELF content digest. Manifest, descriptor and uploaded input
+are rechecked, followed by the selected candidate/version and revision conflict checks.
+
+Both metadata producers share one capture admission in the service. Parsing runs
+outside the global job monitor; each read unit still checks service lifecycle and
+namespace ownership. Each metadata document has a 16 MiB ceiling and the manifest
+and canonical input set admit at most 25,000 records. Pages default to 50, admit at
+most 200 rows and retain the separate 1,000,000-byte item ceiling. Signed continuations
+bind the session, job, run, revision, page size and captured metadata version. A changed
+version expires the cursor explicitly. No page cache or source body is retained.
+
+`revisionSources` has non-null job/run/revision bindings and
+`authority: "source-input-commitments"`. `sourceSha256` is the persisted canonical
+commitment; `metadataVersion` identifies the observed manifest/descriptor pair.
+File IDs are stable opaque values across sessions and listener restarts for the same
+job/run/revision/source input set. They grant no access without the session boundary.
+Display labels never become filesystem selectors. Viewability/encoding flags remain
+host-profile declarations. This projection reports no compiler result, canonical graph
+acceptance or release relationship, including when the stored attempt has an accepted
+reference. Missing registration returns 404; inconsistent capture returns 409; missing,
+malformed, unsupported or oversized metadata has a fixed unavailable response.
+
+This endpoint lists only the canonical build input set. The observed catalog above
+continues to describe other manifest entries. Text/chunk reads, complete downloads,
+directory navigation, file routes and UI/HTTP/performance qualification remain open;
+bootstrap source chunk advertising stays zero. In-memory controls cover canonical
+identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
+admission. They do not establish the D0 physical source workload or delivery budgets.
 
 ## Legacy session migration
 

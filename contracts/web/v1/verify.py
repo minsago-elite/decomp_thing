@@ -83,6 +83,17 @@ def check_run(run: dict) -> None:
         raise ValueError("running or completed attempt has no start timestamp")
 
 
+def check_source_page(data: dict, version: str) -> None:
+    items, page = data["items"], data["page"]
+    if page["snapshotVersion"] != version or len(items) > min(page["limit"], data["totalFiles"]):
+        raise ValueError("source page does not match its captured metadata")
+    if len({item["fileId"] for item in items}) != len(items) or (page["nextCursor"] is not None and not 0 < len(items) < data["totalFiles"]):
+        raise ValueError("source page has duplicate identities or an impossible continuation")
+    if any(not part.strip() or part in (".", "..") or len(part.encode("utf-16-le")) // 2 > 255
+           for item in items for part in item["displayName"].split("/")):
+        raise ValueError("source display label is not a portable relative name")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -106,14 +117,9 @@ def check_semantics(document: dict) -> None:
         if (data["state"] == "published") != (data["jobId"] is not None):
             raise ValueError("upload publication identity is inconsistent")
     elif kind == "sourceCatalog":
-        items, page = data["items"], data["page"]
-        if page["snapshotVersion"] != data["manifestSha256"] or len(items) > min(page["limit"], data["totalFiles"]):
-            raise ValueError("source catalog page does not match its captured metadata")
-        if len({item["fileId"] for item in items}) != len(items) or (page["nextCursor"] is not None and not 0 < len(items) < data["totalFiles"]):
-            raise ValueError("source catalog page has duplicate identities or an impossible continuation")
-        if any(not part.strip() or part in (".", "..") or len(part.encode("utf-16-le")) // 2 > 255
-               for item in items for part in item["displayName"].split("/")):
-            raise ValueError("source catalog display label is not a portable relative name")
+        check_source_page(data, data["manifestSha256"])
+    elif kind == "revisionSources":
+        check_source_page(data, data["metadataVersion"])
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:

@@ -2975,6 +2975,109 @@
         "page"
       ],
       "additionalProperties": false
+    },
+    "revisionSourceFile": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sizeBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "declaredUtf8Text": {
+          "type": "boolean"
+        },
+        "declaredViewable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sizeBytes",
+        "sha256",
+        "declaredUtf8Text",
+        "declaredViewable"
+      ],
+      "additionalProperties": false
+    },
+    "revisionSources": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "descriptorSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "totalFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25000
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/revisionSourceFile"
+          },
+          "minItems": 1,
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "manifestSha256",
+        "descriptorSha256",
+        "metadataVersion",
+        "totalFiles",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -3543,6 +3646,30 @@
         },
         "data": {
           "$ref": "#/definitions/sourceCatalog"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "revisionSources"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/revisionSources"
         }
       },
       "required": [

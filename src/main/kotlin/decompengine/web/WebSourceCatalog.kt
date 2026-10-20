@@ -37,10 +37,35 @@ internal class WebSourceCatalogEvidence(
     private val readArtifact: (String, String, Long) -> StableRegularFile,
 ) {
     private val profiles = profiles.associateBy { it.id to it.sha256 }
+    private val capturing = AtomicBoolean(false)
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
-    fun read(jobId: String, runId: String): WebSourceCatalogSnapshot {
+    fun read(jobId: String, runId: String): WebSourceCatalogSnapshot = capture(jobId, runId) { manifest, captured ->
+        WebSourceCatalogSnapshot(captured.sha256, manifest.files)
+    }
+
+    fun readRevision(reference: WebRevisionSourceReference): WebRevisionSourceSnapshot = capture(reference.jobId, reference.runId) { manifest, captured ->
+        val path = "reports/runs/${reference.runId}/source-tree/reports/build_contract.json"
+        val descriptor = readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES)
+        require(descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+        val document = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+            ?: throw IllegalArgumentException("Source input descriptor is invalid.")
+        val result = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
+        requireSame(descriptor, readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES))
+        result
+    }
+
+    private fun <T> capture(jobId: String, runId: String,
+        project: (decompengine.project.SourceTreeManifest, StableRegularFile) -> T): T {
+        if (!capturing.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
+        }
+        return try { captured(jobId, runId, project) } finally { capturing.set(false) }
+    }
+
+    private fun <T> captured(jobId: String, runId: String,
+        project: (decompengine.project.SourceTreeManifest, StableRegularFile) -> T): T {
         val path = "reports/runs/$runId/source-tree/source_tree_manifest.json"
         canonicalReportSegments(path)
         val input = readInput(jobId)
@@ -58,7 +83,7 @@ internal class WebSourceCatalogEvidence(
         require(declaredFiles.size <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
         val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
         require(manifest.inputSha256 == input.sha256)
-        val result = WebSourceCatalogSnapshot(captured.sha256, manifest.files)
+        val result = project(manifest, captured)
         requireSame(captured, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
         requireSame(input, readInput(jobId))
         return result
