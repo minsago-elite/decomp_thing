@@ -612,6 +612,46 @@
     {
       "file": "fixtures/invalid-source-chunk-numeric-offset.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/revision-file-root.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-file-unicode.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-revision-file-verification.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-binding.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-numeric-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-root-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-nested-parent.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-empty-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-long-component.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-file-path-selector.json",
+      "valid": false
     }
   ]
 }

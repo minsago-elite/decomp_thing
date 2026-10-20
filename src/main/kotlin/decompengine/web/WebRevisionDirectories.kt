@@ -8,6 +8,21 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.*
 
+internal fun revisionSourceDirectoryId(snapshot: WebRevisionSourceSnapshot, path: String): String {
+    val prefix = "$path/"
+    var low = 0; var high = snapshot.files.size
+    while (low < high) {
+        val middle = (low + high) ushr 1
+        if (snapshot.files[middle].evidence.path < prefix) low = middle + 1 else high = middle
+    }
+    check(low < snapshot.files.size && snapshot.files[low].evidence.path.startsWith(prefix))
+    val depth = path.count { it == '/' } + 1
+    val ref = snapshot.reference
+    val hash = revisionSourceDigest(listOf("revision-source-directory-v1", ref.jobId, ref.runId, ref.revisionId,
+        ref.sourceSha256, path, low.toString(), depth.toString()).joinToString("\u0000"))
+    return "dir_${low}_${depth}_$hash"
+}
+
 /** Lazy immediate-child views of recorded canonical input prefixes, never a filesystem walk. */
 internal class WebRevisionDirectoryPages(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
@@ -39,7 +54,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
             if (depth >= parts.size) notFound()
             val path = parts.take(depth).joinToString("/")
             if (index > 0 && snapshot.files[index - 1].evidence.path.startsWith("$path/")) notFound()
-            val canonical = idForDirectory(snapshot, path)
+            val canonical = revisionSourceDirectoryId(snapshot, path)
             if (!MessageDigest.isEqual(canonical.toByteArray(), directoryId.toByteArray())) notFound()
             Selection(path, index, depth)
         }
@@ -78,7 +93,7 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
         var itemBytes = 0
         for (child in ordered.subList(offset, minOf(ordered.size, offset + query.limit))) {
             val item = if (child.directoryPath != null) buildJsonObject {
-                put("kind", "directory"); put("directoryId", idForDirectory(snapshot, child.directoryPath))
+                put("kind", "directory"); put("directoryId", revisionSourceDirectoryId(snapshot, child.directoryPath))
                 put("displayName", child.name); put("sourceFileCount", child.files)
             } else {
                 val file = snapshot.files[child.first]
@@ -99,14 +114,14 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
         breadcrumbs += buildJsonObject { put("directoryId", "root"); put("displayName", JsonNull) }
         for (depth in maxOf(1, selected.depth - 30)..selected.depth) {
             breadcrumbs += buildJsonObject {
-                put("directoryId", idForDirectory(snapshot, parts.take(depth).joinToString("/")))
+                put("directoryId", revisionSourceDirectoryId(snapshot, parts.take(depth).joinToString("/")))
                 put("displayName", parts[depth - 1])
             }
         }
         val parentId = when (selected.depth) {
             0 -> null
             1 -> "root"
-            else -> idForDirectory(snapshot, parts.dropLast(1).joinToString("/"))
+            else -> revisionSourceDirectoryId(snapshot, parts.dropLast(1).joinToString("/"))
         }
         val next = offset + items.size
         val result = buildJsonObject {
@@ -127,21 +142,6 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
         }
         check(result.toString().toByteArray(Charsets.UTF_8).size <= 1_048_000)
         return result
-    }
-
-    private fun idForDirectory(snapshot: WebRevisionSourceSnapshot, path: String): String {
-        val prefix = "$path/"
-        var low = 0; var high = snapshot.files.size
-        while (low < high) {
-            val middle = (low + high) ushr 1
-            if (snapshot.files[middle].evidence.path < prefix) low = middle + 1 else high = middle
-        }
-        check(low < snapshot.files.size && snapshot.files[low].evidence.path.startsWith(prefix))
-        val depth = path.count { it == '/' } + 1
-        val ref = snapshot.reference
-        val hash = revisionSourceDigest(listOf("revision-source-directory-v1", ref.jobId, ref.runId, ref.revisionId,
-            ref.sourceSha256, path, low.toString(), depth.toString()).joinToString("\u0000"))
-        return "dir_${low}_${depth}_$hash"
     }
 
     private fun signature(vararg fields: Any): String {

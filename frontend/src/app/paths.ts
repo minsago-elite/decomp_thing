@@ -144,3 +144,28 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
   if (!ID.test(runId)) return invalidUrl();
   return `${jobPath(basePath, jobId)}/runs/${runId}`;
 }
+
+export interface SourceSelection { jobId: string; runId: string; revisionId: string }
+
+function sourceRevisionPath(basePath: string, selected: SourceSelection): string {
+  return `${runPath(basePath, selected.jobId, selected.runId)}/revisions/${identifier(selected.revisionId)}`;
+}
+
+/** Source links contain opaque identities only. Display labels never enter these routes. */
+export function sourceDirectoryPath(basePath: string, selected: SourceSelection, directoryId = 'root', cursor?: string): string {
+  const path = `${sourceRevisionPath(basePath, selected)}/sources/${identifier(directoryId)}`;
+  return cursor === undefined ? path : `${path}?cursor=${identifier(cursor)}`;
+}
+
+export function sourceFilePath(basePath: string, selected: SourceSelection, fileId: string): string {
+  return `${sourceRevisionPath(basePath, selected)}/source-files/${identifier(fileId)}`;
+}
+
+/** Relative API route for the existing bounded transport or an explicit native download link. */
+export function sourceReadRoute(selected: SourceSelection, kind: 'directory' | 'file' | 'download', id: string): string {
+  const revision = sourceRevisionPath('', selected);
+  if (kind === 'directory') return `${revision}/source-directories/${identifier(id)}`;
+  if (kind === 'file') return `${revision}/source-files/${identifier(id)}`;
+  if (kind === 'download') return `${revision}/source-files/${identifier(id)}/content`;
+  return invalidUrl();
+}

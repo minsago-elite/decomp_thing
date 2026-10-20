@@ -1,11 +1,12 @@
 import { runCopy as copy } from '../copy/attempt';
+import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
 import type { Run as RunData } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import { jobPath, runPath } from '../app/paths';
+import { jobPath, runPath, sourceDirectoryPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
@@ -70,7 +71,8 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
       <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
       <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-      <p>{copy.sourceAndArtifactNavigationForThisAttemptIsNotConnected}</p>
+      {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
+        : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
 }

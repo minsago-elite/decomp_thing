@@ -169,3 +169,5 @@ button:disabled { opacity: 0.65; cursor: wait; }
 .retained-case-detail dd { margin-inline-start: 0; }
 .retained-case-detail code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-row summary { cursor: pointer; }
+
+.source-navigation { min-width: 0; overflow-wrap: anywhere; }

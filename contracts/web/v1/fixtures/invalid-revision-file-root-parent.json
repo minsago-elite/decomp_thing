@@ -1,0 +1,26 @@
+{
+  "apiVersion": 1,
+  "kind": "revisionFile",
+  "requestId": "request_revision_file_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "contentVerification": "not-performed",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "parentDirectoryId": "directory_other",
+    "item": {
+      "fileId": "file_0_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "displayName": "Makefile",
+      "sizeBytes": "0",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "declaredUtf8Text": true,
+      "declaredViewable": true,
+      "declaredArchivable": true
+    }
+  }
+}

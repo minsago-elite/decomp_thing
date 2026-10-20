@@ -133,6 +133,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'sourceChunk':
       checkSourceChunk(document.data);
       break;
+    case 'revisionFile': {
+      const { item, parentDirectoryId } = document.data;
+      requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));
+      requireValue((parentDirectoryId === 'root') === !item.displayName.includes('/'));
+      break;
+    }
     case 'recovery': {
       const inventory = document.data;
       const candidates = inventory.retainedUploadStages + inventory.retainedMetadataFiles;
