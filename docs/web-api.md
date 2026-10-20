@@ -792,6 +792,11 @@ request without retries, and reads no response body. Only status 200, a bodyless
 response, octet-stream/nosniff headers, exact byte length and matching source,
 metadata and file digests can produce the transient matching-byte observation.
 Unknown, missing, changed or combined integrity header values fail closed.
+Bodyless HEAD denials carry `X-Decomp-Session-Error` only for status 401 with
+the exact `SESSION_REQUIRED` or `SESSION_EXPIRED` codes. The client accepts this
+signal only with a valid request identity, JSON/nosniff error headers and no body,
+and preserves it for the existing generation-bound session invalidation observer.
+Other statuses or missing, combined and unknown error codes grant no session signal.
 Navigation, metadata refresh and session removal discard the observation and
 cancel its read. Metadata reads still report `contentVerification: not-performed`;
 they do not start this check. The actual source-chunk bootstrap permission stays

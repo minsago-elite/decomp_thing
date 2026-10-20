@@ -43,3 +43,16 @@ export function readSourceDigestHead(status: number, bodyAbsent: boolean,
     || header('X-Decomp-Content-SHA256') !== expected.sha256) throw new ApiClientError('invalid_headers');
   return Object.freeze({ ...expected, basis: 'committed-digest', requestId });
 }
+
+/** Preserve session invalidation without reading a HEAD body or trusting arbitrary peer codes. */
+export function sourceDigestHeadFailure(status: number, bodyAbsent: boolean,
+  header: (name: string) => string | null): ApiClientError {
+  const requestId = header('X-Request-ID'); const code = header('X-Decomp-Session-Error');
+  const sessionCode = code === 'SESSION_REQUIRED' ? 'SESSION_REQUIRED' : code === 'SESSION_EXPIRED' ? 'SESSION_EXPIRED' : null;
+  const validRequestId = requestId !== null && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestId);
+  const trusted = status === 401 && bodyAbsent && validRequestId
+    && /^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(header('Content-Type') ?? '')
+    && header('X-Content-Type-Options') === 'nosniff' && sessionCode !== null;
+  return new ApiClientError('http_error', { status, ...(requestId !== null && validRequestId ? { requestId } : {}),
+    ...(sessionCode !== null && trusted ? { serverCode: sessionCode } : {}) });
+}

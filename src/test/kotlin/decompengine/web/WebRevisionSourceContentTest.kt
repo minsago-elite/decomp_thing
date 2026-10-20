@@ -235,4 +235,15 @@ class WebRevisionSourceContentTest {
             WebRevisionSourceContent(snapshot, id, file, forged).verifiedDownloadHeaders()
         }.code)
     }
+
+    @Test fun `HEAD denial signal retains only exact session invalidation codes without an authentication context`() {
+        for (code in listOf("SESSION_REQUIRED", "SESSION_EXPIRED")) {
+            assertEquals(code, headWebSessionErrorCode("HEAD", 401, code))
+            for (method in listOf("GET", "POST", "head", "")) assertNull(headWebSessionErrorCode(method, 401, code))
+            for (status in listOf(200, 204, 400, 403, 409, 500)) assertNull(headWebSessionErrorCode("HEAD", status, code))
+        }
+        for (code in listOf("", "SESSION_REQUIRED, SESSION_EXPIRED", "SESSION_REQUIRED\nPRIVATE", "PRIVATE /private/path", "ORIGIN_DENIED")) {
+            assertNull(headWebSessionErrorCode("HEAD", 401, code))
+        }
+    }
 }

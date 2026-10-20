@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { expect, it } from 'vitest';
 import type { RevisionFile } from '../src/api/generated';
-import { readSourceDigestHead, sourceDigestExpectation } from '../src/api/sourceDigest';
+import { readSourceDigestHead, sourceDigestExpectation, sourceDigestHeadFailure } from '../src/api/sourceDigest';
 
 // DTOs and injected string lookups only: no fetch, DOM, Headers, timer or listener.
 function metadata(): RevisionFile {
@@ -78,4 +78,23 @@ it('rejects stale metadata or a different source commitment and returns no compi
   expect(Object.keys(result).sort()).toEqual(['basis', 'fileId', 'jobId', 'metadataVersion', 'requestId', 'revisionId',
     'route', 'runId', 'sha256', 'sizeBytes', 'sourceSha256'].sort());
   expect(JSON.stringify(result)).not.toContain('PRIVATE'); expect(JSON.stringify(result)).not.toContain('accepted');
+});
+
+it('preserves only trusted bodyless session denials for the existing generation-bound invalidation observer', () => {
+  for (const code of ['SESSION_REQUIRED', 'SESSION_EXPIRED']) {
+    const values = { 'X-Request-ID': 'request_denied_1', 'Content-Type': 'application/json; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff', 'X-Decomp-Session-Error': code };
+    const failure = sourceDigestHeadFailure(401, true, lookup(values));
+    expect(failure).toMatchObject({ code: 'http_error', status: 401, requestId: 'request_denied_1', serverCode: code });
+    expect(failure.message).not.toContain(code);
+    for (const [status, bodyAbsent, fields] of [[403, true, values], [409, true, values], [500, true, values],
+      [200, true, values], [401, false, values], [401, true, { ...values, 'X-Decomp-Session-Error': '' }],
+      [401, true, { ...values, 'X-Decomp-Session-Error': `${code}, ${code}` }],
+      [401, true, { ...values, 'X-Decomp-Session-Error': 'PRIVATE /private/path' }],
+      [401, true, { ...values, 'X-Request-ID': '' }], [401, true, { ...values, 'Content-Type': 'text/html' }],
+      [401, true, { ...values, 'X-Content-Type-Options': '' }]] as const) {
+      const rejected = sourceDigestHeadFailure(status, bodyAbsent, lookup(fields));
+      expect(rejected.serverCode).toBeUndefined(); expect(rejected.message).not.toContain('PRIVATE');
+    }
+  }
 });

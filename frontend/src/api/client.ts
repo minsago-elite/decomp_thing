@@ -4,7 +4,7 @@ import { decodeContract, encodeRequest } from './decode';
 import { ApiClientError } from './errors';
 import type { Artifact, RequestData, RequestKind, ResponseKind, ResponseOf, RevisionFile } from './generated';
 import { MAX_JSON_BYTES } from './json';
-import { readSourceDigestHead, sourceDigestExpectation } from './sourceDigest';
+import { readSourceDigestHead, sourceDigestExpectation, sourceDigestHeadFailure } from './sourceDigest';
 import type { SourceDigestExpectation, SourceDigestObservation } from './sourceDigest';
 
 export { ApiClientError, withApiFailureReference } from './errors';
@@ -86,7 +86,7 @@ export function createApiClient(options: ClientOptions) {
       if (!headerId || !requestIdPattern.test(headerId)) throw new ApiClientError('invalid_headers');
       requestId = headerId;
       if (sourceHead) {
-        if (!response.ok) throw new ApiClientError('http_error');
+        if (!response.ok) throw sourceDigestHeadFailure(response.status, response.body === null, name => response!.headers.get(name));
         return readSourceDigestHead(response.status, response.body === null, name => response!.headers.get(name), sourceHead);
       }
       if (!artifact && kind === null && response.status === 204) return undefined;
