@@ -152,8 +152,31 @@ keyword. Each records exit 1 without a signal, a bounded rejection diagnostic
 with the fixture root redacted, and unchanged hashes for all four fixture inputs.
 The authored bad inputs are expected refusals within the passing test; this
 receipt supplies no clean/cache-hit or broader integration qualification.
-Gradle jobs restore the shared master dependency cache on pull requests; only
-master writes new Gradle cache entries, avoiding one large cache per pull request.
+
+### Compilation and download cache boundaries
+
+`gradle.properties` enables Gradle task-output caching. The root build applies an
+unconditional `doNotCacheIf` predicate across all projects to every task except
+`JavaCompile` and `KotlinCompile`. Compiler outputs retain Gradle's ordinary source,
+classpath, compiler and toolchain cache inputs. This enables no configuration
+cache, remote cache service or additional credential authority.
+
+`Test`, `Exec`, `JavaExec`, resource generation and packaging tasks cannot restore
+task outputs from this cache. Existing task selections, freshness guards, native
+limits and required failures remain in force. Qualification reports must describe
+the current compiled source and join its actual standard XML inventory; compiler
+reuse does not qualify a runtime test or release.
+
+Gradle jobs restore the shared master cache on pull requests; only master writes
+new entries. npm caching retains package downloads, with a clean locked install
+and current frontend build in each job. Neither cache supplies prior test XML or
+a generated release bundle.
+
+A completed ordinary log's compiler `FROM-CACHE` disposition demonstrates reused
+compiler output for that source. `UP-TO-DATE` alone does not establish cross-build
+reuse. Cache configuration, a cache hit or elapsed time alone establishes no fixed
+speedup or whole-CI cost improvement; preserve the required execution and report
+evidence independently.
 
 Run the frontend checks locally with the pinned tools:
 
