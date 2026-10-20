@@ -7,7 +7,7 @@ import type { ProgressObservation } from '../api/generated';
 export function durationSeconds(value: string): string | null {
   if (value.length > 128) return null;
   const parts = /^PT(?:(0|[1-9][0-9]{0,18})H)?(?:(0|[1-9][0-9]{0,18})M)?(?:(0|[1-9][0-9]{0,18})(?:\.([0-9]{1,9}))?S)?$/.exec(value);
-  if (!parts || !parts.slice(1).some(part => part !== undefined)) return null;
+  if (!parts || parts[0] !== value || !parts.slice(1).some(part => part !== undefined)) return null;
   const whole = BigInt(parts[1] ?? '0') * 3600n + BigInt(parts[2] ?? '0') * 60n + BigInt(parts[3] ?? '0');
   const fraction = (parts[4] ?? '').replace(/0+$/, '');
   return `${whole}${fraction ? `.${fraction}` : ''}`;
