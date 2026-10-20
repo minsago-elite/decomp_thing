@@ -111,7 +111,7 @@ class WebRevisionSourceContentTest {
             chunk(content, "offset=$offset")
         }.code)
         assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> { chunk(content, "metadataVersion=${"d".repeat(64)}") }.code)
-        val empty = chunk(makeContent(byteArrayOf())); assertEquals("", text(empty)); assertEquals(JsonNull, next(empty))
+        val empty = chunk(makeContent(byteArrayOf())); assertEquals("", text(empty)); assertNull(next(empty))
         assertEquals("0", empty.getValue("lengthBytes").jsonPrimitive.content); assertTrue(empty.getValue("completeFile").jsonPrimitive.boolean)
     }
 
