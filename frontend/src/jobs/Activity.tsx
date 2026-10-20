@@ -9,8 +9,11 @@ import type { ActivityReceiptTime } from './ActivityReceiptAge';
 import { ActivityRow, matchesActivity } from './ActivityRow';
 import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
+import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
 const capacity = 200;
+type ActivityPosition = { initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null };
+type ActivityDisplay = { position: ActivityPosition; receipt: ActivityReceiptTime };
 
 /** Retained journal observations are display evidence, never acceptance receipts. */
 export function Activity({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
@@ -30,7 +33,9 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [group, setGroup] = useState<'all' | ActivityGroup>('all');
   const [taskDigest, setTaskDigest] = useState('');
   const [reset, setReset] = useState(0);
-  const position = useRef<{ initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null }>({ initialized: false, cursor: null, rows: [], last: null });
+  const position = useRef<ActivityPosition>({ initialized: false, cursor: null, rows: [], last: null });
+  const binding = useRef({ client, stream, jobId, runId });
+  binding.current = { client, stream, jobId, runId };
   useEffect(() => {
     if (!availability.online || !availability.visible) {
       reconcile.current = true;
@@ -43,6 +48,13 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     // Catch up one bounded page before switching to live delivery, including on resume.
     let useStreaming = false;
     let readingStream = false;
+    const display = createUsageDisplay<ActivityDisplay, ReturnType<typeof setTimeout>>({
+      schedule: callback => setTimeout(callback, 100),
+      cancel: handle => clearTimeout(handle),
+      isCurrent: value => position.current === value.position && binding.current.client === client
+        && binding.current.stream === stream && binding.current.jobId === jobId && binding.current.runId === runId,
+      publish: value => { setRows(value.position.rows); setLastRead(value.receipt); },
+    });
     const accept = (items: WebEvent[], cursor: string | null) => {
       const previous = position.current;
       const added: WebEvent[] = [];
@@ -62,8 +74,11 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       if (next.length > capacity) throw new Error('capacity');
       // Never regress the acknowledged cursor when a stream replays a retained duplicate.
       const acknowledged = items.length > 0 && added.length === 0 ? previous.cursor : cursor ?? previous.cursor;
-      position.current = { initialized: true, cursor: acknowledged, rows: next, last };
-      setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now(), wallClockMs: Date.now() }); setRetry(0); failures.current = 0;
+      const acceptedPosition = { initialized: true, cursor: acknowledged, rows: next, last };
+      position.current = acceptedPosition;
+      setRetry(0); failures.current = 0;
+      display.update({ position: acceptedPosition, receipt: { at: new Date().toISOString(), monotonicMs: performance.now(), wallClockMs: Date.now() } },
+        readingStream && added.length > 0 && next.length < capacity && items.length === 1 && items.every(isContextUsageUpdate));
       if (next.length === capacity) { setFollowing(false); return false; }
       return true;
     };
@@ -135,7 +150,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       }
     };
     void poll();
-    return () => { controller.abort(); clearTimeout(timer); };
+    return () => { controller.abort(); clearTimeout(timer); display.close(); };
   }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
 
   const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
