@@ -20,10 +20,18 @@ The focused fixtures provide the following evidence:
   generation and checks that the selected profile identity and budgets remain
   unchanged when a host explicitly admits them.
 
-This evidence is local fixture behavior. The semantic-planning boundary still
-does not retain a separate structured planning receipt containing the complete
-profile configuration, host ceiling, measured planner outcome, and exact plan
-commitment. The deterministic planner's counters are logical work accounting;
-they do not qualify wall-clock or resident-memory enforcement. No production
-Ghidra, authenticated oracle, cgroup, or release-authority qualification is
-claimed here. These are remaining gaps for issue #1058 and its parent #826.
+`reports/confidence.json` retains `semanticPlanningBudgetEvidence` with schema
+version 1, the selected profile ID, digest and complete descriptor, independent
+host safety limits, and effective planner limits after any tighter caller bounds.
+Its outcome records the planned module count, function/global/type counts,
+dependency-edge count and sparse-work count. The module plan remains separate
+evidence. `ProfiledModulePlanningTest` checks the receipt's profile, effective
+limits and observed outcome, including a caller limit tighter than the profile.
+This implements the budget-accounting slice closed in issue #1058.
+
+This is local fixture and logical-work evidence. The counters do not qualify
+wall-clock or resident-memory enforcement, production Ghidra, authenticated
+oracle execution, cgroup containment or release authority. Whole-operation
+planner/publication resource enforcement remains open under #982. Parent #826
+also remains open for the production behavior-validation boundary in #1061;
+the planning receipt does not supply that boundary's missing evidence.
