@@ -105,6 +105,15 @@ def check_semantics(document: dict) -> None:
             raise ValueError("upload progress exceeds the request ceiling")
         if (data["state"] == "published") != (data["jobId"] is not None):
             raise ValueError("upload publication identity is inconsistent")
+    elif kind == "sourceCatalog":
+        items, page = data["items"], data["page"]
+        if page["snapshotVersion"] != data["manifestSha256"] or len(items) > min(page["limit"], data["totalFiles"]):
+            raise ValueError("source catalog page does not match its captured metadata")
+        if len({item["fileId"] for item in items}) != len(items) or (page["nextCursor"] is not None and not 0 < len(items) < data["totalFiles"]):
+            raise ValueError("source catalog page has duplicate identities or an impossible continuation")
+        if any(not part.strip() or part in (".", "..") or len(part.encode("utf-16-le")) // 2 > 255
+               for item in items for part in item["displayName"].split("/")):
+            raise ValueError("source catalog display label is not a portable relative name")
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
