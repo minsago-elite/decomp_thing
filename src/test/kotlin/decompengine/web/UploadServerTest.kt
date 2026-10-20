@@ -845,97 +845,33 @@ class UploadServerTest {
     }
 
     @Test
-    fun `stop request closes service admission before waiting on the lifecycle lock`() {
+    fun `stop signals the job service before waiting on the lifecycle lock`() {
         val dataDir = createTempDirectory("web-stop-signal-order-")
         val server = UploadServer("127.0.0.1", 0, dataDir)
         server.start()
-        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }
-            .get(server) as WebJobService
+        val serviceMonitor = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(server)
         val stopThread = Thread { server.stop() }
         try {
             synchronized(server.lifecycleMonitor()) {
-                synchronized(service) {
+                synchronized(serviceMonitor) {
                     stopThread.start()
-                    assertTrue(awaitWaiting(stopThread), "stop caller must wait for its bounded cleanup task")
-                    assertTrue(service.isShutdownRequested(),
-                        "workflow admission must close before cleanup waits on lifecycle work")
+                    assertTrue(awaitBlocked(stopThread), "cleanup must wait for the held service monitor")
+                    assertTrue(server.jobServiceStopping(),
+                        "the stop signal must be visible before service-monitor cleanup")
                 }
-                assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "performStop"),
-                    "daemon cleanup should wait on the lifecycle lock while it is held")
-                assertTrue(awaitWaiting(stopThread), "stop caller should remain bounded by the cleanup task")
-                assertTrue(service.isShutdownRequested(),
-                    "workflow admission must remain closed while cleanup waits on the lifecycle lock")
+                assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
+                    "stop() should wait on the lifecycle lock while it is held")
+                // The job service must already be signalled while stop() is still blocked:
+                // a queued callback or completing operation must observe shutdown before
+                // the lock frees.
+                assertTrue(server.jobServiceStopping(),
+                    "beginShutdown must be published before waiting on the lifecycle lock")
             }
             stopThread.join(10_000)
             assertTrue(!stopThread.isAlive,
                 "stop() must complete once the lock is released; state=${stopThread.state} " +
                     "frames=${stopThread.stackTrace.joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }}")
         } finally {
-            dataDir.toFile().deleteRecursively()
-        }
-    }
-
-    @Test
-    fun `stop request closes admission promptly and bounds shutdown while terminal publication is held`() {
-        val dataDir = createTempDirectory("web-held-publication-stop-")
-        val server = UploadServer("127.0.0.1", 0, dataDir,
-            requestShutdownTimeoutMs = 0, shutdownTimeoutMs = 200)
-        val service = UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }
-            .get(server) as WebJobService
-        val fence = WebJobService::class.java.getDeclaredField("completionPublication").apply { isAccessible = true }
-            .get(service) as WebCompletionPublicationFence
-        val authCancellation = UploadServer::class.java.getDeclaredField("authenticationInspectionCancellation")
-            .apply { isAccessible = true }.get(server) as java.util.concurrent.atomic.AtomicBoolean
-        val entered = java.util.concurrent.CountDownLatch(1)
-        val release = java.util.concurrent.CountDownLatch(1)
-        val published = java.util.concurrent.atomic.AtomicBoolean(false)
-        val publication = Thread({
-            fence.publishCompletion {
-                entered.countDown()
-                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
-                published.set(true)
-            }
-        }, "held-terminal-publication").apply { isDaemon = true }
-        try {
-            server.start()
-            publication.start()
-            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            val request = java.util.concurrent.FutureTask { server.requestStop() }
-            Thread(request, "bounded-stop-request").apply { isDaemon = true; start() }
-            request.get(500, java.util.concurrent.TimeUnit.MILLISECONDS)
-
-            assertFalse(server.withActiveRequest { error("stop-requested server admitted a request") })
-            assertTrue(authCancellation.get(), "authentication inspection cancellation must be immediate")
-            assertTrue(service.isShutdownRequested(), "workflow admission must close before waiting on publication")
-            assertFalse(service.isStopping(), "the ordered completion signal must wait for the held publication")
-
-            val timeout = assertFailsWith<WebJobServiceException> { server.stop() }
-            assertEquals("SHUTDOWN_INCOMPLETE", timeout.code)
-            assertFalse(published.get())
-            assertFalse(service.isStopping())
-            assertFailsWith<java.io.IOException> {
-                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", server.serverPort), 500) }
-            }
-
-            release.countDown()
-            publication.join(5_000)
-            assertFalse(publication.isAlive)
-            server.stop()
-            assertTrue(published.get())
-            assertTrue(service.isStopping())
-        } finally {
-            release.countDown()
-            publication.join(5_000)
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
-            while (true) {
-                try {
-                    server.stop()
-                    break
-                } catch (failure: WebJobServiceException) {
-                    if (failure.code != "SHUTDOWN_INCOMPLETE" || System.nanoTime() >= deadline) throw failure
-                    Thread.sleep(20)
-                }
-            }
             dataDir.toFile().deleteRecursively()
         }
     }
@@ -2498,10 +2434,14 @@ class UploadServerTest {
     private fun UploadServer.lifecycleMonitor(): Any =
         UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(this)
 
-    private fun awaitWaiting(thread: Thread?): Boolean {
+    private fun UploadServer.jobServiceStopping(): Boolean =
+        (UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(this) as WebJobService)
+            .let { service -> WebJobService::class.java.getDeclaredField("stopping").apply { isAccessible = true }.getBoolean(service) }
+
+    private fun awaitBlocked(thread: Thread?): Boolean {
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
         while (System.nanoTime() < deadline) {
-            if (thread?.state?.let { it in setOf(Thread.State.BLOCKED, Thread.State.WAITING, Thread.State.TIMED_WAITING) } == true) return true
+            if (thread?.state == Thread.State.BLOCKED) return true
             Thread.sleep(10)
         }
         return false

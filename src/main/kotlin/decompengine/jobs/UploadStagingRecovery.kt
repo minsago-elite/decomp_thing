@@ -18,8 +18,7 @@ internal object UploadStagingRecovery {
             check()
             return Linux.openRoot(root).use { directory ->
                 // Bound the complete scan before deleting anything, including unrelated root entries.
-                val candidates = Linux.directoryEntryNames(directory, MAX_WORKFLOW_STARTUP_ROOT_ENTRIES)
-                    .filter { stageName.matches(it) }.sorted()
+                val candidates = Linux.directoryEntryNames(directory, 10_512).filter { stageName.matches(it) }.sorted()
                 require(candidates.size <= 256) { "Too many upload staging entries" }
                 check()
                 val inspected = candidates.map { check(); inspect(directory, it, check) }
