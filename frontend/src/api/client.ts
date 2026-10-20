@@ -2,8 +2,10 @@ import { boundedBody } from './body';
 import { apiPath, normalizeBasePath, validateResourceHref } from '../app/paths';
 import { decodeContract, encodeRequest } from './decode';
 import { ApiClientError } from './errors';
-import type { Artifact, RequestData, RequestKind, ResponseKind, ResponseOf } from './generated';
+import type { Artifact, RequestData, RequestKind, ResponseKind, ResponseOf, RevisionFile } from './generated';
 import { MAX_JSON_BYTES } from './json';
+import { readSourceDigestHead, sourceDigestExpectation, sourceDigestHeadFailure } from './sourceDigest';
+import type { SourceDigestExpectation, SourceDigestObservation } from './sourceDigest';
 
 export { ApiClientError, withApiFailureReference } from './errors';
 export interface RequestOptions { signal?: AbortSignal }
@@ -31,13 +33,14 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact): Promise<ResponseOf<K> | string | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact, sourceHead?: SourceDigestExpectation): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
-    const headers = new Headers({ Accept: artifact ? 'application/octet-stream' : 'application/json' });
-    if (method !== 'GET' && !upload) headers.set('Content-Type', 'application/json');
-    if (method !== 'GET') {
+    const headers = new Headers({ Accept: artifact || sourceHead ? 'application/octet-stream' : 'application/json' });
+    const mutating = method !== 'GET' && method !== 'HEAD';
+    if (mutating && !upload) headers.set('Content-Type', 'application/json');
+    if (mutating) {
       if (!session && !upload && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
       if (!session && (!settings.idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey))) throw new ApiClientError('invalid_request');
       if ((!session || method === 'DELETE') && (!settings.csrfToken || !/^[A-Za-z0-9_-]{32,256}$/.test(settings.csrfToken))) throw new ApiClientError('invalid_request');
@@ -70,7 +73,7 @@ export function createApiClient(options: ClientOptions) {
       stop = () => { reject(new ApiClientError(timedOut ? 'timeout' : 'aborted')); };
       controller.signal.addEventListener('abort', stop, { once: true });
     });
-    const operation = async (): Promise<ResponseOf<K> | string | undefined> => {
+    const operation = async (): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> => {
       response = await fetcher(url, {
         method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
         cache: 'no-store', signal: controller.signal, ...(body === undefined ? {} : { body }),
@@ -82,6 +85,10 @@ export function createApiClient(options: ClientOptions) {
       const headerId = response.headers.get('X-Request-ID');
       if (!headerId || !requestIdPattern.test(headerId)) throw new ApiClientError('invalid_headers');
       requestId = headerId;
+      if (sourceHead) {
+        if (!response.ok) throw sourceDigestHeadFailure(response.status, response.body === null, name => response!.headers.get(name));
+        return readSourceDigestHead(response.status, response.body === null, name => response!.headers.get(name), sourceHead);
+      }
       if (!artifact && kind === null && response.status === 204) return undefined;
       if (artifact && response.ok) {
         if (response.status !== 200) throw new ApiClientError('unexpected_response');
@@ -121,6 +128,11 @@ export function createApiClient(options: ClientOptions) {
     }
   }
   return {
+    /** Existing private attachment HEAD checks captured bytes; no browser body or automatic retry. */
+    async checkSourceFileDigest(metadata: RevisionFile, settings: RequestOptions = {}): Promise<SourceDigestObservation> {
+      const expected = sourceDigestExpectation(metadata);
+      return await request(null, expected.route, 'HEAD', undefined, settings, false, false, undefined, expected) as SourceDigestObservation;
+    },
     /** One bounded read of the exact observed JSON artifact; its digest grants no acceptance authority. */
     async readArtifactText(artifact: Artifact, expected: { jobId: string; runId: string }, settings: RequestOptions = {}): Promise<string> {
       const observed = { ...artifact };

@@ -95,6 +95,18 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
         return bytes.copyOf()
     }
 
+    /** Reports the constructor's exact committed-byte check, never build/behavior/archive acceptance. */
+    fun verifiedDownloadHeaders(): Map<String, String> {
+        if (!downloadAvailable) representationUnavailable()
+        return mapOf(
+            "X-Decomp-Content-Verification" to "committed-digest",
+            "X-Decomp-File-ID" to fileId,
+            "X-Decomp-Source-SHA256" to reference.sourceSha256,
+            "X-Decomp-Metadata-Version" to metadataVersion,
+            "X-Decomp-Content-SHA256" to sha256,
+        )
+    }
+
     fun chunk(query: WebSourceChunkQuery): JsonObject {
         if (!previewAvailable) representationUnavailable()
         val offset = query.offset

@@ -13,6 +13,7 @@ import { formatExactBytes } from '../jobs/metadataFormat';
 import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage } from '../sources/navigation';
 import type { DirectorySelection, FileSelection, SourceReadState, SourceSnapshot } from '../sources/navigation';
 import { SourcePreview } from '../sources/SourcePreview';
+import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
@@ -141,6 +142,7 @@ function File({ selected, basePath, runtime, search }: { selected: FileSelection
         ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
             maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} />
         : <button type="button" onClick={() => setPreviewOpened(true)}>{copy.openPreview}</button>)}
+      {policy.download && <SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} />}
       {policy.download
         ? <a href={apiPath(basePath, sourceReadRoute(selected, 'download', selected.fileId))} download="">{copy.download}</a>
         : <p>{policy.downloadNotice === 'too-large' ? copy.tooLarge : copy.notArchivable}</p>}
