@@ -1,9 +1,12 @@
+import { Fragment } from 'preact';
+import { useState } from 'preact/hooks';
 import { activityRowCopy as copy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from './metadataFormat';
 import type { WebEvent } from '../api/generated';
 import { ObservedUsage } from './ObservedUsage';
 import { runPath } from '../app/paths';
+import { additionalProgressReferences } from './progressReferences';
 
 export type ActivityGroup = 'stages' | 'messages' | 'plans' | 'tools' | 'usage' | 'other';
 export function activityGroup(event: WebEvent): ActivityGroup {
@@ -28,6 +31,7 @@ export function matchesActivity(event: WebEvent, group: 'all' | ActivityGroup, t
 }
 
 export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: string }) {
+  const [referencesOpen, setReferencesOpen] = useState(false);
   return <li class="activity-row">
     <time dateTime={event.occurredAt} title={event.occurredAt}>{formatExactTimestamp(event.occurredAt)}</time>{' '}<span>{displayMessage(copy.sequence, { sequence: event.sequence })}</span>
     <p><a href={runPath(basePath, event.jobId, event.runId)}>{displayMessage(copy.attempt, { run: event.runId })}</a></p>
@@ -49,6 +53,17 @@ export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: st
           <dt>{copy.requestDigest}</dt><dd><code>{event.payload.fields.requestSha256 ?? copy.notRecorded}</code></dd>
           <dt>{copy.toolCallDigest}</dt><dd><code>{event.payload.fields.toolCallIdSha256 ?? copy.notRecorded}</code></dd>
         </dl>
+        <details onToggle={toggle => setReferencesOpen(toggle.currentTarget.open)}>
+          <summary>{copy.additionalReferences}</summary>
+          {referencesOpen && <>
+            <p>{copy.referenceBoundary}</p>
+            <dl class="job-facts">
+              {additionalProgressReferences(event.payload.fields).map(reference => <Fragment key={reference.key}>
+                <dt>{reference.label}</dt><dd><code>{reference.value}</code></dd>
+              </Fragment>)}
+            </dl>
+          </>}
+        </details>
       </details>
     </> : <p>{displayMessage(copy.otherObservation, { type: event.type })}</p>}
   </li>;
