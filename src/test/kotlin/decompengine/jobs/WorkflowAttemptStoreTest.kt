@@ -73,7 +73,7 @@ class WorkflowAttemptStoreTest {
             events += "inspect-$id"
             budget.chargeRead(2)
             WorkflowStartupRecoveryMutation(2) { events += "write-$id" }
-        }, beforeChanges = { events += "maintenance" })
+        }, beforeChanges = { events += "maintenance"; true })
         assertEquals(listOf("inspect-$a", "inspect-$b", "maintenance", "write-$a", "write-$b"), events)
         assertEquals(3, budget.entries)
         assertEquals(4L, budget.readBytes)
@@ -91,7 +91,7 @@ class WorkflowAttemptStoreTest {
             executeWorkflowStartupRecovery(ids.asSequence(), budget, prepare = { id ->
                 if (id == ids.last()) throw invalid
                 WorkflowStartupRecoveryMutation(1) { writes++ }
-            }, beforeChanges = { maintenance++ })
+            }, beforeChanges = { maintenance++; false })
         }
         kotlin.test.assertSame(invalid, failure)
         assertFalse(budget.changesStarted)
@@ -100,7 +100,7 @@ class WorkflowAttemptStoreTest {
         val rootLimit = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2, 8, 8))
         assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
             executeWorkflowStartupRecovery(sequenceOf("unknown-a", "unknown-b", "unknown-c"), rootLimit,
-                prepare = { error("root admission must precede record reads") }, beforeChanges = { maintenance++ })
+                prepare = { error("root admission must precede record reads") }, beforeChanges = { maintenance++; false })
         }.code)
         for (readLimited in listOf(true, false)) {
             val bounded = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(2,
@@ -109,12 +109,37 @@ class WorkflowAttemptStoreTest {
                 executeWorkflowStartupRecovery(ids.asSequence(), bounded, prepare = {
                     bounded.chargeRead(2)
                     WorkflowStartupRecoveryMutation(2) { writes++ }
-                }, beforeChanges = { maintenance++ })
+                }, beforeChanges = { maintenance++; false })
             }.code)
             assertFalse(bounded.changesStarted)
         }
         assertEquals(0, writes)
         assertEquals(0, maintenance)
+    }
+
+    @Test fun `bounded root-entry inventory admits ten thousand jobs plus owner entries`() {
+        val budget = WorkflowStartupRecoveryBudget()
+        val names = sequence {
+            yield(".web-owner.lock")
+            yield(".workflow-owner.lock")
+            repeat(10_000) { yield(it.toString(16).padStart(32, '0')) }
+        }
+        executeWorkflowStartupRecovery(names, budget, prepare = { null }, beforeChanges = { false })
+        assertEquals(10_002, budget.entries)
+        assertEquals(10_512, WorkflowStartupRecoveryLimits().maximumEntries)
+        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(10_513) }
+        assertFalse(budget.changesStarted)
+    }
+
+    @Test fun `pre-mutation startup callback refusal retains its original type and certainty`() {
+        val budget = WorkflowStartupRecoveryBudget()
+        val refusal = IllegalStateException("directory durability refusal")
+        val failure = assertFailsWith<IllegalStateException> {
+            executeWorkflowStartupRecovery(sequenceOf("a".repeat(32)), budget,
+                prepare = { null }, beforeChanges = { throw refusal })
+        }
+        kotlin.test.assertSame(refusal, failure)
+        assertFalse(budget.changesStarted)
     }
 
     @Test fun `startup cancellation distinguishes before changes from admitted or completed mutations`() {
@@ -134,7 +159,7 @@ class WorkflowAttemptStoreTest {
             val late = assertFailsWith<WorkflowStoreException> {
                 executeWorkflowStartupRecovery(sequenceOf(id), budget,
                     prepare = { WorkflowStartupRecoveryMutation(0) { writes++; cancelled = true } },
-                    beforeChanges = { if (!cancelAfterWrite) cancelled = true })
+                    beforeChanges = { if (!cancelAfterWrite) cancelled = true; !cancelAfterWrite })
             }
             assertEquals("RECOVERY_CANCELLED", late.code)
             assertTrue(late.outcomeUnknown)
@@ -149,7 +174,7 @@ class WorkflowAttemptStoreTest {
                     prepare = { name -> WorkflowStartupRecoveryMutation(0) {
                         if (name.startsWith("b")) throw original
                         completed++
-                    } }, beforeChanges = {})
+                    } }, beforeChanges = { false })
             }
             assertTrue(failed.outcomeUnknown)
             kotlin.test.assertSame(original, failed.cause)
@@ -206,7 +231,7 @@ class WorkflowAttemptStoreTest {
             emptyList(), null)
         assertNull(recoveredWorkflowSnapshot(current, { error("unchanged records do not read the clock") },
             { error("unchanged records do not allocate replacement identities") }))
-        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(4097) }
+        assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(10_513) }
         assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(maximumReadBytes = 64L * 1024 * 1024 + 1) }
         assertFailsWith<IllegalArgumentException> { WorkflowStartupRecoveryLimits(maximumPlanBytes = 64L * 1024 * 1024 + 1) }
     }

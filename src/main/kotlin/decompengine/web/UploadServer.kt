@@ -200,10 +200,12 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    private val shutdownTimeoutMs: Long = 5000,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
         require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
+        require(shutdownTimeoutMs in 0..5000) { "HTTP server shutdown wait must be between zero and five seconds" }
         check(!Thread.currentThread().isInterrupted && !startupCancellation()) { "Web server startup cancelled" }
     }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
@@ -253,7 +255,7 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
-        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
+        shutdownTimeoutMs = shutdownTimeoutMs, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
@@ -277,6 +279,8 @@ class UploadServer(
     private var activeRequests = 0
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val stopCleanupTask = java.util.concurrent.atomic.AtomicReference<java.util.concurrent.FutureTask<Unit>?>(null)
+    @Volatile private var stopCleanupSucceeded = false
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -353,15 +357,14 @@ class UploadServer(
         }
     }
 
-    /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
+    /** Close listener, credential-inspection and workflow admission without waiting for publication. */
     internal fun requestStop() {
-        jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
-        jobs.beginShutdown()
+        jobs.requestShutdown()
     }
 
-    /** Latch that resolves once requestStop has published its signal; test evidence helper. */
+    /** Latch that resolves once requestStop has published admission closure; test evidence helper. */
     internal fun requestStopSignalled(): java.util.concurrent.CountDownLatch {
         val latch = java.util.concurrent.CountDownLatch(1)
         Thread({
@@ -373,10 +376,62 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
-        // Signal recovery and the job service even while start or a queued callback holds
-        // lifecycleLock through filesystem operations: no queued operation may begin and no
-        // completion may be published after the stop signal is observable.
         requestStop()
+        awaitStopCleanup(scheduleStopCleanup(delaySeconds))
+    }
+
+    private fun scheduleStopCleanup(delaySeconds: Int): java.util.concurrent.FutureTask<Unit> {
+        while (true) {
+            val current = stopCleanupTask.get()
+            if (current != null && (!current.isDone || stopCleanupSucceeded)) return current
+            val candidate = java.util.concurrent.FutureTask<Unit> {
+                performStop(delaySeconds)
+                stopCleanupSucceeded = true
+            }
+            if (!stopCleanupTask.compareAndSet(current, candidate)) continue
+            try {
+                Thread(candidate, "decomp-web-shutdown-cleanup").apply { isDaemon = true }.start()
+            } catch (failure: Throwable) {
+                stopCleanupTask.compareAndSet(candidate, null)
+                throw failure
+            }
+            return candidate
+        }
+    }
+
+    private fun awaitStopCleanup(task: java.util.concurrent.FutureTask<Unit>) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
+        var interrupted = false
+        try {
+            while (true) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0 && !task.isDone) {
+                    throw WebJobServiceException("SHUTDOWN_INCOMPLETE",
+                        "Server cleanup exceeded its bounded shutdown wait; storage ownership remains until cleanup completes.")
+                }
+                try {
+                    if (task.isDone) task.get()
+                    else task.get(remaining, java.util.concurrent.TimeUnit.NANOSECONDS)
+                    return
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    throw WebJobServiceException("SHUTDOWN_INCOMPLETE",
+                        "Server cleanup exceeded its bounded shutdown wait; storage ownership remains until cleanup completes.")
+                } catch (failure: java.util.concurrent.ExecutionException) {
+                    when (val cause = failure.cause ?: failure) {
+                        is RuntimeException -> throw cause
+                        is Error -> throw cause
+                        else -> throw IllegalStateException("Web server cleanup failed", cause)
+                    }
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun performStop(delaySeconds: Int) {
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
@@ -397,6 +452,10 @@ class UploadServer(
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
         access.close()
+        // Close the listener and its request machinery before waiting on terminal publication.
+        // Fast shutdown intent already closed service admission; this ordered fence waits only
+        // for a terminal write that linearized before that intent.
+        jobs.beginShutdown()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {

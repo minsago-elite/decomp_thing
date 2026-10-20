@@ -214,6 +214,7 @@ class WebJobService(
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     @Volatile private var initialized = false
+    @Volatile private var shutdownRequested = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
     private val completionPublication = WebCompletionPublicationFence { stopping = true }
@@ -234,7 +235,7 @@ class WebJobService(
     private fun runProgressRetentionBatch() {
         repeat(32) {
             val continueBatch = synchronized(this) {
-                if (!initialized || closed || stopping || attempts == null || publicationFailures.isNotEmpty() || uploads.isNotEmpty())
+                if (!initialized || closed || stopping || shutdownRequested || attempts == null || publicationFailures.isNotEmpty() || uploads.isNotEmpty())
                     return@synchronized false
                 try {
                     if (retentionRuns.isNotEmpty()) {
@@ -284,14 +285,29 @@ class WebJobService(
         requireInitializedRead()
         val sampledAt = java.time.Instant.now()
         val pool = ownedExecutor ?: return WebSchedulerSnapshot.Unavailable(sampledAt)
-        return WebSchedulerSnapshot.Available(sampledAt, stopping, pool.activeCount, pool.maximumPoolSize,
+        return WebSchedulerSnapshot.Available(sampledAt, stopping || shutdownRequested, pool.activeCount, pool.maximumPoolSize,
             pool.queue.size, configuredQueueCapacity)
     }
 
-    /** Serialize with terminal publication before acquiring the service, executor or listener cleanup locks. */
-    internal fun signalShutdown() = completionPublication.signalShutdown()
+    /** Close service admission without taking executor, service-monitor, or publication locks. */
+    internal fun requestShutdown() {
+        shutdownRequested = true
+    }
 
-    @Synchronized fun beginShutdown() { completionPublication.signalShutdown(); retentionWorker?.stop() }
+    /** Serialize the canonical shutdown boundary before taking cleanup locks. */
+    internal fun signalShutdown() {
+        requestShutdown()
+        completionPublication.signalShutdown()
+    }
+
+    internal fun isShutdownRequested(): Boolean = shutdownRequested
+    internal fun isStopping(): Boolean = stopping
+
+    internal fun beginShutdown() {
+        requestShutdown()
+        completionPublication.signalShutdown()
+        synchronized(this) { retentionWorker?.stop() }
+    }
 
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
     internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() && retentionWorker?.isIdle != false }
@@ -304,26 +320,26 @@ class WebJobService(
 
     @Synchronized
     internal fun initializeExistingStorage(cancellation: () -> Boolean) {
-        check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
+        check(!closed && !shutdownRequested && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
         fun checkCancellation() {
-            if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+            if (stopping || shutdownRequested || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
                 "RECOVERY_CANCELLED", "Startup recovery was cancelled; preserve any already reconciled storage.", attempts != null)
         }
         checkCancellation()
         if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover(cancellation)
         checkCancellation()
         initialized = true
-        if (!stopping) retentionWorker?.start()
+        if (!stopping && !shutdownRequested) retentionWorker?.start()
     }
 
     private fun acquireAndRecover(cancellation: () -> Boolean = { false }): WorkflowAttemptStore {
         attempts?.let { return it }
-        if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+        if (stopping || shutdownRequested || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
-            acquired.recoverForStartup(cancellation = { stopping || cancellation() }) { check ->
+            acquired.recoverForStartup(cancellation = { stopping || shutdownRequested || cancellation() }) { check ->
                 check()
                 try {
                     store.prepareStorageDirectories()
@@ -332,7 +348,7 @@ class WebJobService(
                         "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
                 }
                 check()
-                decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
+                decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check) > 0
             }
             attempts = acquired
             return acquired
@@ -343,7 +359,7 @@ class WebJobService(
     }
 
     private fun writableStore(): WorkflowAttemptStore {
-        if (closed || stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        if (closed || stopping || shutdownRequested) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
         if (!initialized) initializeExistingStorage()
         return acquireAndRecover()
@@ -429,7 +445,7 @@ class WebJobService(
     @Synchronized
     internal fun dashboardRows(): WebDashboardRows {
         requireInitializedRead()
-        val budget = WebDashboardReadBudget(cancellation = { stopping })
+        val budget = WebDashboardReadBudget(cancellation = { stopping || shutdownRequested })
         val read: (String, Int) -> ByteArray = { relative, maximum ->
             val perFile = if (relative.endsWith("/job.json")) minOf(maximum, 256 * 1024) else maximum
             budget.read(perFile) { allowance, check ->
@@ -683,7 +699,7 @@ class WebJobService(
 
     @Synchronized
     fun start(jobId: String, workflow: WebWorkflow): WebWorkflowAdmission {
-        if (closed || stopping || uploads.isNotEmpty()) return WebWorkflowAdmission.Unavailable
+        if (closed || stopping || shutdownRequested || uploads.isNotEmpty()) return WebWorkflowAdmission.Unavailable
         if (publicationFailures.isNotEmpty()) return WebWorkflowAdmission.Unavailable
         val owner = writableStore()
         val record = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available ?: return WebWorkflowAdmission.Unavailable
@@ -710,7 +726,7 @@ class WebJobService(
     @Synchronized
     fun startDurable(jobId: String, expectedJobVersion: String, request: DurableWebWorkflowRequest): DurableWebWorkflowAdmission {
         if (uploads.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("UPLOAD_CAPACITY")
-        if (closed || stopping) return DurableWebWorkflowAdmission.Unavailable("SERVICE_STOPPED")
+        if (closed || stopping || shutdownRequested) return DurableWebWorkflowAdmission.Unavailable("SERVICE_STOPPED")
         if (publicationFailures.isNotEmpty()) return DurableWebWorkflowAdmission.Unavailable("RECOVERY_REQUIRED")
         val registration = registrations[request.workflow] ?: return DurableWebWorkflowAdmission.Unsupported(request.workflow)
         val owner = writableStore()
@@ -776,7 +792,7 @@ class WebJobService(
             throw WebJobServiceException(failure.code, "The recorded workflow start is unavailable. Refresh its state before retrying.", failure)
         }
         if (replay != null) return DurableWebWorkflowStartResult(replay.attempt, replayed = true)
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        if (stopping || shutdownRequested) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload capacity is currently in use.")
         val registration = registrations[request.workflow]
             ?: throw WebJobServiceException("WORKFLOW_UNAVAILABLE", "The requested workflow is unavailable.")
@@ -833,7 +849,7 @@ class WebJobService(
     @Synchronized
     internal fun cancelDurable(jobId: String, runId: String, expectedRunVersion: String): WorkflowAttempt {
         requireInitializedRead()
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        if (stopping || shutdownRequested) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
         val current = getAttempt(jobId, runId)
         if (current.version != expectedRunVersion)
@@ -854,7 +870,7 @@ class WebJobService(
     internal fun requestDurableCancellation(jobId: String, runId: String, expectedRunVersion: String,
         actor: decompengine.jobs.WorkflowCancellationActor, requestKey: String): decompengine.jobs.WorkflowCancellationRequestResult {
         requireInitializedRead()
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        if (stopping || shutdownRequested) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
         val current = getAttempt(jobId, runId)
         val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
@@ -893,6 +909,7 @@ class WebJobService(
     }
 
     override fun close() {
+        requestShutdown()
         var problem: Throwable? = null
         val running = synchronized(this) {
             if (closed) return
@@ -956,7 +973,7 @@ class WebJobService(
             try {
                 val job = synchronized(this@WebJobService) {
                     if (terminal || active[jobId] !== this) return
-                    if (closed || stopping) { stopPending(); return }
+                    if (closed || stopping || shutdownRequested) { stopPending(); return }
                     started = true
                     worker = Thread.currentThread()
                     store.updateStatus(jobId, "analyzing", "Legacy ${workflow.name.lowercase()} workflow is running; attempt provenance is unavailable")
@@ -967,7 +984,7 @@ class WebJobService(
                     WebWorkflow.RECONSTRUCT -> reconstructor.reconstruct(job, reports)
                 }
                 synchronized(this@WebJobService) {
-                    if (closed || stopping || Thread.currentThread().isInterrupted) finish("failed", "Server stopped before the operation reported completion")
+                    if (closed || stopping || shutdownRequested || Thread.currentThread().isInterrupted) finish("failed", "Server stopped before the operation reported completion")
                     else finish("complete", "Legacy workflow completed; completion does not establish accepted revision evidence")
                 }
             } catch (failure: Exception) {
@@ -979,7 +996,7 @@ class WebJobService(
             if (terminal || active[jobId] !== this) return@publishCompletion
             terminal = true
             val restoreInterrupt = Thread.interrupted()
-            val selected = selectWebLegacyCompletion(status, message, closed || stopping || restoreInterrupt)
+            val selected = selectWebLegacyCompletion(status, message, closed || stopping || shutdownRequested || restoreInterrupt)
             try { store.updateStatus(jobId, selected.first, selected.second) }
             finally {
                 if (restoreInterrupt) Thread.currentThread().interrupt()
@@ -999,7 +1016,7 @@ class WebJobService(
             try {
                 val context = synchronized(this@WebJobService) {
                     if (terminal || active[jobId] !== this) return
-                    if (closed || stopping) { stopPending(); return }
+                    if (closed || stopping || shutdownRequested) { stopPending(); return }
                     started = true
                     worker = Thread.currentThread()
                     attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, WorkflowTransition.Start).attempt
@@ -1007,7 +1024,7 @@ class WebJobService(
                 }
                 val outcome = adapter.execute(context)
                 synchronized(this@WebJobService) {
-                    if (closed || stopping || (Thread.currentThread().isInterrupted && !cancellationRequested)) finish(interrupted())
+                    if (closed || stopping || shutdownRequested || (Thread.currentThread().isInterrupted && !cancellationRequested)) finish(interrupted())
                     else finish(when (outcome) {
                         is DurableWebWorkflowOutcome.Completed -> WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED, outcome.candidate, outcome.usage)
                         is DurableWebWorkflowOutcome.Failed -> WorkflowTransition.Finish(WorkflowRunState.FAILED, outcome.reason, outcome.candidate, outcome.usage)
@@ -1016,7 +1033,7 @@ class WebJobService(
             } catch (failure: Exception) {
                 synchronized(this@WebJobService) {
                     publicationFailure?.let { throw it }
-                    try { finish(if (closed || stopping || Thread.currentThread().isInterrupted || failure is InterruptedException) interrupted()
+                    try { finish(if (closed || stopping || shutdownRequested || Thread.currentThread().isInterrupted || failure is InterruptedException) interrupted()
                         else WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)) }
                     catch (cleanup: Exception) { if (cleanup !== failure) failure.addSuppressed(cleanup); throw failure }
                 }
@@ -1029,7 +1046,7 @@ class WebJobService(
             // A cooperative worker can return with its interrupt flag set. Decide the outcome first,
             // then clear that flag only around the bounded atomic metadata operation and restore it.
             val restoreInterrupt = Thread.interrupted()
-            val selected = if (closed || stopping || (restoreInterrupt && !cancellationRequested)) interrupted() else transition
+            val selected = if (closed || stopping || shutdownRequested || (restoreInterrupt && !cancellationRequested)) interrupted() else transition
             try {
                 attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, selected).attempt
                 terminal = true
@@ -1046,7 +1063,7 @@ class WebJobService(
                 if (!started) release()
             }
         }
-        private fun interrupted() = if (cancellationRequested && !closed && !stopping)
+        private fun interrupted() = if (cancellationRequested && !closed && !stopping && !shutdownRequested)
             WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED)
         else WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)
     }

@@ -339,9 +339,12 @@ class WorkflowAttemptStore private constructor(
         inspectLocked(jobId, directory)
     }
 
-    /** Complete startup admission; all bounded reads and encoded replacements precede any recovery mutation. */
+    /** Complete startup admission; all bounded reads and encoded replacements precede any recovery mutation.
+     * The maintenance callback returns true only after completing a recovery mutation; if it fails after
+     * a partial mutation, the thrown store exception carries that uncertainty itself.
+     */
     internal fun recoverForStartup(
-        cancellation: () -> Boolean = { false }, beforeChanges: (() -> Unit) -> Unit = {},
+        cancellation: () -> Boolean = { false }, beforeChanges: (() -> Unit) -> Boolean = { check -> check(); false },
     ) = lifetime.write {
         ensureOpen()
         val budget = WorkflowStartupRecoveryBudget(cancellation = cancellation)
@@ -736,12 +739,15 @@ internal fun workflowStartupReadFailure(failure: Exception): WorkflowStoreExcept
     else WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
         "The bounded startup inspection did not finish; no recovery changes were applied.", cause = failure)
 
+/** Allows 10,000 persisted jobs plus bounded owner and staging entries in the same store root. */
+internal const val MAX_WORKFLOW_STARTUP_ROOT_ENTRIES = 10_512
+
 internal data class WorkflowStartupRecoveryLimits(
-    val maximumEntries: Int = 4096, val maximumReadBytes: Long = 64L * 1024 * 1024,
+    val maximumEntries: Int = MAX_WORKFLOW_STARTUP_ROOT_ENTRIES, val maximumReadBytes: Long = 64L * 1024 * 1024,
     val maximumPlanBytes: Long = 64L * 1024 * 1024,
 ) {
     init {
-        require(maximumEntries in 1..4096)
+        require(maximumEntries in 1..MAX_WORKFLOW_STARTUP_ROOT_ENTRIES)
         require(maximumReadBytes in 1..64L * 1024 * 1024 && maximumPlanBytes in 1..64L * 1024 * 1024)
     }
 }
@@ -789,13 +795,14 @@ internal class WorkflowStartupRecoveryBudget(
         planBytes += bytes
     }
     fun beginChanges() { checkpoint(); changesStarted = true }
+    fun markChangesStarted() { changesStarted = true }
 }
 
 internal class WorkflowStartupRecoveryMutation(val retainedBytes: Long, val apply: () -> Unit)
 
 internal fun executeWorkflowStartupRecovery(
     rootEntries: Sequence<String>, budget: WorkflowStartupRecoveryBudget,
-    prepare: (String) -> WorkflowStartupRecoveryMutation?, beforeChanges: () -> Unit,
+    prepare: (String) -> WorkflowStartupRecoveryMutation?, beforeChanges: () -> Boolean,
 ) {
     budget.checkpoint()
     val ids = ArrayList<String>()
@@ -805,14 +812,14 @@ internal fun executeWorkflowStartupRecovery(
         budget.checkpoint()
         prepare(id)?.let { mutation -> budget.retain(mutation.retainedBytes); plan += mutation }
     }
-    budget.beginChanges()
     try {
-        beforeChanges()
+        if (beforeChanges()) budget.markChangesStarted()
         budget.checkpoint()
-        for (mutation in plan) { budget.checkpoint(); mutation.apply(); budget.checkpoint() }
+        for (mutation in plan) { budget.beginChanges(); mutation.apply(); budget.checkpoint() }
         budget.checkpoint()
     } catch (failure: Exception) {
         if (failure is WorkflowStoreException && failure.outcomeUnknown) throw failure
+        if (!budget.changesStarted) throw failure
         throw WorkflowStoreException((failure as? WorkflowStoreException)?.code ?: "STARTUP_RECOVERY_INCOMPLETE",
             "Startup recovery did not finish; changes may have begun. Preserve storage and reconcile before retrying.", true, failure)
     }
