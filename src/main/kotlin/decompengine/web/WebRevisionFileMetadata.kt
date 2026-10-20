@@ -25,6 +25,12 @@ internal class WebRevisionFileMetadata(
             put("authority", "source-input-commitments"); put("contentVerification", "not-performed")
             put("sourceSha256", ref.sourceSha256); put("metadataVersion", snapshot.metadataVersion)
             put("parentDirectoryId", if (parent.isEmpty()) "root" else revisionSourceDirectoryId(snapshot, parent))
+            // Preserve the manifest claim without promoting it to content or revision acceptance evidence.
+            put("implementationDeclaration", when (entry.acceptedImplementation) {
+                true -> "accepted"
+                false -> "unaccepted"
+                null -> "not-classified"
+            })
             put("recordedModule", captured.recordedModule ?: JsonNull)
             put("item", buildJsonObject {
                 put("fileId", fileId); put("displayName", entry.path); put("sizeBytes", file.sizeBytes.toString())

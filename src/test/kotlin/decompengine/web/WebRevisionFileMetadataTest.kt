@@ -35,6 +35,27 @@ class WebRevisionFileMetadataTest {
         assertFalse(metadata.containsKey("text")); assertFalse(metadata.containsKey("acceptance"))
     }
 
+    @Test fun `nullable manifest implementation claims remain declarations rather than verification`() {
+        for ((claim, expected) in listOf(true to "accepted", false to "unaccepted", null to "not-classified")) {
+            val snapshot = WebRevisionSourceSnapshot(
+                WebRevisionSourceReference(jobId, runId, revisionId, "a".repeat(64), "version_1"),
+                "b".repeat(64), "c".repeat(64), listOf(WebRevisionSourceFile(GeneratedFileEvidence(
+                    "src/body.c", "d".repeat(64), "fixture", acceptedImplementation = claim,
+                    roles = setOf(ProjectFileRole.BUILD_INPUT), contentKind = ProjectContentKind.UTF8_TEXT), 8)))
+            var captures = 0
+            val metadata = WebRevisionFileMetadata { _, _, _ -> captures++; snapshot }
+                .read(jobId, runId, revisionId, fileId(snapshot, 0))
+            assertEquals(1, captures)
+            assertEquals(expected, metadata.getValue("implementationDeclaration").jsonPrimitive.content)
+            assertEquals("source-input-commitments", metadata.getValue("authority").jsonPrimitive.content)
+            assertEquals("not-performed", metadata.getValue("contentVerification").jsonPrimitive.content)
+            assertEquals(snapshot.reference.sourceSha256, metadata.getValue("sourceSha256").jsonPrimitive.content)
+            assertEquals(snapshot.metadataVersion, metadata.getValue("metadataVersion").jsonPrimitive.content)
+            assertFalse(metadata.containsKey("acceptance"))
+            assertFalse(metadata.containsKey("text"))
+        }
+    }
+
     @Test fun `file identities reject foreign candidate bindings and malformed selectors before capture`() {
         val snapshot = makeSnapshot(listOf("src/a.c")); var captures = 0
         val metadata = WebRevisionFileMetadata { job, run, revision ->
