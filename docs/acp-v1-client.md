@@ -393,10 +393,23 @@ launch. At most four invocations run at once, with one active invocation per pri
 holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
 whose workspace is already active cannot prevent another workspace from using a free global slot.
 
+Capacity is reserved before the first caller observer runs, including when a global slot is free.
+The active count includes these unused reservations until fresh cancellation/deadline observations
+commit a permit or release its capacity. A waiter that acquires the fair mutex reserves an eligible
+slot before refreshing observations; admission does not depend on finding an uncontended probe.
+A bounded ingress token covers initial mutex contenders, waiting work and active/quarantined slots:
+at most the active-plus-queued limits combined may be held. The waiting limits still charge only
+queued work, so a busy workspace with a full waiting queue cannot consume an independent free slot.
+
 Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum.
+Every missed initial lock polling slice checks explicit cancellation and the request deadline before
+starting another wait. Cancellation and request expiry can leave that initial wait without acquiring
+the mutex or consuming the full queue deadline.
+
 Caller-provided cancellation/deadline observers run outside the shared scheduler lock. Initial lock
-acquisition uses bounded polling slices, and elapsed observer/lock time is checked against the queue
-deadline before admission, even if capacity is available. Observer callbacks must still return promptly:
+acquisition uses fair interruptible bounded polling slices, and elapsed observer/lock time is checked
+against the original queue deadline before admission, even if capacity is available. Cancellation and
+request expiry are observed before reporting an initial capacity or quarantine refusal. Observer callbacks must still return promptly:
 the scheduler cannot preempt arbitrary caller code, and a blocked eligible FIFO head can delay later
 waiters. A blocked workspace observer does not hold the mutex needed for other eligible work, state
 inspection or permit release. Cancellation and
@@ -408,7 +421,10 @@ continue using the existing ACP cancellation, terminal teardown, and process con
 The admission slot covers the full contained invocation through cleanup and final change capture. A failed process
 cleanup proof retains its slot and workspace reservation for the application process lifetime; another harness
 instance cannot turn an unresolved process into fresh capacity. Such a workspace is unavailable for further turns,
-and no new invocation is admitted when all global slots are retained. Operators must resolve the process/cgroup
+and no new invocation is admitted when all global slots are retained. Quarantine invalidates unused
+same-workspace reservations before publication, ordered atomically against final permit grant.
+Unused reservations release their ingress and active capacity without asserting process cleanup;
+a granted permit retains both until verified cleanup. Operators must resolve the process/cgroup
 failure before restarting the application; this mechanism does not certify cleanup merely because a JVM exits.
 
 Workspace grouping uses the exact normalized primary path already present in the request. Captured repairs use a

@@ -54,10 +54,22 @@ internal data class WebJobQuery(
     }
 }
 
+/** One admitted scan deadline, also checked by the production source between bounded read units. */
+internal class WebJobCollectionDeadline(private val started: Long, private val now: () -> Long) {
+    private var expired = false
+    fun checkpoint() {
+        if (expired || now() - started > 5_000_000_000L) {
+            expired = true
+            throw WebAccessDenied(503, "LISTING_LIMIT", "The job library exceeds this listing scan budget.")
+        }
+    }
+}
+
 /** Bounded, process-local collection snapshots. Continuations never scan storage or execute workflows. */
 internal class WebJobPages(
     private val source: () -> Sequence<JsonObject>,
     private val now: () -> Long = System::nanoTime,
+    private val checkpointedSource: ((() -> Unit) -> Sequence<JsonObject>)? = null,
 ) {
     private data class Snapshot(val id: String, val owner: String, val query: WebJobQuery,
         val items: List<JsonObject>, val expires: Long, val bytes: Long)
@@ -81,11 +93,13 @@ internal class WebJobPages(
         if (!admission.tryAcquire()) throw WebAccessDenied(503, "LISTING_BUSY", "Another job snapshot is being collected. Retry this read shortly.")
         try {
             val start = now()
+            val deadline = WebJobCollectionDeadline(start, now)
             var bytes = 0L
             var visited = 0
             val items = mutableListOf<JsonObject>()
-            for (item in source()) {
-                if (++visited > 10_000 || now() - start > 5_000_000_000L) throw WebAccessDenied(503, "LISTING_LIMIT", "The job library exceeds this listing scan budget.")
+            for (item in checkpointedSource?.invoke(deadline::checkpoint) ?: source()) {
+                if (++visited > 10_000) throw WebAccessDenied(503, "LISTING_LIMIT", "The job library exceeds this listing scan budget.")
+                deadline.checkpoint()
                 val created = try { Instant.parse(item.getValue("createdAt").jsonPrimitive.content) }
                     catch (_: Exception) { throw WebAccessDenied(503, "JOB_RECORD_UNAVAILABLE", "A job has an invalid creation date. Repair its metadata before listing.") }
                 if (!item.getValue("displayFilename").jsonPrimitive.content.lowercase(Locale.ROOT).contains(query.search) ||
@@ -97,12 +111,15 @@ internal class WebJobPages(
                 if (bytes > 16L * 1024 * 1024) throw WebAccessDenied(503, "LISTING_LIMIT", "The job snapshot exceeds its byte budget. Narrow the filters.")
                 items += item
             }
+            deadline.checkpoint() // Empty and fully filtered sources still consume the admitted deadline.
             val order = compareBy<JsonObject> { Instant.parse(it.getValue("createdAt").jsonPrimitive.content) }
                 .thenBy { it.getValue("jobId").jsonPrimitive.content }
             items.sortWith(if (query.sort == "oldest") order else order.reversed())
+            deadline.checkpoint()
             val snapshot = Snapshot(UUID.randomUUID().toString().replace("-", ""), owner, query, items.toList(), now() + ttl, bytes)
             return synchronized(snapshots) {
                 expire()
+                deadline.checkpoint()
                 if (items.size > query.limit) {
                     while (snapshots.isNotEmpty() && (snapshots.size >= 8 || snapshots.values.sumOf { it.bytes } + bytes > 32L * 1024 * 1024)) {
                         snapshots.remove(snapshots.keys.first())

@@ -187,6 +187,12 @@ private inline fun <T> measuredCopyOperation(
     action: () -> T,
 ): T = if (statistics == null) action() else statistics.measure(operation, action)
 
+/** Keep the existing read buffer bound and permit only one byte beyond the remaining allowance. */
+internal fun boundedDescriptorReadRequest(maximumBytes: Int, consumed: Long, bufferBytes: Int): Long {
+    require(maximumBytes >= 0 && consumed >= 0 && consumed <= maximumBytes.toLong() && bufferBytes > 0)
+    return minOf(bufferBytes.toLong(), maximumBytes.toLong() - consumed + 1L)
+}
+
 /**
  * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
  *
@@ -686,7 +692,7 @@ internal object LinuxFilesystemSyscalls {
         while (true) {
             cancellationCheck()
             val count = retryOnInterrupted("read authorized filesystem entry") {
-                libc.read(descriptor.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                libc.read(descriptor.fd, buffer, NativeLong(boundedDescriptorReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
             }
             if (count == 0L) break
             if (count < 0L) throw syscallFailure("read authorized filesystem entry")

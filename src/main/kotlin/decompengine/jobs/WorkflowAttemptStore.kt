@@ -130,6 +130,11 @@ class WorkflowAttemptStore private constructor(
 
     fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId) { directory -> inspectLocked(jobId, directory) }
 
+    /** Display-only collection inspection; ordinary detail/mutation readers retain their existing profile. */
+    internal fun inspectForListing(jobId: String, read: (String, Int) -> ByteArray): WorkflowJobInspection = withJob(jobId) { directory ->
+        inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) }
+    }
+
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
      * Lifecycle publication and close cannot interleave until the callback has returned.
      */
@@ -329,19 +334,65 @@ class WorkflowAttemptStore private constructor(
     fun recoverAfterRestart(jobId: String): WorkflowJobInspection = withJob(jobId) { directory ->
         val inspected = inspectLocked(jobId, directory)
         if (inspected !is WorkflowJobInspection.Available) return@withJob inspected
-        val current = inspected.snapshot
         removePending(directory)
-        val attempts = current.attempts.map { attempt ->
-            if (attempt.state.terminal) attempt else attempt.copy(state = WorkflowRunState.INTERRUPTED, version = newId("version"),
-                endedAt = maxOf(clock.instant(), attempt.startedAt ?: attempt.createdAt), terminalReason = WorkflowTerminalReason.PROCESS_INTERRUPTED)
-        }
-        val legacy = current.legacy.let { observation ->
-            if (observation.status in setOf("queued", "analyzing") && !observation.recoveredInterrupted) observation.copy(recoveredInterrupted = true) else observation
-        }
-        if (attempts != current.attempts || legacy != current.legacy) {
-            persist(directory, current.copy(version = newId("version"), attempts = immutable(attempts), legacy = legacy))
-        }
+        recoveredWorkflowSnapshot(inspected.snapshot, clock::instant, newId)?.let { persist(directory, it) }
         inspectLocked(jobId, directory)
+    }
+
+    /** Complete startup admission; all bounded reads and encoded replacements precede any recovery mutation. */
+    internal fun recoverForStartup(
+        limits: WorkflowStartupRecoveryLimits = WorkflowStartupRecoveryLimits(),
+        cancellation: () -> Boolean = { false }, beforeChanges: (() -> Unit) -> Unit = {},
+    ) = lifetime.write {
+        ensureOpen()
+        val budget = WorkflowStartupRecoveryBudget(limits, cancellation)
+        try {
+            Files.newDirectoryStream(root).use { entries ->
+                executeWorkflowStartupRecovery(entries.asSequence().map { it.fileName.toString() }, budget,
+                    prepare = { jobId ->
+                        val directory = root.resolve(jobId)
+                        if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("INVALID_STORAGE_ENTRY", "A startup job directory is invalid.")
+                        val inspected = inspectRecord(jobId, directory) { path, maximum ->
+                            budget.checkpoint()
+                            val perFile = if (path.fileName.toString() == "job.json") minOf(maximum, 256 * 1024) else maximum
+                            val bytes = try {
+                                decompengine.repair.readStableRegularFile(root,
+                                    root.relativize(path).joinToString("/") { it.toString() },
+                                    budget.readAllowance(perFile), cancellationCheck = budget::checkpoint).bytes
+                            } catch (failure: WorkflowStoreException) { throw failure } catch (failure: Exception) {
+                                budget.checkpoint()
+                                throw workflowStartupReadFailure(failure)
+                            }
+                            budget.chargeRead(bytes.size.toLong())
+                            bytes
+                        }
+                        val pending = directory.resolve(PENDING_FILE)
+                        val hasPending = Files.exists(pending, NOFOLLOW_LINKS)
+                        if (hasPending && (!Files.isRegularFile(pending, NOFOLLOW_LINKS) || Files.size(pending) > STATE_BYTES)) {
+                            fail("CORRUPT_WORKFLOW_STATE", "The reserved pending state file is invalid; preserve storage for recovery.")
+                        }
+                        budget.checkpoint()
+                        val replacement = recoveredWorkflowSnapshot(inspected.snapshot, clock::instant, newId)?.let(::encodeSnapshot)
+                        if (replacement == null && !hasPending) null else WorkflowStartupRecoveryMutation(
+                            replacement?.size?.toLong() ?: 0L,
+                        ) {
+                            budget.checkpoint()
+                            removePending(directory)
+                            replacement?.let { persistPrepared(directory, it, budget::checkpoint) }
+                        }
+                    }, beforeChanges = { beforeChanges(budget::checkpoint) })
+            }
+        } catch (failure: java.io.IOException) {
+            throw WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
+                "Startup recovery did not finish; preserve storage and reconcile any admitted changes before retrying.",
+                budget.changesStarted, failure)
+        } catch (failure: java.nio.file.DirectoryIteratorException) {
+            throw WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
+                "Startup recovery enumeration did not finish; preserve storage before retrying.", budget.changesStarted, failure)
+        } catch (failure: Error) {
+            if (budget.changesStarted) poisoned.set(true)
+            throw failure
+        }
     }
 
     fun recoverAll(): List<WorkflowJobInspection> = lifetime.read {
@@ -377,10 +428,16 @@ class WorkflowAttemptStore private constructor(
         current.copy(version = newId("version"), attempts = immutable(current.attempts.map { if (it.runId == attempt.runId) attempt else it }))
 
     private fun inspectLocked(jobId: String, directory: Path): WorkflowJobInspection = try {
-        val (legacy, bytes) = readLegacy(jobId, directory)
+        inspectRecord(jobId, directory, ::readRegular)
+    } catch (failure: WorkflowStoreException) {
+        WorkflowJobInspection.Unavailable(jobId, WorkflowStoreDiagnostic(failure.code, failure.message ?: "The job record is unavailable."))
+    }
+
+    private fun inspectRecord(jobId: String, directory: Path, read: (Path, Int) -> ByteArray): WorkflowJobInspection.Available {
+        val (legacy, bytes) = readLegacy(jobId, directory, read)
         val statePath = directory.resolve(STATE_FILE)
         val snapshot = if (Files.exists(statePath, NOFOLLOW_LINKS)) {
-            val stateBytes = readRegular(statePath, STATE_BYTES)
+            val stateBytes = read(statePath, STATE_BYTES)
             val persisted = parseState(stateBytes, jobId)
             // Before durable migration, legacy adapters can still change job.json. Bind the read/CAS
             // version to both files so a retained recovery sidecar cannot hide a legacy status change.
@@ -404,9 +461,7 @@ class WorkflowAttemptStore private constructor(
             if (snapshot.attempts.any(WorkflowAttempt::publicationPending)) add(WorkflowStoreDiagnostic("PUBLICATION_PENDING", "Completed candidate output awaits canonical publication review; it is not accepted evidence."))
             if (Files.exists(directory.resolve(PENDING_FILE), NOFOLLOW_LINKS)) add(WorkflowStoreDiagnostic("RECOVERY_REQUIRED", "An unpublished state write remains; run startup recovery before admitting work."))
         }
-        WorkflowJobInspection.Available(legacy, snapshot, immutable(diagnostics))
-    } catch (failure: WorkflowStoreException) {
-        WorkflowJobInspection.Unavailable(jobId, WorkflowStoreDiagnostic(failure.code, failure.message ?: "The job record is unavailable."))
+        return WorkflowJobInspection.Available(legacy, snapshot, immutable(diagnostics))
     }
 
     private fun available(jobId: String, directory: Path): WorkflowJobInspection.Available = when (val value = inspectLocked(jobId, directory)) {
@@ -420,11 +475,17 @@ class WorkflowAttemptStore private constructor(
         }
     }
 
-    private fun persist(directory: Path, snapshot: WorkflowJobSnapshot) {
+    private fun persist(directory: Path, snapshot: WorkflowJobSnapshot) = persistPrepared(directory, encodeSnapshot(snapshot))
+
+    private fun encodeSnapshot(snapshot: WorkflowJobSnapshot): ByteArray {
         validateSnapshot(snapshot)
-        val bytes = try { OracleJson.canonicalBytes(encodeState(snapshot), JSON_LIMITS) } catch (failure: Exception) {
+        return try { OracleJson.canonicalBytes(encodeState(snapshot), JSON_LIMITS) } catch (failure: Exception) {
             throw WorkflowStoreException("STORE_LIMIT", "The workflow state exceeds its persistence limits.", cause = failure)
         }
+    }
+
+    private fun persistPrepared(directory: Path, bytes: ByteArray, check: () -> Unit = {}) {
+        check()
         val target = directory.resolve(STATE_FILE)
         val pending = directory.resolve(PENDING_FILE)
         if (Files.exists(pending, NOFOLLOW_LINKS)) fail("RECOVERY_REQUIRED", "An unpublished state write requires startup recovery.")
@@ -433,16 +494,21 @@ class WorkflowAttemptStore private constructor(
         try {
             FileChannel.open(pending, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
+                while (buffer.hasRemaining()) { check(); channel.write(buffer) }
+                check()
                 faultInjector.hit(WorkflowStoreFaultPoint.AFTER_TEMP_WRITE)
+                check()
                 channel.force(true)
                 faultInjector.hit(WorkflowStoreFaultPoint.AFTER_TEMP_FSYNC)
             }
             // A provider may throw after changing the directory entry; a failed return cannot prove rollback.
+            check()
             renameAttempted = true
             faultInjector.hit(WorkflowStoreFaultPoint.BEFORE_RENAME)
+            check()
             Files.move(pending, target, ATOMIC_MOVE, REPLACE_EXISTING)
             faultInjector.hit(WorkflowStoreFaultPoint.AFTER_RENAME)
+            check()
             forceDirectory(directory)
             committed = true
             faultInjector.hit(WorkflowStoreFaultPoint.AFTER_DIRECTORY_FSYNC)
@@ -455,6 +521,7 @@ class WorkflowAttemptStore private constructor(
             if (!renameAttempted) {
                 try { removePending(directory) } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
             } else poisoned.set(true)
+            if (failure is WorkflowStoreException && failure.code == "RECOVERY_CANCELLED") throw failure
             throw WorkflowStoreException("PERSISTENCE_FAILED", if (renameAttempted) "Workflow publication may have committed; close and reopen storage to reconcile before retrying." else "Workflow state was not published; the prior durable state is preserved.", renameAttempted, failure)
         }
     }
@@ -468,10 +535,10 @@ class WorkflowAttemptStore private constructor(
         }
     }
 
-    private fun readLegacy(jobId: String, directory: Path): Pair<LegacyJobRecord, ByteArray> {
+    private fun readLegacy(jobId: String, directory: Path, read: (Path, Int) -> ByteArray): Pair<LegacyJobRecord, ByteArray> {
         val path = directory.resolve("job.json")
         if (!Files.exists(path, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job has no persisted upload record.")
-        val bytes = readRegular(path, LEGACY_BYTES)
+        val bytes = read(path, LEGACY_BYTES)
         try {
             val root = OracleJson.parse(bytes, JSON_LIMITS.copy(maximumInputBytes = LEGACY_BYTES)).asObject()
             require(root.string("id") == jobId)
@@ -662,6 +729,125 @@ class WorkflowAttemptStore private constructor(
             return WorkflowAcceptanceReference(a.string("jobId"), a.string("runId"), a.string("revisionId"), a.string("sourceSha256"), a.string("graphNodeId"), a.string("artifactId"), a.string("artifactSha256"))
         }
     }
+}
+
+internal fun workflowStartupReadFailure(failure: Exception): WorkflowStoreException =
+    if (failure is decompengine.repair.RepairBudgetExceededException)
+        WorkflowStoreException("STORE_LIMIT", "Startup recovery exceeds its metadata-read limit; no recovery changes were applied.", cause = failure)
+    else WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
+        "The bounded startup inspection did not finish; no recovery changes were applied.", cause = failure)
+
+internal enum class WorkflowStartupRecoveryProfile(val maximumEntries: Int, val maximumJobs: Int) {
+    LEGACY(4096, 4096), WEB_LIBRARY(10_512, 10_000),
+}
+
+internal data class WorkflowStartupRecoveryLimits(
+    val maximumEntries: Int = 4096, val maximumReadBytes: Long = 64L * 1024 * 1024,
+    val maximumPlanBytes: Long = 64L * 1024 * 1024,
+    val profile: WorkflowStartupRecoveryProfile = WorkflowStartupRecoveryProfile.LEGACY,
+) {
+    init {
+        require(maximumEntries in 1..profile.maximumEntries)
+        require(maximumReadBytes in 1..64L * 1024 * 1024 && maximumPlanBytes in 1..64L * 1024 * 1024)
+    }
+    companion object {
+        fun webLibrary() = WorkflowStartupRecoveryLimits(
+            maximumEntries = WorkflowStartupRecoveryProfile.WEB_LIBRARY.maximumEntries,
+            profile = WorkflowStartupRecoveryProfile.WEB_LIBRARY,
+        )
+    }
+}
+
+/** Operation-local accounting. No unchecked record or mutable parsed snapshot survives into publication. */
+internal class WorkflowStartupRecoveryBudget(
+    private val limits: WorkflowStartupRecoveryLimits = WorkflowStartupRecoveryLimits(),
+    private val cancellation: () -> Boolean = { false },
+) {
+    var entries: Int = 0; private set
+    var jobs: Int = 0; private set
+    var readBytes: Long = 0; private set
+    var planBytes: Long = 0; private set
+    var changesStarted: Boolean = false; private set
+    private var cancelled = false
+
+    fun checkpoint() {
+        if (cancelled || Thread.currentThread().isInterrupted || cancellation()) {
+            cancelled = true
+            throw WorkflowStoreException("RECOVERY_CANCELLED", if (changesStarted)
+                "Startup recovery was cancelled after changes may have begun; preserve storage and reconcile before retrying."
+                else "Startup recovery was cancelled before any recovery changes.", changesStarted)
+        }
+    }
+    fun entry() {
+        checkpoint()
+        if (entries >= limits.maximumEntries) fail("STORE_LIMIT", "Startup recovery exceeds its complete root-entry limit.")
+        entries++
+    }
+    fun job() {
+        checkpoint()
+        if (jobs >= limits.profile.maximumJobs) fail("STORE_LIMIT", "Startup recovery exceeds its job-identity limit.")
+        jobs++
+    }
+    fun readAllowance(perFile: Int): Long {
+        checkpoint()
+        val remaining = limits.maximumReadBytes - readBytes
+        if (remaining == 0L) fail("STORE_LIMIT", "Startup recovery has exhausted its aggregate metadata-read allowance.")
+        return minOf(perFile.toLong(), remaining)
+    }
+    fun chargeRead(bytes: Long) {
+        require(bytes >= 0)
+        if (bytes > limits.maximumReadBytes - readBytes) fail("STORE_LIMIT", "Startup recovery exceeds its aggregate metadata-read limit.")
+        readBytes += bytes
+        checkpoint()
+    }
+    fun retain(bytes: Long) {
+        checkpoint()
+        require(bytes >= 0)
+        if (bytes > limits.maximumPlanBytes - planBytes) fail("STORE_LIMIT", "Startup recovery exceeds its retained replacement-byte limit.")
+        planBytes += bytes
+    }
+    fun beginChanges() { checkpoint(); changesStarted = true }
+}
+
+internal class WorkflowStartupRecoveryMutation(val retainedBytes: Long, val apply: () -> Unit)
+
+internal fun executeWorkflowStartupRecovery(
+    rootEntries: Sequence<String>, budget: WorkflowStartupRecoveryBudget,
+    prepare: (String) -> WorkflowStartupRecoveryMutation?, beforeChanges: () -> Unit,
+) {
+    budget.checkpoint()
+    val ids = ArrayList<String>()
+    for (name in rootEntries) { budget.entry(); if (JOB_ID.matches(name)) { budget.job(); ids += name } }
+    val plan = ArrayList<WorkflowStartupRecoveryMutation>()
+    for (id in ids.sorted()) {
+        budget.checkpoint()
+        prepare(id)?.let { mutation -> budget.retain(mutation.retainedBytes); plan += mutation }
+    }
+    budget.beginChanges()
+    try {
+        beforeChanges()
+        budget.checkpoint()
+        for (mutation in plan) { budget.checkpoint(); mutation.apply(); budget.checkpoint() }
+        budget.checkpoint()
+    } catch (failure: Exception) {
+        if (failure is WorkflowStoreException && failure.outcomeUnknown) throw failure
+        throw WorkflowStoreException((failure as? WorkflowStoreException)?.code ?: "STARTUP_RECOVERY_INCOMPLETE",
+            "Startup recovery did not finish; changes may have begun. Preserve storage and reconcile before retrying.", true, failure)
+    }
+}
+
+internal fun recoveredWorkflowSnapshot(
+    current: WorkflowJobSnapshot, now: () -> Instant, newId: (String) -> String,
+): WorkflowJobSnapshot? {
+    val attempts = current.attempts.map { attempt ->
+        if (attempt.state.terminal) attempt else attempt.copy(state = WorkflowRunState.INTERRUPTED, version = newId("version"),
+            endedAt = maxOf(now(), attempt.startedAt ?: attempt.createdAt), terminalReason = WorkflowTerminalReason.PROCESS_INTERRUPTED)
+    }
+    val legacy = current.legacy.let { observation ->
+        if (observation.status in setOf("queued", "analyzing") && !observation.recoveredInterrupted) observation.copy(recoveredInterrupted = true) else observation
+    }
+    return if (attempts != current.attempts || legacy != current.legacy)
+        current.copy(version = newId("version"), attempts = immutable(attempts), legacy = legacy) else null
 }
 
 private val JOB_ID = Regex("[0-9a-f]{32}")

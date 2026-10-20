@@ -40,7 +40,7 @@ internal class WebApiController(
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock)
-    private val jobPages = WebJobPages(jobs::collectionRecords)
+    private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath

@@ -268,12 +268,76 @@ facts do not authorize execution or qualify provider effectiveness, cleanup or r
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```
 
-Web shutdown marks admission as stopping before draining HTTP requests. Owned workers
-receive one shutdown interruption; the service preserves its job-root lease until
+Web shutdown publishes the job service's volatile admission signal before the server stop flag,
+so queued callbacks observe shutdown even when cleanup is waiting for the service monitor.
+Terminal decisions and their complete metadata publication share a separate fence with that signal.
+A terminal publication already admitted to the fence finishes before shutdown publishes the signal;
+if shutdown wins, legacy completion becomes failed and durable completion becomes interrupted.
+This fence never acquires the service or listener cleanup locks while signalling. Waiting for an
+already admitted filesystem publication does not preempt a blocked kernel operation or prove cleanup.
+Both stop entry points share this signal phase; retention-worker teardown and resource ownership
+still use their existing locked cleanup checks. Owned workers receive one shutdown interruption; the service preserves its job-root lease until
 workers actually exit. Final legacy status writes clear and restore the interrupt flag
 around atomic metadata publication. Restart projects interrupted legacy work through
 the durable service while preserving its historical job.json bytes. CLI shutdown uses
 the bounded shutdown hook and reports incomplete cleanup explicitly.
+
+Production CLI startup registers that hook before its single server construction. The same cancellation
+signal reaches constructor recovery, bounded metadata reads, private-stage reconciliation and the final
+listener checks. Cancellation is cooperative between bounded units; no blocked kernel operation is
+claimed to be preempted. Failed construction retains its existing listener and ownership cleanup, and
+a shutdown racing late publication cannot start a new owner. Cleanup diagnostics use a fresh bounded
+wrapper rather than growing a retained primary failure's exception graph.
+
+Under the exclusive root lease and workflow-store write transaction, startup now counts every root
+entry (maximum 4096 for legacy mode; 10,512 entries and 10,000 matching job identities for SPA mode),
+charges actual legacy and workflow metadata reads (64 MiB aggregate, with a
+one-byte overflow probe), and freezes at most 64 MiB of encoded replacement state before recovery
+changes begin. Legacy records retain the 256 KiB startup input profile; each workflow record retains
+its 8 MiB parser/persistence bound. Stable-reader budget exhaustion retains the `STORE_LIMIT`
+classification; inspection failures keep their distinct incomplete-recovery diagnosis.
+Directory-durability refusal retains the established web error type and fixed public diagnostic;
+the coordinator's possible-change context and original provider failure remain in its private cause.
+Only encoded replacement bytes and bounded identities survive the
+planning phase, not a collection of full parsed job snapshots. Directory durability and stage cleanup
+follow complete validation. Historical `job.json` is not rewritten, accepted revisions and terminal
+attempts are retained, and no analysis is replayed. The explicit SPA profile preserves the existing
+preseeded 10,000-job library capacity without weakening the default legacy profile. It is selected
+during initialization and retained when storage is first created lazily after startup.
+Cancellation or failure after the mutating phase
+begins reports that changes may have occurred; it does not promise rollback across all jobs.
+
+Incomplete or malformed existing recovery data refuses startup. Corruption observed after successful
+initialization remains visible through the existing safe isolated diagnostic rows and detail errors.
+The ordinary per-record workflow inspection/recovery API keeps its existing profile.
+These bounds assume the documented participating-writer ownership contract;
+they do not attest unrelated host actors or turn partial inspection into recovery success.
+
+The legacy HTML dashboard uses its own complete read-only collection profile: every root entry counts
+toward 4096, and both workflow inspection and the later legacy presentation read charge a shared
+64 MiB metadata budget. Stable reads retain their existing descriptor, path and per-file checks;
+legacy input is capped at 256 KiB and workflow state at 8 MiB. One overflow byte may be read before
+refusal. A physical-read failure latches refusal before another record can be read, including when an
+ordinary per-record diagnostic catch runs. This bounds incomplete reads without guessing how many
+bytes a failed native reader consumed. Enumeration/read failure, exhausted limits or cancellation
+cannot return a successful partial dashboard.
+
+Fully read malformed runtime records retain their safe unavailable-job rows; the completed dashboard
+can still return HTTP 200 with those rows and its separate bounded recovery summary. Collection
+failures return fixed HTTP 503 diagnostics. Missing storage remains empty only when absence is known;
+an inspection failure is not an empty library. GET never acquires ownership, recovers or reclaims data.
+
+Only compact jobs and diagnostics survive each temporary workflow inspection. At most 4096 rows and
+16 Mi UTF-16 text units are retained, accounting for complete job strings, paths, ELF category strings
+and unavailable diagnostics. The bounded identity list is separate; full attempt histories are not
+retained across dashboard rows. This is a text/object-count bound, not an exact JVM heap measurement.
+Ordinary detail/listInspections retain their existing behavior. The distinct v1 collection keeps its
+10,000-job, five-second and 16 MiB retained-snapshot ceilings. It counts all root entries up to 10,512
+before metadata inspection, shares 64 MiB across both metadata-read paths and forwards one admitted
+deadline through enumeration and read checkpoints. Empty/filtered results, sorting and snapshot
+publication also check that deadline. The HTML dashboard retains its separate 4096-entry profile.
+Metadata reads remain cooperative and cannot preempt blocked kernel I/O; bounded collection does not
+by itself establish full upload/listing responsiveness under blocked I/O.
 
 Persisted display snapshots must account for every allocated sequence through retained events or
 queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation
@@ -301,7 +365,11 @@ Build the application JAR and staged runtime first using the relevant normal bui
 The evidence directory must be new. A successful run records the rendered HTML digest, browser
 version, scenarios and request count, plus a screenshot and Playwright trace. This checks actual
 DOM updates, row limits, separate loss/window warnings, HTTP/network failures, subsequent recovery,
-and peer-text escaping. It does not qualify a real-agent job, server restart, or browser matrix.
+and literal text rendering of displayed fields while peer-authored narrative stays withheld. The fixture
+keeps the production legacy session request layer and mocks only the existing event/status responses;
+other requests remain aborted. It does not qualify authentication, CSRF, a real-agent job, server restart,
+or a browser matrix. Supplying all renderer arguments in the Java fixture does not itself qualify this
+optional browser scenario; the corrected fixture and verifier still require their own authorized run.
 
 New snapshots persist `omittedSequenceRanges` as ordered, nonoverlapping half-open ranges with
 `startInclusive` and `endExclusive` decimal strings. They identify the exact complement of retained

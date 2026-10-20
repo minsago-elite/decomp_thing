@@ -355,9 +355,10 @@ class DurableWebWorkflowTest {
         val good = store.createFromUpload("good.elf", elfFixture())
         val bad = store.createFromUpload("bad.elf", elfFixture())
         val path = root.resolve(bad.id).resolve("job.json")
-        path.writeText("PRIVATE_SECRET_SENTINEL {")
         service(store).use { service ->
             service.initializeExistingStorage()
+            // Already-running reads isolate later corruption; startup itself requires complete validation.
+            path.writeText("PRIVATE_SECRET_SENTINEL {")
             val inspections = service.listInspections()
             assertEquals(2, inspections.size)
             assertEquals(good.id, inspections.filterIsInstance<WebJobInspection.Available>().single().presentation.job.id)

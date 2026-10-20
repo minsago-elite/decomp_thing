@@ -154,6 +154,13 @@ class JobStore internal constructor(
         return decodeJobRecord(jobId, payload)
     }
 
+    /** Display-only collection read; the caller supplies one namespace-bound accounting reader. */
+    @Synchronized
+    internal fun getForListing(jobId: String, read: (String, Int) -> ByteArray): Job {
+        jobDirectory(jobId)
+        return decodeJobRecord(jobId, OracleJson.parse(read("$jobId/job.json", MAX_METADATA_BYTES)).jsonObject)
+    }
+
     private fun decodeJob(jobId: String, bytes: ByteArray): Job = decodeJobRecord(jobId, OracleJson.parse(bytes).jsonObject)
 
     internal fun decodeJobRecord(jobId: String, payload: JsonObject): Job {

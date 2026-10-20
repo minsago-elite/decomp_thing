@@ -21,6 +21,8 @@ import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Legacy adapters retain their legacy provenance; they are not durable workflow registrations. */
 enum class WebWorkflow { EXPLORE, RECONSTRUCT }
@@ -46,6 +48,182 @@ internal fun <T> withWebUploadPublicationOutcome(
         "An upload may have been published. Reopen storage before admitting more work; do not retry blindly."))
     throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
 }
+
+/** Terminal publication and shutdown signalling share this fence, independently of cleanup locks. */
+internal class WebCompletionPublicationFence(private val publishShutdown: () -> Unit) {
+    private val mutex = ReentrantLock(true)
+    fun signalShutdown() = mutex.withLock { publishShutdown() }
+    fun <T> publishCompletion(publish: () -> T): T = mutex.withLock { publish() }
+}
+
+internal fun selectWebLegacyCompletion(status: String, message: String, stopped: Boolean): Pair<String, String> =
+    if (status == "complete" && stopped) "failed" to "Server stopped before the operation reported completion"
+    else status to message
+
+internal fun startupRecoveryLimitsForWeb(uiMode: WebUiMode): decompengine.jobs.WorkflowStartupRecoveryLimits =
+    if (uiMode == WebUiMode.SPA) decompengine.jobs.WorkflowStartupRecoveryLimits.webLibrary()
+    else decompengine.jobs.WorkflowStartupRecoveryLimits()
+
+/** Keep the web refusal contract while retaining the coordinator's recovery context as a private cause. */
+internal fun webStartupFailure(failure: Throwable): Throwable {
+    val recovery = failure as? decompengine.jobs.WorkflowStoreException ?: return failure
+    val maintenance = recovery.cause as? WebJobServiceException ?: return failure
+    return if (recovery.code == "STARTUP_RECOVERY_INCOMPLETE" && maintenance.code == "STORE_DURABILITY_UNAVAILABLE")
+        WebJobServiceException(maintenance.code, publicWebDiagnosticMessage(maintenance.code), recovery)
+    else failure
+}
+
+internal data class WebDashboardRows(val jobs: List<Job>, val unavailable: List<WebJobDiagnostic>)
+
+internal data class WebDashboardReadLimits(
+    val maximumEntries: Int = 4096,
+    val maximumReadBytes: Long = 64L * 1024 * 1024,
+    val maximumRetainedTextUnits: Long = 16L * 1024 * 1024,
+) {
+    init {
+        require(maximumEntries in 1..4096)
+        require(maximumReadBytes in 1..64L * 1024 * 1024)
+        require(maximumRetainedTextUnits in 1..16L * 1024 * 1024)
+    }
+}
+
+/** Counts successful bytes; the first incomplete physical read latches refusal before any next read. */
+internal class WebDashboardReadBudget(
+    private val limits: WebDashboardReadLimits = WebDashboardReadLimits(),
+    private val cancellation: () -> Boolean = { false },
+) {
+    var entries: Int = 0; private set
+    var readBytes: Long = 0; private set
+    var retainedRows: Int = 0; private set
+    var retainedTextUnits: Long = 0; private set
+    private var failureCode: String? = null
+    private var failureCause: Exception? = null
+
+    private fun refuse(code: String, cause: Exception? = null): Nothing {
+        if (failureCode == null) { failureCode = code; failureCause = cause }
+        val selected = checkNotNull(failureCode)
+        throw WebJobServiceException(selected, when (selected) {
+            "STORE_LIMIT" -> "The complete dashboard listing exceeds its configured inspection limits."
+            "SERVICE_STOPPED" -> "The dashboard listing stopped before completing."
+            else -> "The complete dashboard listing could not be inspected. Preserve storage before retrying."
+        }, failureCause)
+    }
+    fun checkpoint() {
+        failureCode?.let { refuse(it) }
+        if (Thread.currentThread().isInterrupted || cancellation()) refuse("SERVICE_STOPPED")
+    }
+    fun entry() {
+        checkpoint()
+        if (entries >= limits.maximumEntries) refuse("STORE_LIMIT")
+        entries++
+    }
+    fun read(maximum: Int, reader: (Long, () -> Unit) -> ByteArray): ByteArray {
+        require(maximum > 0)
+        checkpoint()
+        val remaining = limits.maximumReadBytes - readBytes
+        if (remaining == 0L) refuse("STORE_LIMIT")
+        val allowance = minOf(maximum.toLong(), remaining)
+        val bytes = try { reader(allowance, ::checkpoint) } catch (failure: Exception) {
+            refuse(if (failure is decompengine.repair.RepairBudgetExceededException) "STORE_LIMIT" else "JOB_STORAGE_UNAVAILABLE", failure)
+        }
+        if (bytes.size.toLong() > allowance || bytes.size.toLong() > limits.maximumReadBytes - readBytes) refuse("STORE_LIMIT")
+        readBytes += bytes.size.toLong()
+        checkpoint()
+        return bytes
+    }
+    fun retain(textUnits: Long) {
+        checkpoint()
+        require(textUnits >= 0)
+        if (retainedRows >= limits.maximumEntries || textUnits > limits.maximumRetainedTextUnits - retainedTextUnits) refuse("STORE_LIMIT")
+        retainedRows++
+        retainedTextUnits += textUnits
+    }
+    fun incomplete(failure: Exception): Nothing = refuse("JOB_STORAGE_UNAVAILABLE", failure)
+}
+
+internal data class WebJobLibraryEntryLimits(val maximumEntries: Int = 10_512, val maximumJobs: Int = 10_000) {
+    init {
+        require(maximumEntries in 1..10_512 && maximumJobs in 1..10_000 && maximumJobs <= maximumEntries)
+    }
+}
+
+/** The API retains its ten-thousand-job profile while counting every root entry before metadata reads. */
+internal fun collectWebJobLibraryIds(
+    rootEntries: Sequence<String>, checkpoint: () -> Unit,
+    limits: WebJobLibraryEntryLimits = WebJobLibraryEntryLimits(),
+): List<String> = try {
+    checkpoint()
+    var entries = 0
+    val jobName = Regex("[0-9a-f]{32}")
+    val ids = ArrayList<String>()
+    for (name in rootEntries) {
+        checkpoint()
+        if (entries >= limits.maximumEntries) throw WebJobServiceException("STORE_LIMIT", "The job library exceeds its complete root-entry limit.")
+        entries++
+        if (jobName.matches(name)) {
+            if (ids.size >= limits.maximumJobs) throw WebJobServiceException("STORE_LIMIT", "The job library exceeds its job-identity limit.")
+            ids += name
+        }
+    }
+    checkpoint()
+    ids.sorted().also { checkpoint() }
+} catch (failure: WebAccessDenied) { throw failure } catch (failure: WebJobServiceException) { throw failure }
+catch (failure: Exception) {
+    throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "The complete job library could not be inspected. Preserve storage before retrying.", failure)
+}
+
+/** Preserve the caller's latched deadline even when a per-record catch runs around an interrupted read. */
+internal fun readWebJobCollectionMetadata(
+    budget: WebDashboardReadBudget, maximum: Int, progress: () -> Unit,
+    reader: (Long, () -> Unit) -> ByteArray,
+): ByteArray {
+    progress()
+    try {
+        val bytes = budget.read(maximum) { allowance, check -> reader(allowance) { progress(); check() } }
+        progress()
+        return bytes
+    } catch (failure: Exception) {
+        progress()
+        throw failure
+    }
+}
+
+/** Full enumeration precedes reads; only compact rows survive each temporary workflow snapshot. */
+internal fun collectWebDashboardRows(
+    rootEntries: Sequence<String>, budget: WebDashboardReadBudget, inspect: (String) -> WebJobInspection,
+): WebDashboardRows = try {
+    budget.checkpoint()
+    val jobName = Regex("[0-9a-f]{32}")
+    val ids = ArrayList<String>()
+    for (name in rootEntries) { budget.entry(); if (jobName.matches(name)) ids += name }
+    val jobs = ArrayList<Job>()
+    val unavailable = ArrayList<WebJobDiagnostic>()
+    for (id in ids.sorted()) {
+        budget.checkpoint()
+        val row = inspect(id)
+        budget.checkpoint() // An ordinary per-record catch cannot hide an incomplete physical read.
+        when (row) {
+            is WebJobInspection.Available -> {
+                val job = row.presentation.job
+                check(job.id == id) { "Dashboard job identity changed" }
+                val metadata = job.metadata
+                budget.retain(listOf(job.id, job.filename, job.status, job.createdAt, job.updatedAt,
+                    job.statusMessage.orEmpty(), job.binaryPath.toString(), metadata.format, metadata.endianness,
+                    metadata.osAbi, metadata.objectType, metadata.machine).sumOf { it.length.toLong() })
+                jobs += job
+            }
+            is WebJobInspection.Unavailable -> {
+                val diagnostic = row.diagnostic
+                check(diagnostic.jobId == id) { "Dashboard diagnostic identity changed" }
+                budget.retain(listOf(diagnostic.jobId, diagnostic.code, diagnostic.message).sumOf { it.length.toLong() })
+                unavailable += diagnostic
+            }
+        }
+    }
+    budget.checkpoint()
+    WebDashboardRows(jobs.sortedWith(compareByDescending<Job> { it.createdAt }.thenByDescending { it.id }),
+        unavailable.sortedByDescending { it.jobId })
+} catch (failure: WebJobServiceException) { throw failure } catch (failure: Exception) { budget.incomplete(failure) }
 
 /**
  * Shared service boundary. HTTP adapters authorize before calling it. Initialization is explicit,
@@ -95,9 +273,11 @@ class WebJobService(
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
+    private var startupRecoveryLimits = decompengine.jobs.WorkflowStartupRecoveryLimits()
     @Volatile private var initialized = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
+    private val completionPublication = WebCompletionPublicationFence { stopping = true }
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
     private var retentionCycleActive = false
@@ -169,7 +349,10 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
-    @Synchronized fun beginShutdown() { stopping = true; retentionWorker?.stop() }
+    /** Serialize with terminal publication before acquiring the service, executor or listener cleanup locks. */
+    internal fun signalShutdown() = completionPublication.signalShutdown()
+
+    @Synchronized fun beginShutdown() { completionPublication.signalShutdown(); retentionWorker?.stop() }
 
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
     internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() && retentionWorker?.isIdle != false }
@@ -178,31 +361,50 @@ class WebJobService(
     internal var onQuiescent: (() -> Unit)? = null
 
     @Synchronized
-    fun initializeExistingStorage() {
+    fun initializeExistingStorage() = initializeExistingStorage { false }
+
+    @Synchronized
+    internal fun initializeExistingStorage(cancellation: () -> Boolean) =
+        initializeExistingStorage(decompengine.jobs.WorkflowStartupRecoveryLimits(), cancellation)
+
+    @Synchronized
+    internal fun initializeExistingStorage(limits: decompengine.jobs.WorkflowStartupRecoveryLimits, cancellation: () -> Boolean) {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
-        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover()
+        startupRecoveryLimits = limits
+        fun checkCancellation() {
+            if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+                "RECOVERY_CANCELLED", "Startup recovery was cancelled; preserve any already reconciled storage.", attempts != null)
+        }
+        checkCancellation()
+        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover(cancellation)
+        checkCancellation()
         initialized = true
         if (!stopping) retentionWorker?.start()
     }
 
-    private fun acquireAndRecover(): WorkflowAttemptStore {
+    private fun acquireAndRecover(cancellation: () -> Boolean = { false }): WorkflowAttemptStore {
         attempts?.let { return it }
+        if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
+            "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
         try {
-            try {
-                store.prepareStorageDirectories()
-            } catch (failure: Exception) {
-                throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
-                    "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+            acquired.recoverForStartup(limits = startupRecoveryLimits, cancellation = { stopping || cancellation() }) { check ->
+                check()
+                try {
+                    store.prepareStorageDirectories()
+                } catch (failure: Exception) {
+                    throw WebJobServiceException("STORE_DURABILITY_UNAVAILABLE",
+                        "Store directory durability could not be confirmed. Preserve stored data and verify filesystem support before retrying.", failure)
+                }
+                check()
+                decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
             }
-            decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot)
-            acquired.recoverAll() // Unavailable records remain isolated and visible through inspect/listInspections.
             attempts = acquired
             return acquired
         } catch (failure: Throwable) {
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
-            throw failure
+            throw webStartupFailure(failure)
         }
     }
 
@@ -249,17 +451,19 @@ class WebJobService(
     }
 
     @Synchronized
-    fun inspect(jobId: String): WebJobInspection {
+    fun inspect(jobId: String): WebJobInspection = inspectJob(jobId)
+
+    private fun inspectJob(jobId: String, read: ((String, Int) -> ByteArray)? = null): WebJobInspection {
         requireInitializedRead()
         publicationFailures[jobId]?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || attempts == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
         return try {
-            val inspected = attempts?.inspect(jobId)
+            val inspected = if (read == null) attempts?.inspect(jobId) else attempts?.inspectForListing(jobId, read)
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
-            val raw = store.get(jobId)
+            val raw = if (read == null) store.get(jobId) else store.getForListing(jobId, read)
             requirePublicElfCategories(raw.metadata)
             if (snapshot != null && snapshot.attempts.isNotEmpty()) {
                 require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
@@ -287,6 +491,35 @@ class WebJobService(
         }
     }
 
+    private fun listingReader(budget: WebDashboardReadBudget, progress: () -> Unit = {}): (String, Int) -> ByteArray =
+        { relative, maximum ->
+            val perFile = if (relative.endsWith("/job.json")) minOf(maximum, 256 * 1024) else maximum
+            readWebJobCollectionMetadata(budget, perFile, progress) { allowance, check ->
+                decompengine.repair.readStableRegularFile(store.storageRoot, relative, allowance, cancellationCheck = check).bytes
+            }
+        }
+
+    /** Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories. */
+    @Synchronized
+    internal fun dashboardRows(): WebDashboardRows {
+        requireInitializedRead()
+        val budget = WebDashboardReadBudget(cancellation = { stopping })
+        val read = listingReader(budget)
+        try {
+            budget.checkpoint()
+            if (Files.notExists(store.storageRoot, NOFOLLOW_LINKS)) {
+                budget.checkpoint()
+                return WebDashboardRows(emptyList(), emptyList())
+            }
+            check(Files.isDirectory(store.storageRoot, NOFOLLOW_LINKS)) { "Dashboard storage root is unavailable" }
+            val rows = Files.newDirectoryStream(store.storageRoot).use { entries ->
+                collectWebDashboardRows(entries.asSequence().map { it.fileName.toString() }, budget) { id -> inspectJob(id, read) }
+            }
+            budget.checkpoint()
+            return rows
+        } catch (failure: WebJobServiceException) { throw failure } catch (failure: Exception) { budget.incomplete(failure) }
+    }
+
     @Synchronized
     fun listInspections(): List<WebJobInspection> {
         requireInitializedRead()
@@ -300,14 +533,45 @@ class WebJobService(
     }
 
     /** Short per-record locks allow status reads between bounded snapshot collection steps. */
-    internal fun collectionRecords(): Sequence<kotlinx.serialization.json.JsonObject> {
+    internal fun collectionRecords(): Sequence<kotlinx.serialization.json.JsonObject> = collectionRecordsWithProgress {}
+
+    internal fun collectionRecordsWithProgress(progress: () -> Unit): Sequence<kotlinx.serialization.json.JsonObject> {
+        val budget = WebDashboardReadBudget(cancellation = { stopping })
+        val read = listingReader(budget, progress)
+        fun checkpoint() { progress(); budget.checkpoint() }
         val ids = synchronized(this) {
             requireInitializedRead()
-            try { store.jobIds() } catch (_: decompengine.jobs.JobStoreException) {
-                throw WebJobServiceException("LISTING_UNAVAILABLE", "Job identities cannot be listed within the storage limits. Inspect storage before retrying.")
-            }
+            try {
+                checkpoint()
+                val root = store.storageRoot
+                val inspected = if (Files.notExists(root, NOFOLLOW_LINKS)) emptyList() else {
+                    check(Files.isDirectory(root, NOFOLLOW_LINKS)) { "Job library root is unavailable" }
+                    Files.newDirectoryStream(root).use { entries ->
+                        collectWebJobLibraryIds(entries.asSequence().map { it.fileName.toString() }, ::checkpoint)
+                    }
+                }
+                checkpoint()
+                inspected
+            } catch (failure: WebAccessDenied) { throw failure } catch (failure: WebJobServiceException) { throw failure }
+            catch (failure: Exception) { progress(); budget.incomplete(failure) }
         }
-        return ids.asSequence().map { webJob(presentation(it)) }
+        return sequence {
+            for (id in ids) {
+                checkpoint()
+                val record = synchronized(this@WebJobService) {
+                    requireInitializedRead()
+                    val inspection = inspectJob(id, read)
+                    checkpoint()
+                    when (inspection) {
+                        is WebJobInspection.Available -> webJob(inspection.presentation)
+                        is WebJobInspection.Unavailable -> throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
+                    }
+                }
+                checkpoint()
+                yield(record)
+            }
+            checkpoint()
+        }
     }
 
     fun presentation(jobId: String): WebJobPresentation = when (val value = inspect(jobId)) {
@@ -732,7 +996,7 @@ class WebJobService(
         var problem: Throwable? = null
         val running = synchronized(this) {
             if (closed) return
-            stopping = true
+            completionPublication.signalShutdown()
             closed = true
             retentionWorker?.stop()
             ownedExecutor?.shutdownNow()
@@ -811,11 +1075,12 @@ class WebJobService(
             } finally { synchronized(this@WebJobService) { release() } }
         }
         override fun stopPending() = finish("failed", "Server stopped before the operation started")
-        fun finish(status: String, message: String) {
-            if (terminal || active[jobId] !== this) return
+        fun finish(status: String, message: String) = completionPublication.publishCompletion<Unit> {
+            if (terminal || active[jobId] !== this) return@publishCompletion
             terminal = true
             val restoreInterrupt = Thread.interrupted()
-            try { store.updateStatus(jobId, status, message) }
+            val selected = selectWebLegacyCompletion(status, message, closed || stopping || restoreInterrupt)
+            try { store.updateStatus(jobId, selected.first, selected.second) }
             finally {
                 if (restoreInterrupt) Thread.currentThread().interrupt()
                 if (!started) release()
@@ -858,9 +1123,9 @@ class WebJobService(
             } finally { synchronized(this@WebJobService) { release() } }
         }
         override fun stopPending() = finish(interrupted())
-        fun finish(transition: WorkflowTransition.Finish) {
+        fun finish(transition: WorkflowTransition.Finish) = completionPublication.publishCompletion<Unit> {
             publicationFailure?.let { throw it }
-            if (terminal || active[jobId] !== this) return
+            if (terminal || active[jobId] !== this) return@publishCompletion
             // A cooperative worker can return with its interrupt flag set. Decide the outcome first,
             // then clear that flag only around the bounded atomic metadata operation and restore it.
             val restoreInterrupt = Thread.interrupted()
