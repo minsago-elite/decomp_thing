@@ -294,7 +294,7 @@ class UploadServer(
             }
         }
         try {
-            jobs.initializeExistingStorage { stopRequested.get() || startupCancellation() }
+            jobs.initializeExistingStorage(startupRecoveryLimitsForWeb(uiMode)) { stopRequested.get() || startupCancellation() }
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true

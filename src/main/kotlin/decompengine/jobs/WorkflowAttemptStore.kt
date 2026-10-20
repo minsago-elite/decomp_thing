@@ -341,10 +341,11 @@ class WorkflowAttemptStore private constructor(
 
     /** Complete startup admission; all bounded reads and encoded replacements precede any recovery mutation. */
     internal fun recoverForStartup(
+        limits: WorkflowStartupRecoveryLimits = WorkflowStartupRecoveryLimits(),
         cancellation: () -> Boolean = { false }, beforeChanges: (() -> Unit) -> Unit = {},
     ) = lifetime.write {
         ensureOpen()
-        val budget = WorkflowStartupRecoveryBudget(cancellation = cancellation)
+        val budget = WorkflowStartupRecoveryBudget(limits, cancellation)
         try {
             Files.newDirectoryStream(root).use { entries ->
                 executeWorkflowStartupRecovery(entries.asSequence().map { it.fileName.toString() }, budget,
@@ -736,13 +737,24 @@ internal fun workflowStartupReadFailure(failure: Exception): WorkflowStoreExcept
     else WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE",
         "The bounded startup inspection did not finish; no recovery changes were applied.", cause = failure)
 
+internal enum class WorkflowStartupRecoveryProfile(val maximumEntries: Int, val maximumJobs: Int) {
+    LEGACY(4096, 4096), WEB_LIBRARY(10_512, 10_000),
+}
+
 internal data class WorkflowStartupRecoveryLimits(
     val maximumEntries: Int = 4096, val maximumReadBytes: Long = 64L * 1024 * 1024,
     val maximumPlanBytes: Long = 64L * 1024 * 1024,
+    val profile: WorkflowStartupRecoveryProfile = WorkflowStartupRecoveryProfile.LEGACY,
 ) {
     init {
-        require(maximumEntries in 1..4096)
+        require(maximumEntries in 1..profile.maximumEntries)
         require(maximumReadBytes in 1..64L * 1024 * 1024 && maximumPlanBytes in 1..64L * 1024 * 1024)
+    }
+    companion object {
+        fun webLibrary() = WorkflowStartupRecoveryLimits(
+            maximumEntries = WorkflowStartupRecoveryProfile.WEB_LIBRARY.maximumEntries,
+            profile = WorkflowStartupRecoveryProfile.WEB_LIBRARY,
+        )
     }
 }
 
@@ -752,6 +764,7 @@ internal class WorkflowStartupRecoveryBudget(
     private val cancellation: () -> Boolean = { false },
 ) {
     var entries: Int = 0; private set
+    var jobs: Int = 0; private set
     var readBytes: Long = 0; private set
     var planBytes: Long = 0; private set
     var changesStarted: Boolean = false; private set
@@ -769,6 +782,11 @@ internal class WorkflowStartupRecoveryBudget(
         checkpoint()
         if (entries >= limits.maximumEntries) fail("STORE_LIMIT", "Startup recovery exceeds its complete root-entry limit.")
         entries++
+    }
+    fun job() {
+        checkpoint()
+        if (jobs >= limits.profile.maximumJobs) fail("STORE_LIMIT", "Startup recovery exceeds its job-identity limit.")
+        jobs++
     }
     fun readAllowance(perFile: Int): Long {
         checkpoint()
@@ -799,7 +817,7 @@ internal fun executeWorkflowStartupRecovery(
 ) {
     budget.checkpoint()
     val ids = ArrayList<String>()
-    for (name in rootEntries) { budget.entry(); if (JOB_ID.matches(name)) ids += name }
+    for (name in rootEntries) { budget.entry(); if (JOB_ID.matches(name)) { budget.job(); ids += name } }
     val plan = ArrayList<WorkflowStartupRecoveryMutation>()
     for (id in ids.sorted()) {
         budget.checkpoint()

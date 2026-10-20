@@ -290,21 +290,27 @@ a shutdown racing late publication cannot start a new owner. Cleanup diagnostics
 wrapper rather than growing a retained primary failure's exception graph.
 
 Under the exclusive root lease and workflow-store write transaction, startup now counts every root
-entry (maximum 4096), charges actual legacy and workflow metadata reads (64 MiB aggregate, with a
+entry (maximum 4096 for legacy mode; 10,512 entries and 10,000 matching job identities for SPA mode),
+charges actual legacy and workflow metadata reads (64 MiB aggregate, with a
 one-byte overflow probe), and freezes at most 64 MiB of encoded replacement state before recovery
 changes begin. Legacy records retain the 256 KiB startup input profile; each workflow record retains
 its 8 MiB parser/persistence bound. Stable-reader budget exhaustion retains the `STORE_LIMIT`
 classification; inspection failures keep their distinct incomplete-recovery diagnosis.
+Directory-durability refusal retains the established web error type and fixed public diagnostic;
+the coordinator's possible-change context and original provider failure remain in its private cause.
 Only encoded replacement bytes and bounded identities survive the
 planning phase, not a collection of full parsed job snapshots. Directory durability and stage cleanup
 follow complete validation. Historical `job.json` is not rewritten, accepted revisions and terminal
-attempts are retained, and no analysis is replayed. Cancellation or failure after the mutating phase
+attempts are retained, and no analysis is replayed. The explicit SPA profile preserves the existing
+preseeded 10,000-job library capacity without weakening the default legacy profile. It is selected
+during initialization and retained when storage is first created lazily after startup.
+Cancellation or failure after the mutating phase
 begins reports that changes may have occurred; it does not promise rollback across all jobs.
 
 Incomplete or malformed existing recovery data refuses startup. Corruption observed after successful
 initialization remains visible through the existing safe isolated diagnostic rows and detail errors.
-The ordinary per-record workflow inspection/recovery API and the separate v1 collection limits keep
-their existing profiles. These bounds assume the documented participating-writer ownership contract;
+The ordinary per-record workflow inspection/recovery API keeps its existing profile.
+These bounds assume the documented participating-writer ownership contract;
 they do not attest unrelated host actors or turn partial inspection into recovery success.
 
 The legacy HTML dashboard uses its own complete read-only collection profile: every root entry counts
@@ -325,8 +331,13 @@ Only compact jobs and diagnostics survive each temporary workflow inspection. At
 16 Mi UTF-16 text units are retained, accounting for complete job strings, paths, ELF category strings
 and unavailable diagnostics. The bounded identity list is separate; full attempt histories are not
 retained across dashboard rows. This is a text/object-count bound, not an exact JVM heap measurement.
-Ordinary detail/listInspections and the distinct v1 10,000-job, five-second, 16 MiB snapshot profiles
-retain their existing behavior. Metadata reads remain cooperative and cannot preempt blocked kernel I/O.
+Ordinary detail/listInspections retain their existing behavior. The distinct v1 collection keeps its
+10,000-job, five-second and 16 MiB retained-snapshot ceilings. It counts all root entries up to 10,512
+before metadata inspection, shares 64 MiB across both metadata-read paths and forwards one admitted
+deadline through enumeration and read checkpoints. Empty/filtered results, sorting and snapshot
+publication also check that deadline. The HTML dashboard retains its separate 4096-entry profile.
+Metadata reads remain cooperative and cannot preempt blocked kernel I/O; bounded collection does not
+by itself establish full upload/listing responsiveness under blocked I/O.
 
 Persisted display snapshots must account for every allocated sequence through retained events or
 queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation

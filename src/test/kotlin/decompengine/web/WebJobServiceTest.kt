@@ -29,6 +29,177 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    @Test fun `startup durability refusal preserves its public type and the full private recovery context`() {
+        val original = UnsupportedOperationException("PRIVATE directory provider")
+        val maintenance = WebJobServiceException("STORE_DURABILITY_UNAVAILABLE", "PRIVATE directory failure", original)
+        val recovery = WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE", "PRIVATE recovery context", true, maintenance)
+        val reported = assertIs<WebJobServiceException>(webStartupFailure(recovery))
+        assertEquals(maintenance.code, reported.code)
+        assertEquals(publicWebDiagnosticMessage(reported.code), reported.message)
+        assertFalse(reported.message!!.contains("PRIVATE"))
+        kotlin.test.assertSame(recovery, reported.cause)
+        kotlin.test.assertSame(maintenance, recovery.cause)
+        kotlin.test.assertSame(original, maintenance.cause)
+        assertTrue(recovery.outcomeUnknown)
+        assertTrue(original.suppressed.isEmpty())
+        assertTrue(maintenance.suppressed.isEmpty())
+        assertTrue(recovery.suppressed.isEmpty())
+        for (failure in listOf(original, maintenance,
+            WorkflowStoreException("RECOVERY_CANCELLED", "Cancelled", true, maintenance),
+            WorkflowStoreException("STARTUP_RECOVERY_INCOMPLETE", "Incomplete", true, original))) {
+            kotlin.test.assertSame(failure, webStartupFailure(failure))
+        }
+    }
+
+    @Test fun `API library admits ten thousand sorted identities and counts unrelated entries independently`() {
+        val ids = (1..10_000).map { it.toString(16).padStart(32, '0') }
+        val unrelated = (1..512).map { "retained-$it" }
+        assertEquals(ids, collectWebJobLibraryIds((ids.reversed() + unrelated).asSequence(), {}))
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            collectWebJobLibraryIds((ids + "f".repeat(32)).asSequence(), {})
+        }.code)
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            collectWebJobLibraryIds((ids + unrelated + "another-entry").asSequence(), {})
+        }.code)
+        for ((entries, jobs) in listOf(0 to 1, 10_513 to 1, 2 to 0, 10_512 to 10_001, 1 to 2)) {
+            assertFailsWith<IllegalArgumentException> { WebJobLibraryEntryLimits(entries, jobs) }
+        }
+    }
+
+    @Test fun `API root admission refuses late enumeration failures and counts names that are not jobs`() {
+        var returned: List<String>? = null
+        val original = java.io.IOException("PRIVATE root enumeration details")
+        val failure = assertFailsWith<WebJobServiceException> {
+            returned = collectWebJobLibraryIds(sequence { yield("a".repeat(32)); throw original }, {})
+        }
+        assertEquals("JOB_STORAGE_UNAVAILABLE", failure.code)
+        kotlin.test.assertSame(original, failure.cause)
+        assertFalse(failure.message!!.contains("PRIVATE"))
+        assertEquals(null, returned)
+        assertTrue(original.suppressed.isEmpty())
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            collectWebJobLibraryIds(sequenceOf("unknown-a", "unknown-b", "a".repeat(32)), {},
+                WebJobLibraryEntryLimits(2, 2))
+        }.code)
+    }
+
+    @Test fun `collection deadline keeps its exact boundary wrap arithmetic and sticky expiry`() {
+        var clock = 5_000_000_000L
+        val deadline = WebJobCollectionDeadline(0) { clock }
+        deadline.checkpoint()
+        clock++
+        val failure = assertFailsWith<WebAccessDenied> { deadline.checkpoint() }
+        assertEquals(503, failure.status)
+        assertEquals("LISTING_LIMIT", failure.code)
+        clock = 0
+        assertEquals("LISTING_LIMIT", assertFailsWith<WebAccessDenied> { deadline.checkpoint() }.code)
+        clock = Long.MIN_VALUE + 1_000_000_000L
+        val wrapped = WebJobCollectionDeadline(Long.MAX_VALUE - 2_000_000_000L) { clock }
+        wrapped.checkpoint()
+        clock = Long.MIN_VALUE + 4_000_000_000L
+        assertEquals("LISTING_LIMIT", assertFailsWith<WebAccessDenied> { wrapped.checkpoint() }.code)
+    }
+
+    @Test fun `empty root and a reader returning after deadline cannot publish a successful collection`() {
+        var clock = 0L
+        val deadline = WebJobCollectionDeadline(0) { clock }
+        var ids: List<String>? = null
+        assertEquals("LISTING_LIMIT", assertFailsWith<WebAccessDenied> {
+            ids = collectWebJobLibraryIds(sequence { yield("unknown-entry"); clock = 6_000_000_000L }, deadline::checkpoint)
+        }.code)
+        assertEquals(null, ids)
+        clock = 0
+        val readDeadline = WebJobCollectionDeadline(0) { clock }
+        val budget = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        var returned: ByteArray? = null
+        var reads = 0
+        assertEquals("LISTING_LIMIT", assertFailsWith<WebAccessDenied> {
+            returned = readWebJobCollectionMetadata(budget, 8, readDeadline::checkpoint) { _, _ ->
+                reads++; clock = 6_000_000_000L; ByteArray(1)
+            }
+        }.code)
+        assertEquals(null, returned)
+        assertEquals(1, reads)
+        assertEquals(1L, budget.readBytes)
+    }
+
+    @Test fun `collection metadata shares its byte budget and preserves expiry through per-record catches`() {
+        var clock = 0L
+        var reads = 0
+        val deadline = WebJobCollectionDeadline(0) { clock }
+        val interrupted = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        val expired = assertFailsWith<WebAccessDenied> {
+            readWebJobCollectionMetadata(interrupted, 8, deadline::checkpoint) { _, check ->
+                reads++; clock = 6_000_000_000L; check(); error("expired callback cannot return bytes")
+            }
+        }
+        assertEquals(503, expired.status)
+        assertEquals("LISTING_LIMIT", expired.code)
+        clock = 0
+        assertFailsWith<WebAccessDenied> {
+            readWebJobCollectionMetadata(interrupted, 8, deadline::checkpoint) { _, _ -> reads++; ByteArray(1) }
+        }
+        assertEquals(1, reads)
+
+        val bounded = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        val allowances = mutableListOf<Long>()
+        repeat(2) {
+            readWebJobCollectionMetadata(bounded, 8, {}) { allowance, check ->
+                allowances += allowance; check(); ByteArray(4)
+            }
+        }
+        assertEquals(listOf(8L, 4L), allowances)
+        assertEquals(8L, bounded.readBytes)
+        assertEquals("STORE_LIMIT", assertFailsWith<WebJobServiceException> {
+            readWebJobCollectionMetadata(bounded, 8, {}) { _, _ -> error("exhausted bytes cannot start a reader") }
+        }.code)
+        val incomplete = WebDashboardReadBudget(WebDashboardReadLimits(2, 8, 4096))
+        val original = java.io.IOException("PRIVATE physical failure")
+        val failed = assertFailsWith<WebJobServiceException> {
+            readWebJobCollectionMetadata(incomplete, 8, {}) { _, _ -> throw original }
+        }
+        kotlin.test.assertSame(original, failed.cause)
+        assertFalse(failed.message!!.contains("PRIVATE"))
+        assertEquals("JOB_STORAGE_UNAVAILABLE", assertFailsWith<WebJobServiceException> {
+            readWebJobCollectionMetadata(incomplete, 8, {}) { _, _ -> error("failed physical reads cannot resume") }
+        }.code)
+    }
+
+    @Test fun `SPA startup admits the existing ten thousand job library without relaxing legacy or byte profiles`() {
+        val legacy = startupRecoveryLimitsForWeb(WebUiMode.LEGACY)
+        val library = startupRecoveryLimitsForWeb(WebUiMode.SPA)
+        assertEquals(decompengine.jobs.WorkflowStartupRecoveryLimits(), legacy)
+        assertEquals(4096, legacy.maximumEntries)
+        assertEquals(decompengine.jobs.WorkflowStartupRecoveryProfile.WEB_LIBRARY, library.profile)
+        assertEquals(10_512, library.maximumEntries)
+        assertEquals(10_000, library.profile.maximumJobs)
+        assertEquals(legacy.maximumReadBytes, library.maximumReadBytes)
+        assertEquals(legacy.maximumPlanBytes, library.maximumPlanBytes)
+        assertFailsWith<IllegalArgumentException> { decompengine.jobs.WorkflowStartupRecoveryLimits(maximumEntries = 4097) }
+        val ids = (1..10_000).map { it.toString(16).padStart(32, '0') }
+        val prepared = mutableListOf<String>()
+        var maintenance = 0
+        val admitted = decompengine.jobs.WorkflowStartupRecoveryBudget(library)
+        decompengine.jobs.executeWorkflowStartupRecovery((ids.reversed() + listOf("root-lock", "staging")).asSequence(), admitted,
+            prepare = { prepared += it; null }, beforeChanges = { maintenance++ })
+        assertEquals(ids, prepared)
+        assertEquals(10_002, admitted.entries)
+        assertEquals(10_000, admitted.jobs)
+        assertEquals(0L, admitted.readBytes)
+        assertEquals(0L, admitted.planBytes)
+        assertEquals(1, maintenance)
+        for ((limits, names) in listOf(legacy to ids.take(4097), library to (ids + "f".repeat(32)),
+            library to (1..10_513).map { "unknown-$it" })) {
+            val refused = decompengine.jobs.WorkflowStartupRecoveryBudget(limits)
+            assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
+                decompengine.jobs.executeWorkflowStartupRecovery(names.asSequence(), refused,
+                    prepare = { error("complete admission precedes metadata reads") },
+                    beforeChanges = { error("refused admission cannot begin maintenance") })
+            }.code)
+            assertFalse(refused.changesStarted)
+        }
+    }
+
     @Test fun `dashboard enumerates every root entry before reading and retains compact ordered rows`() {
         val a = "a".repeat(32); val b = "b".repeat(32); val c = "c".repeat(32)
         val events = mutableListOf<String>()
