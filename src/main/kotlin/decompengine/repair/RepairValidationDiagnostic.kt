@@ -63,18 +63,22 @@ data class RepairValidationDiagnosticBinding(
     val diagnosticBytes: Int,
     val failureKind: RepairValidationFailureKind,
     val cleanupVerified: Boolean,
+    val schemaVersion: Int = 1,
 ) {
     init {
+        require(schemaVersion in 1..2)
         require(listOf(runtimeSha256, receiptSha256, diagnosticSha256).all(::validationDigest))
         require(receiptBytes in 1..64L * 1024 * 1024 && diagnosticBytes in 1..4096)
         require(validationReportPath(receiptPath) && validationReportPath(diagnosticPath))
         require(receiptPath != diagnosticPath)
         require(diagnosticPath.substringAfterLast('/') == "${invocation.id}.validation-failure.json")
+        if (schemaVersion >= 2) require(receiptPath == "reports/${invocation.id}.validation.json" &&
+            diagnosticPath == "reports/${invocation.id}.validation-failure.json")
         require(cleanupVerified == (failureKind != RepairValidationFailureKind.CLEANUP_UNVERIFIED))
     }
 
     internal fun toJsonObject(): JsonObject = JsonObject(mapOf(
-        "schemaVersion" to JsonPrimitive(1), "invocation" to invocation.toJsonObject(),
+        "schemaVersion" to JsonPrimitive(schemaVersion), "invocation" to invocation.toJsonObject(),
         "runtimeSha256" to JsonPrimitive(runtimeSha256), "receiptPath" to JsonPrimitive(receiptPath),
         "receiptSha256" to JsonPrimitive(receiptSha256), "receiptBytes" to JsonPrimitive(receiptBytes),
         "diagnosticPath" to JsonPrimitive(diagnosticPath), "diagnosticSha256" to JsonPrimitive(diagnosticSha256),
@@ -83,7 +87,10 @@ data class RepairValidationDiagnosticBinding(
     ))
 
     internal fun requireRetainedBudget(maximumBytes: Long) {
-        require(maximumBytes >= 0 && receiptBytes + 2L * diagnosticBytes <= minOf(maximumBytes, 64L * 1024 * 1024)) {
+        val within = if (schemaVersion == 1) receiptBytes + 2L * diagnosticBytes <= minOf(maximumBytes, 64L * 1024 * 1024)
+            else receiptBytes + diagnosticBytes <= 64L * 1024 * 1024 &&
+                2L * (receiptBytes + diagnosticBytes) <= maximumBytes
+        require(maximumBytes >= 0 && within) {
             "validation diagnostic copies exceed the retained receipt byte bound"
         }
     }
@@ -100,7 +107,7 @@ internal fun parseRepairValidationInvocation(value: JsonObject): RepairValidatio
 internal fun parseRepairValidationDiagnosticBinding(value: JsonObject): RepairValidationDiagnosticBinding {
     require(value.keys == setOf("schemaVersion", "invocation", "runtimeSha256", "receiptPath", "receiptSha256",
         "receiptBytes", "diagnosticPath", "diagnosticSha256", "diagnosticBytes", "failureKind", "cleanupVerified"))
-    require(value.validationNumber("schemaVersion").intOrNull == 1)
+    val version = requireNotNull(value.validationNumber("schemaVersion").intOrNull).also { require(it in 1..2) }
     val kind = value.validationText("failureKind")
     require(kind in RepairValidationFailureKind.entries.map { it.name.lowercase() })
     return RepairValidationDiagnosticBinding(
@@ -110,6 +117,7 @@ internal fun parseRepairValidationDiagnosticBinding(value: JsonObject): RepairVa
         value.validationText("diagnosticSha256"), requireNotNull(value.validationNumber("diagnosticBytes").intOrNull),
         RepairValidationFailureKind.valueOf(kind.uppercase()),
         requireNotNull(value.validationNumber("cleanupVerified").booleanOrNull),
+        version,
     )
 }
 
@@ -133,6 +141,7 @@ internal fun requireRepairValidationDiagnosticAssociation(
 
 /** Auxiliary getter, pairing and retention failures must not replace the original exception. */
 internal fun retainRepairValidationDiagnostic(failure: Exception, invocation: RepairValidationInvocation,
+    expectedReceiptPath: Path? = null, expectedDiagnosticPath: Path? = null,
     retain: (RepairValidationDiagnosticPublication) -> Unit) {
     try {
         val provider = failure.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull() ?: return
@@ -140,6 +149,9 @@ internal fun retainRepairValidationDiagnostic(failure: Exception, invocation: Re
         require(publication.invocation == invocation && publication.receiptPath == provider.receiptPath &&
             publication.receiptSha256 == provider.receiptSha256 && publication.failureKind == provider.failureKind &&
             publication.cleanupVerified == provider.cleanupVerified)
+        require((expectedReceiptPath == null) == (expectedDiagnosticPath == null))
+        if (expectedReceiptPath != null) require(publication.receiptPath == expectedReceiptPath &&
+            publication.diagnosticPath == expectedDiagnosticPath)
         retain(publication)
     } catch (retention: Throwable) {
         if (retention !== failure && failure.suppressed.none { it === retention }) {
@@ -149,6 +161,43 @@ internal fun retainRepairValidationDiagnostic(failure: Exception, invocation: Re
                 IllegalStateException("validation diagnostic retention failed", retention) else retention)
         }
     }
+}
+
+/** Source files may be operator-selected; canonical names never depend on that source namespace. */
+internal class RepairValidationDiagnosticRetention internal constructor(
+    private val publication: RepairValidationDiagnosticPublication,
+    val binding: RepairValidationDiagnosticBinding,
+) {
+    fun retain(read: (Path, Long) -> ByteArray, write: (String, ByteArray) -> Unit,
+        readRetained: (String, Long) -> ByteArray) {
+        val primary = read(publication.receiptPath, binding.receiptBytes)
+        require(primary.size.toLong() == binding.receiptBytes && sha256(primary) == binding.receiptSha256)
+        val diagnostic = read(publication.diagnosticPath, binding.diagnosticBytes.toLong())
+        require(diagnostic.size == binding.diagnosticBytes && sha256(diagnostic) == binding.diagnosticSha256)
+        val primaryName = "${binding.invocation.id}.validation.json"
+        val diagnosticName = "${binding.invocation.id}.validation-failure.json"
+        write(primaryName, primary)
+        write(diagnosticName, diagnostic)
+        require(readRetained(primaryName, binding.receiptBytes).contentEquals(primary))
+        require(readRetained(diagnosticName, binding.diagnosticBytes.toLong()).contentEquals(diagnostic))
+    }
+}
+
+internal fun planRepairValidationDiagnosticRetention(publication: RepairValidationDiagnosticPublication,
+    maximumBytes: Long): RepairValidationDiagnosticRetention {
+    val primary = publication.receiptPath.toAbsolutePath().normalize()
+    val diagnostic = publication.diagnosticPath.toAbsolutePath().normalize()
+    require(primary.parent == diagnostic.parent)
+    val primaryName = primary.fileName.toString()
+    require(primaryName.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.validation\\.json")))
+    require(diagnostic.fileName.toString() == primaryName.removeSuffix(".validation.json") + ".validation-failure.json")
+    val id = publication.invocation.id
+    val binding = RepairValidationDiagnosticBinding(publication.invocation, publication.runtimeSha256,
+        "reports/$id.validation.json", publication.receiptSha256, publication.receiptBytes,
+        "reports/$id.validation-failure.json", publication.diagnosticSha256, publication.diagnosticBytes,
+        publication.failureKind, publication.cleanupVerified, schemaVersion = 2)
+    binding.requireRetainedBudget(maximumBytes)
+    return RepairValidationDiagnosticRetention(publication.copy(receiptPath = primary, diagnosticPath = diagnostic), binding)
 }
 
 private fun validationDigest(value: String): Boolean = value.matches(Regex("[0-9a-f]{64}"))

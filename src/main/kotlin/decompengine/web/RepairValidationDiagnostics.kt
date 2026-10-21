@@ -27,6 +27,7 @@ internal fun checkedRecordedRepairValidationDiagnostic(binding: RepairRecordedVa
     if (receiptBytes == null || diagnosticBytes == null || receiptBytes.isEmpty() || diagnosticBytes.isEmpty())
         return RecordedRepairValidationDiagnosticView(RepairEvidenceArtifactState.UNAVAILABLE)
     return runCatching {
+        require(binding.receiptBytes in 1..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
         require(receiptBytes.size.toLong() == binding.receiptBytes && sha256(receiptBytes) == binding.receiptSha256)
         require(diagnosticBytes.size == binding.diagnosticBytes && sha256(diagnosticBytes) == binding.diagnosticSha256)
         val diagnostic = parseGeneratedCValidationFailureRecord(diagnosticBytes)
@@ -38,9 +39,10 @@ internal fun checkedRecordedRepairValidationDiagnostic(binding: RepairRecordedVa
             diagnostic.profileSha256 == binding.profileSha256 && diagnostic.indexSha256 == binding.indexSha256 &&
             diagnostic.regressionCorpusSha256 == binding.regressionCorpusSha256 &&
             diagnostic.runtimeSha256 == binding.runtimeSha256 && diagnostic.classification == binding.failureKind)
-        val primary = OracleJson.parse(receiptBytes, StrictJsonLimits(maximumInputBytes = 16 * 1024 * 1024,
-            maximumCanonicalBytes = 16 * 1024 * 1024, maximumDepth = 20, maximumNodes = 1_000_000,
-            maximumStringBytes = 16 * 1024 * 1024, maximumTotalStringBytes = 16 * 1024 * 1024)) as? JsonObject
+        val receiptLimit = binding.receiptBytes.toInt()
+        val primary = OracleJson.parse(receiptBytes, StrictJsonLimits(maximumInputBytes = receiptLimit,
+            maximumCanonicalBytes = receiptLimit, maximumDepth = 20, maximumNodes = 1_000_000,
+            maximumStringBytes = receiptLimit, maximumTotalStringBytes = receiptLimit)) as? JsonObject
             ?: error("validation receipt object type")
         require(primary.keys == setOf("schemaVersion", "provider", "profileId", "profileSha256", "indexSha256",
             "sourceRevisionSha256", "regressionCorpusSha256", "runtimeSha256", "runtimeConfiguration",

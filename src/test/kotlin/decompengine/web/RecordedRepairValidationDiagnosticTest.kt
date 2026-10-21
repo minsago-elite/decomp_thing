@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCValidationFailurePhase
 import decompengine.project.GeneratedCValidationFailureReason
 import decompengine.project.GeneratedCValidationFailureRecord
@@ -231,5 +232,49 @@ class RecordedRepairValidationDiagnosticTest {
                 RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceRun = "run_00000002"), 20)
         }
         assertEquals(RepairRecordedSelectionProblem.OUT_OF_RANGE, absent.problem)
+    }
+
+    @Test
+    fun `an admitted bound primary larger than sixteen MiB exposes only finite labels`() {
+        val f = fixture()
+        val maximum = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES.toInt()
+        val primary = JsonObject(f.primary + ("runtimeConfiguration" to JsonObject(mapOf(
+            "privateCanary" to JsonPrimitive("PRIVATE" + "x".repeat(16 * 1024 * 1024))))))
+        val receipt = OracleJson.canonicalBytes(primary, StrictJsonLimits(maximumInputBytes = maximum,
+            maximumCanonicalBytes = maximum, maximumStringBytes = maximum, maximumTotalStringBytes = maximum))
+        assertTrue(receipt.size > 16 * 1024 * 1024)
+        val record = f.record.copy(receiptSha256 = sha256(receipt))
+        val diagnostic = record.encode()
+        val binding = f.binding.copy(receiptBytes = receipt.size.toLong(), receiptSha256 = sha256(receipt),
+            diagnosticBytes = diagnostic.size, diagnosticSha256 = sha256(diagnostic))
+        var remaining = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
+        val primaryReservation = recordedRepairEvidenceReadReservation(binding.receiptBytes, remaining)
+        assertEquals(binding.receiptBytes, primaryReservation)
+        remaining -= primaryReservation
+        assertEquals(binding.diagnosticBytes.toLong(), recordedRepairEvidenceReadReservation(binding.diagnosticBytes.toLong(), remaining))
+        val result = checkedRecordedRepairValidationDiagnostic(binding, receipt, diagnostic)
+        assertEquals(RepairEvidenceArtifactState.AVAILABLE, result.state)
+        assertEquals("timeout", result.reason)
+        assertFalse(result.toString().contains("PRIVATE"))
+    }
+
+    @Test
+    fun `explicit receipt reservations cannot increase the shared request allowance`() {
+        val maximum = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
+        assertEquals(0L, recordedRepairEvidenceReadReservation(maximum, 0))
+        assertEquals(1024L, recordedRepairEvidenceReadReservation(maximum, 1024))
+        assertEquals(16L * 1024 * 1024, recordedRepairEvidenceReadReservation(16L * 1024 * 1024, maximum))
+        assertFailsWith<IllegalArgumentException> { recordedRepairEvidenceReadReservation(maximum + 1, maximum) }
+        assertFailsWith<IllegalArgumentException> { recordedRepairEvidenceReadReservation(1, maximum + 1) }
+        assertFailsWith<IllegalArgumentException> { recordedRepairEvidenceReadReservation(-1, maximum) }
+        assertFailsWith<IllegalArgumentException> { recordedRepairEvidenceReadReservation(1, -1) }
+    }
+
+    @Test
+    fun `an out of range recorded size cannot select parser limits`() {
+        val f = fixture()
+        for (bytes in listOf(0L, MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES + 1, Long.MAX_VALUE)) {
+            assertEquals(RepairEvidenceArtifactState.CORRUPT, view(f.copy(binding = f.binding.copy(receiptBytes = bytes))).state)
+        }
     }
 }

@@ -7,6 +7,15 @@ import decompengine.repair.*
 
 private val SAFE_REPAIR_ARTIFACT_SEGMENT = Regex("[A-Za-z0-9._-]{1,160}")
 
+internal const val MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES = 64L * 1024 * 1024
+
+/** Explicit bound receipts may exceed the generic presentation limit, within the shared allowance. */
+internal fun recordedRepairEvidenceReadReservation(requestedBytes: Long, remainingBytes: Long): Long {
+    require(requestedBytes in 0..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES &&
+        remainingBytes in 0..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
+    return minOf(requestedBytes, remainingBytes)
+}
+
 enum class RepairEvidenceArtifactState { AVAILABLE, UNAVAILABLE, CORRUPT }
 
 /** Receipt integrity is per persisted invocation, even if several records name the same path. */

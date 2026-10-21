@@ -198,8 +198,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                     GeneratedCValidationFailureReason.from(kind, problem), failurePhase,
                     inputs.size, failureInputIndex.takeIf { it >= 0 }, request.invocation)
                 val diagnosticBytes = diagnosticPublication.publish(diagnostic, bytes.size.toLong(),
-                    minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024),
-                    retainedCopies = if (request.invocation == null) 1 else 2)
+                    if (request.invocation == null) minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024)
+                        else request.budget.maximumIndexEvidenceBytes,
+                    retainedCopies = if (request.invocation == null) 1 else 2,
+                    receiptCopies = if (request.invocation == null) 1 else 2)
                 request.invocation?.let { invocation ->
                     primary.retainDiagnostic(RepairValidationDiagnosticPublication(invocation,
                         config.configurationSha256, path, receiptSha256, bytes.size.toLong(), diagnosticPath,

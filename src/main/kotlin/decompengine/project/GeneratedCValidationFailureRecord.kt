@@ -101,11 +101,14 @@ internal data class GeneratedCValidationFailureRecord(
         maximumDepth = 4, maximumNodes = 64, maximumStringBytes = 128,
         maximumTotalStringBytes = 2048, maximumNumberCharacters = 10))
 
-    fun encodeWithinReceiptBudget(receiptBytes: Long, maximumBytes: Long, retainedCopies: Int = 1): ByteArray {
+    fun encodeWithinReceiptBudget(receiptBytes: Long, maximumBytes: Long, retainedCopies: Int = 1,
+        receiptCopies: Int = 1): ByteArray {
         require(receiptBytes >= 0 && maximumBytes >= 0) { "validation diagnostic byte budget is invalid" }
-        require(retainedCopies in 1..2)
+        require(retainedCopies in 1..2 && receiptCopies in 1..2)
         val encoded = encode()
-        if (encoded.size.toLong() * retainedCopies > maximumBytes - receiptBytes) {
+        if (receiptBytes > maximumBytes / receiptCopies ||
+            encoded.size.toLong() * retainedCopies > maximumBytes - receiptBytes * receiptCopies ||
+            receiptCopies == 2 && receiptBytes > 64L * 1024 * 1024 - encoded.size) {
             throw RepairBudgetExceededException("validation diagnostic exceeds the retained receipt byte bound")
         }
         return encoded
@@ -119,8 +122,8 @@ internal data class GeneratedCValidationFailureRecord(
 /** Reset commits before validation; a later encoding/write failure cannot retain an older reason. */
 internal class GeneratedCValidationFailurePublication private constructor(private val replace: (String) -> Unit) {
     fun publish(record: GeneratedCValidationFailureRecord, receiptBytes: Long, maximumBytes: Long,
-        retainedCopies: Int = 1): ByteArray {
-        val bytes = record.encodeWithinReceiptBudget(receiptBytes, maximumBytes, retainedCopies)
+        retainedCopies: Int = 1, receiptCopies: Int = 1): ByteArray {
+        val bytes = record.encodeWithinReceiptBudget(receiptBytes, maximumBytes, retainedCopies, receiptCopies)
         replace(bytes.toString(Charsets.UTF_8))
         return bytes
     }

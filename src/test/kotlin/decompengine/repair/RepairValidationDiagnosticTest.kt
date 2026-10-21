@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.project.sha256
 import java.io.IOException
 import java.nio.file.Path
 import kotlinx.serialization.json.Json
@@ -292,5 +293,115 @@ class RepairValidationDiagnosticTest {
         retainRepairValidationDiagnostic(original, invocation()) { throw auxiliary }
         assertEquals(listOf(primary, auxiliary), original.suppressed.toList())
         assertSame(primary, original.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull())
+    }
+
+    @Test
+    fun `operator selected external relative and project directories retain the same canonical pair`() {
+        val primary = "authored primary receipt".toByteArray()
+        val diagnostic = "authored diagnostic".toByteArray()
+        for (directory in listOf(Path.of("/operator/output"), Path.of("/authored/project/other"),
+                Path.of("authored-relative-output"))) {
+            val source = publication().copy(receiptPath = directory.resolve("initial.validation.json"),
+                diagnosticPath = directory.resolve("initial.validation-failure.json"),
+                receiptSha256 = sha256(primary), receiptBytes = primary.size.toLong(),
+                diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size)
+            val plan = planRepairValidationDiagnosticRetention(source, 4096)
+            val supplied = mapOf(source.receiptPath.toAbsolutePath().normalize() to primary,
+                source.diagnosticPath.toAbsolutePath().normalize() to diagnostic)
+            val retained = linkedMapOf<String, ByteArray>()
+            plan.retain(read = { path, limit -> supplied.getValue(path).also { assertEquals(it.size.toLong(), limit) } },
+                write = { name, bytes -> retained[name] = bytes },
+                readRetained = { name, limit -> retained.getValue(name).also { assertEquals(it.size.toLong(), limit) } })
+            assertEquals(listOf("${invocation().id}.validation.json", "${invocation().id}.validation-failure.json"), retained.keys.toList())
+            assertEquals(2, plan.binding.schemaVersion)
+            assertEquals("reports/${invocation().id}.validation.json", plan.binding.receiptPath)
+            assertTrue(primary.contentEquals(retained.getValue("${invocation().id}.validation.json")))
+            assertEquals(plan.binding, parseRepairValidationDiagnosticBinding(plan.binding.toJsonObject()))
+            assertFalse(plan.binding.toJsonObject().toString().contains(directory.toString()))
+        }
+    }
+
+    @Test
+    fun `canonical pair counts both physical copies and keeps its inspection frame bounded`() {
+        val pair = planRepairValidationDiagnosticRetention(publication(), 2200).binding
+        pair.requireRetainedBudget(2200)
+        assertFailsWith<IllegalArgumentException> { pair.requireRetainedBudget(2199) }
+        assertFailsWith<IllegalArgumentException> {
+            pair.copy(receiptBytes = 64L * 1024 * 1024).requireRetainedBudget(Long.MAX_VALUE)
+        }
+        assertFailsWith<IllegalArgumentException> { pair.copy(receiptPath = "reports/operator.validation.json") }
+        assertFailsWith<IllegalArgumentException> { pair.copy(diagnosticPath = "reports/sub/${invocation().id}.validation-failure.json") }
+        assertEquals(1, binding().schemaVersion)
+        binding().requireRetainedBudget(2100)
+    }
+
+    @Test
+    fun `changed source primary or diagnostic refuses the pair before either canonical write`() {
+        val primary = "authored primary".toByteArray()
+        val diagnostic = "authored diagnostic".toByteArray()
+        val source = publication().copy(receiptSha256 = sha256(primary), receiptBytes = primary.size.toLong(),
+            diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size)
+        for (changedPrimary in listOf(true, false)) {
+            var writes = 0
+            assertFailsWith<IllegalArgumentException> {
+                planRepairValidationDiagnosticRetention(source, 4096).retain(
+                    read = { path, _ ->
+                        if (path == source.receiptPath) { if (changedPrimary) "changed primary".toByteArray() else primary }
+                        else { if (changedPrimary) diagnostic else "changed diagnostic".toByteArray() }
+                    }, write = { _, _ -> writes++ }, readRetained = { _, _ -> error("must not read a refused pair") })
+            }
+            assertEquals(0, writes)
+        }
+    }
+
+    @Test
+    fun `failed or changed immutable publication cannot reach the canonical commit`() {
+        val primary = "authored primary".toByteArray()
+        val diagnostic = "authored diagnostic".toByteArray()
+        val source = publication().copy(receiptSha256 = sha256(primary), receiptBytes = primary.size.toLong(),
+            diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size)
+        for (writeFailure in listOf(true, false)) {
+            val original = IOException("authored publication failure")
+            var committed = false
+            val result = runCatching {
+                planRepairValidationDiagnosticRetention(source, 4096).retain(
+                    read = { path, _ -> if (path == source.receiptPath) primary else diagnostic },
+                    write = { name, _ -> if (writeFailure && name.endsWith(".validation-failure.json")) throw original },
+                    readRetained = { _, _ -> "changed retained bytes".toByteArray() })
+                committed = true
+            }
+            assertTrue(result.isFailure)
+            if (writeFailure) assertSame(original, result.exceptionOrNull())
+            else assertTrue(result.exceptionOrNull() is IllegalArgumentException)
+            assertFalse(committed)
+        }
+    }
+
+    @Test
+    fun `retention cannot select an unrelated sibling name or source directory`() {
+        val source = publication()
+        for (changed in listOf(source.copy(diagnosticPath = Path.of("/other/primary.validation-failure.json")),
+                source.copy(diagnosticPath = Path.of("/authored/reports/other.validation-failure.json")),
+                source.copy(receiptPath = Path.of("/authored/reports/primary.txt")))) {
+            assertFailsWith<IllegalArgumentException> { planRepairValidationDiagnosticRetention(changed, 4096) }
+        }
+    }
+
+    @Test
+    fun `reported publication must match both paths selected by the exact request`() {
+        val source = publication()
+        for (changed in listOf(source.receiptPath.resolveSibling("other.validation.json") to source.diagnosticPath,
+                source.receiptPath to source.diagnosticPath.resolveSibling("other.validation-failure.json"))) {
+            val original = IOException("authored original").also { it.addSuppressed(Marker { source }) }
+            var calls = 0
+            retainRepairValidationDiagnostic(original, invocation(), changed.first, changed.second) { calls++ }
+            assertEquals(0, calls)
+            assertTrue(original.suppressed.last() is IllegalArgumentException)
+        }
+        val original = IOException("authored original").also { it.addSuppressed(Marker { source }) }
+        var calls = 0
+        retainRepairValidationDiagnostic(original, invocation(), source.receiptPath, source.diagnosticPath) { calls++ }
+        assertEquals(1, calls)
+        assertEquals(1, original.suppressed.size)
     }
 }

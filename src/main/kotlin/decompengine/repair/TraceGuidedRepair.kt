@@ -1716,7 +1716,9 @@ class TraceGuidedRepairLoop private constructor(
         val outcome = try {
             validationStrategy.validateCandidate(request)
         } catch (failure: Exception) {
-            retainRepairValidationDiagnostic(failure, invocation) { publication ->
+            retainRepairValidationDiagnostic(failure, invocation,
+                request.reportsDir.resolve("${request.label}.validation.json"),
+                request.reportsDir.resolve("${request.label}.validation-failure.json")) { publication ->
                 graph.recordValidationDiagnostic(invocation, publication)
             }
             throw failure

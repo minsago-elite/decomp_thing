@@ -2412,27 +2412,21 @@ internal class ModuleRevisionGraph private constructor(
         require(if (pending != null) pending.repairMetadata?.runId == run.id
             else node?.id == run.baselineId || node?.repairMetadata?.runId == run.id)
         val source = pending?.candidateSourceRevisionSha256 ?: requireNotNull(node).sourceRevisionSha256
-        val binding = RepairValidationDiagnosticBinding(invocation, publication.runtimeSha256,
-            portableEvidencePath(publication.receiptPath.pathString), publication.receiptSha256, publication.receiptBytes,
-            "reports/${invocation.id}.validation-failure.json", publication.diagnosticSha256,
-            publication.diagnosticBytes, publication.failureKind, publication.cleanupVerified)
+        val retention = planRepairValidationDiagnosticRetention(publication, state.budget.maximumIndexEvidenceBytes)
+        val binding = retention.binding
         requireRepairValidationDiagnosticAssociation(binding, run.id, state.profileSha256, state.indexSha256,
             run.regressionCorpusSha256, invocation.candidateRevisionId, requireNotNull(source))
         require(run.validationDiagnostic == null || run.validationDiagnostic == binding)
-        binding.requireRetainedBudget(state.budget.maximumIndexEvidenceBytes)
-        val primary = stateStore.readValidationReport(binding.receiptPath,
-            minOf(binding.receiptBytes, state.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024))
-        require(primary.size.toLong() == binding.receiptBytes && sha256(primary) == binding.receiptSha256)
-        val published = portableEvidencePath(publication.diagnosticPath.pathString)
-        require(binding.receiptPath.endsWith(".validation.json") &&
-            published == binding.receiptPath.removeSuffix(".validation.json") + ".validation-failure.json")
-        val bytes = stateStore.readValidationReport(published, 4096)
-        require(bytes.size == publication.diagnosticBytes && sha256(bytes) == publication.diagnosticSha256)
-        stateStore.writeImmutableValidationDiagnostic("${invocation.id}.validation-failure.json", bytes)
-        val retained = stateStore.readValidationReport(binding.diagnosticPath, 4096)
-        require(retained.contentEquals(bytes))
+        retention.retain(
+            read = { path, limit -> readStableRepairFile(path.parent, path.fileName.toString(), limit) },
+            write = { name, bytes ->
+                if (name.endsWith(".validation-failure.json")) stateStore.writeImmutableValidationDiagnostic(name, bytes)
+                else stateStore.writeImmutableValidationReceipt(name, bytes)
+            },
+            readRetained = { name, limit -> stateStore.readValidationReport("reports/$name", limit) },
+        )
         persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) +
-            run.copy(schemaVersion = 3, validationDiagnostic = binding))))
+            run.copy(schemaVersion = maxOf(run.schemaVersion, 3), validationDiagnostic = binding))))
     }
 
     private fun workingHeadId(): String = state.provisionalHeadId ?: state.headId

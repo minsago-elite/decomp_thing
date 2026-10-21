@@ -227,13 +227,21 @@ The primary marker is attached first and survives any auxiliary failure. Already
 exceptions are not duplicated, and an auxiliary provider marker is retained as a
 wrapped cause rather than a competing top-level provider. The original status classifier therefore
 continues to see its single original marker. Before canonical storage,
-the graph checks the exact request/provider relation, authenticates both reported byte commitments
-through its descriptor-pinned report reader, and copies the supplement to
-`reports/<validation identity>.validation-failure.json`. This copy uses the existing descriptor-pinned
-atomic no-replace publisher: an existing identical file is idempotent; different bytes are refused.
-The mutable label supplement and immutable copy both count against the same byte ceiling.
+the caller checks both paths against its exact request, and the graph authenticates both reported
+byte commitments through descriptor-pinned stable reads. It retains the primary as
+`reports/<validation identity>.validation.json` and the supplement as
+`reports/<validation identity>.validation-failure.json`, independently of the supported `--reports`
+directory. Absolute external directories, relative directories and other project directories use
+the same canonical pair. Both files use the existing descriptor-pinned atomic no-replace publisher:
+existing identical bytes are idempotent; different bytes are refused.
 
-Only after the immutable copy is retained and checked does the graph commit its portable descriptor
+New canonical bindings use schema2 with these fixed portable names. The operator-selected pair and
+its canonical copies count as `2 * (primary bytes + diagnostic bytes)` against the configured
+`maximumIndexEvidenceBytes`; the canonical pair also fits within the existing 64 MiB inspection
+allowance. This does not increase either configured limit. Schema1 bindings preserve their original
+encoding and retention accounting. A copy or verification failure leaves no committed binding.
+
+Only after both immutable copies are retained and checked does the graph commit its portable descriptor
 to the owning run using run schema3. Legacy run schemas1/2 preserve their previous encoding and
 have no invented descriptor. Run, candidate, source/profile/index/corpus associations and unique
 invocation identities are checked in canonical, read-only history and release archive readers.
@@ -249,8 +257,11 @@ with `historyEvidence`, and it does not require a candidate attempt for a baseli
 Default history pages do not read run diagnostic payloads.
 
 The existing checked selected-report namespace and duplicate-target refusal apply before reads.
-Primary and diagnostic bytes share the existing request-wide byte/call allowance. Byte capture may
-be cached by path, while integrity is checked separately for each selected invocation. The reader
+Primary and diagnostic bytes share the existing 64 MiB request-wide byte/call allowance. An explicit
+bound receipt reserves its admitted byte count instead of the generic 16 MiB presentation limit;
+its parser uses that same admitted size, capped at 64 MiB. Typed run references bypass the generic
+artifact pass, so that pass cannot cache a failed smaller read before the bound read. Byte capture
+may be cached by path, while integrity is checked separately for each selected invocation. The reader
 checks both exact byte commitments, schema2 invocation commitment, source/profile/index/corpus/runtime,
 primary outcome/cleanup, input count and any case position before exposing closed reason/phase labels.
 Missing or empty data is unavailable; changed, unbound, malformed or cross-paired data is withheld.

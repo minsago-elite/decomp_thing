@@ -371,4 +371,43 @@ class GeneratedCValidationFailureRecordTest {
         assertFailsWith<RepairBudgetExceededException> { value.encodeWithinReceiptBudget(100, 100L + value.encode().size, 2) }
         assertContentEquals(value.encode(), value.encodeWithinReceiptBudget(100, 100L + 2 * value.encode().size, 2))
     }
+
+    @Test
+    fun `canonical primary and diagnostic copies consume the configured physical retention budget`() {
+        val value = record().copy(invocation = invocation())
+        val encoded = value.encode()
+        val exact = 2L * (100 + encoded.size)
+        assertContentEquals(encoded, value.encodeWithinReceiptBudget(100, exact, retainedCopies = 2, receiptCopies = 2))
+        assertFailsWith<RepairBudgetExceededException> {
+            value.encodeWithinReceiptBudget(100, exact - 1, retainedCopies = 2, receiptCopies = 2)
+        }
+        assertFailsWith<RepairBudgetExceededException> {
+            value.encodeWithinReceiptBudget(Long.MAX_VALUE, Long.MAX_VALUE, retainedCopies = 2, receiptCopies = 2)
+        }
+        assertFailsWith<IllegalArgumentException> { value.encodeWithinReceiptBudget(100, 4096, receiptCopies = 0) }
+        assertFailsWith<IllegalArgumentException> { value.encodeWithinReceiptBudget(100, 4096, receiptCopies = 3) }
+    }
+
+    @Test
+    fun `the canonical inspection frame fits within sixty four MiB even with a larger physical budget`() {
+        val value = record().copy(invocation = invocation())
+        val encoded = value.encode()
+        val primaryBytes = 64L * 1024 * 1024 - encoded.size
+        assertContentEquals(encoded, value.encodeWithinReceiptBudget(primaryBytes, 512L * 1024 * 1024,
+            retainedCopies = 2, receiptCopies = 2))
+        assertFailsWith<RepairBudgetExceededException> {
+            value.encodeWithinReceiptBudget(primaryBytes + 1, 512L * 1024 * 1024, retainedCopies = 2, receiptCopies = 2)
+        }
+    }
+
+    @Test
+    fun `a refused canonical pair leaves the reset supplement unpublished`() {
+        val writes = mutableListOf<String>()
+        val publisher = GeneratedCValidationFailurePublication.start { writes += it }
+        assertFailsWith<RepairBudgetExceededException> {
+            publisher.publish(record().copy(invocation = invocation()), 64L * 1024 * 1024,
+                512L * 1024 * 1024, retainedCopies = 2, receiptCopies = 2)
+        }
+        assertEquals(listOf(""), writes)
+    }
 }

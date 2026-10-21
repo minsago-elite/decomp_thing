@@ -136,6 +136,20 @@ internal class RepairStateStore private constructor(
 
     fun writeReport(name: String, bytes: ByteArray) = writeAtomically(reports, name, bytes, "repair-report")
 
+    /** The selected provider receipt is retained independently of its operator-selected directory. */
+    fun writeImmutableValidationReceipt(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 64L * 1024 * 1024,
+                "immutable validation receipt").bytes.contentEquals(bytes)) {
+                "immutable validation receipt already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-receipt", requireAbsent = true)
+    }
+
     /** Uses the same descriptor-pinned no-replace publication as immutable invocation receipts. */
     fun writeImmutableValidationDiagnostic(name: String, bytes: ByteArray) {
         require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation-failure\\.json")))

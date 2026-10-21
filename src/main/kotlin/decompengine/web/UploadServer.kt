@@ -860,10 +860,10 @@ class UploadServer(
             recordedRepairEvidenceTarget(reference, snapshot, context, artifacts)?.let { reference to it }
         }.toMap()
         val captured = mutableMapOf<String, Result<ByteArray>>()
-        var remainingWorkBytes = 64L * 1024 * 1024
+        var remainingWorkBytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
         var readAttempts = 0
         fun readOnce(target: String, maximumBytes: Long = MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES): Result<ByteArray> = captured.getOrPut(target) {
-            val reserved = minOf(maximumBytes, MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES, remainingWorkBytes)
+            val reserved = recordedRepairEvidenceReadReservation(maximumBytes, remainingWorkBytes)
             if (reserved == 0L || readAttempts >= 128) Result.failure(IllegalStateException("Repair evidence presentation allowance exhausted"))
             else {
                 // Bound calls and captured payloads. Failed reads retain their full reservation.
