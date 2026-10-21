@@ -3,10 +3,12 @@ import { decodeResponse } from '../api/decode';
 
 export const MAX_VALIDATION_EXPORT_BYTES = 192 * 1024;
 
-/** Export one checked observation already in memory; no fetch, admission, source read or object URL. */
-export function validationPageDownload(report: Report, selected: {
+export type SelectedValidationObservation = {
   jobId: string; runId: string; graphSha256: string | null; owner: ValidationOwner;
-}): { href: string; filename: string; bytes: number } | null {
+};
+
+/** Recheck the selected in-memory observation and project out additive producer fields. */
+export function checkedValidationObservation(report: Report, selected: SelectedValidationObservation): Report | null {
   try {
     const encoder = new TextEncoder();
     const wire = JSON.stringify({ apiVersion: 1, kind: 'report', requestId: 'validation_export', data: report });
@@ -25,9 +27,20 @@ export function validationPageDownload(report: Report, selected: {
       detail.corpusSha256 !== owner.corpusSha256) return null;
     if (owner.ownerKind === 'run-failure' ? !failure || Boolean(cases) || value.summary !== null ||
       failure.classification !== owner.failureKind : !cases || Boolean(failure) || cases.normalOutcome !== owner.normalOutcome) return null;
+    return value;
+  } catch { return null; }
+}
+
+/** Export one checked observation already in memory; no fetch, admission, source read or object URL. */
+export function validationPageDownload(report: Report, selected: SelectedValidationObservation): { href: string; filename: string; bytes: number } | null {
+  try {
+    const value = checkedValidationObservation(report, selected);
+    if (!value) return null;
+    const encoder = new TextEncoder(), cases = value.validationCases, failure = value.validationFailure;
     const text = JSON.stringify({ format: 'decomp-recorded-validation-observation', exportSchemaVersion: 1,
       scope: cases ? 'selected-case-page' : 'selected-failure-diagnostic',
       limitations: ['This export contains the selected observation only, not a complete receipt or every case page.',
+        'A compact full-corpus mismatch index may be included; unselected case details and full outputs are not included.',
         'Output previews are bounded prefixes; comparison flags describe the retained full-byte observations.',
         'Failure labels and completed-pair counts are producer reports, not inferred per-case outcomes.',
         'This export grants no acceptance, authentication, containment or equivalence qualification.'],

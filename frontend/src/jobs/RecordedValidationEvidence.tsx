@@ -5,6 +5,8 @@ import { recordedValidationCopy as copy } from '../copy/attempt';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 import { validationPageDownload } from './recordedValidationExport';
+import { compareValidationSnapshots, validationComparisonSnapshot } from './recordedValidationComparison';
+import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
 
 export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
@@ -12,6 +14,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
   type View = { binding: typeof binding; history: ValidationHistory | null; selected: ValidationOwner | null;
     report: Report | null; loading: boolean; error: string };
   const [stored, setStored] = useState<View | null>(null);
+  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner };
+  const [savedBaseline, setSavedBaseline] = useState<Baseline | null>(null);
+  const baseline = savedBaseline?.binding === binding ? savedBaseline : null;
   const view = stored?.binding === binding ? stored : null;
   useEffect(() => () => { binding.active?.abort(); }, [binding]);
   const root = `/jobs/${jobId}/runs/${runId}`;
@@ -23,10 +28,14 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     return controller;
   }
   function failed(controller: AbortController, failure: unknown) {
-    if (!controller.signal.aborted) setStored({ binding, history: null, selected: null, report: null, loading: false,
-      error: withApiFailureReference(copy.failed, failure) });
+    if (!controller.signal.aborted) {
+      setSavedBaseline(null);
+      setStored({ binding, history: null, selected: null, report: null, loading: false,
+        error: withApiFailureReference(copy.failed, failure) });
+    }
   }
   async function readHistory(page?: number, graph?: string) {
+    if (page === undefined) setSavedBaseline(null);
     const controller = begin();
     try {
       const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
@@ -40,6 +49,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
   }
   async function readCases(history: ValidationHistory, owner: ValidationOwner, page = 1, reportId?: string) {
     if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
+    if (baseline && baseline.snapshot.graphSha256 !== history.graphSha256) setSavedBaseline(null);
     const controller = begin(history, owner);
     try {
       const failureOwner = owner.ownerKind === 'run-failure';
@@ -67,6 +77,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
   const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
   const download = useMemo(() => report && history && selected
     ? validationPageDownload(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
+  [report, history, selected, jobId, runId]);
+  const comparisonSnapshot = useMemo(() => report && history && selected
+    ? validationComparisonSnapshot(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
   [report, history, selected, jobId, runId]);
   const loading = view?.loading ?? false;
   const flag = (value: boolean | null) => value === null ? copy.notCompared : value ? copy.matches : copy.differs;
@@ -128,6 +141,27 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         </dl>
       </section>}
       {cases ? <>
+        <section aria-labelledby="validation-comparison-title">
+          <h3 id="validation-comparison-title">{copy.comparisonTitle}</h3><p>{copy.comparisonScope}</p>
+          {comparisonSnapshot ? <button type="button" disabled={loading} onClick={() => {
+            if (history && selected) setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
+          }}>{copy.setComparisonBaseline}</button> : <p>{copy.comparisonUnavailable}</p>}
+          {baseline && <>
+            <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{baseline.snapshot.ownerKind}: {baseline.snapshot.ownerId}</code></dd>
+              <dt>{copy.candidate}</dt><dd><code>{baseline.snapshot.candidateId}</code></dd>
+              <dt>{copy.source}</dt><dd><code>{baseline.snapshot.sourceSha256}</code></dd></dl>
+            <button type="button" onClick={() => { setSavedBaseline(null); }}>{copy.clearComparisonBaseline}</button>
+            {comparisonSnapshot && <MismatchComparison key={`${baseline.snapshot.reportId}:${comparisonSnapshot.reportId}`}
+              first={baseline.snapshot} second={comparisonSnapshot} onInspectPage={page => {
+                if (history && selected) void readCases(history, selected, page, report.reportId);
+              }} onSwap={() => {
+                if (history && selected) {
+                  setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
+                  void readCases(baseline.history, baseline.owner, 1, baseline.snapshot.reportId);
+                }
+              }} />}
+          </>}
+        </section>
         <dl><dt>{copy.source}</dt><dd><code>{cases.sourceSha256}</code></dd><dt>{copy.corpus}</dt><dd><code>{cases.corpusSha256}</code></dd>
           <dt>{copy.inputs}</dt><dd>{cases.totalInputs}</dd><dt>{copy.matched}</dt><dd>{cases.matchedInputs ?? copy.notCompared}</dd></dl>
         <p>{copy.casePage} {cases.page} / {cases.totalPages}</p>
@@ -169,6 +203,37 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       </> : !failure && <p>{copy.noCases}</p>}
     </>}
   </section>;
+}
+
+function MismatchComparison({ first, second, onInspectPage, onSwap }: { first: ValidationComparisonSnapshot;
+  second: ValidationComparisonSnapshot; onInspectPage: (page: number) => void; onSwap: () => void }) {
+  const [page, setPage] = useState(1);
+  const result = useMemo(() => compareValidationSnapshots(first, second), [first, second]);
+  if (result.state !== 'available') return <p>{result.state === 'same-observation' ? copy.selectComparisonTarget : copy.comparisonIncompatible}</p>;
+  const groups = [[copy.newMismatch, result.newMismatches], [copy.persistentMismatch, result.persistentMismatches],
+    [copy.resolvedMismatch, result.resolvedMismatches]] as const;
+  const pages = Math.max(1, Math.ceil(Math.max(...groups.map(([, ordinals]) => ordinals.length)) / 20));
+  return <>
+    <p>{copy.comparisonPopulation}: {second.totalInputs}. {copy.comparisonPolicy}: {second.comparisonPolicy}.</p>
+    <dl>{groups.map(([label, ordinals]) => <div key={label}><dt>{label}</dt><dd>{ordinals.length}</dd></div>)}
+      <dt>{copy.matchingBoth}</dt><dd>{result.matched}</dd></dl>
+    <p>{copy.comparisonWindow} {page} / {pages}. {copy.comparisonOrdinals}</p>
+    <div role="region" aria-label={copy.comparisonDifferences} tabIndex={0}>
+      <table><caption>{copy.comparisonDifferences}</caption><thead><tr><th scope="col">{copy.outcome}</th>
+        <th scope="col">{copy.caseOrdinal}</th><th scope="col">{copy.inspectSelected}</th></tr></thead><tbody>
+        {groups.flatMap(([label, ordinals]) => ordinals.slice((page - 1) * 20, page * 20).map(ordinal => <tr key={`${label}:${ordinal}`}>
+          <th scope="row">{label}</th><td>{ordinal}</td><td><button type="button" onClick={() => { onInspectPage(Math.floor((ordinal - 1) / 20) + 1); }}
+            aria-label={`${copy.inspectSelected}: ${ordinal}`}>{copy.inspectSelected}</button></td>
+        </tr>))}
+      </tbody></table>
+    </div>
+    {groups.every(([, ordinals]) => ordinals.length === 0) && <p>{copy.noComparisonDifferences}</p>}
+    <nav aria-label={copy.comparisonNavigation}>
+      <button type="button" disabled={page === 1} onClick={() => { setPage(page - 1); }}>{copy.previousComparison}</button>
+      <button type="button" disabled={page === pages} onClick={() => { setPage(page + 1); }}>{copy.nextComparison}</button>
+    </nav>
+    <button type="button" onClick={onSwap}>{copy.swapComparison}</button>
+  </>;
 }
 
 function Preview({ title, value }: { title: string; value: ValidationBytePreview | null }) {

@@ -6,6 +6,7 @@ import type { Report, ResponseOf } from '../src/api/generated';
 import { RecordedValidationEvidence } from '../src/jobs/RecordedValidationEvidence';
 import { ValidationSourceSnapshot } from '../src/jobs/ValidationSourceSnapshot';
 import { MAX_VALIDATION_EXPORT_BYTES, validationPageDownload } from '../src/jobs/recordedValidationExport';
+import { compareValidationSnapshots, validationComparisonSnapshot } from '../src/jobs/recordedValidationComparison';
 
 // Authored wire DTOs and an in-memory fetch only; no server, browser session or validation process.
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
@@ -52,6 +53,180 @@ function exportSelection(failed = false) {
   if (!owner) throw new Error('Authored selected owner is absent');
   return { jobId, runId, graphSha256: history.graphSha256, owner };
 }
+
+function comparisonDocument(id: string, ordinals: readonly number[], page = 1, total = 61) {
+  const document = reportFixture(), original = document.data.validationCases!, item = original.items[0]!;
+  const owner = { ...exportSelection().owner, ownerKind: 'attempt' as const, ownerId: `attempt_${id}`,
+    candidateId: `revision_${id}`, sourceSha256: (id === 'before' ? 'd' : 'e').repeat(64), normalOutcome: 'behavior-checked' as const };
+  const differences = new Set(ordinals), bytes = new Uint8Array(Math.ceil(total / 8));
+  for (const ordinal of differences) {
+    const position = (ordinal - 1) >>> 3;
+    bytes[position] = (bytes[position] ?? 0) | (1 << ((ordinal - 1) & 7));
+  }
+  const mismatchPages = [...new Set([...differences].sort((a, b) => a - b).map(ordinal => Math.floor((ordinal - 1) / 20) + 1))];
+  const totalPages = Math.ceil(total / 20), start = (page - 1) * 20;
+  document.data.reportId = `validation_${id}`; document.data.binding.revisionId = owner.candidateId;
+  document.data.summary = { result: differences.size ? 'failed' : 'passed', casesCompared: String(total), sourceSha256: owner.sourceSha256 };
+  document.data.validationCases = { ...original, ownerKind: owner.ownerKind, ownerId: owner.ownerId, sourceSha256: owner.sourceSha256,
+    totalInputs: String(total), matchedInputs: String(total - differences.size), page, totalPages,
+    previousPage: page > 1 ? page - 1 : null, nextPage: page < totalPages ? page + 1 : null,
+    firstMismatchPage: mismatchPages[0] ?? null, previousMismatchPage: mismatchPages.filter(value => value < page).at(-1) ?? null,
+    nextMismatchPage: mismatchPages.find(value => value > page) ?? null,
+    comparisonIndex: { referenceObservationsSha256: 'c'.repeat(64), mismatchBitmapHex: Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('') },
+    items: Array.from({ length: Math.min(20, total - start) }, (_, index) => {
+      const ordinal = start + index + 1, mismatch = differences.has(ordinal);
+      return { ...item, caseId: `case_${ordinal}`, ordinal: String(ordinal), stdoutMatches: !mismatch,
+        outcome: mismatch ? 'mismatch' as const : 'matched' as const,
+        rebuiltStdoutPreview: mismatch ? { ...item.rebuiltStdoutPreview!, hex: '00 fe 0a' } : item.rebuiltStdoutPreview };
+    }) };
+  return { document, owner, selected: { jobId, runId, graphSha256: original.graphSha256, owner } };
+}
+function comparisonHistory() {
+  const history = historyFixture();
+  history.data.items = [comparisonDocument('before', [1, 22]).owner, comparisonDocument('after', [22, 61]).owner];
+  return history;
+}
+async function discoverComparisons() {
+  fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
+  await screen.findByRole('button', { name: 'Inspect cases: attempt attempt_before' });
+}
+async function inspectComparison(id: string) {
+  fireEvent.click(screen.getByRole('button', { name: `Inspect cases: attempt attempt_${id}` }));
+  await screen.findByRole('table', { name: 'Recorded validation cases' });
+}
+function pinComparison() {
+  fireEvent.click(screen.getByRole('button', { name: 'Use selected observation as comparison baseline' }));
+}
+
+it('compares complete corpus mismatch changes beyond either visible case page', () => {
+  const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
+  const first = validationComparisonSnapshot(before.document.data, before.selected);
+  const second = validationComparisonSnapshot(after.document.data, after.selected);
+  if (!first || !second) throw new Error('Authored complete comparison was refused');
+  expect(compareValidationSnapshots(first, second)).toEqual({ state: 'available', newMismatches: [61],
+    persistentMismatches: [22], resolvedMismatches: [1], matched: 58 });
+  expect(Object.isFrozen(first)).toBe(true);
+  expect(JSON.stringify(first)).not.toContain('Preview');
+  expect(compareValidationSnapshots(second, first)).toEqual({ state: 'available', newMismatches: [1],
+    persistentMismatches: [22], resolvedMismatches: [61], matched: 58 });
+});
+
+it('refuses cross corpus reference policy graph run and owner comparison or missing indexes', () => {
+  const before = comparisonDocument('before', [1]), after = comparisonDocument('after', [22]);
+  const first = validationComparisonSnapshot(before.document.data, before.selected);
+  const second = validationComparisonSnapshot(after.document.data, after.selected);
+  if (!first || !second) throw new Error('Authored comparison was refused');
+  for (const fields of [{ jobId: 'e'.repeat(32) }, { runId: 'run_other' }, { graphSha256: 'e'.repeat(64) },
+    { corpusSha256: 'e'.repeat(64) }, { referenceObservationsSha256: 'f'.repeat(64) }, { totalInputs: 62 },
+    { comparisonPolicy: 'changed-normalization' as never }]) expect(compareValidationSnapshots(first, { ...second, ...fields })).toEqual({ state: 'incompatible' });
+  expect(compareValidationSnapshots(first, first)).toEqual({ state: 'same-observation' });
+  expect(compareValidationSnapshots(first, { ...second, ownerId: first.ownerId })).toEqual({ state: 'same-observation' });
+  delete after.document.data.validationCases!.comparisonIndex;
+  expect(validationComparisonSnapshot(after.document.data, after.selected)).toBeNull();
+  expect(validationComparisonSnapshot({ ...before.document.data, state: 'partial' }, before.selected)).toBeNull();
+  expect(validationComparisonSnapshot(before.document.data, { ...before.selected,
+    owner: { ...before.owner, identityWithheld: true } })).toBeNull();
+  before.document.data.validationCases!.comparisonPolicy = 'changed-normalization' as never;
+  expect(validationComparisonSnapshot(before.document.data, before.selected)).toBeNull();
+});
+
+it('retains all ten thousand comparison positions in bounded metadata without output or private extensions', () => {
+  const before = comparisonDocument('before', Array.from({ length: 10000 }, (_, index) => index + 1), 1, 10000);
+  const after = comparisonDocument('after', [], 1, 10000);
+  const first = validationComparisonSnapshot({ ...before.document.data, privateRoot: 'PRIVATE-canary' } as Report, before.selected);
+  const second = validationComparisonSnapshot(after.document.data, after.selected);
+  if (!first || !second) throw new Error('Maximum supported comparison was refused');
+  expect(first.bitmapHex.length).toBe(2500);
+  expect(JSON.stringify(first)).not.toContain('PRIVATE');
+  expect(JSON.stringify(first)).not.toContain('00 ff 0a');
+  const result = compareValidationSnapshots(first, second);
+  if (result.state !== 'available') throw new Error('Compatible complete corpus was refused');
+  expect(result.newMismatches).toEqual([]); expect(result.persistentMismatches).toEqual([]);
+  expect(result.resolvedMismatches).toHaveLength(10000);
+  expect(result.resolvedMismatches[0]).toBe(1); expect(result.resolvedMismatches.at(-1)).toBe(10000); expect(result.matched).toBe(0);
+});
+
+it('pins and compares observations without extra reads and inspects an exact later case page', async () => {
+  const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(comparisonHistory()))
+    .mockResolvedValueOnce(response(before.document)).mockResolvedValueOnce(response(after.document))
+    .mockResolvedValueOnce(response(comparisonDocument('after', [22, 61], 4).document));
+  vi.stubGlobal('fetch', fetcher); mount(); await discoverComparisons(); await inspectComparison('before');
+  pinComparison(); expect(fetcher).toHaveBeenCalledTimes(2);
+  await inspectComparison('after');
+  const table = await screen.findByRole('table', { name: 'Complete-corpus mismatch changes' });
+  const rows = Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('th,td')).slice(0, 2).map(cell => cell.textContent));
+  expect(rows).toEqual([['New mismatches', '61'], ['Persistent mismatches', '22'], ['Resolved mismatches', '1']]);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect in selected observation: 61' }));
+  expect(await screen.findByText('case_61')).toBeTruthy();
+  expect(fetcher.mock.calls[3]?.[0]).toContain('historyEvidence=attempt_after&historyValidationPage=4');
+  expect(fetcher.mock.calls[3]?.[0]).toContain(`historyGraph=${'a'.repeat(64)}&historyPage=1`);
+  for (const [, options] of fetcher.mock.calls) expect(options?.method).toBe('GET');
+});
+
+it('keeps incompatible reference observations separate without inferring any regression category', async () => {
+  const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
+  after.document.data.validationCases!.comparisonIndex!.referenceObservationsSha256 = 'f'.repeat(64);
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(comparisonHistory()))
+    .mockResolvedValueOnce(response(before.document)).mockResolvedValueOnce(response(after.document));
+  vi.stubGlobal('fetch', fetcher); mount(); await discoverComparisons(); await inspectComparison('before'); pinComparison();
+  await inspectComparison('after');
+  expect(await screen.findByText(/No regression result is inferred/)).toBeTruthy();
+  expect(screen.queryByRole('table', { name: 'Complete-corpus mismatch changes' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('clears comparison baselines on context changes explicit history refresh and denied reads', async () => {
+  for (const change of ['context', 'refresh', 'denied']) {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(comparisonHistory()))
+      .mockResolvedValueOnce(response(comparisonDocument('before', [1, 22]).document))
+      .mockResolvedValueOnce(response(fixture<ResponseOf<'error'>>('error-denied'), 403));
+    vi.stubGlobal('fetch', fetcher); const view = mount(); await discoverComparisons(); await inspectComparison('before'); pinComparison();
+    expect(screen.getByText('Comparison baseline')).toBeTruthy();
+    if (change === 'context') view.rerender(<RecordedValidationEvidence jobId={jobId} runId="run_other" basePath="/nested" />);
+    else {
+      fireEvent.click(screen.getByRole('button', { name: change === 'refresh' ? 'Read validation evidence' : 'Inspect cases: attempt attempt_after' }));
+      await screen.findByRole('alert');
+    }
+    expect(screen.queryByText('Comparison baseline')).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Complete-corpus mismatch changes' })).toBeNull();
+    view.unmount();
+  }
+});
+
+it('pages complete comparison categories in memory with at most twenty positions per category', async () => {
+  const range = (start: number) => Array.from({ length: 45 }, (_, index) => start + index);
+  const before = comparisonDocument('before', [...range(1), ...range(100)], 1, 1000);
+  const after = comparisonDocument('after', [...range(1), ...range(200)], 1, 1000);
+  const history = comparisonHistory(); history.data.items = [before.owner, after.owner];
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(history))
+    .mockResolvedValueOnce(response(before.document)).mockResolvedValueOnce(response(after.document));
+  vi.stubGlobal('fetch', fetcher); mount(); await discoverComparisons(); await inspectComparison('before'); pinComparison(); await inspectComparison('after');
+  const table = await screen.findByRole('table', { name: 'Complete-corpus mismatch changes' });
+  expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
+  fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
+  fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(15);
+  expect(screen.getByRole('button', { name: 'Next comparison window' })).toBeDisabled();
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('retains a baseline across history pages and swaps exact owners using their original history page', async () => {
+  const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
+  const first = comparisonHistory(); Object.assign(first.data, { items: [before.owner], totalPages: 2, nextPage: 2 });
+  const second = structuredClone(first); Object.assign(second.data, { items: [after.owner], page: 2, previousPage: 1, nextPage: null });
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(first)).mockResolvedValueOnce(response(before.document))
+    .mockResolvedValueOnce(response(second)).mockResolvedValueOnce(response(after.document)).mockResolvedValueOnce(response(before.document));
+  vi.stubGlobal('fetch', fetcher); mount(); await discoverComparisons(); await inspectComparison('before'); pinComparison();
+  fireEvent.click(screen.getByRole('button', { name: 'Earlier validation operations' }));
+  await screen.findByRole('button', { name: 'Inspect cases: attempt attempt_after' }); await inspectComparison('after');
+  await screen.findByRole('table', { name: 'Complete-corpus mismatch changes' });
+  fireEvent.click(screen.getByRole('button', { name: 'Swap baseline and selected observation' }));
+  await screen.findByRole('table', { name: 'Complete-corpus mismatch changes' });
+  expect(fetcher.mock.calls[4]?.[0]).toContain('historyPage=1&historyEvidence=attempt_before&historyValidationPage=1');
+  expect(screen.getByText('attempt: attempt_after')).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledTimes(5);
+});
 
 it('exports the checked selected case page with exact identities comparisons and byte prefixes', () => {
   const report = reportFixture().data, selected = exportSelection();
