@@ -51,7 +51,23 @@ function checkValidationPreview(value: ValidationBytePreview | null, bytes: stri
   requireValue((value.text === null) === (value.textBytes === null));
   if (value.textBytes !== null) requireValue(value.textBytes <= prefix &&
     (value.truncated ? prefix - value.textBytes <= 3 : value.textBytes === prefix));
-  if (prefix === 0) requireValue(value.text === '' && value.textBytes === 0);
+  let expectedText: string | null = null, expectedBytes: number | null = null;
+  try {
+    // Streaming leaves only an incomplete suffix undecoded; malformed UTF-8 still throws.
+    const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+      .decode(Uint8Array.from(tokens, token => Number.parseInt(token, 16)), { stream: value.truncated });
+    expectedBytes = new TextEncoder().encode(decoded).length;
+    expectedText = Array.from(decoded, character => {
+      if (character === '\\') return '\\\\';
+      if (character === '\r') return '\\r';
+      if (character === '\n') return '\\n\n';
+      if (character === '\t') return '\\t';
+      const code = character.codePointAt(0)!;
+      return code <= 31 || (code >= 127 && code <= 159) || /[\p{Cf}\p{Zl}\p{Zp}]/u.test(character)
+        ? `${code > 65535 ? '\\U' : '\\u'}${code.toString(16).padStart(code > 65535 ? 8 : 4, '0')}` : character;
+    }).join('');
+  } catch { /* Malformed bytes have no text representation. */ }
+  requireValue(value.text === expectedText && value.textBytes === expectedBytes);
 }
 
 function checkValidationCases(value: ValidationCases, summary: ValidationSummary): void {
@@ -290,6 +306,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         || (reportType === 'revision-validation' && producerSchemaVersion === 2);
       if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {
         throw new ApiClientError('unsupported_contract');
+      }
+      if (reportType === 'revision-validation' && state === 'partial') {
+        requireValue(summary === null && validationCases == null && document.data.validationFailure == null);
       }
       if (validationCases) {
         if (!summary || !('result' in summary)) throw new ApiClientError('invalid_response');

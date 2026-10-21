@@ -284,14 +284,19 @@ class RecordedRepairValidationDiagnosticTest {
     private fun apiFailureFixture(): Fixture {
         val f = fixture()
         val corpus = recordedNormalValidationCorpusSha256(f.primary.getValue("inputs") as JsonArray)
-        val invocation = invocation().copy(regressionCorpusSha256 = corpus)
-        val value = JsonObject(f.primary + ("regressionCorpusSha256" to JsonPrimitive(corpus)))
+        val invocation = invocation().copy(regressionCorpusSha256 = corpus, sourceRevisionSha256 = AuthoredValidationReceiptMetadata.sourceSha256)
+        val value = JsonObject(f.primary + mapOf("regressionCorpusSha256" to JsonPrimitive(corpus),
+            "profileId" to JsonPrimitive(AuthoredValidationReceiptMetadata.profileId),
+            "sourceRevisionSha256" to JsonPrimitive(invocation.sourceRevisionSha256),
+            "sourceSnapshot" to AuthoredValidationReceiptMetadata.snapshot))
         val receipt = OracleJson.canonicalBytes(value)
-        val record = f.record.copy(receiptSha256 = sha256(receipt), regressionCorpusSha256 = corpus, invocation = invocation)
+        val record = f.record.copy(receiptSha256 = sha256(receipt), regressionCorpusSha256 = corpus,
+            sourceRevisionSha256 = invocation.sourceRevisionSha256, invocation = invocation)
         val diagnostic = record.encode()
         // Artifact references belong to the current graph corpus; the receipt proof has its own historical corpus.
         return f.copy(primary = value, receipt = receipt, diagnostic = diagnostic, record = record,
             binding = f.binding.copy(invocationSha256 = invocation.commitmentSha256(), regressionCorpusSha256 = corpus,
+                sourceRevisionSha256 = invocation.sourceRevisionSha256, context = AuthoredValidationReceiptMetadata.context,
                 receiptSha256 = sha256(receipt), receiptBytes = receipt.size.toLong(),
                 diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size))
     }
@@ -528,4 +533,27 @@ class RecordedRepairValidationDiagnosticTest {
         val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
         assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
     }
+    @Test fun `failed receipt inventories must recompute the selected revision even when every receipt hash is rebound`() {
+        val f = apiFailureFixture(); val original = AuthoredValidationReceiptMetadata.snapshot
+        val changedFiles = JsonArray((original.getValue("files") as JsonArray).map { element ->
+            JsonObject((element as JsonObject) + ("sha256" to JsonPrimitive("a".repeat(64)))) })
+        for (manifest in listOf(original.getValue("manifestSha256"), JsonPrimitive(sha256(OracleJson.canonicalBytes(changedFiles))))) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to JsonObject(original + mapOf(
+                "files" to changedFiles, "manifestSha256" to manifest)))))
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertEquals("available", reportState(failureReport(f)))
+    }
+    @Test fun `failures before retained source capture or without graph context remain unattributed partial reports`() {
+        val f = apiFailureFixture()
+        for (value in listOf(withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to JsonNull))),
+                f.copy(binding = f.binding.copy(context = null)))) {
+            val report = failureReport(value)
+            assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+    }
+
 }

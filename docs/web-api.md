@@ -1201,3 +1201,11 @@ frontend controls cover pin parsing, route/range propagation, exact digest HEAD,
 source resolution and in-memory session navigation without new actual execution
 contexts. The original controller/native fixtures and source-chunk limits are
 unchanged. This source awaits its own Actions and review.
+
+### Retained validation receipt consistency
+
+A normal selected validation result additionally checks the retained source inventory against the graph-bound source commitment and resource budget, and the canonical runtime configuration against its recorded digest, registered tool roles, normalized mounts and profile. Behavior comparisons recompute the original executable/input/exit/stdout/stderr observation digest across all cases and bind it to the selected durable repair run. Missing graph or reference metadata leaves the report partial; contradictory metadata is invalid. These checks also run when a caller selects a later case page.
+
+Failed-operation reports recompute the retained source manifest and revision before attributing a diagnostic to the selected source. A failure before source capture, or a missing bound profile, leaves the report partial with no source-attributed failure detail. Such a report still provides neither per-case failure outcomes nor cleanup qualification.
+
+Server-rendered history withholds case rows and output previews when required diff evidence or owner/candidate identity is unavailable or corrupt. Both the SPA decoder and Python wire verifier independently derive escaped text from the exact hexadecimal preview, including strict UTF-8, incomplete suffixes, BOM and control/format escaping. Partial selected validation reports cannot carry a result summary or case detail.

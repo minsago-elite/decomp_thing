@@ -717,78 +717,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)) {
                 "repair validation behavior budgets differ from the graph and host safety policy"
             }
-            val runtime = receipt.getValue("runtimeConfiguration").requiredObject("validation runtime")
-            require(sha256(OracleJson.canonicalBytes(runtime, HISTORY_JSON_LIMITS)) == proof.runtimeSha256) {
-                "repair validation runtime configuration digest is stale"
-            }
-            runtime.requireExactKeys(setOf("runtime", "sandboxConfigurationSha256"), "validation runtime binding")
-            runtime.requiredSha256("sandboxConfigurationSha256", "validation runtime binding")
-            val configuration = runtime.getValue("runtime").requiredObject("validation runtime configuration")
-            configuration.requireExactKeys(setOf("schemaVersion", "profileId", "sandboxConfigurationFile", "tools",
-                "buildRuntimeMounts", "programRuntimeMounts", "sourceTmpfs", "outputTmpfs"), "validation runtime configuration")
-            require(configuration.requiredInt("schemaVersion", "validation runtime configuration") == 1 &&
-                configuration.requiredString("profileId", "validation runtime configuration") == graph.profileId)
-            fun absolutePath(root: JsonObject, field: String): Path =
-                Path.of(root.requiredString(field, "validation runtime path")).also {
-                    require(it.isAbsolute && it == it.normalize()) { "validation runtime path is not absolute and normalized" }
-                }
-            val sourceMount = absolutePath(configuration, "sourceTmpfs")
-            val outputMount = absolutePath(configuration, "outputTmpfs")
-            absolutePath(configuration, "sandboxConfigurationFile")
-            require(!sourceMount.startsWith(outputMount) && !outputMount.startsWith(sourceMount)) {
-                "validation source/output mount configuration overlaps"
-            }
-            val toolRecords = configuration.getValue("tools").requiredObject("validation runtime tools")
-            toolRecords.requireExactKeys(GeneratedCRepairRuntimeConfiguration.TOOL_ROLES, "validation runtime tools")
-            fun mountRecord(value: JsonElement): JsonObject = value.requiredObject("validation runtime mount").also {
-                it.requireExactKeys(setOf("source", "destination", "sha256"), "validation runtime mount")
-                val source = absolutePath(it, "source")
-                absolutePath(it, "destination")
-                it.requiredSha256("sha256", "validation runtime mount")
-                require(!source.startsWith(sourceMount) && !source.startsWith(outputMount)) {
-                    "validation runtime input overlaps candidate staging"
-                }
-            }
-            toolRecords.forEach { (role, record) ->
-                require(absolutePath(mountRecord(record), "destination") ==
-                    GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY.resolve(
-                        GeneratedCRepairRuntimeConfiguration.TOOL_NAMES.getValue(role))) {
-                    "validation runtime tool destination differs from its registered role"
-                }
-            }
-            listOf("buildRuntimeMounts", "programRuntimeMounts").forEach { field ->
-                val mounts = configuration.requiredArray(field, "validation runtime mounts")
-                require(mounts.size <= 48) { "validation runtime mount inventory is unbounded" }
-                mounts.forEach(::mountRecord)
-            }
-            val snapshot = receipt.getValue("sourceSnapshot").requiredObject("validation snapshot")
-            snapshot.requireExactKeys(setOf("manifestSha256", "files", "quota"), "validation snapshot")
-            val files = snapshot.requiredArray("files", "validation snapshot")
-            require(files.isNotEmpty() && files.size <= graph.budget.maximumSourceFiles &&
-                sha256(OracleJson.canonicalBytes(files, HISTORY_JSON_LIMITS)) ==
-                    snapshot.requiredSha256("manifestSha256", "validation snapshot")) {
-                "repair validation source manifest is missing or stale"
-            }
-            val sources = files.map { entry ->
-                val file = entry.requiredObject("validation source")
-                file.requireExactKeys(setOf("path", "role", "mode", "bytes", "sha256"), "validation source")
-                val path = file.requiredString("path", "validation source")
-                requireNormalizedPath(path, "validation source")
-                require(file.requiredString("role", "validation source") ==
-                    (if (path == buildDefinition) "build-file" else "source") &&
-                    file.requiredInt("mode", "validation source") == 292) {
-                    "repair validation source role or immutable mode is invalid"
-                }
-                ReleaseSourceIdentity(path, file.requiredNonNegativeLong("bytes", "validation source"),
-                    file.requiredSha256("sha256", "validation source"))
-            }
-            require(sources.map { it.path } == sources.map { it.path }.distinct().sorted() &&
-                sources.all { it.bytes <= graph.budget.maximumSourceFileBytes } &&
-                sources.fold(0L) { sum, source -> Math.addExact(sum, source.bytes) } <= graph.budget.maximumSourceBytes &&
-                revisionSha256(sources) == proof.sourceRevisionSha256) {
-                "repair validation source snapshot differs from its revision"
-            }
-            val sourceQuota = verifyValidationQuota(snapshot.getValue("quota"))
+            val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(
+                receipt.getValue("runtimeConfiguration"), proof.runtimeSha256, graph.profileId)
+            val sourceQuota = requireRecordedRepairValidationSourceSnapshot(
+                receipt.getValue("sourceSnapshot"), proof.sourceRevisionSha256, graph.budget, buildDefinition)
             val outputLink = receipt.getValue("buildOutputLink").requiredObject("validation output link")
             outputLink.requireExactKeys(setOf("path", "role", "target", "quota"), "validation output link")
             require(outputLink.requiredString("path", "validation output link") == "build" &&
@@ -800,7 +732,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 sourceQuota.getValue("mountPathSha256") != outputQuota.getValue("mountPathSha256") &&
                 sourceQuota.requiredSha256("mountPathSha256", "quota") == sha256(sourceMount.toString().toByteArray(Charsets.UTF_8)) &&
                 outputQuota.requiredSha256("mountPathSha256", "quota") == sha256(outputMount.toString().toByteArray(Charsets.UTF_8)) &&
-                absolutePath(outputLink, "target").parent == outputMount) {
+                validationAbsolutePath(outputLink, "target").parent == outputMount) {
                 "repair validation source/output quota mounts are cross-paired"
             }
             fun executable(field: String, digest: String?, role: String): String? {
@@ -1485,6 +1417,90 @@ private fun verifyValidationQuota(value: JsonElement): JsonObject {
     }
     quota.requiredSha256("mountPathSha256", "validation quota")
     return quota
+}
+
+/** Pure retained runtime configuration binding, shared with the metadata-only web projection. */
+internal fun requireRecordedRepairValidationRuntime(value: JsonElement, expectedSha256: String,
+    profileId: String): Pair<Path, Path> {
+    val runtime = value.requiredObject("validation runtime")
+    require(sha256(OracleJson.canonicalBytes(runtime, HISTORY_JSON_LIMITS)) == expectedSha256) {
+        "repair validation runtime configuration digest is stale"
+    }
+    runtime.requireExactKeys(setOf("runtime", "sandboxConfigurationSha256"), "validation runtime binding")
+    runtime.requiredSha256("sandboxConfigurationSha256", "validation runtime binding")
+    val configuration = runtime.getValue("runtime").requiredObject("validation runtime configuration")
+    configuration.requireExactKeys(setOf("schemaVersion", "profileId", "sandboxConfigurationFile", "tools",
+        "buildRuntimeMounts", "programRuntimeMounts", "sourceTmpfs", "outputTmpfs"), "validation runtime configuration")
+    require(configuration.requiredInt("schemaVersion", "validation runtime configuration") == 1 &&
+        configuration.requiredString("profileId", "validation runtime configuration") == profileId)
+    val sourceMount = validationAbsolutePath(configuration, "sourceTmpfs")
+    val outputMount = validationAbsolutePath(configuration, "outputTmpfs")
+    validationAbsolutePath(configuration, "sandboxConfigurationFile")
+    require(!sourceMount.startsWith(outputMount) && !outputMount.startsWith(sourceMount)) {
+        "validation source/output mount configuration overlaps"
+    }
+    val toolRecords = configuration.getValue("tools").requiredObject("validation runtime tools")
+    toolRecords.requireExactKeys(GeneratedCRepairRuntimeConfiguration.TOOL_ROLES, "validation runtime tools")
+    fun mountRecord(value: JsonElement): JsonObject = value.requiredObject("validation runtime mount").also {
+        it.requireExactKeys(setOf("source", "destination", "sha256"), "validation runtime mount")
+        val source = validationAbsolutePath(it, "source")
+        validationAbsolutePath(it, "destination")
+        it.requiredSha256("sha256", "validation runtime mount")
+        require(!source.startsWith(sourceMount) && !source.startsWith(outputMount)) {
+            "validation runtime input overlaps candidate staging"
+        }
+    }
+    toolRecords.forEach { (role, record) ->
+        require(validationAbsolutePath(mountRecord(record), "destination") ==
+            GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY.resolve(
+                GeneratedCRepairRuntimeConfiguration.TOOL_NAMES.getValue(role))) {
+            "validation runtime tool destination differs from its registered role"
+        }
+    }
+    listOf("buildRuntimeMounts", "programRuntimeMounts").forEach { field ->
+        val mounts = configuration.requiredArray(field, "validation runtime mounts")
+        require(mounts.size <= 48) { "validation runtime mount inventory is unbounded" }
+        mounts.forEach(::mountRecord)
+    }
+    return sourceMount to outputMount
+}
+
+private fun validationAbsolutePath(root: JsonObject, field: String): Path =
+    Path.of(root.requiredString(field, "validation runtime path")).also {
+        require(it.isAbsolute && it == it.normalize()) { "validation runtime path is not absolute and normalized" }
+    }
+
+/** Exact retained inventory and revision commitment; this grants no source read or execution authority. */
+internal fun requireRecordedRepairValidationSourceSnapshot(value: JsonElement, expectedSha256: String,
+    budget: RepairResourceBudget, buildDefinition: String): JsonObject {
+    val snapshot = value.requiredObject("validation snapshot")
+    snapshot.requireExactKeys(setOf("manifestSha256", "files", "quota"), "validation snapshot")
+    val files = snapshot.requiredArray("files", "validation snapshot")
+    require(files.isNotEmpty() && files.size <= budget.maximumSourceFiles &&
+        sha256(OracleJson.canonicalBytes(files, HISTORY_JSON_LIMITS)) ==
+            snapshot.requiredSha256("manifestSha256", "validation snapshot")) {
+        "repair validation source manifest is missing or stale"
+    }
+    val sources = files.map { entry ->
+        val file = entry.requiredObject("validation source")
+        file.requireExactKeys(setOf("path", "role", "mode", "bytes", "sha256"), "validation source")
+        val path = file.requiredString("path", "validation source")
+        requireNormalizedPath(path, "validation source")
+        require(file.requiredString("role", "validation source") ==
+            (if (path == buildDefinition) "build-file" else "source") &&
+            file.requiredInt("mode", "validation source") == 292) {
+            "repair validation source role or immutable mode is invalid"
+        }
+        ReleaseSourceIdentity(path, file.requiredNonNegativeLong("bytes", "validation source"),
+            file.requiredSha256("sha256", "validation source"))
+    }
+    require(sources.map { it.path } == sources.map { it.path }.distinct().sorted() &&
+        sources.all { it.bytes <= budget.maximumSourceFileBytes } &&
+        sources.fold(0L) { sum, source -> Math.addExact(sum, source.bytes) } <= budget.maximumSourceBytes &&
+        revisionSha256(sources) == expectedSha256) {
+        "repair validation source snapshot differs from its revision"
+    }
+    return verifyValidationQuota(snapshot.getValue("quota"))
 }
 
 /** Pure retained-record binding checks shared with the selected case reader; no launch or admission. */

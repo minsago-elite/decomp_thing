@@ -5,6 +5,9 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.project.requireRecordedRepairValidationOutputQuota
+import decompengine.project.requireRecordedRepairValidationRuntime
+import decompengine.project.requireRecordedRepairValidationSourceSnapshot
+import decompengine.project.ReconstructionProfiles
 import decompengine.repair.RepairRecordedValidationObservation
 import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.requireRepairValidationDiffRole
@@ -154,9 +157,23 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
     val scopes = root.getValue("scopes") as? JsonArray
         ?: return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.CORRUPT, pageNumber)
     if (scopes.isEmpty()) return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.UNAVAILABLE, pageNumber)
+    val context = binding.context
+        ?: return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.UNAVAILABLE, pageNumber)
+    if (binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED && binding.expectedObservationsSha256 == null)
+        return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.UNAVAILABLE, pageNumber)
     return runCatching {
         val behavior = binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED
+        val profile = ReconstructionProfiles.named(context.profileId)
+        require((root.getValue("profileId") as? JsonPrimitive)?.content == context.profileId)
+        val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(
+            root.getValue("runtimeConfiguration"), binding.proof.runtimeSha256, context.profileId)
+        val sourceQuota = requireRecordedRepairValidationSourceSnapshot(root.getValue("sourceSnapshot"),
+            binding.proof.sourceRevisionSha256, context.budget, profile.layout.declaration("build-definition").materialize())
         val outputQuota = requireRecordedRepairValidationOutputQuota(root.getValue("buildOutputLink"))
+        require(sourceQuota.getValue("mountId") != outputQuota.getValue("mountId") &&
+            sourceQuota.getValue("mountPathSha256") != outputQuota.getValue("mountPathSha256") &&
+            sourceQuota.getValue("mountPathSha256") == JsonPrimitive(sha256(sourceMount.toString().toByteArray(Charsets.UTF_8))) &&
+            outputQuota.getValue("mountPathSha256") == JsonPrimitive(sha256(outputMount.toString().toByteArray(Charsets.UTF_8))))
         require(scopes.size.toLong() == if (behavior) 1L + 2L * inputs.size else 1L)
         data class Output(val exit: Int, val stdout: Pair<String, Long>, val stderr: Pair<String, Long>)
         fun text(value: JsonElement): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -206,10 +223,17 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         val from = (pageNumber.toLong() - 1L) * RECORDED_VALIDATION_CASES_PER_PAGE
         val identities = RepairHistoryIdentityReferences(binding.proof.regressionCorpusSha256)
         val rows = ArrayList<RecordedRepairValidationCase>()
+        val referenceDigest = MessageDigest.getInstance("SHA-256")
+        if (behavior) referenceDigest.update((binding.proof.originalBinarySha256 + "\n").toByteArray(Charsets.UTF_8))
         var matches = 0
         for (index in ids.indices) {
             val first = if (behavior) scope(1 + 2 * index, "reference", ids[index]) else null
             val second = if (behavior) scope(2 + 2 * index, "candidate", ids[index]) else null
+            if (first != null) referenceDigest.update(buildString {
+                append(ids[index].length).append(':').append(ids[index]).append(':').append(first.exit).append(':')
+                append(recordedValidationOutputSha256(first.stdout.first)).append(':')
+                append(recordedValidationOutputSha256(first.stderr.first)).append('\n')
+            }.toByteArray(Charsets.UTF_8))
             val exitEqual = first?.let { it.exit == requireNotNull(second).exit }
             val stdoutEqual = first?.let { it.stdout.first == requireNotNull(second).stdout.first }
             val stderrEqual = first?.let { it.stderr.first == requireNotNull(second).stderr.first }
@@ -228,12 +252,25 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
                 first?.stderr?.let(::recordedValidationPreview), second?.stderr?.let(::recordedValidationPreview))
         }
         val declared = (root.getValue("matches") as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull
+        if (behavior) require(HexFormat.of().formatHex(referenceDigest.digest()) == binding.expectedObservationsSha256)
         require(declared == (behavior && ids.isNotEmpty() && matches == ids.size))
         if (pageNumber > pages) RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.OUT_OF_RANGE,
             pageNumber, pages, ids.size)
         else RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.AVAILABLE, pageNumber, pages,
             ids.size, matches.takeIf { behavior }, rows)
     }.getOrElse { RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.CORRUPT, pageNumber) }
+}
+
+/** Hash complete canonical output in bounded groups, rather than allocating another complete decoded stream. */
+private fun recordedValidationOutputSha256(encoded: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    var offset = 0
+    while (offset < encoded.length) {
+        val end = minOf(encoded.length, offset + 8192)
+        digest.update(java.util.Base64.getDecoder().decode(encoded.substring(offset, end)))
+        offset = end
+    }
+    return HexFormat.of().formatHex(digest.digest())
 }
 
 /** Decode only bounded complete base64 groups; full-byte comparison above never uses this prefix. */

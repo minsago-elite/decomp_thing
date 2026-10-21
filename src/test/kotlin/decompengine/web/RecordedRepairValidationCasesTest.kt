@@ -14,6 +14,43 @@ import java.util.Base64
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
+/** In-memory retained metadata for authored reader controls; never touches a source tree or runtime. */
+internal object AuthoredValidationReceiptMetadata {
+    const val profileId = "generated-c-make-v1"
+    val context = RepairRecordedValidationContext(profileId, RepairResourceBudget())
+    private fun digest(text: String) = sha256(text.toByteArray(Charsets.UTF_8))
+    private fun quota(id: Int, path: String) = buildJsonObject {
+        put("provider", "dedicated-tmpfs-size+nr_inodes"); put("mountId", id); put("maximumBytes", 4096)
+        put("maximumEntries", 20); put("mountPathSha256", digest(path))
+    }
+    val files = JsonArray(listOf("Makefile", "src/main.c").map { path -> buildJsonObject {
+        put("path", path); put("role", if (path == "Makefile") "build-file" else "source")
+        put("mode", 292); put("bytes", 1); put("sha256", digest(path))
+    } })
+    val snapshot = buildJsonObject {
+        put("manifestSha256", sha256(OracleJson.canonicalBytes(files))); put("files", files)
+        put("quota", quota(2, "/PRIVATE-source"))
+    }
+    val sourceSha256 = digest(files.joinToString("") { element ->
+        val file = element.jsonObject; val path = file.getValue("path").jsonPrimitive.content
+        "${path.length}:$path:1:${file.getValue("sha256").jsonPrimitive.content}\n"
+    })
+    val runtime = buildJsonObject {
+        put("sandboxConfigurationSha256", "9".repeat(64))
+        put("runtime", buildJsonObject {
+            put("schemaVersion", 1); put("profileId", profileId); put("sandboxConfigurationFile", "/PRIVATE-runtime/config")
+            put("sourceTmpfs", "/PRIVATE-source"); put("outputTmpfs", "/PRIVATE-output")
+            put("tools", buildJsonObject {
+                for ((role, name) in decompengine.project.GeneratedCRepairRuntimeConfiguration.TOOL_NAMES) put(role, buildJsonObject {
+                    put("source", "/PRIVATE-runtime/$name"); put("destination", "/decomp-generated-c-tools/$name"); put("sha256", digest(name))
+                })
+            })
+            put("buildRuntimeMounts", JsonArray(emptyList())); put("programRuntimeMounts", JsonArray(emptyList()))
+        })
+    }
+    val runtimeSha256 = sha256(OracleJson.canonicalBytes(runtime))
+}
+
 /** Authored receipt DTOs and rendered strings only. No validation, process, server or browser trial. */
 class RecordedRepairValidationCasesTest {
     private val graph = "a".repeat(64)
@@ -75,11 +112,13 @@ class RecordedRepairValidationCasesTest {
                     if (mismatch && index == 0) byteArrayOf(0, 1) else byteArrayOf(0, -1)))
             } else emptyList()
         val root = buildJsonObject {
-            put("schemaVersion", 2); put("provider", "generated-c-linux-bubblewrap-cgroup-v1"); put("profileId", "authored")
-            for ((name, digit) in listOf("sourceRevisionSha256" to '2', "profileSha256" to '3', "indexSha256" to '4', "runtimeSha256" to '8'))
+            put("schemaVersion", 2); put("provider", "generated-c-linux-bubblewrap-cgroup-v1"); put("profileId", AuthoredValidationReceiptMetadata.profileId)
+            for ((name, digit) in listOf("profileSha256" to '3', "indexSha256" to '4'))
                 put(name, digit.toString().repeat(64))
-            put("regressionCorpusSha256", corpus); put("runtimeConfiguration", JsonObject(emptyMap()))
-            put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", JsonNull)
+            put("sourceRevisionSha256", AuthoredValidationReceiptMetadata.sourceSha256)
+            put("runtimeSha256", AuthoredValidationReceiptMetadata.runtimeSha256)
+            put("regressionCorpusSha256", corpus); put("runtimeConfiguration", AuthoredValidationReceiptMetadata.runtime)
+            put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", AuthoredValidationReceiptMetadata.snapshot)
             put("buildOutputLink", buildJsonObject {
                 put("path", "build"); put("role", "application-owned-output-link"); put("target", "/PRIVATE-output/program")
                 put("quota", outputQuota())
@@ -95,14 +134,14 @@ class RecordedRepairValidationCasesTest {
             put("cleanupVerified", true); put("assurance", "strict-contained")
         }
         val bytes = OracleJson.canonicalBytes(root)
-        val proof = RepairValidationProof("2".repeat(64), "3".repeat(64), "4".repeat(64), corpus,
-            original, rebuilt, "8".repeat(64), sha256(bytes), true, RepairValidationAssurance.STRICT_CONTAINED)
+        val proof = RepairValidationProof(AuthoredValidationReceiptMetadata.sourceSha256, "3".repeat(64), "4".repeat(64), corpus,
+            original, rebuilt, AuthoredValidationReceiptMetadata.runtimeSha256, sha256(bytes), true, RepairValidationAssurance.STRICT_CONTAINED)
         val identity = RepairRecordedIdentity("root_" + "1".repeat(24), false)
         val invocation = RepairValidationInvocation(nonce, "run_00000001", identity.value,
             proof.sourceRevisionSha256, proof.profileSha256, proof.indexSha256, corpus)
         return rebind(Fixture(RepairRecordedValidationObservation(invocation.commitmentSha256(), identity, proof, outcome,
             RepairRecordedValidationObservedArtifact(recordedRepairArtifactReference(corpus, repairValidationReceiptPath(nonce, sha256(bytes))),
-                sha256(bytes), bytes.size.toLong()), null), root, bytes), root)
+                sha256(bytes), bytes.size.toLong()), null, context = AuthoredValidationReceiptMetadata.context), root, bytes), root)
     }
     private fun rebind(f: Fixture, root: JsonObject): Fixture {
         val bytes = OracleJson.canonicalBytes(root)
@@ -115,8 +154,18 @@ class RecordedRepairValidationCasesTest {
         }) else null
         val diff = diffBytes?.let { RepairRecordedValidationObservedArtifact(recordedRepairArtifactReference(
             f.binding.proof.regressionCorpusSha256, repairValidationDiffPath(sha256(it))), sha256(it), it.size.toLong()) }
+        val expected = runCatching { sha256(buildString {
+            append(f.binding.proof.originalBinarySha256).append('\n')
+            root.getValue("inputs").jsonArray.forEachIndexed { index, input ->
+                val id = input.jsonObject.getValue("id").jsonPrimitive.content
+                val observed = root.getValue("scopes").jsonArray[1 + 2 * index].jsonObject.getValue("output").jsonObject
+                fun hash(field: String) = sha256(Base64.getDecoder().decode(observed.getValue(field).jsonPrimitive.content))
+                append(id.length).append(':').append(id).append(':').append(observed.getValue("exitCode").jsonPrimitive.content)
+                    .append(':').append(hash("stdoutBase64")).append(':').append(hash("stderrBase64")).append('\n')
+            }
+        }.toByteArray(Charsets.UTF_8)) }.getOrNull() ?: f.binding.expectedObservationsSha256
         return f.copy(root = root, bytes = bytes, diffBytes = diffBytes,
-            binding = f.binding.copy(proof = f.binding.proof.copy(evidenceSha256 = sha256(bytes)),
+            binding = f.binding.copy(expectedObservationsSha256 = expected, proof = f.binding.proof.copy(evidenceSha256 = sha256(bytes)),
                 primary = f.binding.primary.copy(artifact = recordedRepairArtifactReference(
                     f.binding.proof.regressionCorpusSha256, repairValidationReceiptPath(nonce, sha256(bytes))),
                     sha256 = sha256(bytes), bytes = bytes.size.toLong()), diff = diff))
@@ -764,9 +813,10 @@ class RecordedRepairValidationCasesTest {
         assertEquals(0, captures)
     }
 
-    private fun html(f: Fixture, number: Int = 1): String {
+    private fun html(f: Fixture, number: Int = 1, diffBytes: ByteArray? = f.diffBytes,
+        diffTarget: Boolean = true, ownerWithheld: Boolean = false): String {
         val corpus = f.binding.proof.regressionCorpusSha256
-        val run = RepairRecordedRun(4, RepairRecordedIdentity("run_00000001", false), RepairRunStatus.RUNNING,
+        val run = RepairRecordedRun(4, RepairRecordedIdentity("run_00000001", ownerWithheld), RepairRunStatus.RUNNING,
             f.binding.candidate, null, null, corpus, 2, 0, 1, 100, null, null, baselineValidationObservation = f.binding)
         val snapshot = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, corpus, f.binding.candidate,
             null, null, listOf(run), emptyList(), null, emptyList())
@@ -777,8 +827,10 @@ class RecordedRepairValidationCasesTest {
             binaryPath = Path.of("authored.elf"), metadata = ElfMetadata("ELF64", "little-endian", 1u, "System V",
                 "EXEC", "x86-64", 0uL, 64.toUShort(), 0.toUShort(), 0.toUShort(), 0.toUShort()))
         return renderRecordedRepairHistory(job, RecordedRepairHistoryView(RepairHistoryReadResult.recorded(snapshot),
-            targets = mapOf(f.binding.primary.artifact to target), page = selected, runId = "run_selected",
-            validationObservations = mapOf(run.identity to checked(f, number)), validationCasePageNumber = number))
+            targets = mapOf(f.binding.primary.artifact to target) + listOfNotNull(f.binding.diff?.takeIf { diffTarget }?.let {
+                it.artifact to "reports/runs/run_selected/source-tree/" + repairValidationDiffPath(it.sha256) }).toMap(),
+            page = selected, runId = "run_selected",
+            validationObservations = mapOf(run.identity to checkedRecordedRepairValidationObservation(f.binding, f.bytes, diffBytes, number)), validationCasePageNumber = number))
     }
     @Test fun `accessible comparison table uses opaque case IDs exact flags and finite byte counts`() {
         val rendered = html(fixture(mismatch = true))
@@ -931,4 +983,80 @@ class RecordedRepairValidationCasesTest {
         val value = reports.history(apiJob, apiRun, null) { _, _, _ -> discoveryCapture(apiSnapshot(f)) }
         assertEquals("recorded", value.getValue("state").jsonPrimitive.content)
     }
+    @Test fun `source inventory content manifest ordering roles and graph bounds precede comparison authority`() {
+        val f = fixture(); val original = AuthoredValidationReceiptMetadata.snapshot
+        val files = original.getValue("files").jsonArray
+        fun snapshot(rows: JsonArray, manifest: String = sha256(OracleJson.canonicalBytes(rows))) =
+            JsonObject(original + mapOf("files" to rows, "manifestSha256" to JsonPrimitive(manifest)))
+        val changed = JsonArray(files.mapIndexed { index, element -> if (index == 0)
+            JsonObject(element.jsonObject + ("sha256" to JsonPrimitive("a".repeat(64)))) else element })
+        val invalid = listOf(snapshot(changed), snapshot(changed, original.getValue("manifestSha256").jsonPrimitive.content),
+            snapshot(JsonArray(files.reversed())), snapshot(JsonArray(files + files.first())),
+            snapshot(JsonArray(files.map { JsonObject(it.jsonObject + ("mode" to JsonPrimitive(420))) })),
+            snapshot(JsonArray(files.map { JsonObject(it.jsonObject + ("role" to JsonPrimitive("source"))) })))
+        for (value in invalid) {
+            val bad = rebind(f, JsonObject(f.root + ("sourceSnapshot" to value)))
+            corrupt(bad); assertEquals("invalid", apiReport(bad).getValue("state").jsonPrimitive.content)
+            assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
+        }
+        val small = f.copy(binding = f.binding.copy(context = AuthoredValidationReceiptMetadata.context.copy(
+            budget = RepairResourceBudget(maximumSourceFiles = 1))))
+        corrupt(small)
+    }
+    @Test fun `runtime digest tools normalized mounts and profile bindings precede comparison authority`() {
+        val f = fixture(); val original = AuthoredValidationReceiptMetadata.runtime
+        val configuration = original.getValue("runtime").jsonObject
+        fun configured(fields: Map<String, JsonElement>) = JsonObject(original +
+            ("runtime" to JsonObject(configuration + fields)))
+        val variants = listOf(JsonObject(original + ("sandboxConfigurationSha256" to JsonPrimitive("a".repeat(64)))),
+            configured(mapOf("tools" to JsonObject(emptyMap()))),
+            configured(mapOf("outputTmpfs" to JsonPrimitive("/PRIVATE-source/nested"))),
+            configured(mapOf("sandboxConfigurationFile" to JsonPrimitive("relative"))),
+            configured(mapOf("profileId" to JsonPrimitive("unrelated"))))
+        for (runtime in variants) for (recompute in listOf(false, true)) {
+            val digest = if (recompute) sha256(OracleJson.canonicalBytes(runtime)) else f.binding.proof.runtimeSha256
+            val bad = rebind(f, JsonObject(f.root + mapOf("runtimeConfiguration" to runtime, "runtimeSha256" to JsonPrimitive(digest))))
+                .let { it.copy(binding = it.binding.copy(proof = it.binding.proof.copy(runtimeSha256 = digest))) }
+            // A changed but structurally valid configuration with its matching digest is valid metadata.
+            if (runtime == variants.first() && recompute) assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(bad).state)
+            else corrupt(bad)
+        }
+    }
+    @Test fun `self consistent substituted reference and candidate outputs cannot replace the durable observations`() {
+        val f = fixture(count = 21)
+        val first = output(f, 41, mapOf("stdoutBase64" to encoded("unrelated".toByteArray())))
+        val both = output(first, 42, mapOf("stdoutBase64" to encoded("unrelated".toByteArray())))
+        val forged = both.copy(binding = both.binding.copy(expectedObservationsSha256 = f.binding.expectedObservationsSha256))
+        for (number in listOf(1, 2)) {
+            assertEquals(RecordedRepairValidationCaseState.CORRUPT, page(forged, number).state)
+            val report = apiReport(forged, casePage = number)
+            assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertFalse("Recorded exact-byte comparisons</caption>" in html(forged))
+    }
+    @Test fun `missing graph context and durable reference commitments cannot produce a validation result`() {
+        val f = fixture()
+        for (binding in listOf(f.binding.copy(context = null), f.binding.copy(expectedObservationsSha256 = null))) {
+            val report = apiReport(f.copy(binding = binding))
+            assertEquals("partial", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        val compilation = fixture(outcome = RepairValidationObservedOutcome.COMPILE_VALID)
+        assertEquals("available", apiReport(compilation.copy(binding = compilation.binding.copy(expectedObservationsSha256 = null)))
+            .getValue("state").jsonPrimitive.content)
+    }
+    @Test fun `HTML withholds case rows and previews for missing corrupt unlinked diffs or withheld identities`() {
+        val f = fixture(mismatch = true)
+        val pages = listOf(html(f, diffBytes = null), html(f, diffBytes = byteArrayOf(1)), html(f, diffTarget = false),
+            html(f, ownerWithheld = true), html(f.copy(binding = f.binding.copy(candidate = f.binding.candidate.copy(rawIdentityWithheld = true)))))
+        for (rendered in pages) {
+            assertTrue("case comparisons are withheld" in rendered)
+            assertFalse("Recorded exact-byte comparisons</caption>" in rendered)
+            assertFalse("Exact byte prefix (hexadecimal)" in rendered)
+            assertFalse("1 matched; 1 mismatched" in rendered)
+        }
+        assertTrue("Recorded exact-byte comparisons</caption>" in html(f))
+    }
+
 }

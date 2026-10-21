@@ -2,6 +2,8 @@ package decompengine.web
 
 import decompengine.project.sha256
 import decompengine.project.parseGeneratedCValidationFailureRecord
+import decompengine.project.requireRecordedRepairValidationSourceSnapshot
+import decompengine.project.ReconstructionProfiles
 import decompengine.repair.*
 import kotlinx.serialization.json.*
 
@@ -86,7 +88,16 @@ internal fun recordedValidationFailureReport(jobId: String, runId: String, captu
                         val casePhase = phase in setOf("before-case", "original-operation", "rebuilt-operation")
                         require(casePhase == (checked.inputIndex != null))
                         if (phase in setOf("source-preparation", "build", "build-finalization", "capture-rebuilt")) require(completed == 0)
-                        if (run.identity.rawIdentityWithheld || binding.candidate.rawIdentityWithheld) {
+                        val context = binding.context
+                        if (root.getValue("sourceSnapshot") != JsonNull && context != null) {
+                            require(root.getValue("profileId").jsonPrimitive.content == context.profileId)
+                            requireRecordedRepairValidationSourceSnapshot(root.getValue("sourceSnapshot"),
+                                binding.sourceRevisionSha256, context.budget,
+                                ReconstructionProfiles.named(context.profileId).layout.declaration("build-definition").materialize())
+                        }
+                        if (root.getValue("sourceSnapshot") == JsonNull || context == null) {
+                            state = "partial"; limitation = "The retained source inventory or bound profile is unavailable; no source-attributed diagnostic is exposed."
+                        } else if (run.identity.rawIdentityWithheld || binding.candidate.rawIdentityWithheld) {
                             state = "partial"; limitation = "The selected failure identity is withheld; no diagnostic detail is exposed."
                         } else {
                             detail = buildJsonObject {

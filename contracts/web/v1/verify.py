@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import codecs
+import unicodedata
 from pathlib import Path
 import sys
 
@@ -36,11 +38,30 @@ def check_validation_preview(value: dict | None, byte_count: str | None) -> None
     if text_bytes is not None and (text_bytes > prefix or
             (prefix - text_bytes > 3 if value["truncated"] else text_bytes != prefix)):
         raise ValueError("validation UTF-8 preview has an invalid consumed byte count")
-    if prefix == 0 and (value["text"] != "" or text_bytes != 0):
-        raise ValueError("empty observed output must retain its empty preview")
+    expected_text = expected_bytes = None
+    try:
+        decoded = codecs.getincrementaldecoder("utf-8")("strict").decode(
+            bytes.fromhex("".join(tokens)), final=not value["truncated"])
+        expected_bytes = len(decoded.encode("utf-8"))
+        def escape(character: str) -> str:
+            special = {"\\": "\\\\", "\r": "\\r", "\n": "\\n\n", "\t": "\\t"}
+            if character in special:
+                return special[character]
+            code = ord(character)
+            if code <= 31 or 127 <= code <= 159 or unicodedata.category(character) in {"Cf", "Zl", "Zp"}:
+                return ("\\U" + format(code, "08x")) if code > 65535 else ("\\u" + format(code, "04x"))
+            return character
+        expected_text = "".join(map(escape, decoded))
+    except UnicodeDecodeError:
+        pass
+    if value["text"] != expected_text or text_bytes != expected_bytes:
+        raise ValueError("validation text preview does not represent its hexadecimal prefix")
 
 
 def check_validation_cases(data: dict) -> None:
+    if data["reportType"] == "revision-validation" and data["state"] == "partial" and any(
+            data.get(field) is not None for field in ("summary", "validationCases", "validationFailure")):
+        raise ValueError("partial selected validation reports cannot infer results or case detail")
     value = data.get("validationCases")
     if value is None:
         return
@@ -460,6 +481,53 @@ def check_run_lifecycle_controls(validate) -> int:
     return checked
 
 
+def check_validation_display_controls(validate) -> int:
+    """Authored wire controls only: byte/text binding and absence of partial results."""
+    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    cases = [
+        ([65], None, "A", 1), ([0xef, 0xbb, 0xbf, 65], None, "\\ufeffA", 4),
+        ([92, 13, 10, 9, 0, 0xe2, 0x80, 0xae], None, '\\\\\\r\\n\n\\t\\u0000\\u202e', 8),
+        ([0xff], None, None, None), ([0xc3, 0x28], None, None, None), ([0xe2], None, None, None),
+        ([65] * 127 + [0xe2], "130", "A" * 127, 127),
+    ]
+    checked = 0
+    def check(document, valid):
+        nonlocal checked
+        try:
+            validate(document)
+            check_semantics(document)
+        except (fastjsonschema.JsonSchemaException, ValueError):
+            if valid:
+                raise ValueError("valid validation display metadata was rejected")
+        else:
+            if not valid:
+                raise ValueError("fabricated validation display metadata was accepted")
+        checked += 1
+    for octets, total, text, consumed in cases:
+        document = json.loads(json.dumps(original))
+        item = document["data"]["validationCases"]["items"][0]
+        count = total or str(len(octets))
+        hexadecimal = "".join(("" if i == 0 else "\n" if i % 16 == 0 else " ") + format(byte, "02x")
+                              for i, byte in enumerate(octets))
+        preview = {"totalBytes": count, "prefixBytes": len(octets), "hex": hexadecimal,
+                   "text": text, "textBytes": consumed, "truncated": int(count) > len(octets)}
+        item.update(originalStdoutBytes=count, rebuiltStdoutBytes=count,
+                    originalStdoutPreview=preview, rebuiltStdoutPreview=preview)
+        check(document, True)
+        item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {
+            **preview, "text": "fabricated", "textBytes": len(octets)}
+        check(document, False)
+        if text is not None:
+            item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {**preview, "text": None, "textBytes": None}
+            check(document, False)
+    document = json.loads(json.dumps(original))
+    document["data"].update(state="partial", validationCases=None, validationFailure=None)
+    check(document, False)
+    document["data"]["summary"] = None
+    check(document, True)
+    return checked
+
+
 def main() -> int:
     manifest = json.loads((ROOT / "fixtures.json").read_text())
     schema = json.loads((ROOT / manifest["schema"]).read_text())
@@ -495,11 +563,16 @@ def main() -> int:
         lifecycle_controls = check_run_lifecycle_controls(validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
         failures.append(f"run lifecycle controls: {error}")
+    try:
+        validation_display_controls = check_validation_display_controls(validate)
+    except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
+        failures.append(f"validation display controls: {error}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(f"v1 design contracts: {accepted} valid fixtures accepted; {rejected} invalid fixtures rejected; {len(OUTCOME_EXPECTATIONS)} web outcomes verified")
     print(f"run lifecycle metadata: {lifecycle_controls} envelope controls verified")
+    print(f"validation display metadata: {validation_display_controls} authored envelope controls verified")
     return 0
 
 

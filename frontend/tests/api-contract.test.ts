@@ -12,6 +12,41 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('binds escaped preview text to strict UTF8 bytes including BOM controls and incomplete suffixes', () => {
+    const document = decodeResponse(fixture('report-normal-cases'), 'report');
+    const detail = document.data.validationCases!, item = detail.items[0]!;
+    const cases: { bytes: number[]; total?: string; text: string | null; consumed: number | null }[] = [
+      { bytes: [65], text: 'A', consumed: 1 }, { bytes: [0xef, 0xbb, 0xbf, 65], text: '\\ufeffA', consumed: 4 },
+      { bytes: [92, 13, 10, 9, 0, 0xe2, 0x80, 0xae], text: "\\\\\\r\\n\n\\t\\u0000\\u202e", consumed: 8 },
+      { bytes: [0xff], text: null, consumed: null }, { bytes: [0xc3, 0x28], text: null, consumed: null },
+      { bytes: [0xe2], text: null, consumed: null },
+      { bytes: [...Array<number>(127).fill(65), 0xe2], total: '130', text: 'A'.repeat(127), consumed: 127 },
+    ];
+    for (const value of cases) {
+      const hex = value.bytes.map((byte, index) => `${index === 0 ? '' : index % 16 === 0 ? '\n' : ' '}${byte.toString(16).padStart(2, '0')}`).join('');
+      const total = value.total ?? String(value.bytes.length);
+      const preview = { totalBytes: total, prefixBytes: value.bytes.length, hex, text: value.text,
+        textBytes: value.consumed, truncated: BigInt(total) > BigInt(value.bytes.length) };
+      const encode = (next: typeof preview) => JSON.stringify({ ...document, data: { ...document.data,
+        validationCases: { ...detail, items: [{ ...item, originalStdoutBytes: total, rebuiltStdoutBytes: total,
+          originalStdoutPreview: next, rebuiltStdoutPreview: next }] } } });
+      for (const mode of ['producer', 'response'] as const) {
+        expect(decodeContract(encode(preview), { mode })).toBeDefined();
+        expect(() => decodeContract(encode({ ...preview, text: 'fabricated', textBytes: value.bytes.length }), { mode }))
+          .toThrow(ApiClientError);
+        if (value.text !== null) expect(() => decodeContract(encode({ ...preview, text: null, textBytes: null }), { mode }))
+          .toThrow(ApiClientError);
+      }
+    }
+  });
+  it('rejects a partial selected validation summary even when no case detail is supplied', () => {
+    const document = decodeResponse(fixture('report-normal-cases'), 'report');
+    const partial = { ...document, data: { ...document.data, state: 'partial', validationCases: null, validationFailure: null } };
+    for (const mode of ['producer', 'response'] as const) {
+      expect(() => decodeContract(JSON.stringify(partial), { mode })).toThrow(ApiClientError);
+      expect(decodeContract(JSON.stringify({ ...partial, data: { ...partial.data, summary: null } }), { mode })).toBeDefined();
+    }
+  });
   it('decodes failed-operation diagnostics separately from case comparisons and preserves exact reported counts', () => {
     const document = decodeResponse(fixture('report-validation-failure'), 'report');
     expect(document.data.summary).toBeNull(); expect(document.data.validationCases).toBeNull();

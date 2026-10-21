@@ -694,7 +694,11 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             "<br>Source snapshot: <code>${binding.proof.sourceRevisionSha256.escapeHtml()}</code> · " +
             "<code>${binding.candidate.value.escapeHtml()}</code>" +
             "<br><a href=\"${artifactHref(job, target)}\">Open retained primary validation receipt</a>$derived</p>" +
-            normalCases(detail.casePage, owner, isRun)
+            if (binding.candidate.rawIdentityWithheld || owner.rawIdentityWithheld ||
+                binding.diff != null && (detail.diffState != RepairEvidenceArtifactState.AVAILABLE ||
+                    view.targets[binding.diff.artifact] == null))
+                "<p>Required recorded diff or identity evidence is unavailable; case comparisons are withheld.</p>"
+            else normalCases(detail.casePage, owner, isRun)
     }
     val visible = page.attempts
     val items = visible.joinToString("") { attempt ->
