@@ -207,7 +207,7 @@ it('pages complete comparison categories in memory with at most twenty positions
   expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
   fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
   fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(15);
-  expect(screen.getByRole('button', { name: 'Next comparison window' })).toBeDisabled();
+  expect((screen.getByRole('button', { name: 'Next comparison window' }) as HTMLButtonElement).disabled).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(3);
 });
 
