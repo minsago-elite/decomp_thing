@@ -3,6 +3,7 @@ package decompengine.web
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCValidationBudgetPolicy
+import decompengine.project.requireRepairRegressionCorpusMetadata
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.project.requireRecordedRepairValidationOutputQuota
@@ -175,6 +176,10 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
     return runCatching {
         val behavior = binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED
         require(root.getValue("behaviorBudgetEvidence") == GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget))
+        requireRepairRegressionCorpusMetadata(inputs, context.budget,
+            { ((it as JsonObject).getValue("id") as JsonPrimitive).content },
+            { ((it as JsonObject).getValue("args") as JsonArray).map { value -> (value as JsonPrimitive).content } },
+            { recordedValidationEncodedBytes((it as JsonObject).getValue("stdinBase64")).second })
         val profile = ReconstructionProfiles.named(context.profileId)
         require((root.getValue("profileId") as? JsonPrimitive)?.content == context.profileId)
         val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(

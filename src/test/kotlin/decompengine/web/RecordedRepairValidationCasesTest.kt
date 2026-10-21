@@ -1260,4 +1260,73 @@ class RecordedRepairValidationCasesTest {
         assertFalse("PRIVATE" in index.toString())
     }
 
+    private fun inputBudget(f: Fixture, budget: RepairResourceBudget) = f.copy(binding = f.binding.copy(
+        context = requireNotNull(f.binding.context).copy(budget = budget)))
+
+    private fun inputCorpus(f: Fixture, inputs: JsonArray): Fixture {
+        require(inputs.size == f.root.getValue("inputs").jsonArray.size)
+        val corpus = recordedNormalValidationCorpusSha256(inputs)
+        val proof = f.binding.proof.copy(regressionCorpusSha256 = corpus)
+        val invocation = RepairValidationInvocation(nonce, "run_00000001", f.binding.candidate.value,
+            proof.sourceRevisionSha256, proof.profileSha256, proof.indexSha256, corpus)
+        val rows = f.root.getValue("scopes").jsonArray.mapIndexed { index, scope ->
+            if (index == 0) scope else JsonObject(scope.jsonObject +
+                ("inputId" to inputs[(index - 1) / 2].jsonObject.getValue("id")))
+        }
+        return rebind(f.copy(binding = f.binding.copy(proof = proof, invocationSha256 = invocation.commitmentSha256())),
+            JsonObject(f.root + mapOf("inputs" to inputs, "regressionCorpusSha256" to JsonPrimitive(corpus), "scopes" to JsonArray(rows))))
+    }
+
+    @Test fun `selected corpus count and byte limits include inputs outside the visible case page`() {
+        val f = fixture(count = 21)
+        val budget = RepairResourceBudget(maximumRegressionInputs = 21, maximumRegressionInputBytes = 357)
+        for (number in listOf(1, 2)) {
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(inputBudget(f, budget), number).state)
+            for (limit in listOf(budget.copy(maximumRegressionInputs = 20), budget.copy(maximumRegressionInputBytes = 356))) {
+                val bad = inputBudget(f, limit)
+                assertEquals(RecordedRepairValidationCaseState.CORRUPT, page(bad, number).state)
+                assertTrue(page(bad, number).cases.isEmpty())
+                val report = apiReport(bad, casePage = number)
+                assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+                assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            }
+        }
+    }
+
+    @Test fun `input budget counts all UTF8 argument and identity bytes plus decoded stdin`() {
+        val original = fixture(count = 1)
+        val row = JsonObject(original.root.getValue("inputs").jsonArray.single().jsonObject + mapOf(
+            "args" to JsonArray(listOf(JsonPrimitive("é"), JsonPrimitive("z"))),
+            "stdinBase64" to encoded(byteArrayOf(0, 1))))
+        val f = inputCorpus(original, JsonArray(listOf(row)))
+        val budget = RepairResourceBudget(maximumRegressionArguments = 2, maximumRegressionInputBytes = 22)
+        val atLimit = inputBudget(f, budget)
+        assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(atLimit).state)
+        assertEquals("available", apiReport(atLimit).getValue("state").jsonPrimitive.content)
+        assertNotEquals(original.binding.proof.regressionCorpusSha256, f.binding.proof.regressionCorpusSha256)
+        for (limit in listOf(budget.copy(maximumRegressionArguments = 1), budget.copy(maximumRegressionInputBytes = 21))) {
+            val bad = inputBudget(f, limit)
+            corrupt(bad)
+            assertEquals("invalid", apiReport(bad).getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, apiReport(bad).getValue("validationCases"))
+        }
+    }
+
+    @Test fun `hash rebound input identities and arguments must satisfy the canonical nonblank and NUL policy`() {
+        val f = fixture(count = 1)
+        val original = f.root.getValue("inputs").jsonArray.single().jsonObject
+        val variants = listOf(original + ("id" to JsonPrimitive("")), original + ("id" to JsonPrimitive(" ")),
+            original + ("id" to JsonPrimitive("\u0000")),
+            original + ("args" to JsonArray(listOf(JsonPrimitive("bad\u0000argument")))))
+        for (fields in variants) {
+            val bad = inputCorpus(f, JsonArray(listOf(JsonObject(fields))))
+            assertEquals(sha256(bad.bytes), bad.binding.primary.sha256)
+            assertFalse(checked(bad).casePage?.state == RecordedRepairValidationCaseState.AVAILABLE)
+            val report = apiReport(bad)
+            assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
+        }
+    }
+
 }

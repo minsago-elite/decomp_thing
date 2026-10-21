@@ -1820,19 +1820,33 @@ private fun revisionSha256(sources: Collection<ReleaseSourceIdentity>): String =
 )
 
 private fun validateRegressionCorpus(inputs: List<ReleaseRegressionInput>, budget: RepairResourceBudget) {
-    require(inputs.map(ReleaseRegressionInput::id) == inputs.map(ReleaseRegressionInput::id).distinct().sorted()) {
+    requireRepairRegressionCorpusMetadata(inputs, budget, ReleaseRegressionInput::id,
+        ReleaseRegressionInput::args, { it.stdin.size.toLong() })
+}
+
+/** Shared retained-input shape and resource policy; checking metadata grants no execution authority. */
+internal fun <T> requireRepairRegressionCorpusMetadata(inputs: List<T>, budget: RepairResourceBudget,
+    id: (T) -> String, args: (T) -> List<String>, stdinBytes: (T) -> Long) {
+    require(inputs.size <= budget.maximumRegressionInputs) {
+        "repair release retained regression corpus exceeds its bounds"
+    }
+    val ids = inputs.map(id)
+    require(ids == ids.distinct().sorted()) {
         "repair release retained regression input IDs are not unique and sorted"
     }
     var arguments = 0L
     var bytes = 0L
-    inputs.forEach { input ->
-        require(input.id.isNotBlank() && '\u0000' !in input.id && input.args.none { '\u0000' in it }) {
+    inputs.forEachIndexed { index, input ->
+        val inputId = ids[index]
+        val argumentsForInput = args(input)
+        val inputStdinBytes = stdinBytes(input)
+        require(inputId.isNotBlank() && '\u0000' !in inputId && argumentsForInput.none { '\u0000' in it } && inputStdinBytes >= 0) {
             "repair release retained regression input is invalid"
         }
-        arguments = Math.addExact(arguments, input.args.size.toLong())
-        bytes = Math.addExact(bytes, input.id.toByteArray().size.toLong())
-        bytes = Math.addExact(bytes, input.stdin.size.toLong())
-        input.args.forEach { bytes = Math.addExact(bytes, it.toByteArray().size.toLong()) }
+        arguments = Math.addExact(arguments, argumentsForInput.size.toLong())
+        bytes = Math.addExact(bytes, inputId.toByteArray().size.toLong())
+        bytes = Math.addExact(bytes, inputStdinBytes)
+        argumentsForInput.forEach { bytes = Math.addExact(bytes, it.toByteArray().size.toLong()) }
     }
     require(arguments <= budget.maximumRegressionArguments && bytes <= budget.maximumRegressionInputBytes) {
         "repair release retained regression corpus exceeds its bounds"
