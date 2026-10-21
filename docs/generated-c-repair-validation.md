@@ -222,6 +222,10 @@ revision, source, profile, index and corpus. With this request, the supplemental
 schema2 and includes the exact invocation. Identical primary receipts cannot identify a later call.
 Requests without this context retain legacy schema1 diagnostics and cannot obtain a bound view.
 
+The repair CLI resolves the default or selected report directory to an absolute normalized path
+before constructing the strict provider request. This resolves spelling without a filesystem probe;
+the provider's existing absolute, normalized report-directory guard remains in force.
+
 The provider attaches a publication descriptor only after the bounded supplemental write returns.
 The primary marker is attached first and survives any auxiliary failure. Already attached
 exceptions are not duplicated, and an auxiliary provider marker is retained as a
