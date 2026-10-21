@@ -21,6 +21,7 @@ import decompengine.repair.parseRepairValidationDiagnosticBinding
 import decompengine.repair.requireRepairValidationDiagnosticAssociation
 import decompengine.repair.RepairValidationObservation
 import decompengine.repair.requireRepairValidationDiffRole
+import decompengine.repair.repairValidationDiffInputIds
 import decompengine.repair.RepairValidationObservedArtifact
 import decompengine.repair.RepairValidationProof
 import decompengine.repair.RepairValidationObservationLog
@@ -674,8 +675,16 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val required = graph.nodes.mapNotNull { node -> node.validationProof?.let {
             ReleaseValidationRequirement(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)),
                 node.id, node.status == "accepted")
-        } } + ReleaseValidationRequirement(requireNotNull(graph.acceptedProof), graph.runs.last(), graph.headId, true)
-        required.distinct().forEach { (proof, run, candidateId, fullyAccepted) ->
+        } } + ReleaseValidationRequirement(requireNotNull(graph.acceptedProof), graph.runs.last(), graph.headId, true) +
+            graph.runs.flatMap { run -> run.validationObservations.entries.map { observation ->
+                ReleaseValidationRequirement(observation.proof.toReleaseValidationProof(), run,
+                    observation.invocation.candidateRevisionId, false)
+            } }
+        // Rejected and baseline observations use the same complete verifier as accepted receipts.
+        // Combining duplicate requirements must retain the strongest acceptance requirement.
+        required.groupBy { Triple(it.proof, it.run.id, it.candidateId) }.values.map { bindings ->
+            bindings.first().copy(fullyAccepted = bindings.any { it.fullyAccepted })
+        }.forEach { (proof, run, candidateId, fullyAccepted) ->
             val observation = run.validationObservations.entries.singleOrNull {
                 it.invocation.candidateRevisionId == candidateId
             }
@@ -1368,16 +1377,32 @@ internal fun verifyRepairValidationObservedArtifactsForArchive(observations: Lis
         }
     }
     val primaryBindings = observations.groupBy { it.primary.path }
+    // Keep one commitment per payload instead of retaining every parsed input list for the run.
+    fun inputCommitment(ids: List<String>): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        ids.forEach { id ->
+            val bytes = id.toByteArray(StandardCharsets.UTF_8)
+            digest.update(bytes.size.toString().toByteArray(StandardCharsets.US_ASCII))
+            digest.update(':'.code.toByte())
+            digest.update(bytes)
+        }
+        return java.util.HexFormat.of().formatHex(digest.digest())
+    }
+    val expectedDiffInputs = linkedMapOf<String, String>()
+    val actualDiffInputs = linkedMapOf<String, String>()
     unique.values.forEach { artifact ->
         val bytes = read(artifact.path, artifact.bytes)
         require(bytes.size.toLong() == artifact.bytes && sha256(bytes) == artifact.sha256) {
             "recorded validation artifact changed after archive inventory"
         }
-        primaryBindings[artifact.path]?.let { bindings ->
-            val root = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = bytes.size,
-                maximumCanonicalBytes = bytes.size, maximumDepth = 20, maximumNodes = 1_000_000,
-                maximumStringBytes = bytes.size, maximumTotalStringBytes = bytes.size)) as? JsonObject
-                ?: error("normal validation receipt object type")
+        val root = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = bytes.size,
+            maximumCanonicalBytes = bytes.size, maximumDepth = 20, maximumNodes = 1_000_000,
+            maximumStringBytes = bytes.size, maximumTotalStringBytes = bytes.size)) as? JsonObject
+            ?: error("normal validation artifact object type")
+        val bindings = primaryBindings[artifact.path]
+        if (bindings == null) {
+            actualDiffInputs[artifact.path] = inputCommitment(repairValidationDiffInputIds(root))
+        } else {
             require((root["schemaVersion"] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull == 2 &&
                 (root["provider"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "generated-c-linux-bubblewrap-cgroup-v1")
             val matches = requireNotNull((root["matches"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull)
@@ -1385,13 +1410,44 @@ internal fun verifyRepairValidationObservedArtifactsForArchive(observations: Lis
                 require((root["outcome"] as? JsonPrimitive)?.takeIf { it.isString }?.content ==
                     binding.outcome.name.lowercase().replace('_', '-'))
                 requireRepairValidationDiffRole(binding.outcome, matches, binding.diff != null)
+                val proof = binding.proof
+                mapOf("sourceRevisionSha256" to proof.sourceRevisionSha256, "profileSha256" to proof.profileSha256,
+                    "indexSha256" to proof.indexSha256, "regressionCorpusSha256" to proof.regressionCorpusSha256,
+                    "runtimeSha256" to proof.runtimeSha256).forEach { (field, expected) ->
+                    require((root[field] as? JsonPrimitive)?.takeIf { it.isString }?.content == expected) {
+                        "recorded validation receipt differs from its observation proof: $field"
+                    }
+                }
+                require((root["cleanupVerified"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == true &&
+                    (root["assurance"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "strict-contained")
+                mapOf("originalExecutable" to proof.originalBinarySha256,
+                    "rebuiltExecutable" to proof.rebuiltBinarySha256).forEach { (field, expected) ->
+                    val executable = root.getValue(field)
+                    if (expected == null) require(executable is JsonNull) else
+                        require(((executable as? JsonObject)?.get("sha256") as? JsonPrimitive)
+                            ?.takeIf { it.isString }?.content == expected)
+                }
+                binding.diff?.let { diff ->
+                    val inputs = root["inputs"] as? JsonArray ?: error("normal validation inputs type")
+                    val ids = inputs.map { row -> ((row as? JsonObject)?.get("id") as? JsonPrimitive)
+                        ?.takeIf { it.isString }?.content ?: error("normal validation input identity type") }
+                    require(ids.isNotEmpty() && ids.distinct().size == ids.size)
+                    val commitment = inputCommitment(ids)
+                    val previous = expectedDiffInputs.putIfAbsent(diff.path, commitment)
+                    require(previous == null || previous == commitment) { "shared validation diff has incompatible inputs" }
+                }
             }
         }
     }
+    require(actualDiffInputs == expectedDiffInputs) { "derived validation diff inputs differ from its primary receipt" }
 }
 
 private data class ReleaseValidationRequirement(val proof: ReleaseValidationProof, val run: ReleaseRepairRun,
     val candidateId: String, val fullyAccepted: Boolean)
+
+private fun RepairValidationProof.toReleaseValidationProof() = ReleaseValidationProof(sourceRevisionSha256,
+    profileSha256, indexSha256, regressionCorpusSha256, originalBinarySha256, rebuiltBinarySha256,
+    runtimeSha256, evidenceSha256, cleanupVerified, assurance.name.lowercase())
 
 private fun ReleaseValidationProof.matchesObservationProof(proof: RepairValidationProof): Boolean =
     sourceRevisionSha256 == proof.sourceRevisionSha256 && profileSha256 == proof.profileSha256 &&

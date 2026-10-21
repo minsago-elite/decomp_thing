@@ -6,6 +6,7 @@ import decompengine.project.sha256
 import decompengine.repair.RepairRecordedValidationObservation
 import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.requireRepairValidationDiffRole
+import decompengine.repair.repairValidationDiffInputIds
 import decompengine.repair.RepairValidationAssurance
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -85,14 +86,7 @@ internal fun checkedRecordedRepairValidationObservation(binding: RepairRecordedV
     val state = if (diffBytes == null || diffBytes.isEmpty()) RepairEvidenceArtifactState.UNAVAILABLE else {
         if (runCatching {
             require(diffBytes.size.toLong() == diff.bytes && sha256(diffBytes) == diff.sha256)
-            val root = parseNormalValidationJson(diffBytes)
-            require(root.keys == setOf("id", "matches", "cases"))
-            require((root.getValue("id") as? JsonPrimitive)?.isString == true)
-            require((root.getValue("matches") as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == false)
-            val cases = root.getValue("cases") as? JsonArray ?: error("derived validation cases type")
-            val ids = cases.map { row -> ((row as? JsonObject)?.get("id") as? JsonPrimitive)
-                ?.takeIf { it.isString }?.content ?: error("derived validation case identity type") }
-            require(ids == expectedInputIds)
+            require(repairValidationDiffInputIds(parseNormalValidationJson(diffBytes)) == expectedInputIds)
         }.isSuccess) RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
     }
     return primary.copy(diffState = state)

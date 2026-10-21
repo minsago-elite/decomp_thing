@@ -83,6 +83,18 @@ internal fun requireRepairValidationDiffRole(outcome: RepairValidationObservedOu
     }
 }
 
+/** A derived diff names exactly the ordered retained inputs; its own digest is not that association. */
+internal fun repairValidationDiffInputIds(root: JsonObject): List<String> {
+    require(root.keys == setOf("id", "matches", "cases"))
+    require((root.getValue("id") as? JsonPrimitive)?.isString == true)
+    require((root.getValue("matches") as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == false)
+    val cases = root.getValue("cases") as? JsonArray ?: error("derived validation cases type")
+    val ids = cases.map { row -> ((row as? JsonObject)?.get("id") as? JsonPrimitive)
+        ?.takeIf { it.isString }?.content ?: error("derived validation case identity type") }
+    require(ids.isNotEmpty() && ids.distinct().size == ids.size)
+    return ids
+}
+
 /** Cleanup's quarantine guard verifies the exact admitted payload twice before unlink. */
 internal fun reserveRepairValidationDiffCleanupBytes(bytes: Long, remaining: Long): Long {
     require(bytes in 1..64L * 1024 * 1024 && remaining in 0..2L * 64 * 1024 * 1024)
