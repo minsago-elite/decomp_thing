@@ -210,7 +210,7 @@ it('attaches a mismatched recovery selection error to the picker and retains the
 
 it.each(['INVALID_ELF', 'UPLOAD_TOO_LARGE'] as const)('marks the picker invalid for %s while retaining file context until explicit replacement', async serverCode => {
   const requestId = '123e4567-e89b-42d3-a456-426614174000';
-  transport.upload.mockRejectedValue(new ApiClientError('http_error', { serverCode, requestId }));
+  transport.upload.mockRejectedValue(new ApiClientError('http_error', { serverCode, status: serverCode === 'INVALID_ELF' ? 422 : 413, requestId }));
   await mount(); const file = select();
   fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
   const error = await screen.findByRole('alert');
