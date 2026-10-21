@@ -123,11 +123,12 @@ navigation, active history changes and broader fixture families remain outstandi
 
 The attempt metadata includes its persisted `harnessCapabilityId` beside the
 recorded workflow identity. It is an opaque public capability ID, not a current
-server selection or a reconstruction of private configuration. An explicit null
-is shown as not recorded for that attempt; malformed or foreign values are shown
-as not verified. The view does not coerce objects or display path/markup-shaped,
-overlong or final-newline values. It never infers evidence-only mode, provider
-choice, authentication, availability or acceptance from this field.
+server selection or a reconstruction of private configuration. The v1 response
+decoder requires a canonical ID or null. An explicit null is shown as not recorded
+for that attempt. A malformed or non-string value rejects the entire response;
+the page clears unverified attempt metadata and presents its standard error.
+It never infers evidence-only mode, provider choice, authentication, availability
+or acceptance from this field.
 
 The row uses the same job/attempt/session/deployment-bound retained metadata as
 the rest of the page: a same-identity transient refresh may keep it, while an
@@ -136,6 +137,8 @@ preflight, adapter registration or automatic retry is introduced. Server default
 workflow launch, immutable submitted configuration across all choices and actual
 packaged/assistive-technology qualification remain separate full requirements.
 
-Nine additional mock-consumer controls are prepared for exact recorded identity,
-explicit null, invalid/foreign values and refresh retention/refusal. These are
-source controls pending own Actions qualification; no local subject was run.
+Nine additional consumer controls cover exact recorded identity, explicit null,
+invalid values and refresh retention/refusal. They delegate attempt reads through
+the actual API client and response decoder using bounded mocked HTTP responses,
+including malformed fields that reject and clear the whole attempt. These source
+controls require their own Actions qualification; no local subject was run.

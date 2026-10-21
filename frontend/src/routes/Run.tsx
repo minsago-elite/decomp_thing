@@ -14,13 +14,6 @@ import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function recordedHarnessCapability(value: unknown): string {
-  if (value === null) return copy.harnessCapabilityNotRecorded;
-  if (typeof value !== 'string' || value.length < 1 || value.length > 128
-    || !/^[A-Za-z0-9]/.test(value) || /[^A-Za-z0-9_-]/.test(value)) return copy.harnessCapabilityNotVerified;
-  return value;
-}
-
 function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
@@ -58,7 +51,7 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
       <dl class="job-facts">
         <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
         <dt>{copy.workflow}</dt><dd>{run.workflow}</dd><dt>{copy.attemptState}</dt><dd>{run.state}</dd>
-        <dt>{copy.recordedHarnessCapability}</dt><dd><code>{recordedHarnessCapability(run.harnessCapabilityId)}</code></dd>
+        <dt>{copy.recordedHarnessCapability}</dt><dd><code>{run.harnessCapabilityId ?? copy.harnessCapabilityNotRecorded}</code></dd>
         <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>

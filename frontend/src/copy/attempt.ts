@@ -273,7 +273,6 @@ export const runCopy = {
   "openPreviousAttempt": "Open previous attempt",
   "recordedHarnessCapability": "Recorded harness capability",
   "harnessCapabilityNotRecorded": "Not recorded for this attempt",
-  "harnessCapabilityNotVerified": "Not verified",
   "recordedHarnessBoundary": "This identity comes from the persisted attempt configuration. It does not identify the current server configuration, verify authentication or establish readiness.",
   "recordedLimits": "Recorded limits",
   "sourceThePersistedConfigurationForThisAttemptLimitsDoNot": "Source: the persisted configuration for this attempt. Limits do not measure consumption or confer acceptance.",
