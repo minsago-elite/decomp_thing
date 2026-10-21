@@ -170,6 +170,11 @@ jobs:
         run: |
           df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
           df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
+      - name: Sample per-command CPU during the diagnostic (diagnostic-only, outside the evidence root)
+        if: inputs.capture-mode == 'cc1-runtime-diagnostics'
+        run: |
+          : >"$RUNNER_TEMP/process-cpu-samples.txt"
+          nohup setsid bash scripts/ci-sample-process-cpu.sh "$RUNNER_TEMP/process-cpu-samples.txt" 30 >/dev/null 2>&1 &
       - name: Run the selected contained capture
         env:
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/compiler-engines.json
@@ -193,6 +198,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ env.DECOMP_GCC_CLI_EVIDENCE_ROOT }}
+            ${{ runner.temp }}/process-cpu-samples.txt
             build/reports/tests/test
             build/test-results/test
       - name: Release dedicated full-export scratch
