@@ -51,6 +51,7 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
       <dl class="job-facts">
         <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
         <dt>{copy.workflow}</dt><dd>{run.workflow}</dd><dt>{copy.attemptState}</dt><dd>{run.state}</dd>
+        <dt>{copy.recordedHarnessCapability}</dt><dd><code>{run.harnessCapabilityId ?? copy.harnessCapabilityNotRecorded}</code></dd>
         <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
@@ -60,6 +61,7 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
         <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
       </dl>
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
+      <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
       <h2>{copy.recordedLimits}</h2>
       <p>{copy.sourceThePersistedConfigurationForThisAttemptLimitsDoNot}</p>

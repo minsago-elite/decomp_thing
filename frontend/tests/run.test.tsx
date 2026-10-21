@@ -479,3 +479,118 @@ it.each([['attempt', 'STORE_LIMIT'], ['history', 'STORE_LIMIT'],
     expect(transport.get.mock.calls.map(call => call[0])).toEqual([kind === 'history' ? 'runs' : 'run', kind === 'history' ? 'runs' : 'run']);
   } finally { auth.dispose(); }
 });
+
+
+async function recordedRunTransport(auth: Awaited<ReturnType<typeof session>>, ...responses: unknown[]) {
+  const { createApiClient } = await vi.importActual<typeof ClientModule>('../src/api/client');
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/run-completed-unaccepted.json'), 'utf8')) as { requestId: string; data: unknown };
+  const fetch = vi.fn<typeof globalThis.fetch>();
+  for (const response of responses) {
+    if (response instanceof ApiClientError) fetch.mockRejectedValueOnce(response);
+    else fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...envelope, data: response }), {
+      status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': envelope.requestId },
+    }));
+  }
+  const client = createApiClient({ basePath: '/nested', fetch, observeFailure: () => auth.observeRequestFailure() });
+  transport.get.mockImplementation((kind, path, options) => {
+    expect(kind).toBe('run');
+    return client.get('run', path, options);
+  });
+  return fetch;
+}
+
+it('shows the exact persisted harness capability with the selected workflow without granting current readiness or adding requests', async () => {
+  const auth = await session();
+  const recorded = 'h'.repeat(128);
+  const fetch = await recordedRunTransport(auth, { ...sample, harnessCapabilityId: recorded });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText(recorded)).toBeTruthy();
+    expect(screen.getByText('Recorded harness capability').nextElementSibling?.textContent).toBe(recorded);
+    expect(screen.getByText('Workflow').nextElementSibling?.textContent).toBe(sample.workflow);
+    expect(screen.getByText(/does not identify the current server configuration, verify authentication or establish readiness/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /start|launch/i })).toBeNull();
+    expect(transport.get.mock.calls.map(call => [call[0], call[1]])).toEqual([['run', `/jobs/${sample.jobId}/runs/${sample.runId}`]]);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]?.[0]).toBe(`/nested/api/v1/jobs/${sample.jobId}/runs/${sample.runId}`);
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe('GET');
+  } finally { auth.dispose(); }
+});
+
+it('keeps an explicitly absent recorded harness distinct from the current capability report or an inferred execution mode', async () => {
+  const auth = await session();
+  const fetch = await recordedRunTransport(auth, { ...sample, harnessCapabilityId: null });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('Recorded harness capability')).toBeTruthy();
+    expect(screen.getByText('Recorded harness capability').nextElementSibling?.textContent).toBe('Not recorded for this attempt');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(transport.get).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['empty', ''],
+  ['private-path', '/private/configuration'],
+  ['final-newline', 'acp_public\n'],
+  ['overflow', 'h'.repeat(129)],
+  ['markup', '<img src=x onerror="throw 1">'],
+] as const)('rejects %s recorded harness metadata through the actual decoder and clears the entire attempt', async (_label, value) => {
+  const auth = await session();
+  const fetch = await recordedRunTransport(auth, { ...sample, harnessCapabilityId: value });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByText('Recorded harness capability')).toBeNull();
+    expect(screen.queryByText(sample.runId)).toBeNull();
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+    expect(document.querySelector('img[onerror]')).toBeNull();
+    await expect(transport.get.mock.results[0]?.value).rejects.toMatchObject({ code: 'invalid_response' });
+    expect(transport.get).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('rejects object-valued recorded harness metadata through the actual decoder without coercion', async () => {
+  const auth = await session();
+  const stringify = vi.fn(() => { throw new Error('foreign metadata must not be coerced'); });
+  const foreign = { toString: stringify } as unknown as Run['harnessCapabilityId'];
+  const fetch = await recordedRunTransport(auth, { ...sample, harnessCapabilityId: foreign });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByText('Recorded harness capability')).toBeNull();
+    expect(screen.queryByText(sample.runId)).toBeNull();
+    await expect(transport.get.mock.results[0]?.value).rejects.toMatchObject({ code: 'invalid_response' });
+    expect(stringify).not.toHaveBeenCalled();
+    expect(transport.get).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally { auth.dispose(); }
+});
+
+it('retains recorded harness context on a same-attempt transient read and clears it on an unverified refresh', async () => {
+  const auth = await session();
+  const recorded = 'persisted_harness';
+  const fetch = await recordedRunTransport(auth, { ...sample, harnessCapabilityId: recorded },
+    new ApiClientError('network_error'), { ...sample, harnessCapabilityId: 'private/path' });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const value = await screen.findByText(recorded);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByText(recorded)).toBe(value);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    await waitFor(() => expect(screen.queryByText('Recorded harness capability')).toBeNull());
+    expect(screen.queryByText(recorded)).toBeNull();
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['run', 'run', 'run']);
+    await expect(transport.get.mock.results[2]?.value).rejects.toMatchObject({ code: 'invalid_response' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  } finally { auth.dispose(); }
+});
