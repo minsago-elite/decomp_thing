@@ -17,6 +17,83 @@ import fastjsonschema
 
 ROOT = Path(__file__).resolve().parent
 
+
+def check_validation_preview(value: dict | None, byte_count: str | None) -> None:
+    if value is None or byte_count is None:
+        raise ValueError("compared validation output requires byte counts and previews")
+    total = int(byte_count)
+    prefix = min(total, 128)
+    if value["totalBytes"] != byte_count or value["prefixBytes"] != prefix or value["truncated"] != (total > prefix):
+        raise ValueError("validation preview byte counts or truncation disagree")
+    tokens = value["hex"].split() if value["hex"] else []
+    canonical = "".join(("" if index == 0 else "\n" if index % 16 == 0 else " ") + token
+                        for index, token in enumerate(tokens))
+    if len(tokens) != prefix or any(not re.fullmatch(r"[0-9a-f]{2}", token) for token in tokens) or value["hex"] != canonical:
+        raise ValueError("validation hexadecimal preview is not an exact canonical prefix")
+    text_bytes = value["textBytes"]
+    if (value["text"] is None) != (text_bytes is None):
+        raise ValueError("validation preview text and consumed byte count disagree")
+    if text_bytes is not None and (text_bytes > prefix or
+            (prefix - text_bytes > 3 if value["truncated"] else text_bytes != prefix)):
+        raise ValueError("validation UTF-8 preview has an invalid consumed byte count")
+    if prefix == 0 and (value["text"] != "" or text_bytes != 0):
+        raise ValueError("empty observed output must retain its empty preview")
+
+
+def check_validation_cases(data: dict) -> None:
+    value = data.get("validationCases")
+    if value is None:
+        return
+    summary = data["summary"]
+    total = int(value["totalInputs"])
+    start = (value["page"] - 1) * 20
+    pages = max(1, (total + 19) // 20)
+    if value["totalPages"] != pages or value["page"] > pages or len(value["items"]) != min(20, max(0, total - start)):
+        raise ValueError("validation case page count or window disagrees with its population")
+    if value["previousPage"] != (value["page"] - 1 if value["page"] > 1 else None) or \
+            value["nextPage"] != (value["page"] + 1 if value["page"] < pages else None):
+        raise ValueError("validation case navigation leaves its captured window")
+    if len({item["caseId"] for item in value["items"]}) != len(value["items"]) or value["sourceSha256"] != summary["sourceSha256"]:
+        raise ValueError("validation case identity or source binding disagrees")
+    behavior = value["normalOutcome"] == "behavior-checked"
+    matched = int(value["matchedInputs"]) if value["matchedInputs"] is not None else None
+    if behavior:
+        if total == 0 or matched is None or matched > total or summary["casesCompared"] != value["totalInputs"] or \
+                summary["result"] != ("passed" if matched == total else "failed"):
+            raise ValueError("validation behavior counts or full comparison result disagree")
+    elif matched is not None or summary["casesCompared"] != "0" or \
+            summary["result"] != ("failed" if value["normalOutcome"] == "compile-failed" else "unknown"):
+        raise ValueError("unobserved compile-only cases cannot become behavior success")
+    page_matches = 0
+    for index, item in enumerate(value["items"]):
+        if int(item["ordinal"]) != start + index + 1:
+            raise ValueError("validation case ordinals leave their captured page")
+        flags = [item[key] for key in ("exitCodeMatches", "stdoutMatches", "stderrMatches")]
+        counts = [item[key] for key in ("originalStdoutBytes", "rebuiltStdoutBytes", "originalStderrBytes", "rebuiltStderrBytes")]
+        previews = [item[key] for key in ("originalStdoutPreview", "rebuiltStdoutPreview", "originalStderrPreview", "rebuiltStderrPreview")]
+        if not behavior:
+            expected = "compile-failed" if value["normalOutcome"] == "compile-failed" else "compile-only"
+            if item["outcome"] != expected or any(field is not None for field in flags + counts + previews):
+                raise ValueError("compile-only validation must preserve absent case observations")
+            continue
+        if any(flag is None for flag in flags):
+            raise ValueError("compared validation cases require every comparison flag")
+        for preview, count in zip(previews, counts):
+            check_validation_preview(preview, count)
+        for flag, first, second in [(item["stdoutMatches"], previews[0], previews[1]),
+                                    (item["stderrMatches"], previews[2], previews[3])]:
+            same_prefix = first["totalBytes"] == second["totalBytes"] and first["hex"] == second["hex"]
+            if flag and (not same_prefix or first["text"] != second["text"] or first["textBytes"] != second["textBytes"]):
+                raise ValueError("equal validation streams have different prefixes")
+            if not first["truncated"] and not second["truncated"] and flag != same_prefix:
+                raise ValueError("complete validation previews contradict their comparison flag")
+        same = all(flags)
+        if item["outcome"] != ("matched" if same else "mismatch"):
+            raise ValueError("validation case outcome contradicts its comparison flags")
+        page_matches += int(same)
+    if matched is not None and not page_matches <= matched <= page_matches + total - len(value["items"]):
+        raise ValueError("validation case page contradicts the full matched count")
+
 # #604's outcome index is deliberately narrower than the full fixture manifest.
 # These expectations cannot be changed merely by relabeling a fixture in JSON.
 OUTCOME_EXPECTATIONS = {
@@ -249,6 +326,7 @@ def check_semantics(document: dict) -> None:
         if data["acceptance"] == "accepted":
             if summary is None or summary.get("result") != "passed":
                 raise ValueError("accepted report requires a passed validation summary")
+        check_validation_cases(data)
     elif kind == "snapshot":
         check_run(data["run"])
         if (data["throughCursor"] is None) != (data["throughSequence"] is None):

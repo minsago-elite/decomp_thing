@@ -12,6 +12,78 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('decodes bounded validation case windows exact counts and unobserved compilation rows', () => {
+    const document = decodeResponse(fixture('report-normal-cases'), 'report');
+    const detail = document.data.validationCases, item = detail?.items[0];
+    if (!detail || !item) throw new Error('authored case fixture is absent');
+    expect(item.originalStdoutPreview?.hex).toBe('00 ff 0a');
+    expect(item.originalStdoutPreview?.text).toBeNull();
+    const legacy = { ...document.data }; delete legacy.validationCases;
+    expect(decodeResponse(JSON.stringify({ ...document, data: legacy }), 'report').data.validationCases).toBeUndefined();
+    const compilation = { ...document, data: { ...document.data,
+      summary: { result: 'unknown', casesCompared: '0', sourceSha256: detail.sourceSha256 },
+      validationCases: { ...detail, normalOutcome: 'compile-valid', matchedInputs: null,
+        items: [{ ...item, outcome: 'compile-only', exitCodeMatches: null, stdoutMatches: null, stderrMatches: null,
+          originalStdoutBytes: null, rebuiltStdoutBytes: null, originalStderrBytes: null, rebuiltStderrBytes: null,
+          originalStdoutPreview: null, rebuiltStdoutPreview: null, originalStderrPreview: null, rebuiltStderrPreview: null }] } } };
+    expect(decodeResponse(JSON.stringify(compilation), 'report').data.validationCases?.matchedInputs).toBeNull();
+    const rows = Array.from({ length: 20 }, (_, index) => ({ ...item, caseId: `case_${index + 1}`, ordinal: String(index + 1) }));
+    const first = { ...document, data: { ...document.data,
+      summary: { result: 'passed', casesCompared: '21', sourceSha256: detail.sourceSha256 },
+      validationCases: { ...detail, totalInputs: '21', matchedInputs: '21', totalPages: 2, nextPage: 2, items: rows } } };
+    expect(decodeResponse(JSON.stringify(first), 'report').data.validationCases?.items).toHaveLength(20);
+    const last = { ...first, data: { ...first.data, validationCases: { ...first.data.validationCases,
+      page: 2, previousPage: 1, nextPage: null, items: [{ ...item, caseId: 'case_21', ordinal: '21' }] } } };
+    expect(decodeResponse(JSON.stringify(last), 'report').data.validationCases?.items[0]?.ordinal).toBe('21');
+    const hex = Array.from({ length: 128 }, (_, index) => `${index === 0 ? '' : index % 16 === 0 ? '\n' : ' '}00`).join('');
+    const preview = { totalBytes: '9007199254740993', prefixBytes: 128, hex, text: '\\u0000'.repeat(128), textBytes: 128, truncated: true };
+    const large = { ...document, data: { ...document.data, validationCases: { ...detail, items: [{ ...item,
+      originalStdoutBytes: preview.totalBytes, rebuiltStdoutBytes: preview.totalBytes,
+      originalStdoutPreview: preview, rebuiltStdoutPreview: preview }] } } };
+    expect(decodeResponse(JSON.stringify(large), 'report').data.validationCases?.items[0]?.originalStdoutBytes).toBe(preview.totalBytes);
+    const mismatch = { ...large, data: { ...large.data, summary: { result: 'failed', casesCompared: '1', sourceSha256: detail.sourceSha256 },
+      validationCases: { ...large.data.validationCases, matchedInputs: '0', items: [{ ...large.data.validationCases.items[0], outcome: 'mismatch', stdoutMatches: false }] } } };
+    expect(decodeResponse(JSON.stringify(mismatch), 'report').data.validationCases?.items[0]?.stdoutMatches).toBe(false);
+  });
+  it('refuses contradictory validation case populations ordinals previews flags and authority', () => {
+    const document = decodeResponse(fixture('report-normal-cases'), 'report');
+    const detail = document.data.validationCases, item = detail?.items[0], preview = item?.originalStdoutPreview;
+    if (!detail || !item || !preview) throw new Error('authored case fixture is absent');
+    const invalid = [{ ...detail, totalInputs: '2' }, { ...detail, totalPages: 2 }, { ...detail, page: 2 },
+      { ...detail, nextPage: 2 }, { ...detail, previousPage: 1 }, { ...detail, matchedInputs: '0' },
+      { ...detail, sourceSha256: 'd'.repeat(64) }, { ...detail, items: [item, item] },
+      { ...detail, items: [{ ...item, ordinal: '2' }] }, { ...detail, items: [{ ...item, outcome: 'mismatch' }] },
+      { ...detail, items: [{ ...item, stdoutMatches: null }] }, { ...detail, items: [{ ...item, stdoutMatches: false, outcome: 'mismatch' }] },
+      { ...detail, items: [{ ...item, originalStdoutBytes: '4' }] },
+      ...[{ ...preview, prefixBytes: 2 }, { ...preview, prefixBytes: 129 }, { ...preview, totalBytes: '4' },
+        { ...preview, truncated: true }, { ...preview, textBytes: 0 }, { ...preview, hex: '00 FF 0a' },
+        { ...preview, hex: '00 ff' }].map(value => ({ ...detail, items: [{ ...item, originalStdoutPreview: value }] })),
+      { ...detail, normalOutcome: 'compile-valid' }];
+    for (const value of invalid) for (const mode of ['producer', 'response'] as const) {
+      expect(() => decodeContract(JSON.stringify({ ...document, data: { ...document.data, validationCases: value } }), { mode }))
+        .toThrow(ApiClientError);
+    }
+    for (const data of [{ ...document.data, state: 'partial' }, { ...document.data, authority: 'canonical-validation' },
+      { ...document.data, acceptance: 'accepted' }]) {
+      expect(() => decodeResponse(JSON.stringify({ ...document, data }), 'report')).toThrow(ApiClientError);
+    }
+  });
+  it('keeps unrecorded validation unknown and refuses partial reports without a recognized producer', () => {
+    const document = decodeResponse(fixture('report-normal-not-recorded'), 'report');
+    expect(document.data.state).toBe('unknown');
+    expect(document.data.producerSchemaVersion).toBeNull();
+    expect(document.data.summary).toBeNull();
+    expect(document.data.acceptance).toBe('not-evaluated');
+    for (const mode of ['producer', 'response'] as const) {
+      expect(decodeContract(JSON.stringify(document), { mode })).toEqual(document);
+      expect(() => decodeContract(JSON.stringify({ ...document, data: { ...document.data, state: 'partial' } }), { mode }))
+        .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
+      const partial = { ...document, data: { ...document.data, state: 'partial', producerSchemaVersion: 2 } };
+      expect(decodeContract(JSON.stringify(partial), { mode })).toEqual(partial);
+      expect(() => decodeContract(JSON.stringify({ ...partial, data: { ...partial.data, producerSchemaVersion: 3 } }), { mode }))
+        .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
+    }
+  });
   it('keeps older file metadata readable and projects only admitted reported-generation fields', () => {
     const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
     expect(decodeContract(JSON.stringify(original), { mode: 'producer' })).toEqual(original);

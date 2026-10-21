@@ -372,7 +372,7 @@ internal fun recordedNormalValidationCorpusSha256(rows: JsonArray): String {
     return HexFormat.of().formatHex(digest.digest())
 }
 
-private fun parseNormalValidationJson(bytes: ByteArray): JsonObject {
+internal fun parseNormalValidationJson(bytes: ByteArray): JsonObject {
     require(bytes.size.toLong() in 1..MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
     return OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = bytes.size, maximumCanonicalBytes = bytes.size,
         maximumDepth = 20, maximumNodes = 1_000_000, maximumStringBytes = bytes.size,

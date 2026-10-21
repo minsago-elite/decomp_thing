@@ -510,6 +510,254 @@ class RecordedRepairValidationCasesTest {
         assertEquals(1, parseRecordedRepairHistoryQuery(null).validationCasePageNumber)
     }
 
+    private val apiJob = "a".repeat(32)
+    private val apiRun = "run_selected"
+    private val apiQuery get() = "historyGraph=$graph&historyRunEvidence=run_00000001"
+    private fun apiSnapshot(f: Fixture, digest: String = graph, owner: String = "run_00000001", normal: Boolean = true): RepairHistorySnapshot {
+        val corpus = f.binding.proof.regressionCorpusSha256
+        val run = RepairRecordedRun(4, RepairRecordedIdentity(owner, false), RepairRunStatus.RUNNING,
+            f.binding.candidate, null, null, corpus, 2, 0, 1, 100, null, null,
+            baselineValidationObservation = f.binding.takeIf { normal })
+        return RepairHistorySnapshot(digest, 4, RepairRecordedGraphWire.COMPACT, corpus,
+            f.binding.candidate, null, null, listOf(run), emptyList(), null, emptyList())
+    }
+    private fun apiCapture(f: Fixture, primary: ByteArray? = f.bytes, diff: ByteArray? = f.diffBytes,
+        snapshot: RepairHistorySnapshot = apiSnapshot(f), query: String = apiQuery): WebRevisionValidationCapture =
+        WebRevisionValidationCapture(RepairRecordedHistoryPage.select(snapshot, WebRevisionValidationQuery.parse(query).selection, 20), primary, diff)
+    private fun apiReport(f: Fixture, primary: ByteArray? = f.bytes, diff: ByteArray? = f.diffBytes, casePage: Int = 1): JsonObject =
+        WebRevisionValidationReports { _, _, _ -> apiCapture(f, primary, diff) }.read(apiJob, apiRun,
+            apiQuery + if (casePage == 1) "" else "&historyValidationPage=$casePage")
+    private fun apiArtifacts(f: Fixture): List<WebArtifactSummary> = listOf(
+        WebArtifactSummary("reports/runs/$apiRun/source-tree/" + repairValidationReceiptPath(nonce, f.binding.primary.sha256),
+            "PRIVATE-receipt-name", f.binding.primary.bytes)) + listOfNotNull(f.binding.diff?.let {
+        WebArtifactSummary("reports/runs/$apiRun/source-tree/" + repairValidationDiffPath(it.sha256), "PRIVATE-diff-name", it.bytes)
+    })
+    private val apiContext get() = WebReportContext(Path.of("authored"), "reports/runs/$apiRun", apiRun)
+
+    @Test fun `versioned validation selection requires one explicit graph and owner before capture`() {
+        val invalid = listOf(null, "", "historyGraph=$graph", "historyRunEvidence=run_00000001", apiQuery + "&historyEvidence=revision_other",
+            apiQuery + "&historyGraph=$graph", apiQuery + "&runId=run_other", apiQuery + "&historyCasesPage=1",
+            apiQuery + "&historyValidationPage=02", apiQuery + "&historyPage=01", apiQuery + "&historyPage=2147483648",
+            apiQuery.replace(graph, "9".repeat(63)), apiQuery.replace("run_00000001", "..%2FPRIVATE"))
+        invalid.forEach { assertEquals(400, assertFailsWith<WebAccessDenied> { WebRevisionValidationQuery.parse(it) }.status) }
+        assertEquals("run_00000001", WebRevisionValidationQuery.parse(apiQuery).selection.evidenceRun)
+        assertEquals(2, WebRevisionValidationQuery.parse(apiQuery + "&historyValidationPage=2").casePageNumber)
+    }
+    @Test fun `actual validation report shape retains source identity counts and observation authority`() {
+        val f = fixture(); val report = apiReport(f); val summary = report.getValue("summary").jsonObject
+        assertEquals("available", report.getValue("state").jsonPrimitive.content)
+        assertEquals("passed", summary.getValue("result").jsonPrimitive.content)
+        assertEquals("2", summary.getValue("casesCompared").jsonPrimitive.content)
+        assertEquals(f.binding.proof.sourceRevisionSha256, summary.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(f.binding.candidate.value, report.getValue("binding").jsonObject.getValue("revisionId").jsonPrimitive.content)
+        assertEquals("observations", report.getValue("authority").jsonPrimitive.content)
+        assertEquals("not-evaluated", report.getValue("acceptance").jsonPrimitive.content)
+        assertEquals(JsonNull, report.getValue("sourceArtifact")); assertEquals(JsonNull, report.getValue("acceptanceArtifactId"))
+        assertFalse("PRIVATE" in report.toString()); assertFalse("command" in report.toString())
+    }
+    @Test fun `normal mismatches produce a failed report without granting acceptance`() {
+        val report = apiReport(fixture(mismatch = true))
+        assertEquals("available", report.getValue("state").jsonPrimitive.content)
+        assertEquals("failed", report.getValue("summary").jsonObject.getValue("result").jsonPrimitive.content)
+        assertEquals("not-evaluated", report.getValue("acceptance").jsonPrimitive.content)
+    }
+    @Test fun `compile failure and compile only reports do not invent completed behavior pairs`() {
+        for ((kind, expected) in listOf(RepairValidationObservedOutcome.COMPILE_FAILED to "failed",
+                RepairValidationObservedOutcome.COMPILE_VALID to "unknown")) {
+            val summary = apiReport(fixture(outcome = kind)).getValue("summary").jsonObject
+            assertEquals(expected, summary.getValue("result").jsonPrimitive.content)
+            assertEquals("0", summary.getValue("casesCompared").jsonPrimitive.content)
+        }
+    }
+    @Test fun `unavailable incomplete and corrupt recorded reports remain distinct`() {
+        val f = fixture()
+        assertEquals("unknown", apiReport(f, primary = null).getValue("state").jsonPrimitive.content)
+        assertEquals("unknown", apiReport(f, primary = byteArrayOf()).getValue("state").jsonPrimitive.content)
+        val incomplete = apiReport(scopes(f, emptyList()))
+        assertEquals("partial", incomplete.getValue("state").jsonPrimitive.content); assertEquals(JsonNull, incomplete.getValue("summary"))
+        val invalid = apiReport(f, primary = byteArrayOf(1))
+        assertEquals("invalid", invalid.getValue("state").jsonPrimitive.content); assertEquals(JsonNull, invalid.getValue("summary"))
+    }
+    @Test fun `digest bound unsupported producer versions are not treated as valid or malformed current reports`() {
+        val f = fixture()
+        val unsupported = apiReport(rebind(f, JsonObject(f.root + ("schemaVersion" to JsonPrimitive(3)))))
+        assertEquals("unsupported", unsupported.getValue("state").jsonPrimitive.content)
+        assertEquals(3, unsupported.getValue("producerSchemaVersion").jsonPrimitive.intOrNull)
+        assertEquals(JsonNull, unsupported.getValue("summary"))
+        val invalid = apiReport(rebind(f, JsonObject(f.root + ("schemaVersion" to JsonPrimitive("3")))))
+        assertEquals("invalid", invalid.getValue("state").jsonPrimitive.content)
+    }
+    @Test fun `required derived diff bytes must be available and checked before a report result is exposed`() {
+        val f = fixture(mismatch = true)
+        val missing = apiReport(f, diff = null); val corrupt = apiReport(f, diff = byteArrayOf(1))
+        assertEquals("partial", missing.getValue("state").jsonPrimitive.content)
+        assertEquals("invalid", corrupt.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, missing.getValue("summary")); assertEquals(JsonNull, corrupt.getValue("summary"))
+    }
+    @Test fun `an owner without a normal receipt has no invented normal or fatal result`() {
+        val f = fixture(); val report = recordedValidationReport(apiJob, apiRun,
+            apiCapture(f, snapshot = apiSnapshot(f, normal = false)))
+        assertEquals("unknown", report.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, report.getValue("producerSchemaVersion"))
+        assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("binding").jsonObject.getValue("revisionId"))
+    }
+    @Test fun `foreign captured graph owner and malformed job identities are refused before projection`() {
+        val f = fixture(); var calls = 0
+        val different = apiQuery.replace("run_00000001", "run_00000002")
+        val reports = WebRevisionValidationReports { _, _, _ -> calls++; apiCapture(f,
+            snapshot = apiSnapshot(f, owner = "run_00000002"), query = different) }
+        assertEquals(409, assertFailsWith<WebAccessDenied> { reports.read(apiJob, apiRun, apiQuery) }.status)
+        assertEquals(404, assertFailsWith<WebAccessDenied> { reports.read("PRIVATE/..", apiRun, apiQuery) }.status)
+        assertEquals(1, calls)
+        val changed = apiQuery.replace(graph, "9".repeat(64))
+        assertEquals(409, assertFailsWith<WebAccessDenied> {
+            WebRevisionValidationReports { _, _, _ -> apiCapture(f, snapshot = apiSnapshot(f, digest = "9".repeat(64)), query = changed) }
+                .read(apiJob, apiRun, apiQuery)
+        }.status)
+    }
+    @Test fun `capture admission rejects overlapping reads and releases after a callback failure`() {
+        val f = fixture(); var fail = true; var busy = false
+        lateinit var reports: WebRevisionValidationReports
+        reports = WebRevisionValidationReports { _, _, _ ->
+            if (fail) error("PRIVATE-callback-failure")
+            busy = assertFailsWith<WebAccessDenied> { reports.read(apiJob, apiRun, apiQuery) }.status == 429
+            apiCapture(f)
+        }
+        assertFailsWith<IllegalStateException> { reports.read(apiJob, apiRun, apiQuery) }
+        fail = false; assertEquals("available", reports.read(apiJob, apiRun, apiQuery).getValue("state").jsonPrimitive.content)
+        assertTrue(busy)
+    }
+    @Test fun `stale graph and foreign owner selection precede every report inventory or payload callback`() {
+        val f = fixture(); val snapshot = apiSnapshot(f); var payloadCalls = 0
+        for (selection in listOf(RepairRecordedHistorySelection(expectedGraphSha256 = "9".repeat(64), evidenceRun = "run_00000001"),
+                RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceRun = "run_foreign"))) {
+            assertFailsWith<WebAccessDenied> { captureRecordedValidationReport(selection, apiContext, { "1" },
+                { RepairHistoryReadResult.recorded(snapshot) }, { _, _ -> payloadCalls++; apiArtifacts(f) },
+                { _, _ -> payloadCalls++; f.bytes }) }
+        }
+        assertEquals(0, payloadCalls)
+    }
+    @Test fun `changed attempt or graph after payload capture refuses a mixed report`() {
+        val f = fixture(); val selection = WebRevisionValidationQuery.parse(apiQuery).selection
+        for (changeGraph in listOf(false, true)) {
+            var captured = false
+            val failure = assertFailsWith<WebAccessDenied> { captureRecordedValidationReport(selection, apiContext,
+                { if (captured && !changeGraph) "2" else "1" },
+                { RepairHistoryReadResult.recorded(apiSnapshot(f, digest = if (captured && changeGraph) "9".repeat(64) else graph)) },
+                { _, _ -> apiArtifacts(f) }, { _, _ -> captured = true; f.bytes }) }
+            assertTrue(captured); assertEquals(409, failure.status)
+        }
+    }
+    @Test fun `ambiguous artifact inventory and excessive commitments never admit a payload read`() {
+        val original = fixture(); val selection = WebRevisionValidationQuery.parse(apiQuery).selection
+        val oversized = original.copy(binding = original.binding.copy(primary = original.binding.primary.copy(
+            bytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES + 1)))
+        for (f in listOf(original, oversized)) {
+            var reads = 0
+            val capture = captureRecordedValidationReport(selection, apiContext, { "1" },
+                { RepairHistoryReadResult.recorded(apiSnapshot(f)) },
+                { _, _ -> apiArtifacts(f).let { if (f === original) it + it.single() else it } },
+                { _, _ -> reads++; f.bytes })
+            assertEquals(0, reads); assertNull(capture.primary)
+        }
+    }
+    @Test fun `report identities bind the job run graph owner and exact primary receipt`() {
+        val f = fixture(); val capture = apiCapture(f)
+        fun identity(job: String = apiJob, run: String = apiRun, value: WebRevisionValidationCapture = capture) =
+            recordedValidationReport(job, run, value).getValue("reportId").jsonPrimitive.content
+        val base = identity(); assertEquals(base, identity())
+        assertNotEquals(base, identity(job = "b".repeat(32))); assertNotEquals(base, identity(run = "run_other"))
+        assertNotEquals(base, identity(value = apiCapture(stdoutPair(byteArrayOf(1)))))
+        val query = apiQuery.replace(graph, "9".repeat(64))
+        assertNotEquals(base, identity(value = apiCapture(f, snapshot = apiSnapshot(f, digest = "9".repeat(64)), query = query)))
+        val ownerQuery = apiQuery.replace("run_00000001", "run_00000002")
+        assertNotEquals(base, identity(value = apiCapture(f, snapshot = apiSnapshot(f, owner = "run_00000002"), query = ownerQuery)))
+    }
+
+    @Test fun `versioned case detail retains graph owner corpus source identity exact flags and byte prefixes`() {
+        val f = fixture(); val report = apiReport(f); val detail = report.getValue("validationCases").jsonObject
+        assertEquals(graph, detail.getValue("graphSha256").jsonPrimitive.content)
+        assertEquals(f.binding.proof.sourceRevisionSha256, detail.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(f.binding.proof.regressionCorpusSha256, detail.getValue("corpusSha256").jsonPrimitive.content)
+        assertEquals("run-baseline", detail.getValue("ownerKind").jsonPrimitive.content)
+        assertEquals("run_00000001", detail.getValue("ownerId").jsonPrimitive.content)
+        assertEquals("2", detail.getValue("totalInputs").jsonPrimitive.content)
+        val rows = detail.getValue("items").jsonArray; assertEquals(2, rows.size)
+        val first = rows.first().jsonObject
+        assertEquals(page(f).cases.first().identity.value, first.getValue("caseId").jsonPrimitive.content)
+        assertEquals("matched", first.getValue("outcome").jsonPrimitive.content)
+        assertEquals(true, first.getValue("stdoutMatches").jsonPrimitive.booleanOrNull)
+        val preview = first.getValue("originalStdoutPreview").jsonObject
+        assertEquals("2", preview.getValue("totalBytes").jsonPrimitive.content)
+        assertEquals("00 ff", preview.getValue("hex").jsonPrimitive.content)
+        assertEquals(JsonNull, preview.getValue("text")); assertEquals(JsonNull, preview.getValue("textBytes"))
+        assertFalse("PRIVATE" in report.toString()); assertEquals("not-evaluated", report.getValue("acceptance").jsonPrimitive.content)
+    }
+    @Test fun `versioned case pages preserve the same report and full counts across bounded windows`() {
+        val f = fixture(count = 41); val reports = (1..3).map { apiReport(f, casePage = it) }
+        assertEquals(1, reports.map { it.getValue("reportId") }.distinct().size)
+        val details = reports.map { it.getValue("validationCases").jsonObject }
+        assertEquals(listOf(20, 20, 1), details.map { it.getValue("items").jsonArray.size })
+        assertEquals((1..41).map(Int::toString), details.flatMap { it.getValue("items").jsonArray.map { row -> row.jsonObject.getValue("ordinal").jsonPrimitive.content } })
+        assertTrue(details.all { it.getValue("totalInputs").jsonPrimitive.content == "41" && it.getValue("matchedInputs").jsonPrimitive.content == "41" })
+        assertEquals(JsonNull, details.first().getValue("previousPage")); assertEquals(JsonPrimitive(2), details.first().getValue("nextPage"))
+        assertEquals(JsonPrimitive(2), details.last().getValue("previousPage")); assertEquals(JsonNull, details.last().getValue("nextPage"))
+        assertEquals(400, assertFailsWith<WebAccessDenied> { apiReport(f, casePage = Int.MAX_VALUE) }.status)
+    }
+    @Test fun `versioned compilation cases preserve absent comparisons counts and all four previews`() {
+        for (kind in listOf(RepairValidationObservedOutcome.COMPILE_FAILED, RepairValidationObservedOutcome.COMPILE_VALID)) {
+            val detail = apiReport(fixture(outcome = kind)).getValue("validationCases").jsonObject
+            assertEquals(JsonNull, detail.getValue("matchedInputs"))
+            val expected = if (kind == RepairValidationObservedOutcome.COMPILE_FAILED) "compile-failed" else "compile-only"
+            for (row in detail.getValue("items").jsonArray) {
+                val item = row.jsonObject; assertEquals(expected, item.getValue("outcome").jsonPrimitive.content)
+                for (name in listOf("exitCodeMatches", "stdoutMatches", "stderrMatches", "originalStdoutBytes", "rebuiltStdoutBytes",
+                        "originalStderrBytes", "rebuiltStderrBytes", "originalStdoutPreview", "rebuiltStdoutPreview", "originalStderrPreview", "rebuiltStderrPreview"))
+                    assertEquals(JsonNull, item.getValue(name))
+            }
+        }
+    }
+    @Test fun `corrupt later case scopes and missing required diffs withhold every versioned case row`() {
+        val f = fixture(); val rows = f.root.getValue("scopes").jsonArray.toMutableList()
+        rows[4] = JsonObject(rows[4].jsonObject + ("inputId" to JsonPrimitive("PRIVATE-foreign")))
+        val corrupt = apiReport(scopes(f, rows)); val incomplete = apiReport(fixture(mismatch = true), diff = null)
+        assertEquals("invalid", corrupt.getValue("state").jsonPrimitive.content)
+        assertEquals("partial", incomplete.getValue("state").jsonPrimitive.content)
+        for (report in listOf(corrupt, incomplete)) assertEquals(JsonNull, report.getValue("validationCases"))
+    }
+    @Test fun `versioned identical truncated prefixes retain a mismatch beyond their 128 byte boundary`() {
+        val original = ByteArray(129) { 65 }; val rebuilt = original.copyOf().also { it[it.lastIndex] = 66 }
+        val report = apiReport(stdoutPair(original, rebuilt))
+        val row = report.getValue("validationCases").jsonObject.getValue("items").jsonArray.first().jsonObject
+        val first = row.getValue("originalStdoutPreview").jsonObject; val second = row.getValue("rebuiltStdoutPreview").jsonObject
+        assertEquals(first, second); assertEquals(true, first.getValue("truncated").jsonPrimitive.booleanOrNull)
+        assertEquals(128, first.getValue("prefixBytes").jsonPrimitive.intOrNull)
+        assertEquals("129", first.getValue("totalBytes").jsonPrimitive.content)
+        assertEquals(false, row.getValue("stdoutMatches").jsonPrimitive.booleanOrNull)
+        assertEquals("mismatch", row.getValue("outcome").jsonPrimitive.content)
+        assertEquals("failed", report.getValue("summary").jsonObject.getValue("result").jsonPrimitive.content)
+    }
+    @Test fun `unknown and unsupported producer reports do not fabricate versioned case detail`() {
+        val f = fixture(); val unknown = apiReport(f, primary = null)
+        val unsupported = apiReport(rebind(f, JsonObject(f.root + ("schemaVersion" to JsonPrimitive(3)))))
+        for (report in listOf(unknown, unsupported)) {
+            assertEquals(JsonNull, report.getValue("validationCases")); assertEquals(JsonNull, report.getValue("summary"))
+        }
+        val absent = recordedValidationReport(apiJob, apiRun, apiCapture(f, snapshot = apiSnapshot(f, normal = false)))
+        assertEquals("unknown", absent.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, absent.getValue("validationCases")); assertEquals(JsonNull, absent.getValue("producerSchemaVersion"))
+    }
+    @Test fun `noncanonical or duplicate versioned case page queries fail before a capture callback`() {
+        var captures = 0; val f = fixture()
+        val reports = WebRevisionValidationReports { _, _, _ -> captures++; apiCapture(f) }
+        for (value in listOf("0", "01", "-1", "2147483648", "%32", "1&historyValidationPage=2")) {
+            assertEquals(400, assertFailsWith<WebAccessDenied> {
+                reports.read(apiJob, apiRun, apiQuery + "&historyValidationPage=$value")
+            }.status)
+        }
+        assertEquals(0, captures)
+    }
+
     private fun html(f: Fixture, number: Int = 1): String {
         val corpus = f.binding.proof.regressionCorpusSha256
         val run = RepairRecordedRun(4, RepairRecordedIdentity("run_00000001", false), RepairRunStatus.RUNNING,

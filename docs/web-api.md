@@ -157,6 +157,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
+| `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
@@ -1014,7 +1015,73 @@ not prove that a child process started or completed. The normal case table does 
 infer those fatal outcomes.
 
 This is read-only presentation of retained evidence. It does not add execution or
-acceptance authority. The versioned revision-validation API, complete fatal-case
-outcome adapter and source links to the validated snapshot remain separate unfinished work. Native actor attribution,
+acceptance authority. The versioned normal-operation report and case pages described
+below do not complete fatal-case outcome production or source links
+to the validated snapshot. Native actor attribution,
 physical resource bounds, positive authentication and decompilation effectiveness
 require their own evidence.
+
+### Selected recorded validation reports and case pages
+
+The private `GET`/`HEAD R/reports/revision-validation` route projects the existing v1
+`report` contract from one selected recorded normal validation operation. Supply
+`historyGraph=<64 lowercase hex digits>` and exactly one of
+`historyEvidence=<attempt reference>` or `historyRunEvidence=<repair-run reference>`.
+The latter selects that repair run's recorded baseline validation, not its latest
+workflow outcome. Optional `historyPage` selects the same fixed20-owner history
+window used by recorded inspection. Optional canonical `historyValidationPage` selects
+one20-case comparison window independently of the history-owner window. Duplicate,
+foreign, noncanonical and missing selection parameters are refused before capture.
+Case-reference pagination does not apply to this endpoint.
+
+The controller applies the existing session, method and JSON negotiation boundary.
+Graph/owner selection precedes report inventory or payload work. Only the selected
+normal primary and required derived diff are resolved through the existing checked
+report inventory and descriptor-backed reader. Their captures share the existing
+64 MiB recorded-evidence allowance; failed reads consume their reservation. One
+capture/projection is admitted at a time. Both the captured graph digest and selected
+durable attempt version are rechecked after reading; changes return an explicit409.
+The common response writer retains the1 MiB JSON ceiling and private no-store headers.
+These are application admission/byte bounds, not physical RSS or latency qualification.
+
+`state` distinguishes unavailable bytes (`unknown`), unavailable required scopes or
+diffs (`partial`), unsupported declared producer versions (`unsupported`) and corrupt
+or inconsistent evidence (`invalid`). Their summary is null. A normal receipt
+is not inferred from an owner alone: no normal receipt remains `unknown` with a null
+producer version. A `partial` normal report identifies the supported producer schema.
+A checked normal receipt can be `available`: compile failure reports `failed`, compile-only reports `unknown`,
+and complete behavior comparisons report `passed` or `failed` from all retained paired
+bytes. Exact completed-pair counts are decimal strings; the source digest and candidate
+reference come from that operation's graph-bound proof. A report ID binds the selected
+job, durable run, graph, evidence-owner kind/reference and primary digest. It cannot
+silently name a later report or edited source. Out-of-range comparison windows return
+an explicit400 after checking the captured scope population.
+
+An available normal report includes optional v1 `validationCases`. Older reports
+without this extension remain readable; an unavailable, incomplete, unsupported or
+invalid report carries null case detail. Every page identifies its graph, owner kind
+and reference, source and corpus digests, exact comparison policy, global input/match
+counts, window/continuation numbers and stable case identities. At most20 rows retain
+four128-byte output prefixes each. Exact byte counts remain decimal strings. Each
+preview carries canonical hex, strict escaped UTF-8 when available, consumed/prefix
+byte counts and a truncation flag. Identical truncated prefixes can still belong to
+different full outputs. Compile-failed and compile-only rows retain null comparison,
+byte-count and preview fields; they are not skipped or successful behavior executions.
+
+The shared Python wire checks and SPA decoder enforce population/window/ordinal
+consistency, source association, bounded preview geometry and canonical hex, exact
+empty/unobserved distinctions, full-summary/page consistency and comparison flags.
+When both prefixes cover complete streams their equality must match the recorded
+comparison flag; truncated prefixes cannot decide full equality. These metadata
+checks do not independently authenticate the receipt or certify native execution.
+
+Every response has observation authority and `acceptance: "not-evaluated"`.
+No accepted artifact, raw command, host path, credential, source-artifact download URL
+or unverified fatal-case result is manufactured. A source commitment is not a navigable
+validated-source snapshot. Fatal outcome production, bounded mismatch-centered diff
+windows, SPA history/owner discovery and case selection, validated-source navigation,
+complete export and new physical HTTP/browser qualification remain required by their
+original owners. Twenty-one API controls use authored DTOs and callbacks only; three
+shared wire fixtures and three pure decoder controls cover the new protocol boundaries.
+The original41 case-control bodies and actual execution fixtures are unchanged.
+The new source awaits its own ordinary Actions and review.

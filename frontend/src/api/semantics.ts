@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -6,6 +6,65 @@ import type { ApiResource } from '../app/paths';
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
+
+function checkValidationPreview(value: ValidationBytePreview | null, bytes: string | null): void {
+  if (value === null || bytes === null) throw new ApiClientError('invalid_response');
+  const total = BigInt(bytes), prefix = total > 128n ? 128 : Number(total);
+  requireValue(value.totalBytes === bytes && value.prefixBytes === prefix && value.truncated === (total > BigInt(prefix)));
+  const tokens = value.hex === '' ? [] : value.hex.split(/[ \n]/u);
+  requireValue(tokens.length === prefix && tokens.every(token => /^[0-9a-f]{2}$/u.test(token)));
+  requireValue(value.hex === tokens.map((token, index) => `${index === 0 ? '' : index % 16 === 0 ? '\n' : ' '}${token}`).join(''));
+  requireValue((value.text === null) === (value.textBytes === null));
+  if (value.textBytes !== null) requireValue(value.textBytes <= prefix &&
+    (value.truncated ? prefix - value.textBytes <= 3 : value.textBytes === prefix));
+  if (prefix === 0) requireValue(value.text === '' && value.textBytes === 0);
+}
+
+function checkValidationCases(value: ValidationCases, summary: ValidationSummary): void {
+  const total = BigInt(value.totalInputs), start = BigInt(value.page - 1) * 20n;
+  const pages = total === 0n ? 1n : (total + 19n) / 20n;
+  requireValue(BigInt(value.totalPages) === pages && value.page <= value.totalPages);
+  const remaining = total > start ? total - start : 0n;
+  requireValue(value.items.length === Number(remaining > 20n ? 20n : remaining));
+  requireValue(value.previousPage === (value.page > 1 ? value.page - 1 : null));
+  requireValue(value.nextPage === (value.page < value.totalPages ? value.page + 1 : null));
+  requireValue(new Set(value.items.map(item => item.caseId)).size === value.items.length);
+  requireValue(value.sourceSha256 === summary.sourceSha256);
+  const behavior = value.normalOutcome === 'behavior-checked';
+  let matched: bigint | null = null;
+  if (behavior) {
+    if (value.matchedInputs === null) throw new ApiClientError('invalid_response');
+    matched = BigInt(value.matchedInputs);
+    requireValue(total > 0n && matched <= total && summary.casesCompared === value.totalInputs);
+    requireValue(summary.result === (matched === total ? 'passed' : 'failed'));
+  } else requireValue(value.matchedInputs === null && summary.casesCompared === '0' &&
+    summary.result === (value.normalOutcome === 'compile-failed' ? 'failed' : 'unknown'));
+  let pageMatches = 0n;
+  value.items.forEach((item, index) => {
+    requireValue(BigInt(item.ordinal) === start + BigInt(index) + 1n);
+    const flags = [item.exitCodeMatches, item.stdoutMatches, item.stderrMatches];
+    const bytes = [item.originalStdoutBytes, item.rebuiltStdoutBytes, item.originalStderrBytes, item.rebuiltStderrBytes];
+    const previews = [item.originalStdoutPreview, item.rebuiltStdoutPreview, item.originalStderrPreview, item.rebuiltStderrPreview];
+    if (!behavior) {
+      requireValue(item.outcome === (value.normalOutcome === 'compile-failed' ? 'compile-failed' : 'compile-only') &&
+        [...flags, ...bytes, ...previews].every(field => field === null));
+      return;
+    }
+    requireValue(flags.every(flag => flag !== null));
+    previews.forEach((preview, position) => { checkValidationPreview(preview, bytes[position] ?? null); });
+    for (const [flag, first, second] of [[item.stdoutMatches, item.originalStdoutPreview, item.rebuiltStdoutPreview],
+      [item.stderrMatches, item.originalStderrPreview, item.rebuiltStderrPreview]] as const) {
+      if (first === null || second === null) throw new ApiClientError('invalid_response');
+      const samePrefix = first.totalBytes === second.totalBytes && first.hex === second.hex;
+      if (flag) requireValue(samePrefix && first.text === second.text && first.textBytes === second.textBytes);
+      if (!first.truncated && !second.truncated) requireValue(flag === samePrefix);
+    }
+    const same = flags.every(flag => flag === true);
+    requireValue(item.outcome === (same ? 'matched' : 'mismatch'));
+    if (same) pageMatches++;
+  });
+  if (matched !== null) requireValue(pageMatches <= matched && matched <= pageMatches + total - BigInt(value.items.length));
+}
 
 function checkRun(run: Run): void {
   // Match the durable store, including terminal attempts cancelled before start.
@@ -177,7 +236,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'report': {
-      const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion } = document.data;
+      const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion, validationCases } = document.data;
       if (sourceArtifact) requireValue(sourceArtifact.binding.jobId === binding.jobId
         && sourceArtifact.binding.runId === binding.runId && sourceArtifact.binding.revisionId === binding.revisionId);
       if (sourceArtifact) checkHref(sourceArtifact.contentHref, {
@@ -194,6 +253,10 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         || (reportType === 'revision-validation' && producerSchemaVersion === 2);
       if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {
         throw new ApiClientError('unsupported_contract');
+      }
+      if (validationCases) {
+        if (!summary || !('result' in summary)) throw new ApiClientError('invalid_response');
+        checkValidationCases(validationCases, summary);
       }
       break;
     }
