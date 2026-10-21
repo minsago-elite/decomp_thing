@@ -797,3 +797,22 @@ canonical correlation-ID filter is retained. Unsupported formats and unverified
 metadata clear old details rather than presenting a transient-server-failure
 snapshot. The rendered refusal controls include both distinct response-format
 failures, for sixteen new physical in-memory cases across the two routes.
+
+
+Attempt-history pages retain checked rows only for the same private transport,
+deployment path, job and continuation cursor. A pending refresh or transient
+failure of that same read labels the retained rows as potentially outdated.
+Changing page/scope, invalidating the saved query, losing access, an expired cursor,
+an incompatible/malformed response, corrupt metadata or a mismatched page/attempt
+job binding clears those rows. Every returned attempt must match the requested
+job before the page is displayed.
+
+A failed safe page read offers an explicit retry of that exact page and cursor;
+it never starts or repeats workflow work. Refresh history and First page keep
+returning to the first page, including recovery from expired/invalid cursors.
+Recovery messages use fixed local copy and the existing sanitized reference-ID
+projection. In-memory view controls cover same-page retention and focus, continuation
+retry, hard refusals, both response-binding levels, invalid-query recovery and
+late responses after deployment rebinding. These controls add no physical browser
+or provider/native trial; full route/panel, form and accessibility qualification
+remains outstanding.
