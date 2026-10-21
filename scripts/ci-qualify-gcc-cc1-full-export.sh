@@ -42,5 +42,10 @@ else
   selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live selected GCC full export retains its profile-bound model and receipt evidence'
 fi
 export RUN_REAL_GHIDRA=true
+# The native helper builds are deliberately never up to date and embed a fresh random staging path in their
+# build records, so a second build changes the application JAR and the BOOT classpath reference. DECOMP_GCC_CLI_INSTALLATION
+# was installed from the earlier installDist build; reuse that build's outputs (the verify tasks still run) so the
+# regenerated expected reference stays byte-identical to the installed one.
 exec "$project_root/gradlew" --no-daemon -p "$project_root" test --rerun \
+  -x buildAnalysisIoHelper -x buildAcpGateHelper -x buildLlvmBehaviorHelper \
   --tests "$selected_test"
