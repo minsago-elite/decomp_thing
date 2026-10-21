@@ -181,3 +181,34 @@ authority before execution, retain it until the entire candidate tree is quiesce
 bounded final counters and exact supported terminal status before cgroup removal. Missing or
 inconsistent observations must fail closed and their evidence must survive run/archive binding.
 This checkpoint does not introduce a native supervisor change or a polling approximation.
+
+## Supplemental failure diagnostic
+
+When the provider has retained its existing failure receipt, it also attempts to retain
+`<label>.validation-failure.json`. This schema-version-1 producer diagnostic binds the exact
+validation receipt SHA-256 and its source/profile/index/corpus/runtime commitments. The existing
+version-2 receipt, registered proof, acceptance rules and archive verification are unchanged.
+Diagnostic publication failure is suppressed on the original failure; it cannot replace that
+failure, retry validation, or remove the primary receipt.
+The primary receipt and supplement together must fit the existing retained-receipt byte ceiling;
+the supplement is withheld with a suppressed budget failure when that ceiling has no capacity.
+An absent supplement is unavailable diagnostic data, not a successful or skipped execution.
+
+The existing primary failure classification retains its cleanup/cancellation priority. A separate
+closed reason distinguishes an enclosing deadline or typed agent timeout from other resource
+exhaustion. Unknown I/O failure remains validation failure. No exception message, command, host
+path, peer text, input ID or input bytes enter this record. Its canonical encoding is limited to
+4,096 bytes with fixed string, node and number bounds.
+
+The phase records the enclosing producer operation at entry, including preparation, build,
+original/rebuilt operation and finalization. It does not identify a native actor or prove that a
+child started, stopped, or caused the failure. A case operation may record its zero-based position
+in the exact bound receipt's input array; other phases use an explicit null position. The recorded
+input count describes the corpus, not completed, successful or skipped executions. Existing
+completed scopes, cleanup evidence and observation commitments must be interpreted separately.
+
+A future case adapter must check the selected receipt digest and source/run/revision/corpus
+bindings before joining a diagnostic. This supplemental record is not a validation result,
+accepted revision, live v1 API route, or independently qualified case-comparison view. The new
+pure data/classification tests await normal Actions; no additional native process or probe is
+introduced by this diagnostic.

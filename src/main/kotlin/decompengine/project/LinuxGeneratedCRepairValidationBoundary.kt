@@ -100,6 +100,8 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
         var rebuilt: CapturedGeneratedExecutable? = null
         var failure: CompileFailure? = null
         val cases = ArrayList<BehaviorCaseResult>()
+        var failurePhase = GeneratedCValidationFailurePhase.SOURCE_PREPARATION
+        var failureInputIndex = -1
         try {
             withSnapshot(config, request.budget, deadline) { snapshot ->
                 snapshot.populate(request)
@@ -111,12 +113,14 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                 val shell = config.tools.getValue("shell").destination
                 val command = registration.buildCommand(config.tools.getValue("make").destination,
                     compiler, shell)
+                failurePhase = GeneratedCValidationFailurePhase.BUILD
                 val build = runContained(config, deadline, request.budget, aggregateOutput, command,
                     buildEnvironment(output.path), snapshot.source.path, config.tools.values.toList() + config.buildRuntime,
                     listOf(AcpSandboxRootGrant(snapshot.source, AcpSandboxRootMode.READ_ONLY),
                         AcpSandboxRootGrant(output, AcpSandboxRootMode.READ_WRITE)),
                     ByteArray(0), deadline.remaining(),
                 )
+                failurePhase = GeneratedCValidationFailurePhase.BUILD_FINALIZATION
                 receipt.scope("build", null, build, output)
                 requireQuotaNotExhausted(output)
                 requireUnambiguousExit(build.output.exitCode)
@@ -125,21 +129,30 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                         build.output.stdout.toString(Charsets.UTF_8).take(request.budget.maximumDiagnosticCharacters),
                         build.output.stderr.toString(Charsets.UTF_8).take(request.budget.maximumDiagnosticCharacters))
                     snapshot.finishOutput()
+                    failurePhase = GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION
                     return@withSnapshot
                 }
+                failurePhase = GeneratedCValidationFailurePhase.CAPTURE_REBUILT
                 rebuilt = snapshot.captureRebuilt()
                 snapshot.finishOutput()
                 original?.let { reference ->
-                    inputs.forEach { input ->
+                    inputs.forEachIndexed { inputIndex, input ->
+                        failureInputIndex = inputIndex
+                        failurePhase = GeneratedCValidationFailurePhase.BEFORE_CASE
                         deadline.check()
+                        failurePhase = GeneratedCValidationFailurePhase.ORIGINAL_OPERATION
                         val originalOutput = runProgram(config, snapshot, deadline, request.budget, aggregateOutput,
                             reference, input, receipt)
+                        failurePhase = GeneratedCValidationFailurePhase.REBUILT_OPERATION
                         val rebuiltOutput = runProgram(config, snapshot, deadline, request.budget, aggregateOutput,
                             requireNotNull(rebuilt), input, receipt)
                         cases += BehaviorCaseResult(input, originalOutput, rebuiltOutput)
                     }
                 }
+                failureInputIndex = -1
+                failurePhase = GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION
             }
+            failurePhase = GeneratedCValidationFailurePhase.POST_EXECUTION
             deadline.check()
             val outcome = if (failure != null) "compile-failed" else if (original == null) "compile-valid" else "behavior-checked"
             val receiptBytes = receipt.finish(outcome, original, rebuilt, cases)
@@ -167,8 +180,17 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                 val bytes = receipt.finish(kind.name.lowercase().replace('_', '-'), original, rebuilt, cases,
                     cleanupVerified = kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED)
                 writeRepairEvidenceAtomically(path, bytes.toString(Charsets.UTF_8))
-                problem.addSuppressed(GeneratedCValidationFailureEvidence(path, sha256(bytes),
+                val receiptSha256 = sha256(bytes)
+                problem.addSuppressed(GeneratedCValidationFailureEvidence(path, receiptSha256,
                     kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED, kind))
+                val diagnostic = GeneratedCValidationFailureRecord(receiptSha256,
+                    request.sourceRevisionSha256, request.profileSha256, request.indexSha256,
+                    request.regressionCorpusSha256, config.configurationSha256, kind,
+                    GeneratedCValidationFailureReason.from(kind, problem), failurePhase,
+                    inputs.size, failureInputIndex.takeIf { it >= 0 })
+                writeRepairEvidenceAtomically(request.reportsDir.resolve("${request.label}.validation-failure.json"),
+                    diagnostic.encodeWithinReceiptBudget(bytes.size.toLong(),
+                        minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024)).toString(Charsets.UTF_8))
             } catch (archive: Throwable) { problem.addSuppressed(archive) }
             if (problem is InterruptedException) Thread.currentThread().interrupt()
             throw problem
