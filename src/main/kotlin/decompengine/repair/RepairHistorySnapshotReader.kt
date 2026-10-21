@@ -52,9 +52,15 @@ internal class RepairHistoryArtifactCapture internal constructor(
             attempt.before?.artifact?.let(selected::add)
             attempt.after?.artifact?.let(selected::add)
             attempt.invocation?.artifact?.let(selected::add)
+            if (page.selection.evidenceAttempt != null) attempt.validationObservation?.let {
+                selected.add(it.primary.artifact); it.diff?.artifact?.let(selected::add)
+            }
         }
         page.evidenceRuns.forEach { run ->
             run.validationDiagnostic?.let { selected.add(it.receipt); selected.add(it.diagnostic) }
+            run.baselineValidationObservation?.let {
+                selected.add(it.primary.artifact); it.diff?.artifact?.let(selected::add)
+            }
         }
         return selected.mapNotNull(paths::get)
     }

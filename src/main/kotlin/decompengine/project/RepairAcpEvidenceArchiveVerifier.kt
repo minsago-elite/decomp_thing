@@ -19,6 +19,15 @@ import decompengine.repair.requireSingleLegacyRollbackOrigin
 import decompengine.repair.RepairValidationDiagnosticBinding
 import decompengine.repair.parseRepairValidationDiagnosticBinding
 import decompengine.repair.requireRepairValidationDiagnosticAssociation
+import decompengine.repair.RepairValidationObservation
+import decompengine.repair.requireRepairValidationDiffRole
+import decompengine.repair.repairValidationDiffInputIds
+import decompengine.repair.validationObservationReceiptPath
+import decompengine.repair.RepairValidationObservedArtifact
+import decompengine.repair.RepairValidationProof
+import decompengine.repair.RepairValidationObservationLog
+import decompengine.repair.parseRepairValidationObservationLog
+import decompengine.repair.requireRepairValidationObservationAssociation
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.nio.file.Files
@@ -194,10 +203,20 @@ internal object RepairAcpEvidenceArchiveVerifier {
             graph.profileSha256 == repairProfile.configurationSha256(graph.budget)
         ) { "repair release evidence uses an unsupported repair profile" }
         verifyRunContract(graph)
+        val observedArtifactPaths = graph.runs.flatMap { run ->
+            run.validationObservations.entries.flatMap { listOfNotNull(it.primary.path, it.diff?.path) }
+        }.toSet()
+        graph.runs.forEach { run ->
+            verifyRepairValidationObservedArtifactsForArchive(run.validationObservations.entries,
+                payloadSha256, payloadSizes) { path, limit ->
+                readPayloadFile(projectDir, path, limit, payloadSha256, payloadSizes)
+            }
+        }
         val unknownRepairPaths = repairPaths.filterNot { path ->
             path in setOf(REPAIR_HISTORY_PATH, REPAIR_GRAPH_PATH, REPAIR_RECOVERY_BINDING_PATH) ||
                 REPAIR_RECEIPT_PATH.matches(path) ||
                 REPAIR_LEGACY_PATH.matches(path) ||
+                path in observedArtifactPaths ||
                 path.startsWith(REPAIR_BLOB_PREFIX)
         }
         require(unknownRepairPaths.isEmpty()) {
@@ -655,14 +674,27 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val buildDefinition = reconstructionProfile.layout.declaration("build-definition").materialize()
         val runs = graph.runs.associateBy(ReleaseRepairRun::id)
         val required = graph.nodes.mapNotNull { node -> node.validationProof?.let {
-            Triple(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)), node.status == "accepted")
-        } } + Triple(requireNotNull(graph.acceptedProof), graph.runs.last(), true)
-        required.distinct().forEach { (proof, run, fullyAccepted) ->
-            val paths = payloadSha256.filter { (path, digest) ->
-                path.startsWith("reports/") && path.endsWith(".validation.json") && digest == proof.evidenceSha256
-            }.keys
-            require(paths.size == 1) { "repair validation receipt is missing or ambiguously duplicated" }
-            val bytes = readPayloadFile(projectDir, paths.single(),
+            ReleaseValidationRequirement(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)),
+                node.id, node.status == "accepted")
+        } } + ReleaseValidationRequirement(requireNotNull(graph.acceptedProof), graph.runs.last(), graph.headId, true) +
+            graph.runs.flatMap { run -> run.validationObservations.entries.map { observation ->
+                ReleaseValidationRequirement(observation.proof.toReleaseValidationProof(), run,
+                    observation.invocation.candidateRevisionId, false)
+            } }
+        // Rejected and baseline observations use the same complete verifier as accepted receipts.
+        // Combining duplicate requirements must retain the strongest acceptance requirement.
+        required.groupBy { Triple(it.proof, it.run.id, it.candidateId) }.values.map { bindings ->
+            bindings.first().copy(fullyAccepted = bindings.any { it.fullyAccepted })
+        }.forEach { (proof, run, candidateId, fullyAccepted) ->
+            val observation = run.validationObservations.entries.singleOrNull {
+                it.invocation.candidateRevisionId == candidateId
+            }
+            require(observation == null || proof.matchesObservationProof(observation.proof)) {
+                "repair validation receipt observation differs from its required proof"
+            }
+            val path = selectRepairValidationReceiptForArchive(proof.evidenceSha256, observation?.primary,
+                payloadSha256, payloadSizes)
+            val bytes = readPayloadFile(projectDir, path,
                 minOf(graph.budget.maximumIndexEvidenceBytes, MAXIMUM_REPAIR_PROJECTION_BYTES),
                 payloadSha256, payloadSizes)
             val receipt = strictObject(bytes, HISTORY_JSON_LIMITS, "repair validation receipt")
@@ -1313,6 +1345,118 @@ private data class ReleaseRegressionInput(val id: String, val args: List<String>
 
 private data class ReleaseSourceIdentity(val path: String, val bytes: Long, val sha256: String)
 
+/** Canonical observation ownership selects the receipt; a label alias adds no authority. */
+internal fun selectRepairValidationReceiptForArchive(evidenceSha256: String,
+    primary: RepairValidationObservedArtifact?, payloadSha256: Map<String, String>,
+    payloadSizes: Map<String, Long>): String {
+    if (primary != null) {
+        require(validationObservationReceiptPath(primary.path) && primary.path.endsWith("_${primary.sha256}.json") &&
+            primary.sha256 == evidenceSha256 && payloadSha256[primary.path] == evidenceSha256 &&
+            payloadSizes[primary.path] == primary.bytes) {
+            "repair validation receipt is missing or differs from its canonical observation"
+        }
+        return primary.path
+    }
+    val paths = payloadSha256.filter { (path, digest) ->
+        path.startsWith("reports/") && path.endsWith(".validation.json") && digest == evidenceSha256
+    }.keys
+    require(paths.size == 1) { "repair validation receipt is missing or ambiguously duplicated" }
+    return paths.single()
+}
+
+/** Every graph-bound role, including rejected observations, must be an exact archive payload. */
+internal fun verifyRepairValidationObservedArtifactsForArchive(observations: List<RepairValidationObservation>,
+    payloadSha256: Map<String, String>, payloadSizes: Map<String, Long>, read: (String, Long) -> ByteArray) {
+    val unique = linkedMapOf<String, RepairValidationObservedArtifact>()
+    observations.forEach { observation ->
+        listOfNotNull(observation.primary, observation.diff).forEach { artifact ->
+            require(payloadSha256[artifact.path] == artifact.sha256 && payloadSizes[artifact.path] == artifact.bytes) {
+                "recorded validation artifact is missing or differs from the archive inventory"
+            }
+            val previous = unique.putIfAbsent(artifact.path, artifact)
+            require(previous == null || previous == artifact)
+        }
+    }
+    val primaryBindings = observations.groupBy { it.primary.path }
+    // Keep one commitment per payload instead of retaining every parsed input list for the run.
+    fun inputCommitment(ids: List<String>): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        ids.forEach { id ->
+            val bytes = id.toByteArray(StandardCharsets.UTF_8)
+            digest.update(bytes.size.toString().toByteArray(StandardCharsets.US_ASCII))
+            digest.update(':'.code.toByte())
+            digest.update(bytes)
+        }
+        return java.util.HexFormat.of().formatHex(digest.digest())
+    }
+    val expectedDiffInputs = linkedMapOf<String, String>()
+    val actualDiffInputs = linkedMapOf<String, String>()
+    unique.values.forEach { artifact ->
+        val bytes = read(artifact.path, artifact.bytes)
+        require(bytes.size.toLong() == artifact.bytes && sha256(bytes) == artifact.sha256) {
+            "recorded validation artifact changed after archive inventory"
+        }
+        val root = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = bytes.size,
+            maximumCanonicalBytes = bytes.size, maximumDepth = 20, maximumNodes = 1_000_000,
+            maximumStringBytes = bytes.size, maximumTotalStringBytes = bytes.size)) as? JsonObject
+            ?: error("normal validation artifact object type")
+        val bindings = primaryBindings[artifact.path]
+        if (bindings == null) {
+            actualDiffInputs[artifact.path] = inputCommitment(repairValidationDiffInputIds(root))
+        } else {
+            require((root["schemaVersion"] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull == 2 &&
+                (root["provider"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "generated-c-linux-bubblewrap-cgroup-v1")
+            val matches = requireNotNull((root["matches"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull)
+            bindings.forEach { binding ->
+                require((root["outcome"] as? JsonPrimitive)?.takeIf { it.isString }?.content ==
+                    binding.outcome.name.lowercase().replace('_', '-'))
+                requireRepairValidationDiffRole(binding.outcome, matches, binding.diff != null)
+                val proof = binding.proof
+                mapOf("sourceRevisionSha256" to proof.sourceRevisionSha256, "profileSha256" to proof.profileSha256,
+                    "indexSha256" to proof.indexSha256, "regressionCorpusSha256" to proof.regressionCorpusSha256,
+                    "runtimeSha256" to proof.runtimeSha256).forEach { (field, expected) ->
+                    require((root[field] as? JsonPrimitive)?.takeIf { it.isString }?.content == expected) {
+                        "recorded validation receipt differs from its observation proof: $field"
+                    }
+                }
+                require((root["cleanupVerified"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == true &&
+                    (root["assurance"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "strict-contained")
+                mapOf("originalExecutable" to proof.originalBinarySha256,
+                    "rebuiltExecutable" to proof.rebuiltBinarySha256).forEach { (field, expected) ->
+                    val executable = root.getValue(field)
+                    if (expected == null) require(executable is JsonNull) else
+                        require(((executable as? JsonObject)?.get("sha256") as? JsonPrimitive)
+                            ?.takeIf { it.isString }?.content == expected)
+                }
+                binding.diff?.let { diff ->
+                    val inputs = root["inputs"] as? JsonArray ?: error("normal validation inputs type")
+                    val ids = inputs.map { row -> ((row as? JsonObject)?.get("id") as? JsonPrimitive)
+                        ?.takeIf { it.isString }?.content ?: error("normal validation input identity type") }
+                    require(ids.isNotEmpty() && ids.distinct().size == ids.size)
+                    val commitment = inputCommitment(ids)
+                    val previous = expectedDiffInputs.putIfAbsent(diff.path, commitment)
+                    require(previous == null || previous == commitment) { "shared validation diff has incompatible inputs" }
+                }
+            }
+        }
+    }
+    require(actualDiffInputs == expectedDiffInputs) { "derived validation diff inputs differ from its primary receipt" }
+}
+
+private data class ReleaseValidationRequirement(val proof: ReleaseValidationProof, val run: ReleaseRepairRun,
+    val candidateId: String, val fullyAccepted: Boolean)
+
+private fun RepairValidationProof.toReleaseValidationProof() = ReleaseValidationProof(sourceRevisionSha256,
+    profileSha256, indexSha256, regressionCorpusSha256, originalBinarySha256, rebuiltBinarySha256,
+    runtimeSha256, evidenceSha256, cleanupVerified, assurance.name.lowercase())
+
+private fun ReleaseValidationProof.matchesObservationProof(proof: RepairValidationProof): Boolean =
+    sourceRevisionSha256 == proof.sourceRevisionSha256 && profileSha256 == proof.profileSha256 &&
+        indexSha256 == proof.indexSha256 && regressionCorpusSha256 == proof.regressionCorpusSha256 &&
+        originalBinarySha256 == proof.originalBinarySha256 && rebuiltBinarySha256 == proof.rebuiltBinarySha256 &&
+        runtimeSha256 == proof.runtimeSha256 && evidenceSha256 == proof.evidenceSha256 &&
+        cleanupVerified == proof.cleanupVerified && assurance == proof.assurance.name.lowercase()
+
 private data class ReleaseValidationProof(
     val sourceRevisionSha256: String,
     val profileSha256: String,
@@ -1409,6 +1553,7 @@ private data class ReleaseRepairRun(
     val rollbackFailureAttemptId: String?,
     val rollbackResolution: String?,
     val validationDiagnostic: RepairValidationDiagnosticBinding?,
+    val validationObservations: RepairValidationObservationLog,
 )
 
 private fun JsonObject.optionalSha256(field: String, label: String): String? = optionalString(field, label)?.also {
@@ -1435,9 +1580,10 @@ private fun JsonObject.optionalValidationProof(field: String, label: String): Re
 private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
     val root = element.requiredObject("repair release run")
     val version = root.requiredInt("schemaVersion", "repair release run")
-    require(version in 1..3) { "unsupported repair release run schema" }
+    require(version in 1..4) { "unsupported repair release run schema" }
     root.requireExactKeys(RUN_FIELDS + (if (version >= 2) RUN_ROLLBACK_FIELDS else emptySet()) +
-        (if (version >= 3) setOf("validationDiagnostic") else emptySet()), "repair release run")
+        (if (version >= 3) setOf("validationDiagnostic") else emptySet()) +
+        (if (version >= 4) setOf("validationObservations") else emptySet()), "repair release run")
     val failureAttempt = if (version >= 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
     val resolution = if (version >= 2) root.optionalString("rollbackResolution", "repair release run") else null
     val status = root.requiredString("status", "repair release run")
@@ -1465,6 +1611,9 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
         if (version >= 3) root.getValue("validationDiagnostic").takeUnless { it is JsonNull }?.let {
             parseRepairValidationDiagnosticBinding(it.requiredObject("repair release validation diagnostic"))
         } else null,
+        if (version >= 4) parseRepairValidationObservationLog(root.requiredArray("validationObservations",
+            "repair release run"), root.requiredInt("attemptedCount", "repair release run").toLong() + 1)
+        else RepairValidationObservationLog.EMPTY,
     )
 }
 
@@ -1494,8 +1643,9 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
     ) { "repair release requires complete strict-contained build and behavior validation" }
     val runById = graph.runs.associateBy(ReleaseRepairRun::id)
     require(runById.size == graph.runs.size) { "repair release run identities are duplicated" }
-    val diagnostics = graph.runs.mapNotNull { it.validationDiagnostic }
-    require(diagnostics.map { it.invocation.id }.distinct().size == diagnostics.size)
+    val validationIds = graph.runs.flatMap { run -> run.validationObservations.entries.map { it.invocation.id } +
+        listOfNotNull(run.validationDiagnostic?.invocation?.id) }
+    require(validationIds.distinct().size == validationIds.size)
     val attemptsByRun = graph.nodes.drop(1).groupBy { node ->
         requireNotNull(node.repairMetadata?.runId) { "repair release revision has no durable run identity" }
     }
@@ -1520,6 +1670,17 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
             require(run.status !in setOf("fully_accepted", "compile_valid"))
             requireRepairValidationDiagnosticAssociation(binding, run.id, graph.profileSha256, graph.indexSha256,
                 run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256)
+        }
+        run.validationObservations.entries.forEach { observation ->
+            observation.requireRetainedBudget(graph.budget.maximumIndexEvidenceBytes)
+            val invocation = observation.invocation
+            val candidate = requireNotNull(nodes[invocation.candidateRevisionId])
+            require(candidate.id == run.baselineId || candidate.repairMetadata?.runId == run.id)
+            requireRepairValidationObservationAssociation(observation, run.id, graph.profileSha256, graph.indexSha256,
+                run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256, run.originalBinarySha256)
+            candidate.validationProof?.takeIf { candidate.repairMetadata?.runId == run.id }?.let { proof ->
+                require(proof.matchesObservationProof(observation.proof))
+            }
         }
         attemptsByRun[run.id].orEmpty().forEach { node ->
             require(node.repairMetadata?.regressionCorpusSha256 == run.regressionCorpusSha256) {

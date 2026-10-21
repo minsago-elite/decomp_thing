@@ -451,4 +451,17 @@ class RepairValidationDiagnosticTest {
             RepairRecordedHistorySelection(expectedGraphSha256 = other.graphSha256, evidenceRun = "run_00000001"), 20)
         assertFailsWith<IllegalArgumentException> { capture.selectedPaths(otherPage) }
     }
+
+    @Test
+    fun `CLI report spelling becomes absolute and normalized before the strict request without a filesystem probe`() {
+        val project = Path.of("authored-project")
+        val default = repairReportsDirectory(project, null)
+        assertEquals(project.resolve("reports").toAbsolutePath().normalize(), default)
+        val selected = Path.of("authored-output", "nested", "..", "reports")
+        assertEquals(Path.of("authored-output", "reports").toAbsolutePath().normalize(), repairReportsDirectory(project, selected))
+        val absolute = Path.of("/operator/output/reports")
+        assertEquals(absolute, repairReportsDirectory(project, absolute))
+        assertEquals(default, repairReportsDirectory(project, default))
+        assertTrue(default.isAbsolute && default == default.normalize())
+    }
 }
