@@ -129,7 +129,7 @@ final class AcpCompatibilityFailureSummary {
             case "decompengine.acp.RuntimePrivateControlScope#requireDescriptor" -> "descriptor-revalidation";
             case "decompengine.acp.LinuxBubblewrapBoundaryKt#buildRuntimeManifestOwned" -> "runtime-manifest";
             case "decompengine.acp.LinuxBubblewrapBoundaryKt#stagePrivateRuntimeSnapshot" -> "runtime-snapshot";
-            case "decompengine.acp.LinuxBubblewrapBoundaryKt#pinMounts" -> "launch-pinning";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#pinMounts" -> "mount-pinning";
             case "decompengine.acp.RuntimePrivateControlScope#currentRoot" -> "root-identity";
             case "decompengine.acp.RuntimePrivateControlScope#requireRootUnexposed" -> "private-control-coverage";
             case "decompengine.acp.LinuxBubblewrapBoundaryKt#requirePrivateControlRegistryHealthy" -> "registry-health";

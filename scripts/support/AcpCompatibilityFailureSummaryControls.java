@@ -105,7 +105,7 @@ public final class AcpCompatibilityFailureSummaryControls {
             new StackTraceElement("decompengine.acp.LinuxBubblewrapBoundaryKt", "buildRuntimeManifestOwned", "PRIVATE-file", 8)
         });
         var capturedSummary = summary(null, capturedContext);
-        require(capturedSummary.contains("io[mount-event,mount-check,private-control-checkpoint,descriptor-revalidation,runtime-snapshot,launch-pinning]"));
+        require(capturedSummary.contains("io[mount-event,mount-check,private-control-checkpoint,descriptor-revalidation,runtime-snapshot,mount-pinning]"));
         require(!capturedSummary.contains("runtime-manifest"));
         results.put("distinctCapturedStageLabelsRetainOriginalPrefixAndBoundDisclosure", "PASS");
         if (results.size() != 8) throw new AssertionError("unexpected expanded summary control inventory");
