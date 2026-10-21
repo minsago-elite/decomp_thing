@@ -1156,7 +1156,7 @@ inspection, skipped/unsupported case evidence, bounded difference windows, sourc
 navigation and complete export remain required in the original full scopes.
 
 The SPA offers an explicit failure action, verifies the selected bindings and clears
-unverified evidence. Sixteen added DTO/callback methods, four shared wire fixtures,
+unverified evidence. Eighteen added DTO/callback methods, four shared wire fixtures,
 two decoder controls and four mocked-fetch/JSDOM controls cover this extension.
 They do not add actual execution contexts or physical qualification. Own Actions,
 generated drift verification and automatic review are still required.

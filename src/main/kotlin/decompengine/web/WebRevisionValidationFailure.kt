@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.project.sha256
+import decompengine.project.parseGeneratedCValidationFailureRecord
 import decompengine.repair.*
 import kotlinx.serialization.json.*
 
@@ -74,6 +75,9 @@ internal fun recordedValidationFailureReport(jobId: String, runId: String, captu
                         state = "partial"; limitation = "The required bound failure diagnostic is unavailable; no failure labels are inferred."
                     }
                     RepairEvidenceArtifactState.AVAILABLE -> {
+                        val invocation = requireNotNull(parseGeneratedCValidationFailureRecord(requireNotNull(capture.diagnostic)).invocation)
+                        require(binding.regressionCorpusSha256 == run.corpusSha256)
+                        if (!run.identity.rawIdentityWithheld) require(invocation.runId == run.identity.value)
                         val inputs = root.getValue("inputs").jsonArray
                         require(recordedNormalValidationCorpusSha256(inputs) == binding.regressionCorpusSha256)
                         require(binding.cleanupVerified == (binding.failureKind != RepairValidationFailureKind.CLEANUP_UNVERIFIED))

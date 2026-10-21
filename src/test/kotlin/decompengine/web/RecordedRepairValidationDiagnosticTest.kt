@@ -304,8 +304,13 @@ class RecordedRepairValidationDiagnosticTest {
             "outcome" to JsonPrimitive(kind.name.lowercase().replace('_', '-')),
             "cleanupVerified" to JsonPrimitive(kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED), "caseCount" to JsonPrimitive(completed))))
     }
+    private fun apiFailureSnapshot(f: Fixture): RepairHistorySnapshot {
+        val base = snapshot(f.binding)
+        return RepairHistorySnapshot(base.graphSha256, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, base.runs.map { it.copy(corpusSha256 = f.binding.regressionCorpusSha256) }, emptyList(), null, emptyList())
+    }
     private fun failurePage(f: Fixture, selection: RepairRecordedHistorySelection = parseWebValidationFailureQuery(failureQuery)) =
-        RepairRecordedHistoryPage.select(snapshot(f.binding), selection, 20)
+        RepairRecordedHistoryPage.select(apiFailureSnapshot(f), selection, 20)
     private fun failureCapture(f: Fixture, primary: ByteArray? = f.receipt, diagnostic: ByteArray? = f.diagnostic) =
         WebRevisionValidationFailureCapture(failurePage(f), primary, diagnostic)
     private fun failureReport(f: Fixture, primary: ByteArray? = f.receipt, diagnostic: ByteArray? = f.diagnostic) =
@@ -401,7 +406,7 @@ class RecordedRepairValidationDiagnosticTest {
         for (selection in listOf(RepairRecordedHistorySelection(expectedGraphSha256 = "9".repeat(64), evidenceRun = "run_00000001"),
             RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceRun = "run_00000002"))) {
             assertFailsWith<WebAccessDenied> { captureRecordedValidationFailureReport(selection, failureContext, { "v1" },
-                { RepairHistoryReadResult.recorded(snapshot(f.binding)) }, { _, _ -> payloads++; failureArtifacts(f) },
+                { RepairHistoryReadResult.recorded(apiFailureSnapshot(f)) }, { _, _ -> payloads++; failureArtifacts(f) },
                 { _, _ -> payloads++; error("payload must not be read") }) }
         }
         assertEquals(0, payloads)
@@ -409,7 +414,7 @@ class RecordedRepairValidationDiagnosticTest {
     @Test fun `failed receipt and diagnostic capture use checked targets and one shared byte allowance`() {
         val f = apiFailureFixture(); val reads = mutableListOf<Pair<String, Long>>()
         val capture = captureRecordedValidationFailureReport(parseWebValidationFailureQuery(failureQuery), failureContext, { "v1" },
-            { RepairHistoryReadResult.recorded(snapshot(f.binding)) }, { _, _ -> failureArtifacts(f) }, { target, maximum ->
+            { RepairHistoryReadResult.recorded(apiFailureSnapshot(f)) }, { _, _ -> failureArtifacts(f) }, { target, maximum ->
                 reads += target to maximum
                 if (target.endsWith(".validation-failure.json")) f.diagnostic else f.receipt })
         assertEquals(2, reads.size); assertEquals(f.binding.receiptBytes, reads[0].second)
@@ -418,7 +423,7 @@ class RecordedRepairValidationDiagnosticTest {
         val oversized = f.binding.copy(receiptBytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
         var calls = 0
         val withheld = captureRecordedValidationFailureReport(parseWebValidationFailureQuery(failureQuery), failureContext, { "v1" },
-            { RepairHistoryReadResult.recorded(snapshot(oversized)) }, { _, _ -> failureArtifacts(f) }, { _, maximum ->
+            { RepairHistoryReadResult.recorded(apiFailureSnapshot(f.copy(binding = oversized))) }, { _, _ -> failureArtifacts(f) }, { _, maximum ->
                 calls++; assertEquals(MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES, maximum); null })
         assertEquals(1, calls); assertNull(withheld.primary); assertNull(withheld.diagnostic)
     }
@@ -428,7 +433,7 @@ class RecordedRepairValidationDiagnosticTest {
             var read = false
             assertEquals(409, assertFailsWith<WebAccessDenied> { captureRecordedValidationFailureReport(
                 parseWebValidationFailureQuery(failureQuery), failureContext, { if (read && !changeGraph) "v2" else "v1" },
-                { val before = snapshot(f.binding)
+                { val before = apiFailureSnapshot(f)
                     if (read && changeGraph) RepairHistoryReadResult.recorded(RepairHistorySnapshot("9".repeat(64), 4,
                         RepairRecordedGraphWire.COMPACT, before.corpusSha256, before.publishedHead, null, null, before.runs, emptyList(), null, emptyList()))
                     else RepairHistoryReadResult.recorded(before) }, { _, _ -> failureArtifacts(f) },
@@ -436,7 +441,7 @@ class RecordedRepairValidationDiagnosticTest {
         }
     }
     @Test fun `failure history discovers distinct candidates and historical corpus without reading receipts`() {
-        val f = apiFailureFixture(); val before = snapshot(f.binding)
+        val f = apiFailureFixture(); val before = apiFailureSnapshot(f)
         val history = webValidationHistory(apiJob, apiRun, WebValidationHistoryCapture(RepairHistoryReadResult.recorded(before),
             RepairRecordedHistoryPage.select(before, RepairRecordedHistorySelection(), 20)))
         val rows = history.getValue("items") as JsonArray
@@ -470,7 +475,7 @@ class RecordedRepairValidationDiagnosticTest {
     }
 
     @Test fun `failure history windows bound all three owner families and pending to sixty one rows`() {
-        val f = apiFailureFixture(); val base = snapshot(f.binding)
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
         fun attempt(index: Int, kind: RepairRecordedAttemptKind = RepairRecordedAttemptKind.FINALIZED) = RepairRecordedAttempt(
             kind, RepairRecordedIdentity("revision_$index", false), null, index, null, null, null, null, null, null,
             emptyList(), null, RepairRecordedFailureKind.OTHER, null, null)
@@ -488,7 +493,7 @@ class RecordedRepairValidationDiagnosticTest {
         assertEquals(76, keys.toSet().size)
     }
     @Test fun `withheld failed operation references cannot expose candidate commitments or diagnostic detail`() {
-        val f = apiFailureFixture(); val base = snapshot(f.binding)
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
         val run = base.runs.single().copy(identity = RepairRecordedIdentity("run_00000001", true))
         val withheld = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, base.corpusSha256,
             base.publishedHead, null, null, listOf(run), emptyList(), null, emptyList())
@@ -502,5 +507,25 @@ class RecordedRepairValidationDiagnosticTest {
             for (key in listOf("candidateId", "sourceSha256", "corpusSha256")) assertEquals(JsonNull, row.getValue(key))
         }
         assertFalse(report.toString().contains("PRIVATE")); assertFalse(history.toString().contains("PRIVATE"))
+    }
+
+    @Test fun `failure projection refuses an otherwise valid invocation attached to another selected run`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        val crossPaired = RepairHistorySnapshot(graph, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, listOf(base.runs.single().copy(identity = RepairRecordedIdentity("run_00000002", false))), emptyList(), null, emptyList())
+        val selection = parseWebValidationFailureQuery(failureQuery.replace("run_00000001", "run_00000002"))
+        val page = RepairRecordedHistoryPage.select(crossPaired, selection, 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+    }
+    @Test fun `failure projection binds the selected run corpus while allowing a different current graph corpus`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        assertTrue(base.corpusSha256 != f.binding.regressionCorpusSha256)
+        assertEquals("available", reportState(failureReport(f)))
+        val crossPaired = RepairHistorySnapshot(graph, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, listOf(base.runs.single().copy(corpusSha256 = "9".repeat(64))), emptyList(), null, emptyList())
+        val page = RepairRecordedHistoryPage.select(crossPaired, parseWebValidationFailureQuery(failureQuery), 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
     }
 }
