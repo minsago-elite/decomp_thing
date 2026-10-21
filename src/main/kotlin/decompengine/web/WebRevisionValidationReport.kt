@@ -232,6 +232,7 @@ internal fun recordedValidationReport(jobId: String, runId: String, capture: Web
             "Integrity checks do not qualify independent containment, physical resource bounds, authentication or ACP decompilation effectiveness."))))
         put("summary", summary ?: JsonNull)
         put("validationCases", caseDetail ?: JsonNull)
+        put("validationFailure", JsonNull)
     }
 }
 
