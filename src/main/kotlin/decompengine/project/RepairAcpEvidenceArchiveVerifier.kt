@@ -19,6 +19,9 @@ import decompengine.repair.requireSingleLegacyRollbackOrigin
 import decompengine.repair.RepairValidationDiagnosticBinding
 import decompengine.repair.parseRepairValidationDiagnosticBinding
 import decompengine.repair.requireRepairValidationDiagnosticAssociation
+import decompengine.repair.RepairValidationObservation
+import decompengine.repair.RepairValidationObservedArtifact
+import decompengine.repair.RepairValidationProof
 import decompengine.repair.RepairValidationObservationLog
 import decompengine.repair.parseRepairValidationObservationLog
 import decompengine.repair.requireRepairValidationObservationAssociation
@@ -197,10 +200,20 @@ internal object RepairAcpEvidenceArchiveVerifier {
             graph.profileSha256 == repairProfile.configurationSha256(graph.budget)
         ) { "repair release evidence uses an unsupported repair profile" }
         verifyRunContract(graph)
+        val observedDiffPaths = graph.runs.flatMap { run ->
+            run.validationObservations.entries.mapNotNull { it.diff?.path }
+        }.toSet()
+        graph.runs.forEach { run ->
+            verifyRepairValidationObservedArtifactsForArchive(run.validationObservations.entries,
+                payloadSha256, payloadSizes) { path, limit ->
+                readPayloadFile(projectDir, path, limit, payloadSha256, payloadSizes)
+            }
+        }
         val unknownRepairPaths = repairPaths.filterNot { path ->
             path in setOf(REPAIR_HISTORY_PATH, REPAIR_GRAPH_PATH, REPAIR_RECOVERY_BINDING_PATH) ||
                 REPAIR_RECEIPT_PATH.matches(path) ||
                 REPAIR_LEGACY_PATH.matches(path) ||
+                path in observedDiffPaths ||
                 path.startsWith(REPAIR_BLOB_PREFIX)
         }
         require(unknownRepairPaths.isEmpty()) {
@@ -658,14 +671,19 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val buildDefinition = reconstructionProfile.layout.declaration("build-definition").materialize()
         val runs = graph.runs.associateBy(ReleaseRepairRun::id)
         val required = graph.nodes.mapNotNull { node -> node.validationProof?.let {
-            Triple(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)), node.status == "accepted")
-        } } + Triple(requireNotNull(graph.acceptedProof), graph.runs.last(), true)
-        required.distinct().forEach { (proof, run, fullyAccepted) ->
-            val paths = payloadSha256.filter { (path, digest) ->
-                path.startsWith("reports/") && path.endsWith(".validation.json") && digest == proof.evidenceSha256
-            }.keys
-            require(paths.size == 1) { "repair validation receipt is missing or ambiguously duplicated" }
-            val bytes = readPayloadFile(projectDir, paths.single(),
+            ReleaseValidationRequirement(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)),
+                node.id, node.status == "accepted")
+        } } + ReleaseValidationRequirement(requireNotNull(graph.acceptedProof), graph.runs.last(), graph.headId, true)
+        required.distinct().forEach { (proof, run, candidateId, fullyAccepted) ->
+            val observation = run.validationObservations.entries.singleOrNull {
+                it.invocation.candidateRevisionId == candidateId
+            }
+            require(observation == null || proof.matchesObservationProof(observation.proof)) {
+                "repair validation receipt observation differs from its required proof"
+            }
+            val path = selectRepairValidationReceiptForArchive(proof.evidenceSha256, observation?.primary,
+                payloadSha256, payloadSizes)
+            val bytes = readPayloadFile(projectDir, path,
                 minOf(graph.budget.maximumIndexEvidenceBytes, MAXIMUM_REPAIR_PROJECTION_BYTES),
                 payloadSha256, payloadSizes)
             val receipt = strictObject(bytes, HISTORY_JSON_LIMITS, "repair validation receipt")
@@ -1316,6 +1334,51 @@ private data class ReleaseRegressionInput(val id: String, val args: List<String>
 
 private data class ReleaseSourceIdentity(val path: String, val bytes: Long, val sha256: String)
 
+/** Canonical observation ownership selects the receipt; a label alias adds no authority. */
+internal fun selectRepairValidationReceiptForArchive(evidenceSha256: String,
+    primary: RepairValidationObservedArtifact?, payloadSha256: Map<String, String>,
+    payloadSizes: Map<String, Long>): String {
+    if (primary != null) {
+        require(primary.path.matches(Regex("reports/validation_[0-9a-f]{32}\\.validation\\.json")) &&
+            primary.sha256 == evidenceSha256 && payloadSha256[primary.path] == evidenceSha256 &&
+            payloadSizes[primary.path] == primary.bytes) {
+            "repair validation receipt is missing or differs from its canonical observation"
+        }
+        return primary.path
+    }
+    val paths = payloadSha256.filter { (path, digest) ->
+        path.startsWith("reports/") && path.endsWith(".validation.json") && digest == evidenceSha256
+    }.keys
+    require(paths.size == 1) { "repair validation receipt is missing or ambiguously duplicated" }
+    return paths.single()
+}
+
+/** Every graph-bound role, including rejected observations, must be an exact archive payload. */
+internal fun verifyRepairValidationObservedArtifactsForArchive(observations: List<RepairValidationObservation>,
+    payloadSha256: Map<String, String>, payloadSizes: Map<String, Long>, read: (String, Long) -> ByteArray) {
+    observations.forEach { observation ->
+        listOfNotNull(observation.primary, observation.diff).forEach { artifact ->
+            require(payloadSha256[artifact.path] == artifact.sha256 && payloadSizes[artifact.path] == artifact.bytes) {
+                "recorded validation artifact is missing or differs from the archive inventory"
+            }
+            val bytes = read(artifact.path, artifact.bytes)
+            require(bytes.size.toLong() == artifact.bytes && sha256(bytes) == artifact.sha256) {
+                "recorded validation artifact changed after archive inventory"
+            }
+        }
+    }
+}
+
+private data class ReleaseValidationRequirement(val proof: ReleaseValidationProof, val run: ReleaseRepairRun,
+    val candidateId: String, val fullyAccepted: Boolean)
+
+private fun ReleaseValidationProof.matchesObservationProof(proof: RepairValidationProof): Boolean =
+    sourceRevisionSha256 == proof.sourceRevisionSha256 && profileSha256 == proof.profileSha256 &&
+        indexSha256 == proof.indexSha256 && regressionCorpusSha256 == proof.regressionCorpusSha256 &&
+        originalBinarySha256 == proof.originalBinarySha256 && rebuiltBinarySha256 == proof.rebuiltBinarySha256 &&
+        runtimeSha256 == proof.runtimeSha256 && evidenceSha256 == proof.evidenceSha256 &&
+        cleanupVerified == proof.cleanupVerified && assurance == proof.assurance.name.lowercase()
+
 private data class ReleaseValidationProof(
     val sourceRevisionSha256: String,
     val profileSha256: String,
@@ -1538,14 +1601,7 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
             requireRepairValidationObservationAssociation(observation, run.id, graph.profileSha256, graph.indexSha256,
                 run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256, run.originalBinarySha256)
             candidate.validationProof?.takeIf { candidate.repairMetadata?.runId == run.id }?.let { proof ->
-                require(observation.proof.sourceRevisionSha256 == proof.sourceRevisionSha256 &&
-                    observation.proof.profileSha256 == proof.profileSha256 && observation.proof.indexSha256 == proof.indexSha256 &&
-                    observation.proof.regressionCorpusSha256 == proof.regressionCorpusSha256 &&
-                    observation.proof.originalBinarySha256 == proof.originalBinarySha256 &&
-                    observation.proof.rebuiltBinarySha256 == proof.rebuiltBinarySha256 &&
-                    observation.proof.runtimeSha256 == proof.runtimeSha256 && observation.proof.evidenceSha256 == proof.evidenceSha256 &&
-                    observation.proof.cleanupVerified == proof.cleanupVerified &&
-                    observation.proof.assurance.name.lowercase() == proof.assurance)
+                require(proof.matchesObservationProof(observation.proof))
             }
         }
         attemptsByRun[run.id].orEmpty().forEach { node ->

@@ -875,13 +875,32 @@ class UploadServer(
                 }
             }
         }
+        val normalBindings = buildList {
+            if (selected.selection.evidenceAttempt != null) selected.evidenceAttempts.forEach { attempt ->
+                attempt.validationObservation?.let { add(attempt.identity to it) }
+            }
+            selected.evidenceRuns.forEach { run -> run.baselineValidationObservation?.let { add(run.identity to it) } }
+        }
+        val observations = normalBindings.associate { (owner, binding) ->
+            val primary = targets[binding.primary.artifact]?.let { readOnce(it, binding.primary.bytes).getOrNull() }
+            val diff = binding.diff?.let { artifact -> targets[artifact.artifact]?.let { readOnce(it, artifact.bytes).getOrNull() } }
+            owner to checkedRecordedRepairValidationObservation(binding, primary, diff)
+        }
+        val observedArtifactStates = buildMap {
+            normalBindings.forEach { (owner, binding) ->
+                val detail = observations.getValue(owner)
+                put(binding.primary.artifact, detail.primaryState)
+                binding.diff?.let { put(it.artifact, detail.diffState ?: RepairEvidenceArtifactState.UNAVAILABLE) }
+            }
+        }
         val genericReferences = buildSet {
             selected.evidenceAttempts.forEach { attempt ->
                 attempt.before?.artifact?.let(::add); attempt.after?.artifact?.let(::add)
                 attempt.invocation?.artifact?.let(::add)
             }
         }
-        val evidence = targets.filterKeys { it in genericReferences }.mapValues { (_, target) ->
+        val evidence = targets.filterKeys { it in genericReferences }.mapValues { (reference, target) ->
+            observedArtifactStates[reference]?.let { return@mapValues it }
             val bytes = readOnce(target).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
             if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
                 RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
@@ -912,17 +931,6 @@ class UploadServer(
                 run.identity to checkedRecordedRepairValidationDiagnostic(binding, primary, diagnostic)
             }
         }.toMap()
-        val normalBindings = buildList {
-            if (selected.selection.evidenceAttempt != null) selected.evidenceAttempts.forEach { attempt ->
-                attempt.validationObservation?.let { add(attempt.identity to it) }
-            }
-            selected.evidenceRuns.forEach { run -> run.baselineValidationObservation?.let { add(run.identity to it) } }
-        }
-        val observations = normalBindings.associate { (owner, binding) ->
-            val primary = targets[binding.primary.artifact]?.let { readOnce(it, binding.primary.bytes).getOrNull() }
-            val diff = binding.diff?.let { artifact -> targets[artifact.artifact]?.let { readOnce(it, artifact.bytes).getOrNull() } }
-            owner to checkedRecordedRepairValidationObservation(binding, primary, diff)
-        }
         return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId, diagnostics, observations)
     }
 

@@ -2455,10 +2455,15 @@ internal class ModuleRevisionGraph private constructor(
         retention.retain(
             read = { path, limit -> readStableRepairFile(path.parent, path.fileName.toString(), limit) },
             write = { name, bytes ->
-                if (name.endsWith(".diff.json")) stateStore.writeImmutableValidationDiff(name, bytes)
+                if (name.startsWith("repair-revisions/"))
+                    stateStore.writeImmutableValidationDiff(name.removePrefix("repair-revisions/"), bytes)
                 else stateStore.writeImmutableValidationReceipt(name, bytes)
             },
-            readRetained = { name, limit -> stateStore.readValidationReport("reports/$name", limit) },
+            readRetained = { name, limit ->
+                if (name.startsWith("repair-revisions/"))
+                    stateStore.readImmutableValidationDiff(name.removePrefix("repair-revisions/"), limit)
+                else stateStore.readValidationReport("reports/$name", limit)
+            },
         )
         persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) + run.copy(schemaVersion = 4,
             validationObservations = run.validationObservations.appended(observation)))))

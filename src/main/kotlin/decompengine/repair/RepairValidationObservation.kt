@@ -22,12 +22,16 @@ enum class RepairValidationObservedOutcome { COMPILE_FAILED, COMPILE_VALID, BEHA
 /** A primary receipt and a derived diff have distinct roles even when both are JSON. */
 data class RepairValidationObservedArtifact(val path: String, val sha256: String, val bytes: Long) {
     init {
-        require(validationReportPath(path) && validationDigest(sha256) && bytes in 1..64L * 1024 * 1024)
+        require((validationReportPath(path) || validationObservationDiffPath(path)) &&
+            validationDigest(sha256) && bytes in 1..64L * 1024 * 1024)
     }
 
     internal fun toJsonObject() = JsonObject(mapOf("path" to JsonPrimitive(path),
         "sha256" to JsonPrimitive(sha256), "bytes" to JsonPrimitive(bytes)))
 }
+
+internal fun validationObservationDiffPath(path: String): Boolean =
+    Regex("reports/repair-revisions/validation_[0-9a-f]{32}\\.diff\\.json").matches(path)
 
 internal data class RepairValidationPublishedArtifact(val path: Path, val sha256: String, val bytes: Long)
 
@@ -72,7 +76,7 @@ data class RepairValidationObservation(
         require(outcome != RepairValidationObservedOutcome.BEHAVIOR_CHECKED ||
             proof.originalBinarySha256 != null && proof.rebuiltBinarySha256 != null)
         require(diff == null || outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED &&
-            diff.path == "reports/${invocation.id}.diff.json")
+            diff.path == "reports/repair-revisions/${invocation.id}.diff.json")
     }
 
     internal fun requireRetainedBudget(maximumBytes: Long) {
@@ -137,7 +141,8 @@ internal fun planRepairValidationObservationRetention(invocation: RepairValidati
         it.copy(path = path)
     }
     fun artifact(value: RepairValidationPublishedArtifact, suffix: String) = RepairValidationObservedArtifact(
-        "reports/${invocation.id}.$suffix.json", value.sha256, value.bytes)
+        "reports/" + (if (suffix == "diff") "repair-revisions/" else "") +
+            "${invocation.id}.$suffix.json", value.sha256, value.bytes)
     val observation = RepairValidationObservation(invocation, proof, outcome, artifact(normalizedPrimary, "validation"),
         normalizedDiff?.let { artifact(it, "diff") })
     observation.requireRetainedBudget(maximumBytes)

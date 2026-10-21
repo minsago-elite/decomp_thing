@@ -73,8 +73,15 @@ class RepairValidationObservationTest {
     @Test
     fun `primary and diff roles require their own fixed canonical names and commitments`() {
         val value = observation()
-        val diff = RepairValidationObservedArtifact("reports/${value.invocation.id}.diff.json", "b".repeat(64), 40)
+        val diff = RepairValidationObservedArtifact("reports/repair-revisions/${value.invocation.id}.diff.json", "b".repeat(64), 40)
         assertEquals(diff, value.copy(diff = diff).diff)
+        assertFailsWith<IllegalArgumentException> {
+            value.copy(diff = diff.copy(path = "reports/${value.invocation.id}.diff.json"))
+        }
+        for (path in listOf("reports/repair-revisions/graph.json", "reports/repair-revisions/blobs/private",
+                "reports/repair-revisions/nested/${value.invocation.id}.diff.json")) {
+            assertFailsWith<IllegalArgumentException> { diff.copy(path = path) }
+        }
         assertFailsWith<IllegalArgumentException> { value.copy(primary = value.primary.copy(path = diff.path)) }
         assertFailsWith<IllegalArgumentException> { value.copy(diff = diff.copy(path = value.primary.path)) }
         assertFailsWith<IllegalArgumentException> { observation(RepairValidationObservedOutcome.COMPILE_FAILED).copy(diff = diff) }
@@ -88,7 +95,7 @@ class RepairValidationObservationTest {
         val value = observation()
         value.requireRetainedBudget(160)
         assertFailsWith<IllegalArgumentException> { value.requireRetainedBudget(159) }
-        val diff = RepairValidationObservedArtifact("reports/${value.invocation.id}.diff.json", "b".repeat(64), 40)
+        val diff = RepairValidationObservedArtifact("reports/repair-revisions/${value.invocation.id}.diff.json", "b".repeat(64), 40)
         value.copy(diff = diff).requireRetainedBudget(240)
         assertFailsWith<IllegalArgumentException> { value.copy(diff = diff).requireRetainedBudget(239) }
         assertFailsWith<IllegalArgumentException> {
@@ -177,7 +184,7 @@ class RepairValidationObservationTest {
         val writes = linkedMapOf<String, ByteArray>()
         plan.retain(read = { path, limit -> reads.getValue(path).also { assertEquals(it.size.toLong(), limit) } },
             write = { name, bytes -> writes[name] = bytes }, readRetained = { name, _ -> writes.getValue(name) })
-        assertEquals(listOf("${value.invocation.id}.validation.json", "${value.invocation.id}.diff.json"), writes.keys.toList())
+        assertEquals(listOf("${value.invocation.id}.validation.json", "repair-revisions/${value.invocation.id}.diff.json"), writes.keys.toList())
         assertEquals(source.sha256, plan.observation.primary.sha256)
         assertEquals(derived.sha256, plan.observation.diff?.sha256)
         assertFalse(plan.observation.toJsonObject().toString().contains("operator"))

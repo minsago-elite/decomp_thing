@@ -662,7 +662,7 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
           <p>Recorded run: <code>${(attempt.run?.value ?: "none").escapeHtml()}</code></p>
           <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
           <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
-          $inspectEvidence${evidence("Before", attempt.before)}${if (attempt.validationObservation == null) evidence("After", attempt.after) else ""}
+          $inspectEvidence${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
           ${normalEvidence(attempt.validationObservation, attempt.identity)}
           <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
           $cases${if (omittedCases > 0) "<p>$omittedCases case references omitted from this page.</p>" else ""}

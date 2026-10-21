@@ -58,7 +58,7 @@ class RecordedRepairValidationObservationTest {
         val binding = RepairRecordedValidationObservation(invocation.commitmentSha256(),
             RepairRecordedIdentity(invocation.candidateRevisionId, false), proof, outcome,
             artifact("reports/${invocation.id}.validation.json", primaryBytes),
-            diffBytes?.let { artifact("reports/${invocation.id}.diff.json", it) })
+            diffBytes?.let { artifact("reports/repair-revisions/${invocation.id}.diff.json", it) })
         return Fixture(binding, primary, primaryBytes, diff, diffBytes)
     }
 
@@ -183,7 +183,7 @@ class RecordedRepairValidationObservationTest {
             recordedRepairArtifactReferences(snapshot, selected))
         val nonce = "validation_" + "b".repeat(32)
         val paths = linkedMapOf(f.binding.primary.artifact to "reports/$nonce.validation.json",
-            requireNotNull(f.binding.diff).artifact to "reports/$nonce.diff.json")
+            requireNotNull(f.binding.diff).artifact to "reports/repair-revisions/$nonce.diff.json")
         val capture = RepairHistoryArtifactCapture(snapshot, paths)
         assertTrue(capture.selectedPaths(default).isEmpty())
         assertEquals(paths.values.toList(), capture.selectedPaths(selected))
@@ -211,7 +211,7 @@ class RecordedRepairValidationObservationTest {
         val selected = RepairRecordedHistoryPage.select(snapshot,
             RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceAttempt = identity.value), 20)
         val paths = linkedMapOf(binding.primary.artifact to "reports/$nonce.validation.json",
-            requireNotNull(binding.diff).artifact to "reports/$nonce.diff.json")
+            requireNotNull(binding.diff).artifact to "reports/repair-revisions/$nonce.diff.json")
         val capture = RepairHistoryArtifactCapture(snapshot, paths)
         assertTrue(recordedRepairArtifactReferences(snapshot, default).isEmpty())
         assertTrue(capture.selectedPaths(default).isEmpty())
@@ -220,18 +220,32 @@ class RecordedRepairValidationObservationTest {
     }
 
     private fun rendered(f: Fixture, detail: RecordedRepairValidationObservationView = view(f),
-        selected: Boolean = true, duplicatePrimary: Boolean = false): String {
+        selected: Boolean = true, duplicatePrimary: Boolean = false,
+        disposition: RepairRecordedEvidenceKind? = null): String {
+        val attemptIdentity = RepairRecordedIdentity("revision_00000001_" + "c".repeat(16), false)
+        val proof = f.binding.proof
+        val invocation = RepairValidationInvocation("validation_" + "b".repeat(32), "run_00000001", attemptIdentity.value,
+            proof.sourceRevisionSha256, proof.profileSha256, proof.indexSha256, corpus)
+        val attemptBinding = f.binding.copy(candidate = attemptIdentity, invocationSha256 = invocation.commitmentSha256())
+        val attempts = disposition?.let { listOf(RepairRecordedAttempt(RepairRecordedAttemptKind.FINALIZED,
+            attemptIdentity, f.binding.candidate, 1, ModuleRevisionStatus.REJECTED, proof.sourceRevisionSha256,
+            RepairRecordedIdentity("run_00000001", false), null, null, null, emptyList(), 1,
+            RepairRecordedFailureKind.BEHAVIOR, null, RepairRecordedEvidence(it, f.binding.primary.artifact),
+            corpus, attemptBinding)) } ?: emptyList()
         val run = RepairRecordedRun(4, RepairRecordedIdentity("run_00000001", false), RepairRunStatus.RUNNING,
-            f.binding.candidate, null, null, corpus, 2, 0, 1, 100, null, null, baselineValidationObservation = f.binding)
+            f.binding.candidate, null, null, corpus, 2, attempts.size, 1, 100, null, null,
+            baselineValidationObservation = f.binding.takeIf { disposition == null })
         val snapshot = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, corpus,
-            f.binding.candidate, null, null, listOf(run), emptyList(), null, emptyList())
+            f.binding.candidate, null, null, listOf(run), attempts, null, emptyList())
         val page = RepairRecordedHistoryPage.select(snapshot, if (selected)
-            RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceRun = run.identity.value)
+            RepairRecordedHistorySelection(expectedGraphSha256 = graph,
+                evidenceRun = run.identity.value.takeIf { disposition == null },
+                evidenceAttempt = attemptIdentity.value.takeIf { disposition != null })
             else RepairRecordedHistorySelection(), 20)
         val context = WebReportContext(Path.of("authored-reports"), "reports/runs/run_selected", "run_selected")
         val nonce = "validation_" + "b".repeat(32)
         val primary = WebArtifactSummary("${context.artifactPrefix}/source-tree/reports/$nonce.validation.json", "Repair evidence", f.primaryBytes.size.toLong())
-        val diff = WebArtifactSummary("${context.artifactPrefix}/source-tree/reports/$nonce.diff.json", "Repair evidence", f.diffBytes?.size?.toLong() ?: 0L)
+        val diff = WebArtifactSummary("${context.artifactPrefix}/source-tree/reports/repair-revisions/$nonce.diff.json", "Repair evidence", f.diffBytes?.size?.toLong() ?: 0L)
         val listing = listOf(primary, diff) + if (duplicatePrimary) listOf(primary) else emptyList()
         val targets = recordedRepairArtifactReferences(snapshot, page).mapNotNull { reference ->
             recordedRepairEvidenceTarget(reference, snapshot, context, listing)?.let { reference to it }
@@ -240,7 +254,32 @@ class RecordedRepairValidationObservationTest {
             binaryPath = Path.of("authored.elf"), metadata = ElfMetadata("ELF64", "little-endian", 1u, "System V",
                 "EXEC", "x86-64", 0uL, 64.toUShort(), 0.toUShort(), 0.toUShort(), 0.toUShort()))
         return renderRecordedRepairHistory(job, RecordedRepairHistoryView(RepairHistoryReadResult.recorded(snapshot),
-            targets = targets, page = page, runId = context.runId, validationObservations = mapOf(run.identity to detail)))
+            targets = targets, evidenceStates = targets.mapValues { RepairEvidenceArtifactState.AVAILABLE },
+            page = page, runId = context.runId,
+            validationObservations = mapOf((if (disposition == null) run.identity else attemptIdentity) to detail)))
+    }
+
+    @Test
+    fun `only fixed canonical diff names are admitted from the repair state namespace`() {
+        val context = WebReportContext(Path.of("authored-reports"), "reports/runs/run_selected", "run_selected")
+        val name = "validation_" + "b".repeat(32) + ".diff.json"
+        val prefix = "${context.artifactPrefix}/source-tree/reports/repair-revisions/"
+        assertEquals("reports/repair-revisions/$name", recordedRepairLogicalArtifactPath(prefix + name, context))
+        for (suffix in listOf("graph.json", "recovery-binding.json", "blobs/private", "nested/$name", "validation_bad.diff.json"))
+            assertNull(recordedRepairLogicalArtifactPath(prefix + suffix, context))
+    }
+
+    @Test
+    fun `normal validation keeps the later regression and no improvement disposition visible`() {
+        for (kind in listOf(RepairRecordedEvidenceKind.REGRESSION, RepairRecordedEvidenceKind.VALIDATION)) {
+            val html = rendered(fixture(), disposition = kind)
+            assertTrue("<b>After:</b> ${recordedRepairEvidenceLabel(kind)} evidence" in html)
+            assertTrue("Recorded validation: Behavior checked" in html)
+            assertTrue("Open retained evidence" in html)
+            assertTrue("Open retained primary validation receipt" in html)
+            assertFalse("PRIVATE" in html)
+            assertFalse("<form" in html)
+        }
     }
 
     @Test
@@ -253,7 +292,8 @@ class RecordedRepairValidationObservationTest {
         assertTrue("Open retained derived diff" in html)
         val prefix = "/jobs/${"a".repeat(32)}/artifacts/reports/runs/run_selected/source-tree/reports/validation_${"b".repeat(32)}"
         assertTrue("href=\"$prefix.validation.json\"" in html)
-        assertTrue("href=\"$prefix.diff.json\"" in html)
+        val diffPrefix = prefix.replace("/reports/validation_", "/reports/repair-revisions/validation_")
+        assertTrue("href=\"$diffPrefix.diff.json\"" in html)
         assertFalse("PRIVATE" in html)
         assertFalse("<form" in html)
         assertTrue("Fully accepted revision: <code>none</code>" in html)
