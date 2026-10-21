@@ -128,9 +128,8 @@ internal fun recordedRepairLogicalArtifactPath(target: String, reports: WebRepor
     if (logical.length > 4096 || parts.size !in 2..32 ||
         parts.any { it == "." || it == ".." || !SAFE_REPAIR_ARTIFACT_SEGMENT.matches(it) }) return null
     if (logical == "reports/repair_history.json") return null
-    if (parts[1] == "repair-revisions" &&
-        (parts.size != 3 || (!Regex("revision_[0-9]{8}_[0-9a-f]{16}\\.acp-receipt\\.json").matches(parts[2]) &&
-            !validationObservationDiffPath(logical)))) return null
+    if (parts[1] == "repair-revisions" && !validationObservationDiffPath(logical) &&
+        (parts.size != 3 || !Regex("revision_[0-9]{8}_[0-9a-f]{16}\\.acp-receipt\\.json").matches(parts[2]))) return null
     return logical
 }
 

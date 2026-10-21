@@ -5,6 +5,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.sha256
 import decompengine.repair.RepairRecordedValidationObservation
 import decompengine.repair.RepairValidationObservedOutcome
+import decompengine.repair.requireRepairValidationDiffRole
 import decompengine.repair.RepairValidationAssurance
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -71,7 +72,7 @@ internal fun checkedRecordedRepairValidationObservation(binding: RepairRecordedV
         val inputs = inputRows.size
         val completed = requireNotNull(scalar("caseCount").intOrNull)
         val matches = requireNotNull(scalar("matches").booleanOrNull)
-        require(binding.diff == null || !matches)
+        requireRepairValidationDiffRole(binding.outcome, matches, binding.diff != null)
         require(root.getValue("scopes") is JsonArray)
         if (binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED)
             require(inputs > 0 && completed == inputs)

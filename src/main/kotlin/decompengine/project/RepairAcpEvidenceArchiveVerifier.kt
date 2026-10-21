@@ -20,6 +20,7 @@ import decompengine.repair.RepairValidationDiagnosticBinding
 import decompengine.repair.parseRepairValidationDiagnosticBinding
 import decompengine.repair.requireRepairValidationDiagnosticAssociation
 import decompengine.repair.RepairValidationObservation
+import decompengine.repair.requireRepairValidationDiffRole
 import decompengine.repair.RepairValidationObservedArtifact
 import decompengine.repair.RepairValidationProof
 import decompengine.repair.RepairValidationObservationLog
@@ -1356,14 +1357,34 @@ internal fun selectRepairValidationReceiptForArchive(evidenceSha256: String,
 /** Every graph-bound role, including rejected observations, must be an exact archive payload. */
 internal fun verifyRepairValidationObservedArtifactsForArchive(observations: List<RepairValidationObservation>,
     payloadSha256: Map<String, String>, payloadSizes: Map<String, Long>, read: (String, Long) -> ByteArray) {
+    val unique = linkedMapOf<String, RepairValidationObservedArtifact>()
     observations.forEach { observation ->
         listOfNotNull(observation.primary, observation.diff).forEach { artifact ->
             require(payloadSha256[artifact.path] == artifact.sha256 && payloadSizes[artifact.path] == artifact.bytes) {
                 "recorded validation artifact is missing or differs from the archive inventory"
             }
-            val bytes = read(artifact.path, artifact.bytes)
-            require(bytes.size.toLong() == artifact.bytes && sha256(bytes) == artifact.sha256) {
-                "recorded validation artifact changed after archive inventory"
+            val previous = unique.putIfAbsent(artifact.path, artifact)
+            require(previous == null || previous == artifact)
+        }
+    }
+    val primaryBindings = observations.groupBy { it.primary.path }
+    unique.values.forEach { artifact ->
+        val bytes = read(artifact.path, artifact.bytes)
+        require(bytes.size.toLong() == artifact.bytes && sha256(bytes) == artifact.sha256) {
+            "recorded validation artifact changed after archive inventory"
+        }
+        primaryBindings[artifact.path]?.let { bindings ->
+            val root = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = bytes.size,
+                maximumCanonicalBytes = bytes.size, maximumDepth = 20, maximumNodes = 1_000_000,
+                maximumStringBytes = bytes.size, maximumTotalStringBytes = bytes.size)) as? JsonObject
+                ?: error("normal validation receipt object type")
+            require((root["schemaVersion"] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull == 2 &&
+                (root["provider"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "generated-c-linux-bubblewrap-cgroup-v1")
+            val matches = requireNotNull((root["matches"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull)
+            bindings.forEach { binding ->
+                require((root["outcome"] as? JsonPrimitive)?.takeIf { it.isString }?.content ==
+                    binding.outcome.name.lowercase().replace('_', '-'))
+                requireRepairValidationDiffRole(binding.outcome, matches, binding.diff != null)
             }
         }
     }

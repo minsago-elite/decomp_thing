@@ -2248,6 +2248,7 @@ internal class ModuleRevisionGraph private constructor(
 
     init {
         validateLoadedState()
+        cleanupUnreferencedValidationDiffs()
         cleanupSourceTemporaries(state.pending)
         recoverPendingAttempt()
         state.runs.lastOrNull()?.takeUnless { it.terminal }?.let {
@@ -2447,26 +2448,34 @@ internal class ModuleRevisionGraph private constructor(
         val observation = retention.observation
         requireRepairValidationObservationAssociation(observation, run.id, state.profileSha256, state.indexSha256,
             run.regressionCorpusSha256, invocation.candidateRevisionId, source, run.originalBinarySha256)
+        cleanupUnreferencedValidationDiffs()
         val existing = run.validationObservations.entries.singleOrNull { it.invocation.id == invocation.id }
         if (existing != null) {
             require(existing == observation)
             return@graphOperation
         }
-        retention.retain(
-            read = { path, limit -> readStableRepairFile(path.parent, path.fileName.toString(), limit) },
-            write = { name, bytes ->
-                if (name.startsWith("repair-revisions/"))
-                    stateStore.writeImmutableValidationDiff(name.removePrefix("repair-revisions/"), bytes)
-                else stateStore.writeImmutableValidationReceipt(name, bytes)
-            },
-            readRetained = { name, limit ->
-                if (name.startsWith("repair-revisions/"))
-                    stateStore.readImmutableValidationDiff(name.removePrefix("repair-revisions/"), limit)
-                else stateStore.readValidationReport("reports/$name", limit)
-            },
-        )
-        persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) + run.copy(schemaVersion = 4,
-            validationObservations = run.validationObservations.appended(observation)))))
+        try {
+            retention.retain(
+                read = { path, limit -> readStableRepairFile(path.parent, path.fileName.toString(), limit) },
+                write = { name, bytes ->
+                    if (name.startsWith("repair-revisions/validation-diffs/"))
+                        stateStore.writeImmutableValidationDiff(name.removePrefix("repair-revisions/validation-diffs/"), bytes)
+                    else stateStore.writeImmutableValidationReceipt(name, bytes)
+                },
+                readRetained = { name, limit ->
+                    if (name.startsWith("repair-revisions/validation-diffs/"))
+                        stateStore.readImmutableValidationDiff(name.removePrefix("repair-revisions/validation-diffs/"), limit)
+                    else stateStore.readValidationReport("reports/$name", limit)
+                },
+            )
+            persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) + run.copy(schemaVersion = 4,
+                validationObservations = run.validationObservations.appended(observation)))))
+        } catch (failure: Throwable) {
+            // A graph write may have committed before reporting failure. Never delete from stale in-memory state.
+            // Reopen under the existing authenticated lock to recover against the actual committed graph.
+            lifecycle = Lifecycle.POISONED
+            throw failure
+        }
     }
 
     private fun workingHeadId(): String = state.provisionalHeadId ?: state.headId
@@ -3939,6 +3948,23 @@ internal class ModuleRevisionGraph private constructor(
             }
     }
         stateStore.synchronizeBlobs()
+    }
+
+    /** Same verified quarantine/unlink guard as source blobs; no archive or receipt authority is relaxed. */
+    private fun cleanupUnreferencedValidationDiffs() {
+        val retained = state.runs.flatMap { run -> run.validationObservations.entries.mapNotNull { it.diff } }
+        val plan = planRepairValidationDiffDirectory(
+            stateStore.validationDiffNames(repairValidationDiffDirectoryEntryLimit(state.budget)), retained,
+            repairValidationDiffDirectoryEntryLimit(state.budget))
+        plan.temporaryTargets.forEach(stateStore::cleanupValidationDiffTemporary)
+        var remaining = minOf(state.budget.maximumIndexEvidenceBytes, 2L * MAXIMUM_REPAIR_PROJECTION_BYTES)
+        plan.orphans.forEachIndexed { cleanupIndex, orphan ->
+            val (identity, size) = stateStore.validationDiffMetadata(orphan.observedName)
+            remaining = reserveRepairValidationDiffCleanupBytes(size, remaining)
+            cleanupRepairOwnedEntry(requireNotNull(stateStore.validationDiffsPath()), "", orphan.targetName,
+                setOf(orphan.sha256), identity.key, size, "validation-diff-gc", orphan.targetName,
+                cleanupIndex, faultInjector, required = true)
+        }
     }
 
     private fun cleanupGraphTemporaries() {

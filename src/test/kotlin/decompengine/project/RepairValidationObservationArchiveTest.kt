@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 /** Authored maps and byte callbacks only; no project, native validator or archive trial. */
 class RepairValidationObservationArchiveTest {
-    private val primaryBytes = "authored receipt".toByteArray()
+    private val primaryBytes = """{"schemaVersion":2,"provider":"generated-c-linux-bubblewrap-cgroup-v1","outcome":"behavior-checked","matches":false}""".toByteArray()
     private val diffBytes = "authored mismatch diff".toByteArray()
     private fun observation(index: Char = 'a'): RepairValidationObservation {
         val invocation = RepairValidationInvocation("validation_" + index.toString().repeat(32), "run_00000001",
@@ -18,7 +18,7 @@ class RepairValidationObservationArchiveTest {
             sha256(primaryBytes), true, RepairValidationAssurance.STRICT_CONTAINED)
         return RepairValidationObservation(invocation, proof, RepairValidationObservedOutcome.BEHAVIOR_CHECKED,
             RepairValidationObservedArtifact("reports/${invocation.id}.validation.json", sha256(primaryBytes), primaryBytes.size.toLong()),
-            RepairValidationObservedArtifact("reports/repair-revisions/${invocation.id}.diff.json", sha256(diffBytes), diffBytes.size.toLong()))
+            RepairValidationObservedArtifact(repairValidationDiffPath(sha256(diffBytes)), sha256(diffBytes), diffBytes.size.toLong()))
     }
     private fun payloads(observations: List<RepairValidationObservation>): Map<String, ByteArray> = buildMap {
         observations.forEach { put(it.primary.path, primaryBytes); put(requireNotNull(it.diff).path, diffBytes) }
@@ -84,7 +84,8 @@ class RepairValidationObservationArchiveTest {
             payloads.getValue(path).also { assertEquals(it.size.toLong(), limit) }
         }
         assertEquals(payloads.keys.toList(), readPaths)
-        assertTrue(readPaths.filter { it.endsWith(".diff.json") }.all { it.startsWith("reports/repair-revisions/") })
+        assertEquals(readPaths.size, readPaths.distinct().size)
+        assertTrue(readPaths.filter { it.contains("/validation-diffs/") }.all { validationObservationDiffPath(it) })
     }
 
     @Test
@@ -115,6 +116,19 @@ class RepairValidationObservationArchiveTest {
                     payloads.mapValues { it.value.size.toLong() }) { path, _ ->
                     if (path == changedPath) payloads.getValue(path).copyOf().also { it[0] = 0 } else payloads.getValue(path)
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `a byte perfect mismatch primary cannot archive an omitted derived role`() {
+        val value = observation().copy(diff = null)
+        assertFailsWith<IllegalArgumentException> {
+            verifyRepairValidationObservedArtifactsForArchive(listOf(value),
+                mapOf(value.primary.path to value.primary.sha256), mapOf(value.primary.path to value.primary.bytes)) { path, limit ->
+                assertEquals(value.primary.path, path)
+                assertEquals(primaryBytes.size.toLong(), limit)
+                primaryBytes
             }
         }
     }
