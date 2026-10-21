@@ -285,7 +285,7 @@ internal fun calculateFullTreeObservationRuntimeManifestSha256(source: Path): St
         stream.limit(MAXIMUM_RUNTIME_TREE_ENTRIES.toLong() + 1L).toList()
     }
     if (entries.size > MAXIMUM_RUNTIME_TREE_ENTRIES) {
-        isolationFail("isolated runtime root exceeds its entry bound")
+        isolationFail("isolated runtime root exceeds its entry bound of $MAXIMUM_RUNTIME_TREE_ENTRIES: $normalized")
     }
     entries.filter { path ->
         normalized.relativize(path).nameCount == MAXIMUM_RUNTIME_TREE_DEPTH &&
