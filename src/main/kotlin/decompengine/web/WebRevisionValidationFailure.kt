@@ -2,7 +2,7 @@ package decompengine.web
 
 import decompengine.project.sha256
 import decompengine.project.parseGeneratedCValidationFailureRecord
-import decompengine.project.GeneratedCValidationBudgetPolicy
+import decompengine.project.requireRecordedRepairValidationBehaviorBudget
 import decompengine.project.requireRecordedRepairValidationSourceSnapshot
 import decompengine.project.requireRecordedRepairValidationRuntime
 import decompengine.project.ReconstructionProfiles
@@ -96,7 +96,7 @@ internal fun recordedValidationFailureReport(jobId: String, runId: String, captu
                             !(sourceSnapshot is JsonObject && sourceSnapshot.isEmpty())
                         if (hasSourceSnapshot && context != null) {
                             require(root.getValue("profileId").jsonPrimitive.content == context.profileId)
-                            require(root.getValue("behaviorBudgetEvidence") == GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget))
+                            requireRecordedRepairValidationBehaviorBudget(root.getValue("behaviorBudgetEvidence"), context.budget)
                             val (sourceMount, _) = requireRecordedRepairValidationRuntime(root.getValue("runtimeConfiguration"),
                                 binding.runtimeSha256, context.profileId)
                             val sourceQuota = requireRecordedRepairValidationSourceSnapshot(sourceSnapshot,

@@ -713,10 +713,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     "repair validation receipt is cross-paired: $field"
                 }
             }
-            require(receipt.getValue("behaviorBudgetEvidence") ==
-                GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)) {
-                "repair validation behavior budgets differ from the graph and host safety policy"
-            }
+            requireRecordedRepairValidationBehaviorBudget(receipt.getValue("behaviorBudgetEvidence"), graph.budget)
             val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(
                 receipt.getValue("runtimeConfiguration"), proof.runtimeSha256, graph.profileId)
             val sourceQuota = requireRecordedRepairValidationSourceSnapshot(
@@ -1404,6 +1401,13 @@ private fun verifyValidationQuota(value: JsonElement): JsonObject {
     }
     quota.requiredSha256("mountPathSha256", "validation quota")
     return quota
+}
+
+/** Canonical retained behavior-budget binding, shared with metadata-only projections. */
+internal fun requireRecordedRepairValidationBehaviorBudget(value: JsonElement, budget: RepairResourceBudget) {
+    require(value == GeneratedCValidationBudgetPolicy.DEFAULT.admit(budget)) {
+        "repair validation behavior budgets differ from the graph and host safety policy"
+    }
 }
 
 /** Shared retained executable metadata policy; this does not read or launch an executable. */
