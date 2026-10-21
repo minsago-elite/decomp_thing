@@ -19,5 +19,11 @@ export const runHistoryCopy = {
   "attemptHistoryCouldNotBeLoadedRetryThisRead": "Attempt history could not be loaded. Retry this read.",
   "previouslyLoadedAttemptsMayBeOutdated": " Previously loaded attempts may be outdated.",
   "loadingAttemptHistory": "Loading attempt history…",
-  "attemptHistoryPages": "Attempt history pages"
+  "attemptHistoryPages": "Attempt history pages",
+  "retryHistoryPage": "Retry this page",
+  "refreshingAttemptHistory": "Refreshing attempt history… Previously loaded attempts may be outdated.",
+  "reconnectToReadAttemptHistory": "Reconnect the local session to read attempt history, then refresh history.",
+  "attemptHistoryAccessDenied": "Access to attempt history was denied. Check the local session and selected job.",
+  "incompatibleHistoryResponse": "This interface cannot read the server's history format. Check the client and server versions, then refresh history.",
+  "attemptHistoryCouldNotBeVerified": "Attempt history could not be verified. Refresh history or retry this page; unverified results are not shown."
 } as const;

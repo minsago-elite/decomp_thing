@@ -70,7 +70,46 @@ class AcpCleanupFailureContextTest {
         }
     }
 
+    @Test
+    fun `missing mutation hook context retains only owned bounded failure facts`() {
+        val privateText = "PRIVATE-LAUNCH-CONTEXT /private/source/path"
+        var messageReads = 0
+        val failure = object : java.io.IOException() {
+            override val message: String get() { messageReads++; error(privateText) }
+        }
+        val phaseType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcomeType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val diagnosticType = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val phase = phaseType.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" }
+        val outcome = outcomeType.enumConstants.single { (it as Enum<*>).name == "EVENT" }
+        val diagnostic = diagnosticType.getDeclaredConstructor(phaseType, outcomeType,
+            Int::class.javaObjectType, Int::class.javaObjectType, Int::class.javaObjectType)
+            .apply { isAccessible = true }.newInstance(phase, outcome, 1, 10, null) as Throwable
+        failure.initCause(diagnostic)
+        val context = targetMutationFailureContext(failure)
+        assertTrue(context.startsWith("ACP_TARGET_MUTATION_V1 hook=NOT_OBSERVED "))
+        assertTrue("mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA" in context)
+        assertTrue("recordedPhase=MISSING recordedCleanup=MISSING" in context)
+        assertTrue(context.length <= 1100)
+        assertFalse(privateText in context)
+        assertEquals(0, messageReads)
+        val forged = java.io.IOException(diagnostic.message)
+        forged.addSuppressed(diagnostic)
+        assertTrue("mountEventRecord=MISSING" in targetMutationFailureContext(forged))
+        val cycle = object : java.io.IOException(privateText) {
+            override val cause: Throwable get() = this
+        }
+        assertTrue("mountEventRecord=MISSING" in targetMutationFailureContext(cycle))
+        assertFalse(privateText in targetMutationFailureContext(cycle))
+    }
+
 }
+
+/** Failure-only projection: a synthetic wrapper supplies no receipt or execution authority. */
+internal fun targetMutationFailureContext(failure: java.io.IOException): String =
+    "ACP_TARGET_MUTATION_V1 hook=NOT_OBSERVED " + acpDoctorFailureContext(AgentExecutionException(
+        AgentFailure(AgentFailureKind.INTERNAL, "Negative launch fixture context"), failure,
+    ))
 
 /** Only explicitly enumerated repository case labels can survive the diagnostic projection. */
 internal fun safeCleanupFailureContext(label: String, failure: AgentExecutionException): String {

@@ -3255,8 +3255,9 @@ class LinuxBubblewrapBoundaryTest {
             },
         )
         try {
-            assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
-            assertTrue(mutated.get())
+            val failure = assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
+            val mutationObserved = mutated.get()
+            assertTrue(mutationObserved, if (mutationObserved) null else targetMutationFailureContext(failure))
             assertTrue(boundary.evidence(null).launches.isEmpty())
         } finally {
             boundary.close()
