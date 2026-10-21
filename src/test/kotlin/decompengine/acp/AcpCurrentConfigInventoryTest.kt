@@ -3,6 +3,7 @@ package decompengine.acp
 import com.agentclientprotocol.annotations.UnstableApi
 import com.agentclientprotocol.model.SessionConfigOption
 import decompengine.agent.AgentExecutionException
+import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.jobs.ProgressRedactor
 import kotlinx.serialization.json.*
@@ -269,6 +270,130 @@ class AcpCurrentConfigInventoryTest {
         assertEquals("1", failure.failure.details["preferenceIndex"])
         assertTrue(failure.failure.message.isNotBlank()); assertTrue(failure.failure.message.length < 1024)
         privateValues.forEach { assertFalse(failure.failure.message.contains(it)) }
+    }
+
+    @Test
+    fun `applied prefix keeps valid flat grouped and boolean choices without selecting future preferences`() {
+        val preferences = appliedPreferences()
+        for (name in listOf("session-new-configured.response", "session-new-grouped-config.response")) {
+            val options = appliedInventory(name)
+            for (count in 0..preferences.size) {
+                requireAppliedSessionConfigPreferences(options, preferences.take(count), emptyList(),
+                    preferences.flatMap { listOfNotNull(it.id, (it.value as? AcpSessionConfigValue.Select)?.valueId) }) {
+                    error("valid applied prefix was rejected at $it")
+                }
+            }
+            val pending = editOption(options, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) }
+            requireAppliedSessionConfigPreferences(pending, preferences.take(1), emptyList(), emptyList()) {
+                error("future unconfigured preference was required at $it")
+            }
+        }
+    }
+
+    @Test
+    fun `a later complete flat inventory cannot remove or duplicate an earlier applied choice`() {
+        val options = appliedInventory("session-new-configured.response")
+        for (duplicate in listOf(false, true)) {
+            val changed = editOption(options, "reasoning") { option ->
+                val choices = option.getValue("options").jsonArray
+                val high = choices.single { it.jsonObject.getValue("value").jsonPrimitive.content == "high" }
+                JsonObject(option + ("options" to JsonArray(if (duplicate) choices + high else choices.filter { it != high })))
+            }
+            assertEquals("high", (changed.first() as SessionConfigOption.Select).currentValue.value)
+            assertEquals(false, (changed.last() as SessionConfigOption.BooleanOption).currentValue)
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    error("consistent selected values must reach the current-choice check")
+                }
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals("currentInventoryMismatch", failure.failure.details["reason"])
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+        }
+    }
+
+    @Test
+    fun `an applied grouped choice remains unique across the entire replacement group inventory`() {
+        val options = appliedInventory("session-new-grouped-config.response")
+        for (duplicate in listOf(false, true)) {
+            val changed = editOption(options, "reasoning") { option ->
+                val groups = option.getValue("options").jsonArray
+                val choices = if (duplicate) groups + JsonObject(groups.first().jsonObject + ("group" to JsonPrimitive("another-group")))
+                else groups.map { group -> JsonObject(group.jsonObject + ("options" to JsonArray(
+                    group.jsonObject.getValue("options").jsonArray.filter {
+                        it.jsonObject.getValue("value").jsonPrimitive.content != "high" }))) }
+                JsonObject(option + ("options" to JsonArray(choices)))
+            }
+            assertEquals("high", (changed.first() as SessionConfigOption.Select).currentValue.value)
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    error("consistent grouped current value must reach the current-choice check")
+                }
+            }
+            assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+            assertEquals("0", failure.failure.details["preferenceIndex"])
+        }
+    }
+
+    @Test
+    fun `original applied response failures keep their exact typed rejection before additional freshness checks`() {
+        val options = appliedInventory("session-new-configured.response")
+        val noEarlierChoices = editOption(options, "reasoning") { JsonObject(it + ("options" to JsonArray(emptyList()))) }
+        val changedType = editOption(options, "reasoning") { JsonObject((it - "options") + mapOf(
+            "type" to JsonPrimitive("boolean"), "currentValue" to JsonPrimitive(true))) }
+        val variants = listOf(emptyList<SessionConfigOption>() to 0, (options + options.first()) to 0,
+            editOption(options, "reasoning") { JsonObject(it + ("currentValue" to JsonPrimitive("low"))) } to 0,
+            editOption(options, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) } to 1,
+            changedType to 0,
+            editOption(noEarlierChoices, "telemetry") { JsonObject(it + ("currentValue" to JsonPrimitive(true))) } to 1)
+        for ((changed, index) in variants) {
+            val marker = AgentExecutionException(AgentFailure(AgentFailureKind.PROTOCOL, "Original typed response failure"))
+            val callbacks = mutableListOf<Int>()
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireAppliedSessionConfigPreferences(changed, appliedPreferences(), emptyList(), emptyList()) {
+                    callbacks += it; marker
+                }
+            }
+            assertSame(marker, failure); assertEquals(listOf(index), callbacks)
+        }
+    }
+
+    @Test
+    fun `applied inventory freshness diagnostics protect the full private configuration beyond the applied prefix`() {
+        val prefix = appliedPreferences().take(1)
+        val preferences = AcpSessionPreferences("private-model", "private-mode", prefix +
+            AcpSessionConfigPreference("private-later-option", AcpSessionConfigValue.Select("private-later-value")))
+        val options = editOption(appliedInventory("session-new-configured.response"), "reasoning") { option ->
+            val choices = listOf("prefix-private-model", "prefix-private-later-value", "prefix-peer-secret")
+            JsonObject(option + ("options" to JsonArray(choices.map { buildJsonObject {
+                put("value", it); put("name", "Display choice") } })))
+        }
+        val privateValues = preferences.privateIdentifiers()
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireAppliedSessionConfigPreferences(options, prefix, listOf("peer-secret"), privateValues) {
+                error("consistent applied value must reach the private freshness diagnostic")
+            }
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+        assertEquals("0", failure.failure.details["preferenceIndex"])
+        assertTrue(failure.failure.message.isNotBlank()); assertTrue(failure.failure.message.length < 1024)
+        (privateValues + "peer-secret").forEach { assertFalse(failure.stackTraceToString().contains(it)) }
+    }
+
+    private fun appliedPreferences() = listOf(
+        AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high")),
+        AcpSessionConfigPreference("telemetry", AcpSessionConfigValue.BooleanValue(false)),
+    )
+
+    private fun appliedInventory(name: String): List<SessionConfigOption> =
+        editOption(editOption(inventory(name), "reasoning") {
+            JsonObject(it + ("currentValue" to JsonPrimitive("high"))) }, "telemetry") {
+            JsonObject(it + ("currentValue" to JsonPrimitive(false))) }
+
+    private fun editOption(options: List<SessionConfigOption>, id: String,
+        edit: (JsonObject) -> JsonObject): List<SessionConfigOption> = options.map { option ->
+        if (option.id.value != id) option else Json.decodeFromJsonElement(SessionConfigOption.serializer(),
+            edit(Json.encodeToJsonElement(SessionConfigOption.serializer(), option).jsonObject))
     }
 
     private fun booleanInventory(): List<SessionConfigOption> = listOf(Json.decodeFromString<SessionConfigOption>(
