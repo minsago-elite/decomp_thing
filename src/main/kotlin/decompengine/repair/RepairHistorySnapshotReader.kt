@@ -53,6 +53,9 @@ internal class RepairHistoryArtifactCapture internal constructor(
             attempt.after?.artifact?.let(selected::add)
             attempt.invocation?.artifact?.let(selected::add)
         }
+        page.evidenceRuns.forEach { run ->
+            run.validationDiagnostic?.let { selected.add(it.receipt); selected.add(it.diagnostic) }
+        }
         return selected.mapNotNull(paths::get)
     }
 }

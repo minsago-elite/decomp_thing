@@ -404,4 +404,51 @@ class RepairValidationDiagnosticTest {
         assertEquals(1, calls)
         assertEquals(1, original.suppressed.size)
     }
+
+    private fun capturedDiagnostic(): Pair<RepairHistorySnapshot, Map<RepairRecordedArtifactReference, String>> {
+        val b = planRepairValidationDiagnosticRetention(publication(), 4096).binding
+        val corpus = b.invocation.regressionCorpusSha256
+        val primary = recordedRepairArtifactReference(corpus, b.receiptPath)
+        val diagnostic = recordedRepairArtifactReference(corpus, b.diagnosticPath)
+        val baseline = RepairRecordedIdentity(b.invocation.candidateRevisionId, false)
+        val recorded = RepairRecordedValidationDiagnostic(b.invocation.commitmentSha256(), baseline,
+            b.invocation.sourceRevisionSha256, b.invocation.profileSha256, b.invocation.indexSha256, corpus,
+            b.runtimeSha256, primary, b.receiptSha256, b.receiptBytes, diagnostic, b.diagnosticSha256,
+            b.diagnosticBytes, b.failureKind, b.cleanupVerified)
+        val run = RepairRecordedRun(3, RepairRecordedIdentity(b.invocation.runId, false), RepairRunStatus.VALIDATION_FAILED,
+            baseline, null, null, corpus, 2, 0, 1, 100, null, null, recorded)
+        val snapshot = RepairHistorySnapshot("f".repeat(64), 4, RepairRecordedGraphWire.COMPACT, corpus,
+            baseline, null, null, listOf(run), emptyList(), null, emptyList())
+        return snapshot to linkedMapOf(primary to b.receiptPath, diagnostic to b.diagnosticPath)
+    }
+
+    @Test
+    fun `run only canonical diagnostics reach the selected artifact capture without an attempt`() {
+        val (snapshot, paths) = capturedDiagnostic()
+        val capture = RepairHistoryArtifactCapture(snapshot, paths)
+        val result = RepairHistoryReadResult.recorded(snapshot, artifactCapture = capture)
+        val default = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), 20)
+        assertTrue(result.selectedArtifactPaths(default).isEmpty())
+        val selected = RepairRecordedHistoryPage.select(snapshot,
+            RepairRecordedHistorySelection(expectedGraphSha256 = snapshot.graphSha256, evidenceRun = "run_00000001"), 20)
+        assertTrue(selected.evidenceAttempts.isEmpty())
+        assertEquals(paths.values.toList(), result.selectedArtifactPaths(selected))
+        assertEquals(2, result.selectedArtifactPaths(selected).size)
+    }
+
+    @Test
+    fun `selected diagnostic paths remain captured and cannot cross snapshots or invent missing mappings`() {
+        val (snapshot, originalPaths) = capturedDiagnostic()
+        val caller = originalPaths.toMutableMap()
+        val capture = RepairHistoryArtifactCapture(snapshot, caller)
+        caller.clear()
+        val selected = RepairRecordedHistoryPage.select(snapshot,
+            RepairRecordedHistorySelection(expectedGraphSha256 = snapshot.graphSha256, evidenceRun = "run_00000001"), 20)
+        assertEquals(originalPaths.values.toList(), capture.selectedPaths(selected))
+        assertTrue(RepairHistoryArtifactCapture(snapshot, emptyMap()).selectedPaths(selected).isEmpty())
+        val (other, _) = capturedDiagnostic()
+        val otherPage = RepairRecordedHistoryPage.select(other,
+            RepairRecordedHistorySelection(expectedGraphSha256 = other.graphSha256, evidenceRun = "run_00000001"), 20)
+        assertFailsWith<IllegalArgumentException> { capture.selectedPaths(otherPage) }
+    }
 }

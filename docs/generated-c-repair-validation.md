@@ -256,6 +256,11 @@ paths or private summary text. `historyRunEvidence=<recorded run reference>` req
 with `historyEvidence`, and it does not require a candidate attempt for a baseline failure.
 Default history pages do not read run diagnostic payloads.
 
+For durable web jobs, the canonical capture also contributes both explicitly selected run diagnostic
+paths to the bounded artifact listing beneath `source-tree`. This includes baseline failures with no
+candidate attempt. Unselected run diagnostics and missing capture mappings add no paths; a page from
+another snapshot is refused before the listing can use it.
+
 The existing checked selected-report namespace and duplicate-target refusal apply before reads.
 Primary and diagnostic bytes share the existing 64 MiB request-wide byte/call allowance. An explicit
 bound receipt reserves its admitted byte count instead of the generic 16 MiB presentation limit;
