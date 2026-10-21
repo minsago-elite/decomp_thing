@@ -3,39 +3,49 @@ import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { Run as RunData } from '../api/generated';
-import { ApiClientError, withApiFailureReference } from '../api/client';
+import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, sourceDirectoryPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
 function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
-  const [run, setRun] = useState<RunData | null>(null);
-  const [error, setError] = useState('');
+  const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
+  const [stored, setStored] = useState<{ binding: typeof binding; data: RunData | null; error: string; loading: boolean }>(
+    { binding, data: null, error: '', loading: true });
+  const { data: run, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const [refresh, setRefresh] = useState(0);
-  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const controller = new AbortController(); setRun(null); setError(''); setLoading(true);
+    const controller = new AbortController();
+    setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
     void client.get('run', `/jobs/${jobId}/runs/${runId}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       if (response.data.jobId !== jobId || response.data.runId !== runId) {
-        setError(copy.theResponseDoesNotBelongToTheRequestedJobAnd); return;
+        setStored({ binding, data: null, error: copy.theResponseDoesNotBelongToTheRequestedJobAnd, loading: false }); return;
       }
-      setRun(response.data);
+      setStored({ binding, data: response.data, error: '', loading: false });
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
-        ? copy.thisAttemptIsUnavailableForThisJob : copy.theAttemptCouldNotBeLoadedCheckTheLocalSession, failure));
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      if (!controller.signal.aborted) setStored(previous => ({ binding,
+        data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
+        error: withApiFailureReference({
+          session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
+          missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
+          unverified: copy.attemptMetadataCouldNotBeVerified,
+          failed: copy.theAttemptCouldNotBeLoadedCheckTheLocalSession,
+        }[metadataFailureKind(failure)], failure), loading: false }));
+    });
     return () => { controller.abort(); };
-  }, [client, jobId, runId, refresh]);
+  }, [binding, client, jobId, runId, refresh]);
   return <>
-    {loading && <p role="status">{copy.loadingAttempt}</p>}
+    {loading && <p role="status">{run ? copy.refreshingAttempt : copy.loadingAttempt}</p>}
     {error && <p role="alert">{error}</p>}
+    {error && run && <p>{copy.previousAttemptMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
       <dl class="job-facts">

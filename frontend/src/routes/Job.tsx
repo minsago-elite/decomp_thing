@@ -1,41 +1,52 @@
 import { jobCopy as copy } from '../copy/job';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
-import { ApiClientError, withApiFailureReference } from '../api/client';
+import { useEffect, useMemo, useState } from 'preact/hooks';
+import { withApiFailureReference } from '../api/client';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
 function JobDetails({ jobId, basePath, runtime }: { jobId: string; basePath: string; runtime: RuntimeSnapshot }) {
   const { client } = usePrivateTransport(basePath);
-  const [job, setJob] = useState<JobData | null>(null);
-  const [error, setError] = useState('');
+  const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
+  const [stored, setStored] = useState<{ binding: typeof binding; data: JobData | null; error: string; loading: boolean }>(
+    { binding, data: null, error: '', loading: true });
+  const { data: job, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const [refresh, setRefresh] = useState(0);
-  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const controller = new AbortController(); setLoading(true); setError(''); setJob(null);
-    if (!/^[0-9a-f]{32}$/.test(jobId)) { setError(copy.thisJobIdentityIsInvalid); setLoading(false); return; }
+    const controller = new AbortController();
+    setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
+    if (!/^[0-9a-f]{32}$/.test(jobId)) {
+      setStored({ binding, data: null, error: copy.thisJobIdentityIsInvalid, loading: false }); return;
+    }
     void client.get('job', `/jobs/${jobId}`, { signal: controller.signal }).then(response => {
       if (!controller.signal.aborted) {
-        if (response.data.jobId !== jobId) { setError(copy.theServerReturnedADifferentJobIdentity); return; }
-        setJob(response.data);
+        if (response.data.jobId !== jobId) {
+          setStored({ binding, data: null, error: copy.theServerReturnedADifferentJobIdentity, loading: false }); return;
+        }
+        setStored({ binding, data: response.data, error: '', loading: false });
       }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
-        ? copy.thisJobIsUnavailableItMayHaveBeenRemoved : failure instanceof ApiClientError && (['CORRUPT_LEGACY_JOB', 'JOB_RECORD_UNAVAILABLE'].includes(failure.serverCode ?? '')
-          || ['invalid_json', 'invalid_response', 'unsupported_contract'].includes(failure.code))
-          ? copy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts
-          : copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession, failure));
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      if (!controller.signal.aborted) setStored(previous => ({ binding,
+        data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
+        error: withApiFailureReference({
+          session: copy.reconnectToReadThisJob, denied: copy.jobAccessDenied,
+          missing: copy.thisJobIsUnavailableItMayHaveBeenRemoved, unsupported: copy.incompatibleJobResponse,
+          unverified: copy.storedJobMetadataIsUnavailableOrMalformedNoBinaryFacts,
+          failed: copy.jobMetadataCouldNotBeLoadedCheckTheLocalSession,
+        }[metadataFailureKind(failure)], failure), loading: false }));
+    });
     return () => { controller.abort(); };
-  }, [client, jobId, refresh]);
+  }, [binding, client, jobId, refresh]);
   return <>
-    {loading && <p role="status">{copy.loadingJob}</p>}
+    {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
     {error && <p role="alert">{error}</p>}
+    {error && job && <p>{copy.previousJobMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
       <h2>{job.displayFilename}</h2><p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>

@@ -453,3 +453,138 @@ it('identifies and focuses invalid dates without changing the current result sna
   expect(before.hasAttribute('aria-invalid')).toBe(false);
   expect(transport.get).toHaveBeenCalledTimes(2);
 });
+
+
+async function metadataSession() {
+  const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await auth.initialize({ kind: 'absent' });
+  return auth;
+}
+
+it('retains job navigation through a transient metadata refresh and explicit recovery', async () => {
+  const auth = await metadataSession(); const selected = job(3);
+  let rejectRefresh: (reason: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce({ data: selected })
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
+    .mockResolvedValueOnce({ data: selected });
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    const historyLink = screen.getByRole('link', { name: 'Browse attempt history' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    historyLink.focus();
+    expect(screen.getByText('Refreshing job… Previously loaded metadata may be outdated.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
+    await act(async () => { rejectRefresh(new ApiClientError('timeout')); await Promise.resolve(); });
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByText('Previously loaded job metadata may be outdated. Refresh the job to read current details.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    expect(document.activeElement).toBe(historyLink);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh job' }).disabled).toBe(false));
+    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job', 'job']);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['401', new ApiClientError('http_error', { status: 401 }), 'Reconnect the session to read this job'],
+  ['403', new ApiClientError('http_error', { status: 403 }), 'Access to this job was denied'],
+  ['404', new ApiClientError('http_error', { status: 404 }), 'This job is unavailable'],
+  ['corrupt-storage', new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }), 'Stored job metadata is unavailable'],
+  ['invalid-response', new ApiClientError('invalid_response'), 'Stored job metadata is unavailable'],
+  ['unsupported-contract', new ApiClientError('unsupported_contract'), "This interface cannot read the server's response format"],
+] as const)('discards retained job metadata and navigation after a %s refresh refusal', async (_label, failure, expected) => {
+  const auth = await metadataSession(); const selected = job(3);
+  transport.get.mockResolvedValueOnce({ data: selected }).mockRejectedValueOnce(failure);
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(expected);
+    expect(screen.queryByRole('heading', { name: selected.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Browse attempt history' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Workflow availability for this job' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(transport.get).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
+it('discards old job metadata when the requested identity changes during a refresh', async () => {
+  const { default: JobView } = await import('../src/routes/Job');
+  const auth = await metadataSession(); const first = job(3); const next = job(4);
+  let finishRefresh: (response: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce({ data: first })
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }))
+    .mockResolvedValueOnce({ data: next });
+  try {
+    const view = render(<JobView basePath="/nested" jobId={first.jobId} session={auth} />);
+    expect(await screen.findByRole('heading', { name: first.displayFilename })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    const obsolete = transport.get.mock.calls[1]![2].signal;
+    view.rerender(<JobView basePath="/nested" jobId={next.jobId} session={auth} />);
+    expect(await screen.findByRole('heading', { name: next.displayFilename })).toBeTruthy();
+    expect(obsolete.aborted).toBe(true);
+    await act(async () => { finishRefresh({ data: first }); await Promise.resolve(); });
+    expect(screen.queryByRole('heading', { name: first.displayFilename })).toBeNull();
+    expect(screen.getByRole('heading', { name: next.displayFilename })).toBeTruthy();
+    expect(transport.get).toHaveBeenCalledTimes(3);
+  } finally { auth.dispose(); }
+});
+
+
+it('clears retained job metadata and navigation after a generic unverified storage refusal', async () => {
+  const auth = await metadataSession(); const selected = job(3);
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce({ data: selected })
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode: 'JOB_STORAGE_UNAVAILABLE', requestId }));
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Stored job metadata is unavailable');
+    expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(screen.queryByRole('heading', { name: selected.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Browse attempt history' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Workflow availability for this job' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(document.body.textContent).not.toContain('JOB_STORAGE_UNAVAILABLE');
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job']);
+  } finally { auth.dispose(); }
+});
+
+
+it.each(['STORE_LIMIT', 'RECOVERY_REQUIRED'] as const)('clears retained job metadata and navigation after a %s storage refusal', async serverCode => {
+  const auth = await metadataSession(); const selected = job(3);
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce({ data: selected })
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode, requestId }));
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Stored job metadata is unavailable');
+    expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(screen.queryByRole('heading', { name: selected.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Browse attempt history' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Workflow availability for this job' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(document.body.textContent).not.toContain(serverCode);
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job']);
+  } finally { auth.dispose(); }
+});
