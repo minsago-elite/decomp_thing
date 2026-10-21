@@ -7,7 +7,8 @@ export function metadataFailureKind(failure: unknown): 'session' | 'denied' | 'm
   if (failure.status === 403) return 'denied';
   if (failure.status === 404 || failure.status === 410) return 'missing';
   if (failure.code === 'unsupported_contract') return 'unsupported';
-  if (['CORRUPT_LEGACY_JOB', 'CORRUPT_WORKFLOW_STATE', 'INVALID_STORAGE_ENTRY', 'JOB_RECORD_UNAVAILABLE', 'JOB_STORAGE_UNAVAILABLE']
+  if (['CORRUPT_LEGACY_JOB', 'CORRUPT_WORKFLOW_STATE', 'INVALID_STORAGE_ENTRY', 'JOB_RECORD_UNAVAILABLE', 'JOB_STORAGE_UNAVAILABLE',
+    'STORE_LIMIT', 'RECOVERY_REQUIRED']
     .includes(failure.serverCode ?? '')
     || ['invalid_json', 'response_too_large', 'invalid_response', 'unexpected_response', 'invalid_headers'].includes(failure.code)) return 'unverified';
   return 'failed';

@@ -453,3 +453,29 @@ it.each(['attempt', 'history'] as const)('clears retained %s content after a gen
     expect(transport.get.mock.calls.map(call => call[0])).toEqual([kind === 'history' ? 'runs' : 'run', kind === 'history' ? 'runs' : 'run']);
   } finally { auth.dispose(); }
 });
+
+
+it.each([['attempt', 'STORE_LIMIT'], ['history', 'STORE_LIMIT'],
+  ['attempt', 'RECOVERY_REQUIRED'], ['history', 'RECOVERY_REQUIRED']] as const)('clears retained %s content after a %s storage refusal', async (kind, serverCode) => {
+  const auth = await session();
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(kind === 'history' ? historyPage() : { data: sample })
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode, requestId }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs${kind === 'history' ? '' : `/${sample.runId}`}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    if (kind === 'history') expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    else expect(await screen.findByText('9007199254740993')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: kind === 'history' ? 'Refresh history' : 'Refresh attempt' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(kind === 'history' ? 'Attempt history could not be verified' : 'Attempt metadata could not be verified');
+    expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(screen.queryByRole('link', { name: 'reconstruct: run_latest' })).toBeNull();
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+    expect(screen.queryByLabelText('Task digest contains')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Read exploration evidence' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded (attempt metadata|attempts) may be outdated/)).toBeNull();
+    expect(document.body.textContent).not.toContain(serverCode);
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual([kind === 'history' ? 'runs' : 'run', kind === 'history' ? 'runs' : 'run']);
+  } finally { auth.dispose(); }
+});

@@ -832,3 +832,10 @@ invokes it after reset. It keeps the new snapshot unresolved while checking that
 neither cleanup nor that late callback restores old rows, so a fast fresh response
 cannot hide an incorrect stale publication. These remain mock transport/fake-clock
 controls, with no physical browser or native/provider trial.
+
+
+Stored-record byte/inspection limit refusals (`STORE_LIMIT`) and uncertain
+publication quarantine (`RECOVERY_REQUIRED`) also invalidate retained job, attempt
+and history metadata. The metadata read path can emit both fixed classifications;
+neither is a transient HTTP 503 outage. Six additional mock route controls cover
+the two classifications across all three consumers without starting native work.
