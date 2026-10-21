@@ -131,6 +131,10 @@
       "reason": "Generated-C repair validation behavior limits and independent host admission policy."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCValidationFailureRecord.kt",
+      "reason": "Generated-C repair validation failure classification and receipt-bound diagnostic projection."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCValidationSnapshot.kt",
       "reason": "Generated-C repair validation workspace staging and snapshot policy."
     },
