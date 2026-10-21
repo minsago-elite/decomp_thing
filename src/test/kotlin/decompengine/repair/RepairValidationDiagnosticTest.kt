@@ -237,4 +237,60 @@ class RepairValidationDiagnosticTest {
         retainRepairValidationDiagnostic(original, invocation()) { throw original }
         assertEquals(listOf(marker), original.suppressed.toList())
     }
+
+    private class ClassifiedMarker(override val failureKind: RepairValidationFailureKind,
+        private val value: () -> RepairValidationDiagnosticPublication?) : Exception("authored classified marker"),
+        RepairValidationFailureEvidence {
+        override val receiptPath = Path.of("/authored/reports/primary.validation.json")
+        override val receiptSha256 = "7".repeat(64)
+        override val cleanupVerified = failureKind != RepairValidationFailureKind.CLEANUP_UNVERIFIED
+        override val diagnosticPublication get() = value()
+    }
+
+    @Test
+    fun `throwing the existing provider marker cannot duplicate or hide its classification`() {
+        for (kind in RepairValidationFailureKind.entries) for (getterFailure in listOf(true, false)) {
+            val original = IOException("authored original")
+            lateinit var marker: ClassifiedMarker
+            marker = ClassifiedMarker(kind) { if (getterFailure) throw marker else publication().copy(
+                failureKind = kind, cleanupVerified = kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED) }
+            original.addSuppressed(marker)
+            retainRepairValidationDiagnostic(original, invocation()) { throw marker }
+            assertEquals(listOf(marker), original.suppressed.toList())
+            val selected = original.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull()
+            assertSame(marker, selected)
+            assertEquals(kind, selected?.failureKind)
+        }
+    }
+
+    @Test
+    fun `an auxiliary provider marker remains a cause without competing with the primary marker`() {
+        for (kind in RepairValidationFailureKind.entries) for (getterFailure in listOf(true, false)) {
+            val original = IOException("authored original")
+            val auxiliary = ClassifiedMarker(if (kind == RepairValidationFailureKind.CANCELLED)
+                RepairValidationFailureKind.CLEANUP_UNVERIFIED else RepairValidationFailureKind.CANCELLED) { null }
+            val primary = ClassifiedMarker(kind) { if (getterFailure) throw auxiliary else publication().copy(
+                failureKind = kind, cleanupVerified = kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED) }
+            original.addSuppressed(primary)
+            retainRepairValidationDiagnostic(original, invocation()) { throw auxiliary }
+            assertSame(primary, original.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull())
+            assertEquals(kind, original.suppressed.filterIsInstance<RepairValidationFailureEvidence>().single().failureKind)
+            val wrapper = original.suppressed.last()
+            assertTrue(wrapper is IllegalStateException)
+            assertFalse(wrapper is RepairValidationFailureEvidence)
+            assertSame(auxiliary, wrapper.cause)
+        }
+    }
+
+    @Test
+    fun `an already retained auxiliary exception is not attached a second time`() {
+        val original = IOException("authored original")
+        val auxiliary = IllegalStateException("authored auxiliary")
+        val primary = Marker { publication() }
+        original.addSuppressed(primary)
+        original.addSuppressed(auxiliary)
+        retainRepairValidationDiagnostic(original, invocation()) { throw auxiliary }
+        assertEquals(listOf(primary, auxiliary), original.suppressed.toList())
+        assertSame(primary, original.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull())
+    }
 }

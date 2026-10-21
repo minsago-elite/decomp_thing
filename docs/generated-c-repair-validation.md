@@ -223,7 +223,10 @@ schema2 and includes the exact invocation. Identical primary receipts cannot ide
 Requests without this context retain legacy schema1 diagnostics and cannot obtain a bound view.
 
 The provider attaches a publication descriptor only after the bounded supplemental write returns.
-The primary marker is attached first and survives any auxiliary failure. Before canonical storage,
+The primary marker is attached first and survives any auxiliary failure. Already attached
+exceptions are not duplicated, and an auxiliary provider marker is retained as a
+wrapped cause rather than a competing top-level provider. The original status classifier therefore
+continues to see its single original marker. Before canonical storage,
 the graph checks the exact request/provider relation, authenticates both reported byte commitments
 through its descriptor-pinned report reader, and copies the supplement to
 `reports/<validation identity>.validation-failure.json`. This copy uses the existing descriptor-pinned

@@ -142,7 +142,12 @@ internal fun retainRepairValidationDiagnostic(failure: Exception, invocation: Re
             publication.cleanupVerified == provider.cleanupVerified)
         retain(publication)
     } catch (retention: Throwable) {
-        if (retention !== failure) failure.addSuppressed(retention)
+        if (retention !== failure && failure.suppressed.none { it === retention }) {
+            // Status classification reads one top-level provider marker. An auxiliary marker
+            // must not become a second provider for the original validation failure.
+            failure.addSuppressed(if (retention is RepairValidationFailureEvidence)
+                IllegalStateException("validation diagnostic retention failed", retention) else retention)
+        }
     }
 }
 
