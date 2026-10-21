@@ -16,6 +16,9 @@ import decompengine.repair.readStableRepairFile
 import decompengine.repair.requireRepairReleaseGraphAdmission
 import decompengine.repair.repairRevisionDirectoryEntryLimit
 import decompengine.repair.requireSingleLegacyRollbackOrigin
+import decompengine.repair.RepairValidationDiagnosticBinding
+import decompengine.repair.parseRepairValidationDiagnosticBinding
+import decompengine.repair.requireRepairValidationDiagnosticAssociation
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.nio.file.Files
@@ -1405,6 +1408,7 @@ private data class ReleaseRepairRun(
     val lastEvidence: ReleaseRepairEvidence?,
     val rollbackFailureAttemptId: String?,
     val rollbackResolution: String?,
+    val validationDiagnostic: RepairValidationDiagnosticBinding?,
 )
 
 private fun JsonObject.optionalSha256(field: String, label: String): String? = optionalString(field, label)?.also {
@@ -1431,10 +1435,11 @@ private fun JsonObject.optionalValidationProof(field: String, label: String): Re
 private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
     val root = element.requiredObject("repair release run")
     val version = root.requiredInt("schemaVersion", "repair release run")
-    require(version in 1..2) { "unsupported repair release run schema" }
-    root.requireExactKeys(RUN_FIELDS + if (version == 2) RUN_ROLLBACK_FIELDS else emptySet(), "repair release run")
-    val failureAttempt = if (version == 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
-    val resolution = if (version == 2) root.optionalString("rollbackResolution", "repair release run") else null
+    require(version in 1..3) { "unsupported repair release run schema" }
+    root.requireExactKeys(RUN_FIELDS + (if (version >= 2) RUN_ROLLBACK_FIELDS else emptySet()) +
+        (if (version >= 3) setOf("validationDiagnostic") else emptySet()), "repair release run")
+    val failureAttempt = if (version >= 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
+    val resolution = if (version >= 2) root.optionalString("rollbackResolution", "repair release run") else null
     val status = root.requiredString("status", "repair release run")
     require((status == "rollback_failed") == (failureAttempt != null) &&
         (failureAttempt == null) == (resolution == null) &&
@@ -1457,6 +1462,9 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
         root.optionalSha256("originalBinarySha256", "repair release run"),
         root.optionalEvidence("lastEvidence", "repair release run"),
         failureAttempt, resolution,
+        if (version >= 3) root.getValue("validationDiagnostic").takeUnless { it is JsonNull }?.let {
+            parseRepairValidationDiagnosticBinding(it.requiredObject("repair release validation diagnostic"))
+        } else null,
     )
 }
 
@@ -1486,6 +1494,8 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
     ) { "repair release requires complete strict-contained build and behavior validation" }
     val runById = graph.runs.associateBy(ReleaseRepairRun::id)
     require(runById.size == graph.runs.size) { "repair release run identities are duplicated" }
+    val diagnostics = graph.runs.mapNotNull { it.validationDiagnostic }
+    require(diagnostics.map { it.invocation.id }.distinct().size == diagnostics.size)
     val attemptsByRun = graph.nodes.drop(1).groupBy { node ->
         requireNotNull(node.repairMetadata?.runId) { "repair release revision has no durable run identity" }
     }
@@ -1503,6 +1513,14 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
                 it.status == "provisional" && it.repairMetadata?.runId == run.id
             } == true)
         ) { "repair release run is cross-paired with its revision lineage" }
+        run.validationDiagnostic?.let { binding ->
+            binding.requireRetainedBudget(graph.budget.maximumIndexEvidenceBytes)
+            val candidate = requireNotNull(nodes[binding.invocation.candidateRevisionId])
+            require(candidate.id == run.baselineId || candidate.repairMetadata?.runId == run.id)
+            require(run.status !in setOf("fully_accepted", "compile_valid"))
+            requireRepairValidationDiagnosticAssociation(binding, run.id, graph.profileSha256, graph.indexSha256,
+                run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256)
+        }
         attemptsByRun[run.id].orEmpty().forEach { node ->
             require(node.repairMetadata?.regressionCorpusSha256 == run.regressionCorpusSha256) {
                 "repair release run corpus differs from its attempt"

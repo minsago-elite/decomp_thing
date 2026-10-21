@@ -136,6 +136,46 @@ internal class RepairStateStore private constructor(
 
     fun writeReport(name: String, bytes: ByteArray) = writeAtomically(reports, name, bytes, "repair-report")
 
+    /** The selected provider receipt is retained independently of its operator-selected directory. */
+    fun writeImmutableValidationReceipt(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 64L * 1024 * 1024,
+                "immutable validation receipt").bytes.contentEquals(bytes)) {
+                "immutable validation receipt already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-receipt", requireAbsent = true)
+    }
+
+    /** Uses the same descriptor-pinned no-replace publication as immutable invocation receipts. */
+    fun writeImmutableValidationDiagnostic(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation-failure\\.json")))
+        require(bytes.size in 1..4096)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 4096,
+                "immutable validation diagnostic").bytes.contentEquals(bytes)) {
+                "immutable validation diagnostic already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-diagnostic", requireAbsent = true)
+    }
+
+    fun readValidationReport(relative: String, maximumBytes: Long): ByteArray {
+        require(maximumBytes in 1..64L * 1024 * 1024 && relative.length <= 4096)
+        val parts = relative.split('/')
+        require(parts.size in 2..32 && parts.first() == "reports" && parts[1] !in setOf("repair-revisions", "runs", "source-tree"))
+        require(parts.drop(1).all { it != "." && it != ".." && it.matches(Regex("[A-Za-z0-9._-]{1,160}")) })
+        require(relative != "reports/repair_history.json")
+        return withProjectEvidenceParent(relative) { parent, name ->
+            readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+                maximumBytes, "validation report").bytes
+        }
+    }
+
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
     /** Retain the manifest-bound preimage until the manifest commits the derived report. */

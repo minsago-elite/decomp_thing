@@ -860,10 +860,10 @@ class UploadServer(
             recordedRepairEvidenceTarget(reference, snapshot, context, artifacts)?.let { reference to it }
         }.toMap()
         val captured = mutableMapOf<String, Result<ByteArray>>()
-        var remainingWorkBytes = 64L * 1024 * 1024
+        var remainingWorkBytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
         var readAttempts = 0
-        fun readOnce(target: String): Result<ByteArray> = captured.getOrPut(target) {
-            val reserved = minOf(MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES, remainingWorkBytes)
+        fun readOnce(target: String, maximumBytes: Long = MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES): Result<ByteArray> = captured.getOrPut(target) {
+            val reserved = recordedRepairEvidenceReadReservation(maximumBytes, remainingWorkBytes)
             if (reserved == 0L || readAttempts >= 128) Result.failure(IllegalStateException("Repair evidence presentation allowance exhausted"))
             else {
                 // Bound calls and captured payloads. Failed reads retain their full reservation.
@@ -875,11 +875,12 @@ class UploadServer(
                 }
             }
         }
-        val evidence = targets.mapValues { (_, target) ->
-            val bytes = readOnce(target).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
-            if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
-                RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
-        }
+        val evidence: Map<decompengine.repair.RepairRecordedArtifactReference, RepairEvidenceArtifactState> =
+            if (selected.selection.evidenceRun != null) emptyMap() else targets.mapValues { (_, target) ->
+                val bytes = readOnce(target).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
+                if (target.endsWith(".json") && runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isFailure)
+                    RepairEvidenceArtifactState.CORRUPT else RepairEvidenceArtifactState.AVAILABLE
+            }
         val receipts = selected.evidenceAttempts.filter { it.invocation != null }.associate { attempt ->
             val invocation = requireNotNull(attempt.invocation)
             val target = targets[invocation.artifact]
@@ -899,7 +900,14 @@ class UploadServer(
             }
             attempt.identity to state
         }
-        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId)
+        val diagnostics = selected.evidenceRuns.mapNotNull { run ->
+            run.validationDiagnostic?.let { binding ->
+                val primary = targets[binding.receipt]?.let { readOnce(it, binding.receiptBytes).getOrNull() }
+                val diagnostic = targets[binding.diagnostic]?.let { readOnce(it, binding.diagnosticBytes.toLong()).getOrNull() }
+                run.identity to checkedRecordedRepairValidationDiagnostic(binding, primary, diagnostic)
+            }
+        }.toMap()
+        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId, diagnostics)
     }
 
     private data class RepairReceiptExpectation(

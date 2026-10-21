@@ -590,13 +590,14 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             RepairEvidenceArtifactState.CORRUPT -> RepairRecordedReceiptCheck.CORRUPT
             else -> RepairRecordedReceiptCheck.UNAVAILABLE
         })
-    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null): String {
+    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null, evidenceRun: String? = null): String {
         val parameters = buildList {
             view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
             add("historyPage=$historyPage")
             add("historyCasesPage=$casePage")
             add("historyGraph=${snapshot.graphSha256}")
             evidenceAttempt?.let { add("historyEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            evidenceRun?.let { add("historyRunEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
         }.joinToString("&")
         val target = "/jobs/${job.id}?$parameters"
         return "<a href=\"${target.escapeHtml()}\">$label</a>"
@@ -635,8 +636,27 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             "<br>Rollback failure attempt: <code>${attempt.value.escapeHtml()}</code> · " +
                 requireNotNull(run.rollbackResolution).name.lowercase().replace('_', '-').escapeHtml()
         }.orEmpty()
+        val diagnostic = run.validationDiagnostic?.let { binding ->
+            val detail = view.validationDiagnostics[run.identity]
+            val inspect = link("Inspect run validation diagnostic", page.selection.pageNumber,
+                page.selection.casePageNumber, evidenceRun = run.identity.value)
+            when {
+                page.selection.evidenceRun != run.identity.value -> "<br>$inspect"
+                detail?.state == RepairEvidenceArtifactState.AVAILABLE -> {
+                    val position = detail.inputIndex?.let { " · Producer corpus position ${it + 1} of ${detail.inputCount}" }.orEmpty()
+                    "<br>Validation diagnostic: ${requireNotNull(detail.reason).replace('-', ' ').escapeHtml()} · " +
+                        "${requireNotNull(detail.phase).replace('-', ' ').escapeHtml()}$position" +
+                        "<br>Source snapshot: <code>${binding.sourceRevisionSha256.escapeHtml()}</code> · " +
+                        "<code>${binding.candidate.value.escapeHtml()}</code>" +
+                        view.targets[binding.diagnostic]?.let { "<br><a href=\"${artifactHref(job, it)}\">Open retained diagnostic</a>" }.orEmpty() +
+                        "<br>Producer observation only; unobserved case outcomes remain unknown."
+                }
+                detail?.state == RepairEvidenceArtifactState.CORRUPT -> "<br>Validation diagnostic is corrupt or does not match this invocation."
+                else -> "<br>Validation diagnostic is unavailable for this invocation."
+            }
+        }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${repairRunLabel(run.status.name.lowercase()).escapeHtml()} · " +
-            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure</p>"
+            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure$diagnostic</p>"
     }
     val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
         if (snapshot.pending?.rollback?.failureCode != null) 1 else 0
