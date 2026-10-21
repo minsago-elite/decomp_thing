@@ -31,10 +31,11 @@ internal object AuthoredValidationReceiptMetadata {
         put("manifestSha256", sha256(OracleJson.canonicalBytes(files))); put("files", files)
         put("quota", quota(2, "/PRIVATE-source"))
     }
-    val sourceSha256 = digest(files.joinToString("") { element ->
+    fun revisionSha256(files: JsonArray) = digest(files.joinToString("") { element ->
         val file = element.jsonObject; val path = file.getValue("path").jsonPrimitive.content
         "${path.length}:$path:1:${file.getValue("sha256").jsonPrimitive.content}\n"
     })
+    val sourceSha256 = revisionSha256(files)
     val runtime = buildJsonObject {
         put("sandboxConfigurationSha256", "9".repeat(64))
         put("runtime", buildJsonObject {
@@ -278,7 +279,7 @@ class RecordedRepairValidationCasesTest {
         corrupt(rebind(f, JsonObject(f.root + ("buildOutputLink" to changedLink))))
     }
     @Test fun `coherent output link and every scope quota preserve existing normal case comparisons`() {
-        val f = fixture(); val quota = JsonObject(outputQuota() + mapOf("mountId" to JsonPrimitive(2),
+        val f = fixture(); val quota = JsonObject(outputQuota() + mapOf("mountId" to JsonPrimitive(3),
             "maximumBytes" to JsonPrimitive(8192), "maximumEntries" to JsonPrimitive(40),
             "mountPathSha256" to JsonPrimitive(sha256("/PRIVATE-other".toByteArray(Charsets.UTF_8)))))
         var changed = f
@@ -291,6 +292,14 @@ class RecordedRepairValidationCasesTest {
         val link = f.root.getValue("buildOutputLink").jsonObject
         changed = rebind(changed, JsonObject(changed.root + ("buildOutputLink" to JsonObject(link +
             mapOf("target" to JsonPrimitive("/PRIVATE-other/program"), "quota" to quota)))))
+        val runtime = changed.root.getValue("runtimeConfiguration").jsonObject
+        val configuration = runtime.getValue("runtime").jsonObject
+        val movedRuntime = JsonObject(runtime + ("runtime" to JsonObject(configuration +
+            ("outputTmpfs" to JsonPrimitive("/PRIVATE-other")))))
+        val runtimeSha256 = sha256(OracleJson.canonicalBytes(movedRuntime))
+        changed = rebind(changed, JsonObject(changed.root + mapOf("runtimeConfiguration" to movedRuntime,
+            "runtimeSha256" to JsonPrimitive(runtimeSha256))))
+        changed = changed.copy(binding = changed.binding.copy(proof = changed.binding.proof.copy(runtimeSha256 = runtimeSha256)))
         assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(changed).state)
         assertTrue(page(changed).cases.all { it.outcome == RecordedRepairValidationCaseOutcome.MATCHED })
         assertFalse("PRIVATE" in page(changed).cases.toString())
@@ -446,15 +455,22 @@ class RecordedRepairValidationCasesTest {
     @Test fun `case identities are corpus bound stable across pages and private text is not projected`() {
         val f = fixture(count = 21); val identities = RepairHistoryIdentityReferences(f.binding.proof.regressionCorpusSha256)
         assertEquals(identities.case("PRIVATE-case-0020"), page(f, 2).cases.single().identity)
-        val nextBytes = rebind(f, JsonObject(f.root + ("sourceRevisionSha256" to JsonPrimitive("9".repeat(64)))))
+        val snapshot = f.root.getValue("sourceSnapshot").jsonObject
+        val files = JsonArray(snapshot.getValue("files").jsonArray.map { file ->
+            JsonObject(file.jsonObject + ("sha256" to JsonPrimitive("9".repeat(64)))) })
+        val sourceSha256 = AuthoredValidationReceiptMetadata.revisionSha256(files)
+        val nextSnapshot = JsonObject(snapshot + mapOf("files" to files,
+            "manifestSha256" to JsonPrimitive(sha256(OracleJson.canonicalBytes(files)))))
+        val nextBytes = rebind(f, JsonObject(f.root + mapOf("sourceRevisionSha256" to JsonPrimitive(sourceSha256),
+            "sourceSnapshot" to nextSnapshot)))
         val candidate = RepairRecordedIdentity("revision_00000001_" + "c".repeat(16), false)
         val nextInvocation = RepairValidationInvocation("validation_" + "c".repeat(32), "run_00000002", candidate.value,
-            "9".repeat(64), f.binding.proof.profileSha256, f.binding.proof.indexSha256, f.binding.proof.regressionCorpusSha256)
+            sourceSha256, f.binding.proof.profileSha256, f.binding.proof.indexSha256, f.binding.proof.regressionCorpusSha256)
         val next = nextBytes.copy(binding = nextBytes.binding.copy(candidate = candidate,
             invocationSha256 = nextInvocation.commitmentSha256(),
             primary = nextBytes.binding.primary.copy(artifact = recordedRepairArtifactReference(
                 f.binding.proof.regressionCorpusSha256, repairValidationReceiptPath(nextInvocation.id, nextBytes.binding.primary.sha256))),
-            proof = nextBytes.binding.proof.copy(sourceRevisionSha256 = "9".repeat(64))))
+            proof = nextBytes.binding.proof.copy(sourceRevisionSha256 = sourceSha256)))
         assertEquals(page(f).cases.first().identity, page(next).cases.first().identity)
         assertNotEquals(page(fixture(count = 2)).cases.first().identity, page(f).cases.first().identity)
         val text = page(f).cases.toString(); assertFalse("PRIVATE" in text); assertFalse("AA==" in text)
@@ -1000,7 +1016,8 @@ class RecordedRepairValidationCasesTest {
             assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
         }
         val small = f.copy(binding = f.binding.copy(context = AuthoredValidationReceiptMetadata.context.copy(
-            budget = RepairResourceBudget(maximumSourceFiles = 1))))
+            budget = RepairResourceBudget(maximumSourceFiles = 1, maximumContextFiles = 1,
+                maximumStagingDirectories = 1, maximumPatchFiles = 1))))
         corrupt(small)
     }
     @Test fun `runtime digest tools normalized mounts and profile bindings precede comparison authority`() {
