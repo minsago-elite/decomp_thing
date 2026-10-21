@@ -5,6 +5,7 @@ import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
 import decompengine.oracle.core.OracleJson
 import decompengine.project.sha256
+import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.repair.*
 import decompengine.validation.ProcessInput
 import java.nio.file.Path
@@ -139,6 +140,42 @@ class RecordedRepairValidationCasesTest {
         rows[index] = JsonObject(rows[index].jsonObject + mapOf("sandboxFields" to sandboxFields(values),
             "sandboxSha256" to JsonPrimitive(digest)))
         return scopes(f, rows)
+    }
+
+    @Test fun `authority names require the literal separator before mode and quota bindings`() {
+        val f = fixture()
+        for (separator in listOf("X", "/", "_", "-", "", ":", "\n")) {
+            val values = fields(f).map { (name, value) ->
+                (if (name.startsWith("authority[0].")) "authority[0]$separator" + name.removePrefix("authority[0].") else name) to value
+            }
+            val changed = sandbox(f, values)
+            corrupt(changed)
+            assertFailsWith<IllegalArgumentException> { requireRecordedRepairValidationSandbox(
+                changed.root.getValue("scopes").jsonArray[1].jsonObject, "1".repeat(64)) }
+        }
+    }
+    @Test fun `lookalike writable fields cannot substitute for an actual read only authority`() {
+        val f = fixture(); val original = fields(f)
+        val readonly = original.map { if (it.first == "authority[0].mode") it.first to "READ_ONLY" else it }
+        val lookalikes = original.filter { it.first.startsWith("authority[0].") }.map { (name, value) ->
+            "authority[1]X" + name.removePrefix("authority[0].") to value
+        }
+        val changed = sandbox(f, readonly + lookalikes)
+        corrupt(changed)
+        assertFailsWith<IllegalArgumentException> { requireRecordedRepairValidationSandbox(
+            changed.root.getValue("scopes").jsonArray[1].jsonObject, "1".repeat(64)) }
+    }
+    @Test fun `exact writable authority names retain valid command executable quota and comparison bindings`() {
+        val f = fixture()
+        for (index in listOf(0, 1, 19)) {
+            val values = fields(f).map { (name, value) ->
+                (if (name.startsWith("authority[0].")) "authority[$index]." + name.removePrefix("authority[0].") else name) to value
+            }
+            val changed = sandbox(f, values)
+            requireRecordedRepairValidationSandbox(changed.root.getValue("scopes").jsonArray[1].jsonObject, "1".repeat(64))
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(changed).state)
+            assertTrue(page(changed).cases.all { it.outcome == RecordedRepairValidationCaseOutcome.MATCHED })
+        }
     }
 
     @Test fun `hash bound receipts with stale sandbox digests cannot expose case comparisons`() {

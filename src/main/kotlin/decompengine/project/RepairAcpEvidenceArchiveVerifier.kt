@@ -1528,7 +1528,7 @@ private fun verifyValidationSandbox(scope: JsonObject, executableManifest: Strin
             fields["launch[0].executable.configuredManifest"] == executableManifest
     ) { "validation executable differs from its contained runtime mount" }
     val quota = verifyValidationQuota(scope.getValue("writableQuota"))
-    val writable = fields.filter { (name, mode) -> name.matches(Regex("authority\\[\\d+].mode")) && mode == "READ_WRITE" }
+    val writable = fields.filter { (name, mode) -> name.matches(Regex("authority\\[\\d+]\\.mode")) && mode == "READ_WRITE" }
     require(writable.size == 1) { "validation scope has unexpected writable authority" }
     val prefix = writable.keys.single().removeSuffix("mode")
     mapOf("provider" to "provider", "mount" to "mountId", "bytes" to "maximumBytes",
