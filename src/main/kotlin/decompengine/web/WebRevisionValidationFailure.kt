@@ -3,6 +3,7 @@ package decompengine.web
 import decompengine.project.sha256
 import decompengine.project.parseGeneratedCValidationFailureRecord
 import decompengine.project.requireRecordedRepairValidationSourceSnapshot
+import decompengine.project.requireRecordedRepairValidationRuntime
 import decompengine.project.ReconstructionProfiles
 import decompengine.repair.*
 import kotlinx.serialization.json.*
@@ -91,6 +92,8 @@ internal fun recordedValidationFailureReport(jobId: String, runId: String, captu
                         val context = binding.context
                         if (root.getValue("sourceSnapshot") != JsonNull && context != null) {
                             require(root.getValue("profileId").jsonPrimitive.content == context.profileId)
+                            requireRecordedRepairValidationRuntime(root.getValue("runtimeConfiguration"),
+                                binding.runtimeSha256, context.profileId)
                             requireRecordedRepairValidationSourceSnapshot(root.getValue("sourceSnapshot"),
                                 binding.sourceRevisionSha256, context.budget,
                                 ReconstructionProfiles.named(context.profileId).layout.declaration("build-definition").materialize())

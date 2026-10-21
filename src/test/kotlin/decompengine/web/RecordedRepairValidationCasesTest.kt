@@ -128,6 +128,7 @@ class RecordedRepairValidationCasesTest {
             })
             fun executable(hash: String?, role: String) = hash?.let { buildJsonObject {
                 put("sha256", it); put("runtimeManifestSha256", requireNotNull(executableManifest(role)))
+                put("role", role); put("mode", 320); put("bytes", 1)
             } } ?: JsonNull
             put("originalExecutable", executable(original, "reference")); put("rebuiltExecutable", executable(rebuilt, "candidate"))
             put("inputs", JsonArray(ids.map { buildJsonObject { put("id", it); put("args", JsonArray(emptyList())); put("stdinBase64", "") } }))
@@ -1326,6 +1327,49 @@ class RecordedRepairValidationCasesTest {
             assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
             assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
             assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
+        }
+    }
+
+    @Test fun `every retained executable requires its exact shape role and immutable mode before case exposure`() {
+        for (outcome in RepairValidationObservedOutcome.entries) {
+            val f = fixture(outcome = outcome)
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(f).state)
+            for (name in listOf("originalExecutable", "rebuiltExecutable")) {
+                val executable = f.root.getValue(name) as? JsonObject ?: continue
+                val variants = listOf(executable - "role", executable - "mode", executable - "bytes",
+                    executable + ("extra" to JsonPrimitive(true)),
+                    executable + ("role" to JsonPrimitive(if (name == "originalExecutable") "candidate" else "reference")),
+                    executable + ("role" to JsonPrimitive(1)), executable + ("mode" to JsonPrimitive(292)),
+                    executable + ("mode" to JsonPrimitive("320")))
+                for (fields in variants) {
+                    val bad = rebind(f, JsonObject(f.root + (name to JsonObject(fields))))
+                    corrupt(bad)
+                    val report = apiReport(bad)
+                    assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+                    assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+                    assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
+                }
+            }
+        }
+    }
+
+    @Test fun `retained executable byte lengths require a positive integer without narrowing valid long metadata`() {
+        val f = fixture()
+        for (name in listOf("originalExecutable", "rebuiltExecutable")) {
+            val executable = f.root.getValue(name).jsonObject
+            for (bytes in listOf(JsonPrimitive(0), JsonPrimitive(-1), JsonPrimitive("1"), JsonPrimitive(1.5),
+                    JsonPrimitive(true), JsonNull)) {
+                val bad = rebind(f, JsonObject(f.root + (name to JsonObject(executable + ("bytes" to bytes)))))
+                corrupt(bad)
+                val report = apiReport(bad)
+                assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+                assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            }
+            for (bytes in listOf(1L, Long.MAX_VALUE)) {
+                val valid = rebind(f, JsonObject(f.root + (name to JsonObject(executable + ("bytes" to JsonPrimitive(bytes))))))
+                assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(valid).state)
+                assertEquals("available", apiReport(valid).getValue("state").jsonPrimitive.content)
+            }
         }
     }
 

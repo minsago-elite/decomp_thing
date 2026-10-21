@@ -736,20 +736,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 "repair validation source/output quota mounts are cross-paired"
             }
             fun executable(field: String, digest: String?, role: String): String? {
-                val value = receipt.getValue(field)
-                if (digest == null) {
-                    require(value is JsonNull) { "repair validation unexpected executable identity" }
-                    return null
-                }
-                val item = value.requiredObject("validation executable")
-                item.requireExactKeys(setOf("sha256", "runtimeManifestSha256", "bytes", "mode", "role"), "validation executable")
-                require(item.requiredSha256("sha256", "validation executable") == digest &&
-                    item.requiredString("role", "validation executable") == role &&
-                    item.requiredInt("mode", "validation executable") == 320 &&
-                    item.requiredNonNegativeLong("bytes", "validation executable") > 0) {
-                    "repair validation executable identity is invalid"
-                }
-                return item.requiredSha256("runtimeManifestSha256", "validation executable")
+                return requireRecordedRepairValidationExecutable(receipt.getValue(field), digest, role)
             }
             val originalManifest = executable("originalExecutable", proof.originalBinarySha256, "reference")
             val rebuiltManifest = executable("rebuiltExecutable", proof.rebuiltBinarySha256, "candidate")
@@ -1417,6 +1404,23 @@ private fun verifyValidationQuota(value: JsonElement): JsonObject {
     }
     quota.requiredSha256("mountPathSha256", "validation quota")
     return quota
+}
+
+/** Shared retained executable metadata policy; this does not read or launch an executable. */
+internal fun requireRecordedRepairValidationExecutable(value: JsonElement, digest: String?, role: String): String? {
+    if (digest == null) {
+        require(value is JsonNull) { "repair validation unexpected executable identity" }
+        return null
+    }
+    val item = value.requiredObject("validation executable")
+    item.requireExactKeys(setOf("sha256", "runtimeManifestSha256", "bytes", "mode", "role"), "validation executable")
+    require(item.requiredSha256("sha256", "validation executable") == digest &&
+        item.requiredString("role", "validation executable") == role &&
+        item.requiredInt("mode", "validation executable") == 320 &&
+        item.requiredNonNegativeLong("bytes", "validation executable") > 0) {
+        "repair validation executable identity is invalid"
+    }
+    return item.requiredSha256("runtimeManifestSha256", "validation executable")
 }
 
 /** Pure retained runtime configuration binding, shared with the metadata-only web projection. */

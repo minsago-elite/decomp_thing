@@ -287,15 +287,19 @@ class RecordedRepairValidationDiagnosticTest {
         val invocation = invocation().copy(regressionCorpusSha256 = corpus, sourceRevisionSha256 = AuthoredValidationReceiptMetadata.sourceSha256)
         val value = JsonObject(f.primary + mapOf("regressionCorpusSha256" to JsonPrimitive(corpus),
             "profileId" to JsonPrimitive(AuthoredValidationReceiptMetadata.profileId),
+            "runtimeConfiguration" to AuthoredValidationReceiptMetadata.runtime,
+            "runtimeSha256" to JsonPrimitive(AuthoredValidationReceiptMetadata.runtimeSha256),
             "sourceRevisionSha256" to JsonPrimitive(invocation.sourceRevisionSha256),
             "sourceSnapshot" to AuthoredValidationReceiptMetadata.snapshot))
         val receipt = OracleJson.canonicalBytes(value)
         val record = f.record.copy(receiptSha256 = sha256(receipt), regressionCorpusSha256 = corpus,
+            runtimeSha256 = AuthoredValidationReceiptMetadata.runtimeSha256,
             sourceRevisionSha256 = invocation.sourceRevisionSha256, invocation = invocation)
         val diagnostic = record.encode()
         // Artifact references belong to the current graph corpus; the receipt proof has its own historical corpus.
         return f.copy(primary = value, receipt = receipt, diagnostic = diagnostic, record = record,
             binding = f.binding.copy(invocationSha256 = invocation.commitmentSha256(), regressionCorpusSha256 = corpus,
+                runtimeSha256 = AuthoredValidationReceiptMetadata.runtimeSha256,
                 sourceRevisionSha256 = invocation.sourceRevisionSha256, context = AuthoredValidationReceiptMetadata.context,
                 receiptSha256 = sha256(receipt), receiptBytes = receipt.size.toLong(),
                 diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size))
@@ -554,6 +558,50 @@ class RecordedRepairValidationDiagnosticTest {
             assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
             assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
         }
+    }
+
+    @Test fun `failure detail rejects stale runtime configuration even when receipt and diagnostic hashes agree`() {
+        val f = apiFailureFixture()
+        val runtime = AuthoredValidationReceiptMetadata.runtime
+        val changed = JsonObject(runtime + ("sandboxConfigurationSha256" to JsonPrimitive("9".repeat(64))))
+        val bad = withPrimary(f, JsonObject(f.primary + ("runtimeConfiguration" to changed)))
+        assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+        val report = failureReport(bad)
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        assertFalse(report.toString().contains("PRIVATE"))
+        assertEquals("available", reportState(failureReport(f)))
+    }
+
+    @Test fun `failure detail requires canonical runtime shape profile tools and mounts after coherent digest rebinding`() {
+        val f = apiFailureFixture(); val runtime = AuthoredValidationReceiptMetadata.runtime
+        val configuration = runtime.getValue("runtime") as JsonObject
+        fun configured(fields: Map<String, kotlinx.serialization.json.JsonElement>) =
+            JsonObject(runtime + ("runtime" to JsonObject(configuration + fields)))
+        fun rebound(value: JsonObject): Fixture {
+            val digest = sha256(OracleJson.canonicalBytes(value))
+            val changed = withPrimary(f, JsonObject(f.primary + mapOf(
+                "runtimeConfiguration" to value, "runtimeSha256" to JsonPrimitive(digest))))
+            return changed.withRecord(changed.record.copy(runtimeSha256 = digest)).let {
+                it.copy(binding = it.binding.copy(runtimeSha256 = digest)) }
+        }
+        val variants = listOf(JsonObject(runtime + ("extra" to JsonPrimitive(true))),
+            configured(mapOf("profileId" to JsonPrimitive("PRIVATE-other-profile"))),
+            configured(mapOf("schemaVersion" to JsonPrimitive("1"))),
+            configured(mapOf("tools" to JsonObject(emptyMap()))),
+            configured(mapOf("sourceTmpfs" to JsonPrimitive("PRIVATE-relative"))),
+            configured(mapOf("sourceTmpfs" to JsonPrimitive("/PRIVATE-source/../PRIVATE-source"))),
+            configured(mapOf("outputTmpfs" to configuration.getValue("sourceTmpfs"))))
+        for (value in variants) {
+            val bad = rebound(value)
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            assertFalse(report.toString().contains("PRIVATE"))
+        }
+        val valid = rebound(configured(mapOf("sandboxConfigurationFile" to JsonPrimitive("/PRIVATE-runtime/other-config"))))
+        assertEquals("available", reportState(failureReport(valid)))
     }
 
 }

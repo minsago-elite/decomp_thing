@@ -8,6 +8,7 @@ import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.project.requireRecordedRepairValidationOutputQuota
 import decompengine.project.requireRecordedRepairValidationRuntime
+import decompengine.project.requireRecordedRepairValidationExecutable
 import decompengine.project.requireRecordedRepairValidationSourceSnapshot
 import decompengine.project.ReconstructionProfiles
 import decompengine.repair.RepairRecordedValidationObservation
@@ -184,6 +185,10 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         require((root.getValue("profileId") as? JsonPrimitive)?.content == context.profileId)
         val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(
             root.getValue("runtimeConfiguration"), binding.proof.runtimeSha256, context.profileId)
+        val originalManifest = requireRecordedRepairValidationExecutable(root.getValue("originalExecutable"),
+            binding.proof.originalBinarySha256, "reference")
+        val rebuiltManifest = requireRecordedRepairValidationExecutable(root.getValue("rebuiltExecutable"),
+            binding.proof.rebuiltBinarySha256, "candidate")
         val sourceQuota = requireRecordedRepairValidationSourceSnapshot(root.getValue("sourceSnapshot"),
             binding.proof.sourceRevisionSha256, context.budget, profile.layout.declaration("build-definition").materialize())
         val outputQuota = requireRecordedRepairValidationOutputQuota(root.getValue("buildOutputLink"))
@@ -196,14 +201,8 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         fun text(value: JsonElement): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
             ?: error("validation case text type")
         fun positive(value: JsonElement) = (value as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.let { it > 0 } == true
-        fun manifest(field: String): String {
-            val executable = root.getValue(field) as? JsonObject ?: error("validation case executable type")
-            return text(executable.getValue("runtimeManifestSha256")).also {
-                require(it.matches(RECORDED_VALIDATION_CASE_DIGEST))
-            }
-        }
-        val manifests = if (behavior) mapOf("reference" to manifest("originalExecutable"),
-            "candidate" to manifest("rebuiltExecutable")) else emptyMap()
+        val manifests = if (behavior) mapOf("reference" to requireNotNull(originalManifest),
+            "candidate" to requireNotNull(rebuiltManifest)) else emptyMap()
         var outputBytes = 0L
         fun scope(index: Int, role: String, input: String?): Output {
             val scope = scopes[index] as? JsonObject ?: error("validation case scope type")
