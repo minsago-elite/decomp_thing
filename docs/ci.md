@@ -540,3 +540,28 @@ Useful artifacts to retain:
 ## Determinism Notes
 
 The default CI path does not require external services. Tests exercise deterministic fakes for angr and the OpenAI-compatible API. Ghidra is additionally exercised in the pinned Docker gate so exporter API compatibility and stripped-binary determinism are verified against the production integration.
+
+
+### Reviewed Node archive download cache
+
+Eight existing install steps in normal CI, ACP, built-in and LLVM model jobs opt
+in with `DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE=1`. Other callers, including Docker,
+keep the original download behavior and require no writable repository cache.
+Actions shares an exact-key cache for `build/frontend-node-downloads`, containing
+only the pinned official Node archive. The key includes OS/architecture, installer,
+reviewed checksums, Node pin and package metadata; there is no broad restore prefix.
+A hit is copied into a fresh owned stage and passes the original strict SHA-256,
+extracted Node/npm versions and repository package/toolchain checks before use.
+Linked cache directories, linked/nonregular archive entries and bad checksums refuse.
+
+A miss uses the original fixed HTTPS download and bounds, then publishes the fully
+verified archive through an owned same-directory temporary file without overwriting
+a concurrent winner. Interrupted copies are not published as hits; owned staging
+and cache temporary files are cleaned on exit. Every installation remains fresh;
+all original qualification/test commands still run. The cache contains no
+node_modules, compiled output, installation, report or runtime/provider evidence.
+A corrupt immutable Actions cache must be removed; archive authentication remains
+mandatory.
+
+This is prepared source. Its own normal Actions must establish hit/miss behavior
+and any download or whole-CI savings; no measured speedup is claimed.
