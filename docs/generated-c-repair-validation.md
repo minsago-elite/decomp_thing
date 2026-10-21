@@ -185,7 +185,7 @@ This checkpoint does not introduce a native supervisor change or a polling appro
 ## Supplemental failure diagnostic
 
 When the provider has retained its existing failure receipt, it also attempts to retain
-`<label>.validation-failure.json`. This schema-version-1 producer diagnostic binds the exact
+`<label>.validation-failure.json`. The legacy schema-version-1 producer diagnostic binds the exact
 validation receipt SHA-256 and its source/profile/index/corpus/runtime commitments. The existing
 version-2 receipt, registered proof, acceptance rules and archive verification are unchanged.
 Before validation, the same atomic publisher replaces any prior supplement for that label with
@@ -194,7 +194,7 @@ later publication failure leaves unavailable diagnostic data instead of a previo
 an accidentally identical receipt digest. An empty supplement is not a valid schema1 record.
 Diagnostic publication failure is suppressed on the original failure; it cannot replace that
 failure, retry validation, or remove the primary receipt.
-The primary receipt and supplement together must fit the existing retained-receipt byte ceiling;
+The primary receipt and retained supplement copies together must fit the existing retained-receipt byte ceiling;
 the supplement is withheld with a suppressed budget failure when that ceiling has no capacity.
 An absent supplement is unavailable diagnostic data, not a successful or skipped execution.
 
@@ -214,8 +214,47 @@ If snapshot closure itself throws during unwinding, the phase becomes snapshot f
 the earlier case position is cleared. Successful closure preserves the original operation phase.
 The original cleanup throwable and prior failure remain linked even if diagnostic notification fails.
 
-A future case adapter must check the selected receipt digest and source/run/revision/corpus
-bindings before joining a diagnostic. This supplemental record is not a validation result,
-accepted revision, live v1 API route, or independently qualified case-comparison view. The new
-pure data/classification tests await normal Actions; no additional native process or probe is
-introduced by this diagnostic.
+### Selected invocation and canonical retention
+
+The repair graph supplies a distinct `validation_<32 lowercase hex digits>` identity for each
+baseline or candidate assessment. The typed request binds that identity to its run, candidate
+revision, source, profile, index and corpus. With this request, the supplemental document uses
+schema2 and includes the exact invocation. Identical primary receipts cannot identify a later call.
+Requests without this context retain legacy schema1 diagnostics and cannot obtain a bound view.
+
+The provider attaches a publication descriptor only after the bounded supplemental write returns.
+The primary marker is attached first and survives any auxiliary failure. Before canonical storage,
+the graph checks the exact request/provider relation, authenticates both reported byte commitments
+through its descriptor-pinned report reader, and copies the supplement to
+`reports/<validation identity>.validation-failure.json`. This copy uses the existing descriptor-pinned
+atomic no-replace publisher: an existing identical file is idempotent; different bytes are refused.
+The mutable label supplement and immutable copy both count against the same byte ceiling.
+
+Only after the immutable copy is retained and checked does the graph commit its portable descriptor
+to the owning run using run schema3. Legacy run schemas1/2 preserve their previous encoding and
+have no invented descriptor. Run, candidate, source/profile/index/corpus associations and unique
+invocation identities are checked in canonical, read-only history and release archive readers.
+Rollback and interruption preserve this correlation; it never supplies acceptance or release proof.
+Uncommitted orphan files are not selected by the history capture.
+
+### Read-only run diagnostic selection
+
+The recorded history view exposes opaque artifact references and commitments, without provider
+paths or private summary text. `historyRunEvidence=<recorded run reference>` requires the captured
+`historyGraph` digest and selects a run on the current bounded history page. It cannot be combined
+with `historyEvidence`, and it does not require a candidate attempt for a baseline failure.
+Default history pages do not read run diagnostic payloads.
+
+The existing checked selected-report namespace and duplicate-target refusal apply before reads.
+Primary and diagnostic bytes share the existing request-wide byte/call allowance. Byte capture may
+be cached by path, while integrity is checked separately for each selected invocation. The reader
+checks both exact byte commitments, schema2 invocation commitment, source/profile/index/corpus/runtime,
+primary outcome/cleanup, input count and any case position before exposing closed reason/phase labels.
+Missing or empty data is unavailable; changed, unbound, malformed or cross-paired data is withheld.
+Neither private receipt content nor exception/peer text is projected into these labels.
+
+This selection does not start validation. It does not establish a native actor, current source,
+successful case, acceptance or release qualification. Full stable case IDs, normalized accessible
+text/binary comparisons, validated source navigation and the live case adapter remain separate work.
+The new schema and reader data controls await their own normal Actions; this follow-up adds no
+actual native process, provider, controller or browser test context.

@@ -135,6 +135,10 @@
       "reason": "Generated-C repair validation failure classification and receipt-bound diagnostic projection."
     },
     {
+      "path": "src/main/kotlin/decompengine/web/RepairValidationDiagnostics.kt",
+      "reason": "Generated-C repair diagnostic receipt pairing and bounded read-only presentation."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCValidationSnapshot.kt",
       "reason": "Generated-C repair validation workspace staging and snapshot policy."
     },

@@ -5,7 +5,10 @@ import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairValidationFailureKind
+import decompengine.repair.RepairValidationInvocation
+import decompengine.repair.RepairValidationDiagnosticPublication
 import java.io.IOException
+import java.nio.file.Path
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.int
@@ -296,5 +299,76 @@ class GeneratedCValidationFailureRecordTest {
         }
         assertSame(cleanup, thrown)
         assertEquals(listOf(observation, primary), cleanup.suppressed.toList())
+    }
+
+    private fun invocation() = RepairValidationInvocation("validation_" + "a".repeat(32), "run_00000001",
+        "root_" + "a".repeat(24), "2".repeat(64), "3".repeat(64), "4".repeat(64), "5".repeat(64))
+
+    @Test
+    fun `schema two commits the exact typed invocation and remains bounded`() {
+        val value = record().copy(invocation = invocation())
+        val bytes = value.encode()
+        assertEquals(value, parseGeneratedCValidationFailureRecord(bytes))
+        assertEquals(2, Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+        assertTrue(bytes.size <= GeneratedCValidationFailureRecord.MAXIMUM_BYTES)
+        assertFailsWith<IllegalArgumentException> {
+            value.copy(invocation = invocation().copy(sourceRevisionSha256 = "9".repeat(64)))
+        }
+    }
+
+    @Test
+    fun `legacy diagnostic parser retains schema one bytes without inventing an invocation`() {
+        val original = record()
+        val parsed = parseGeneratedCValidationFailureRecord(original.encode())
+        assertEquals(original, parsed)
+        assertEquals(null, parsed.invocation)
+        assertContentEquals(original.encode(), parsed.encode())
+    }
+
+    @Test
+    fun `closed diagnostic parser rejects extra fields and quoted numeric values`() {
+        val root = Json.parseToJsonElement(record().copy(invocation = invocation()).encode().toString(Charsets.UTF_8)).jsonObject
+        val edits = listOf(root + ("PRIVATE-extra" to kotlinx.serialization.json.JsonPrimitive("PRIVATE-value")),
+            root + ("inputCount" to kotlinx.serialization.json.JsonPrimitive("3")), root - "invocation")
+        for (edit in edits) assertTrue(runCatching {
+            parseGeneratedCValidationFailureRecord(decompengine.oracle.core.OracleJson.canonicalBytes(kotlinx.serialization.json.JsonObject(edit)))
+        }.isFailure)
+    }
+
+    @Test
+    fun `same receipt and source with a new invocation produce distinct diagnostic bytes`() {
+        val first = record().copy(invocation = invocation())
+        val second = first.copy(invocation = invocation().copy(id = "validation_" + "b".repeat(32)))
+        assertEquals(first.receiptSha256, second.receiptSha256)
+        assertFalse(first.encode().contentEquals(second.encode()))
+        assertFalse(sha256(first.encode()) == sha256(second.encode()))
+    }
+
+    @Test
+    fun `primary marker survives auxiliary failure and accepts one exact successful publication only`() {
+        val path = Path.of("/authored/reports/primary.validation.json")
+        val primary = GeneratedCValidationFailureEvidence(path, "1".repeat(64), true, RepairValidationFailureKind.RESOURCE_EXHAUSTED)
+        val publisher = GeneratedCValidationFailurePublication.start { if (it.isNotEmpty()) throw IOException("authored write") }
+        assertFailsWith<IOException> { publisher.publish(record().copy(invocation = invocation()), 1, 4096) }
+        assertEquals(null, primary.diagnosticPublication)
+        assertEquals("1".repeat(64), primary.receiptSha256)
+        val value = RepairValidationDiagnosticPublication(invocation(), "6".repeat(64), path, "1".repeat(64), 1,
+            Path.of("/authored/reports/${invocation().id}.validation-failure.json"), "7".repeat(64), 1000,
+            RepairValidationFailureKind.RESOURCE_EXHAUSTED, true)
+        assertFailsWith<IllegalArgumentException> { primary.retainDiagnostic(value.copy(receiptSha256 = "9".repeat(64))) }
+        primary.retainDiagnostic(value)
+        assertEquals(value, primary.diagnosticPublication)
+        assertFailsWith<IllegalStateException> { primary.retainDiagnostic(value) }
+    }
+
+    @Test
+    fun `invocation metadata consumes the same retained receipt byte ceiling`() {
+        val legacy = record().encode().size
+        val value = record().copy(invocation = invocation())
+        assertTrue(value.encode().size > legacy)
+        assertFailsWith<RepairBudgetExceededException> { value.encodeWithinReceiptBudget(100, 100L + legacy) }
+        assertContentEquals(value.encode(), value.encodeWithinReceiptBudget(100, 100L + value.encode().size))
+        assertFailsWith<RepairBudgetExceededException> { value.encodeWithinReceiptBudget(100, 100L + value.encode().size, 2) }
+        assertContentEquals(value.encode(), value.encodeWithinReceiptBudget(100, 100L + 2 * value.encode().size, 2))
     }
 }

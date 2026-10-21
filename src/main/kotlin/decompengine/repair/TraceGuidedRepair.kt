@@ -1708,11 +1708,19 @@ class TraceGuidedRepairLoop private constructor(
         require(corpus.inputs == regressionInputs) { "retained regression corpus changed during validation" }
         val snapshot = graph.snapshot
         val sources = graph.candidateSources(attempt)
+        val invocation = graph.validationInvocation(attempt)
         val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
             snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
-            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation)
+            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation)
         progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
-        val outcome = validationStrategy.validateCandidate(request)
+        val outcome = try {
+            validationStrategy.validateCandidate(request)
+        } catch (failure: Exception) {
+            retainRepairValidationDiagnostic(failure, invocation) { publication ->
+                graph.recordValidationDiagnostic(invocation, publication)
+            }
+            throw failure
+        }
         checkRunBudget()
         val proof = outcome.proof
         require(proof.sourceRevisionSha256 == request.sourceRevisionSha256 && proof.profileSha256 == request.profileSha256 &&

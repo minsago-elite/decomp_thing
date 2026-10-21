@@ -25,6 +25,7 @@ class RepairCandidateValidationRequest(
     val budget: RepairResourceBudget,
     val deadlineNanos: Long,
     val cancellation: AgentCancellation,
+    val invocation: RepairValidationInvocation? = null,
 ) {
     private val sourceContent = checkedCandidateSources(candidateSources, budget)
     private val inputContent = checkedCandidateInputs(inputs, budget)
@@ -56,6 +57,10 @@ class RepairCandidateValidationRequest(
         require(inputContent.map { it.id } == inputContent.map { it.id }.distinct().sorted())
         require(repairRegressionCorpusSha256(inputContent) == regressionCorpusSha256)
         require(listOf(profileSha256, indexSha256).all { it.matches(Regex("[0-9a-f]{64}")) })
+        invocation?.let {
+            require(it.sourceRevisionSha256 == sourceRevisionSha256 && it.profileSha256 == profileSha256 &&
+                it.indexSha256 == indexSha256 && it.regressionCorpusSha256 == regressionCorpusSha256)
+        }
     }
 }
 
@@ -116,6 +121,7 @@ interface RepairValidationFailureEvidence {
     val receiptSha256: String
     val cleanupVerified: Boolean
     val failureKind: RepairValidationFailureKind get() = RepairValidationFailureKind.VALIDATION_FAILED
+    val diagnosticPublication: RepairValidationDiagnosticPublication? get() = null
 }
 
 enum class RepairValidationFailureKind { CANCELLED, RESOURCE_EXHAUSTED, VALIDATION_FAILED, CLEANUP_UNVERIFIED }

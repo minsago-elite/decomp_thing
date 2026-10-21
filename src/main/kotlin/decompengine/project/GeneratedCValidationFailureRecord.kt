@@ -6,9 +6,12 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairValidationFailureKind
+import decompengine.repair.RepairValidationInvocation
+import decompengine.repair.parseRepairValidationInvocation
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
 /** An enclosing producer operation, not an assertion that a child process started or failed here. */
 internal enum class GeneratedCValidationFailurePhase(val wireName: String, val hasCase: Boolean = false) {
@@ -61,6 +64,7 @@ internal data class GeneratedCValidationFailureRecord(
     val phase: GeneratedCValidationFailurePhase,
     val inputCount: Int,
     val inputIndex: Int? = null,
+    val invocation: RepairValidationInvocation? = null,
 ) {
     init {
         require(listOf(receiptSha256, sourceRevisionSha256, profileSha256, indexSha256,
@@ -71,10 +75,14 @@ internal data class GeneratedCValidationFailureRecord(
         require(inputCount >= 0 && (inputIndex == null || phase.hasCase && inputIndex in 0 until inputCount)) {
             "validation failure input position is invalid"
         }
+        invocation?.let {
+            require(it.sourceRevisionSha256 == sourceRevisionSha256 && it.profileSha256 == profileSha256 &&
+                it.indexSha256 == indexSha256 && it.regressionCorpusSha256 == regressionCorpusSha256)
+        }
     }
 
     fun encode(): ByteArray = OracleJson.canonicalBytes(JsonObject(mapOf(
-        "schemaVersion" to JsonPrimitive(1),
+        "schemaVersion" to JsonPrimitive(if (invocation == null) 1 else 2),
         "kind" to JsonPrimitive("decomp-engine.generated-c-validation-failure"),
         "authority" to JsonPrimitive("producer-diagnostic"),
         "outcome" to JsonPrimitive("failed"),
@@ -89,14 +97,15 @@ internal data class GeneratedCValidationFailureRecord(
         "phase" to JsonPrimitive(phase.wireName),
         "inputCount" to JsonPrimitive(inputCount),
         "inputIndex" to (inputIndex?.let(::JsonPrimitive) ?: JsonNull),
-    )), StrictJsonLimits(maximumInputBytes = MAXIMUM_BYTES, maximumCanonicalBytes = MAXIMUM_BYTES,
+    ) + (invocation?.let { mapOf("invocation" to it.toJsonObject()) } ?: emptyMap())), StrictJsonLimits(maximumInputBytes = MAXIMUM_BYTES, maximumCanonicalBytes = MAXIMUM_BYTES,
         maximumDepth = 4, maximumNodes = 64, maximumStringBytes = 128,
         maximumTotalStringBytes = 2048, maximumNumberCharacters = 10))
 
-    fun encodeWithinReceiptBudget(receiptBytes: Long, maximumBytes: Long): ByteArray {
+    fun encodeWithinReceiptBudget(receiptBytes: Long, maximumBytes: Long, retainedCopies: Int = 1): ByteArray {
         require(receiptBytes >= 0 && maximumBytes >= 0) { "validation diagnostic byte budget is invalid" }
+        require(retainedCopies in 1..2)
         val encoded = encode()
-        if (encoded.size.toLong() > maximumBytes - receiptBytes) {
+        if (encoded.size.toLong() * retainedCopies > maximumBytes - receiptBytes) {
             throw RepairBudgetExceededException("validation diagnostic exceeds the retained receipt byte bound")
         }
         return encoded
@@ -109,8 +118,11 @@ internal data class GeneratedCValidationFailureRecord(
 
 /** Reset commits before validation; a later encoding/write failure cannot retain an older reason. */
 internal class GeneratedCValidationFailurePublication private constructor(private val replace: (String) -> Unit) {
-    fun publish(record: GeneratedCValidationFailureRecord, receiptBytes: Long, maximumBytes: Long) {
-        replace(record.encodeWithinReceiptBudget(receiptBytes, maximumBytes).toString(Charsets.UTF_8))
+    fun publish(record: GeneratedCValidationFailureRecord, receiptBytes: Long, maximumBytes: Long,
+        retainedCopies: Int = 1): ByteArray {
+        val bytes = record.encodeWithinReceiptBudget(receiptBytes, maximumBytes, retainedCopies)
+        replace(bytes.toString(Charsets.UTF_8))
+        return bytes
     }
 
     companion object {
@@ -119,6 +131,30 @@ internal class GeneratedCValidationFailurePublication private constructor(privat
             return GeneratedCValidationFailurePublication(replace)
         }
     }
+}
+
+/** Closed, bounded diagnostic parser. Neither schema supplies validation acceptance. */
+internal fun parseGeneratedCValidationFailureRecord(bytes: ByteArray): GeneratedCValidationFailureRecord {
+    val value = OracleJson.parse(bytes, StrictJsonLimits(maximumInputBytes = 4096, maximumCanonicalBytes = 4096,
+        maximumDepth = 4, maximumNodes = 64, maximumStringBytes = 128,
+        maximumTotalStringBytes = 2048, maximumNumberCharacters = 10)) as? JsonObject
+        ?: error("validation diagnostic object type")
+    fun text(name: String) = (value.getValue(name) as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: error("validation diagnostic text type")
+    fun number(name: String) = requireNotNull((value.getValue(name) as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull)
+    val schema = number("schemaVersion").also { require(it in 1..2) }
+    require(text("kind") == "decomp-engine.generated-c-validation-failure" &&
+        text("authority") == "producer-diagnostic" && text("outcome") == "failed")
+    val classification = RepairValidationFailureKind.entries.single { it.name.lowercase().replace('_', '-') == text("classification") }
+    val record = GeneratedCValidationFailureRecord(text("receiptSha256"), text("sourceRevisionSha256"),
+        text("profileSha256"), text("indexSha256"), text("regressionCorpusSha256"), text("runtimeSha256"),
+        classification, GeneratedCValidationFailureReason.entries.single { it.wireName == text("reason") },
+        GeneratedCValidationFailurePhase.entries.single { it.wireName == text("phase") }, number("inputCount"),
+        value.getValue("inputIndex").takeUnless { it is JsonNull }?.let { number("inputIndex") },
+        if (schema == 2) parseRepairValidationInvocation(value.getValue("invocation") as? JsonObject
+            ?: error("validation diagnostic invocation type")) else null)
+    require(record.encode().contentEquals(bytes)) { "validation diagnostic is noncanonical or has unknown fields" }
+    return record
 }
 
 /** Preserve the cleanup throwable and original failure while notifying only diagnostic state. */

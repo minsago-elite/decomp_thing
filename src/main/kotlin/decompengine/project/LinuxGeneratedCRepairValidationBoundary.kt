@@ -26,6 +26,7 @@ import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairValidationProof
 import decompengine.repair.RepairValidationFailureEvidence
 import decompengine.repair.RepairValidationFailureKind
+import decompengine.repair.RepairValidationDiagnosticPublication
 import decompengine.repair.writeRepairEvidenceAtomically
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparisonReport
@@ -94,8 +95,9 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
         val config = configuration
         val inputs = request.inputs
         if (request.originalBinary != null) require(inputs.isNotEmpty()) { "behavior validation requires the full nonempty retained corpus" }
+        val diagnosticPath = request.reportsDir.resolve("${request.label}.validation-failure.json")
         val diagnosticPublication = GeneratedCValidationFailurePublication.start { content ->
-            writeRepairEvidenceAtomically(request.reportsDir.resolve("${request.label}.validation-failure.json"), content)
+            writeRepairEvidenceAtomically(diagnosticPath, content)
         }
         val receipt = GeneratedCValidationReceipt(request, config, behaviorBudgetEvidence)
         val aggregateOutput = AtomicLong()
@@ -187,15 +189,22 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                     cleanupVerified = kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED)
                 writeRepairEvidenceAtomically(path, bytes.toString(Charsets.UTF_8))
                 val receiptSha256 = sha256(bytes)
-                problem.addSuppressed(GeneratedCValidationFailureEvidence(path, receiptSha256,
-                    kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED, kind))
+                val primary = GeneratedCValidationFailureEvidence(path, receiptSha256,
+                    kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED, kind)
+                problem.addSuppressed(primary)
                 val diagnostic = GeneratedCValidationFailureRecord(receiptSha256,
                     request.sourceRevisionSha256, request.profileSha256, request.indexSha256,
                     request.regressionCorpusSha256, config.configurationSha256, kind,
                     GeneratedCValidationFailureReason.from(kind, problem), failurePhase,
-                    inputs.size, failureInputIndex.takeIf { it >= 0 })
-                diagnosticPublication.publish(diagnostic, bytes.size.toLong(),
-                    minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024))
+                    inputs.size, failureInputIndex.takeIf { it >= 0 }, request.invocation)
+                val diagnosticBytes = diagnosticPublication.publish(diagnostic, bytes.size.toLong(),
+                    minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024),
+                    retainedCopies = if (request.invocation == null) 1 else 2)
+                request.invocation?.let { invocation ->
+                    primary.retainDiagnostic(RepairValidationDiagnosticPublication(invocation,
+                        config.configurationSha256, path, receiptSha256, bytes.size.toLong(), diagnosticPath,
+                        sha256(diagnosticBytes), diagnosticBytes.size, kind, primary.cleanupVerified))
+                }
             } catch (archive: Throwable) { problem.addSuppressed(archive) }
             if (problem is InterruptedException) Thread.currentThread().interrupt()
             throw problem
@@ -311,7 +320,16 @@ internal class GeneratedCValidationFailureEvidence(
     override val receiptSha256: String,
     override val cleanupVerified: Boolean,
     override val failureKind: RepairValidationFailureKind,
-) : Exception("contained validation attempt evidence: $failureKind"), RepairValidationFailureEvidence
+) : Exception("contained validation attempt evidence: $failureKind"), RepairValidationFailureEvidence {
+    private var publication: RepairValidationDiagnosticPublication? = null
+    override val diagnosticPublication: RepairValidationDiagnosticPublication? get() = publication
+    fun retainDiagnostic(value: RepairValidationDiagnosticPublication) {
+        check(publication == null)
+        require(value.receiptPath == receiptPath && value.receiptSha256 == receiptSha256 &&
+            value.failureKind == failureKind && value.cleanupVerified == cleanupVerified)
+        publication = value
+    }
+}
 
 private fun requireQuotaNotExhausted(root: AcpWorkflowStagingRoot) {
     root.requireCurrentIdentity()
