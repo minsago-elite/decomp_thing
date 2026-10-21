@@ -109,7 +109,21 @@ if [[ -n "$frontend_cache_dir" ]]; then
   if [[ "$frontend_archive_from_cache" == false ]]; then
     frontend_cache_tmp=$(mktemp "$frontend_cache_dir/.${frontend_archive}.XXXXXX")
     cp -- "$frontend_stage/$frontend_archive" "$frontend_cache_tmp"
-    mv -T --no-clobber -- "$frontend_cache_tmp" "$frontend_cached_archive"
+    frontend_cache_move_status=0
+    mv -T --no-clobber -- "$frontend_cache_tmp" "$frontend_cached_archive" || frontend_cache_move_status=$?
+    if [[ -e "$frontend_cache_tmp" ]]; then
+      # No-clobber exit status varies. Accept only a complete reviewed winner.
+      if [[ ! -f "$frontend_cached_archive" || -L "$frontend_cached_archive" ]]; then
+        echo "frontend Node archive cache could not be published" >&2
+        exit 1
+      fi
+      (
+        cd -- "$frontend_cache_dir"
+        printf '%s  %s\n' "$frontend_sha256" "$frontend_archive" | sha256sum --check --strict
+      )
+    elif [[ "$frontend_cache_move_status" != 0 ]]; then
+      exit "$frontend_cache_move_status"
+    fi
     rm -f -- "$frontend_cache_tmp"
     frontend_cache_tmp=''
   fi
