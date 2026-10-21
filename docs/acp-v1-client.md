@@ -380,7 +380,12 @@ configuration diagnostic and preference index. Diagnostics preview at most four 
 and four values, redact configured environment values, and truncate each preview to 48 characters
 plus a truncation marker. These previews are display text, not selectors. The exact initial session advertisement remains a
 separate required authority check: later updates cannot authorize a choice absent from it. Existing
-post-response checks still verify the complete applied preference prefix. This does not make peer
+post-response checks verify both the returned list and installed SDK list: every applied prefix
+value must still be current and uniquely selectable in that replacement inventory. A later setter
+cannot retain an earlier `currentValue` while removing or duplicating that value's advertised choice.
+The original typed response-consistency failures are preserved; this additional freshness refusal
+uses the same private, bounded current-inventory diagnostic and the original preference index.
+This does not make peer
 inventory changes atomic with an RPC or supply an interactive configuration UI.
 
 ## Process and wire boundary

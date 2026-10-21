@@ -1138,17 +1138,9 @@ class AcpAgentHarness(
         options: List<SessionConfigOption>,
         configuredPrefix: List<AcpSessionConfigPreference>,
     ) {
-        configuredPrefix.forEachIndexed { index, preference ->
-            val matches = options.filter { it.id.value == preference.id }
-            if (matches.size != 1) throw safeSessionPreferenceSetterFailure("configOption", index)
-            val applied = matches.single()
-            val consistent = when (val requested = preference.value) {
-                is AcpSessionConfigValue.Select ->
-                    applied is SessionConfigOption.Select && applied.currentValue.value == requested.valueId
-                is AcpSessionConfigValue.BooleanValue ->
-                    applied is SessionConfigOption.BooleanOption && applied.currentValue == requested.value
-            }
-            if (!consistent) throw safeSessionPreferenceSetterFailure("configOption", index)
+        requireAppliedSessionConfigPreferences(options, configuredPrefix,
+            configuration.environment.values.map { it.value }, configuration.sessionPreferences.privateIdentifiers()) { index ->
+            safeSessionPreferenceSetterFailure("configOption", index)
         }
     }
 
