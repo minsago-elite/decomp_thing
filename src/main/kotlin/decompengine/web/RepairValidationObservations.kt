@@ -3,6 +3,7 @@ package decompengine.web
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.sha256
+import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.repair.RepairRecordedValidationObservation
 import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.requireRepairValidationDiffRole
@@ -159,6 +160,14 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         fun text(value: JsonElement): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
             ?: error("validation case text type")
         fun positive(value: JsonElement) = (value as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.let { it > 0 } == true
+        fun manifest(field: String): String {
+            val executable = root.getValue(field) as? JsonObject ?: error("validation case executable type")
+            return text(executable.getValue("runtimeManifestSha256")).also {
+                require(it.matches(RECORDED_VALIDATION_CASE_DIGEST))
+            }
+        }
+        val manifests = if (behavior) mapOf("reference" to manifest("originalExecutable"),
+            "candidate" to manifest("rebuiltExecutable")) else emptyMap()
         fun scope(index: Int, role: String, input: String?): Output {
             val scope = scopes[index] as? JsonObject ?: error("validation case scope type")
             require(scope.keys == setOf("role", "inputId", "output", "sandboxSha256", "sandboxFields", "writableQuota", "cleanupVerified"))
@@ -179,10 +188,12 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
             val output = scope.getValue("output") as? JsonObject ?: error("validation case output type")
             require(output.keys == setOf("command", "exitCode", "stdoutBase64", "stderrBase64", "networkIsolated"))
             val command = output.getValue("command") as? JsonArray ?: error("validation case command type")
+            require(command.isNotEmpty())
             command.forEach { text(it) }
             require((output.getValue("networkIsolated") as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == true)
             val exit = (output.getValue("exitCode") as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
             require(exit != null && exit in 0..127)
+            requireRecordedRepairValidationSandbox(scope, manifests[role])
             return Output(exit, recordedValidationEncodedBytes(output.getValue("stdoutBase64")),
                 recordedValidationEncodedBytes(output.getValue("stderrBase64")))
         }

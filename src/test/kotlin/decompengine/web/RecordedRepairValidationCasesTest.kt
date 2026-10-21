@@ -1,5 +1,6 @@
 package decompengine.web
 
+import decompengine.acp.acpSandboxCanonicalStringDigest
 import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
 import decompengine.oracle.core.OracleJson
@@ -18,19 +19,45 @@ class RecordedRepairValidationCasesTest {
     private data class Fixture(val binding: RepairRecordedValidationObservation, val root: JsonObject, val bytes: ByteArray,
         val diffBytes: ByteArray? = null)
     private fun encoded(bytes: ByteArray) = JsonPrimitive(Base64.getEncoder().encodeToString(bytes))
+    private fun executableManifest(role: String): String? = when (role) {
+        "reference" -> "1".repeat(64)
+        "candidate" -> "2".repeat(64)
+        else -> null
+    }
+    private fun sandboxFields(fields: List<Pair<String, String>>) = JsonArray(fields.map { (name, value) ->
+        JsonArray(listOf(JsonPrimitive(name), JsonPrimitive(value)))
+    })
+    private fun sandboxDigest(fields: List<Pair<String, String>>) = sha256(buildString {
+        fields.forEach { (name, value) -> append(name.length).append(':').append(name)
+            .append(value.length).append(':').append(value).append(';') }
+    }.toByteArray(Charsets.UTF_8))
     private fun scope(role: String, id: String?, exit: Int = 0, stdout: ByteArray = byteArrayOf(0, -1),
         stderr: ByteArray = byteArrayOf(10)): JsonObject = buildJsonObject {
         put("role", role); put("inputId", id?.let(::JsonPrimitive) ?: JsonNull)
+        val command = listOf("PRIVATE-command")
         put("output", buildJsonObject {
-            put("command", JsonArray(listOf(JsonPrimitive("PRIVATE-command"))))
+            put("command", JsonArray(command.map(::JsonPrimitive)))
             put("exitCode", exit); put("stdoutBase64", encoded(stdout)); put("stderrBase64", encoded(stderr)); put("networkIsolated", true)
         })
-        put("sandboxSha256", "6".repeat(64)); put("sandboxFields", JsonArray(listOf(JsonArray(listOf(
-            JsonPrimitive("PRIVATE-host-field"), JsonPrimitive("PRIVATE-peer-path"))))))
-        put("writableQuota", buildJsonObject {
+        val quota = buildJsonObject {
             put("provider", "dedicated-tmpfs-size+nr_inodes"); put("mountId", 1); put("maximumBytes", 4096)
             put("maximumEntries", 20); put("mountPathSha256", "7".repeat(64))
-        })
+        }
+        put("writableQuota", quota)
+        val fields = linkedMapOf("provider" to "bubblewrap+systemd-cgroup-v2",
+            "launch[0].purpose" to "CANDIDATE_VALIDATION", "launch[0].mergeError" to "false",
+            "launch[0].writableMountClosure" to "9".repeat(64),
+            "launch[0].command" to acpSandboxCanonicalStringDigest(command),
+            "authority[0].mode" to "READ_WRITE", "PRIVATE-host-field" to "PRIVATE-peer-path")
+        for (name in listOf("cgroup.pids", "cgroup.memory", "cgroup.cpu", "network", "nestedUserns", "newSession",
+                "dieWithParent", "launch[0].gate.positiveByte")) fields[name] = "true"
+        executableManifest(role)?.let {
+            fields["launch[0].executable.manifest"] = it; fields["launch[0].executable.configuredManifest"] = it
+        }
+        for ((field, key) in mapOf("provider" to "provider", "mount" to "mountId", "bytes" to "maximumBytes",
+                "entries" to "maximumEntries", "path" to "mountPathSha256"))
+            fields["authority[0].quota.$field"] = quota.getValue(key).jsonPrimitive.content
+        put("sandboxSha256", sandboxDigest(fields.toList())); put("sandboxFields", sandboxFields(fields.toList()))
         put("cleanupVerified", true)
     }
     private fun fixture(count: Int = 2, outcome: RepairValidationObservedOutcome = RepairValidationObservedOutcome.BEHAVIOR_CHECKED,
@@ -50,8 +77,10 @@ class RecordedRepairValidationCasesTest {
                 put(name, digit.toString().repeat(64))
             put("regressionCorpusSha256", corpus); put("runtimeConfiguration", JsonObject(emptyMap()))
             put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", JsonNull); put("buildOutputLink", JsonNull)
-            fun executable(hash: String?) = hash?.let { buildJsonObject { put("sha256", it) } } ?: JsonNull
-            put("originalExecutable", executable(original)); put("rebuiltExecutable", executable(rebuilt))
+            fun executable(hash: String?, role: String) = hash?.let { buildJsonObject {
+                put("sha256", it); put("runtimeManifestSha256", requireNotNull(executableManifest(role)))
+            } } ?: JsonNull
+            put("originalExecutable", executable(original, "reference")); put("rebuiltExecutable", executable(rebuilt, "candidate"))
             put("inputs", JsonArray(ids.map { buildJsonObject { put("id", it); put("args", JsonArray(emptyList())); put("stdinBase64", "") } }))
             put("scopes", JsonArray(scopes)); put("outcome", outcome.name.lowercase().replace('_', '-'))
             put("caseCount", if (outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED) count else 0)
@@ -98,6 +127,65 @@ class RecordedRepairValidationCasesTest {
         assertEquals(RepairEvidenceArtifactState.AVAILABLE, checked(f).primaryState)
         assertEquals(RecordedRepairValidationCaseState.CORRUPT, page(f).state)
         assertTrue(page(f).cases.isEmpty())
+    }
+
+    private fun fields(f: Fixture, index: Int = 1): List<Pair<String, String>> =
+        f.root.getValue("scopes").jsonArray[index].jsonObject.getValue("sandboxFields").jsonArray.map {
+            it.jsonArray[0].jsonPrimitive.content to it.jsonArray[1].jsonPrimitive.content
+        }
+    private fun sandbox(f: Fixture, values: List<Pair<String, String>>, index: Int = 1,
+        digest: String = sandboxDigest(values)): Fixture {
+        val rows = f.root.getValue("scopes").jsonArray.toMutableList()
+        rows[index] = JsonObject(rows[index].jsonObject + mapOf("sandboxFields" to sandboxFields(values),
+            "sandboxSha256" to JsonPrimitive(digest)))
+        return scopes(f, rows)
+    }
+
+    @Test fun `hash bound receipts with stale sandbox digests cannot expose case comparisons`() {
+        val f = fixture()
+        assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(f).state)
+        for (index in 0 until f.root.getValue("scopes").jsonArray.size)
+            corrupt(sandbox(f, fields(f, index), index, "0".repeat(64)))
+    }
+    @Test fun `empty and duplicate sandbox field inventories fail even after both hashes are rebound`() {
+        val f = fixture(); val valid = fields(f)
+        corrupt(sandbox(f, emptyList()))
+        corrupt(sandbox(f, valid + valid.first()))
+    }
+    @Test fun `sandbox command bindings and a nonempty command remain required after receipt rebinding`() {
+        val f = fixture()
+        corrupt(output(f, 1, mapOf("command" to JsonArray(listOf(JsonPrimitive("PRIVATE-forged-command"))))))
+        corrupt(sandbox(f, fields(f).map { if (it.first == "launch[0].command") it.first to "0".repeat(64) else it }))
+        val empty = output(f, 1, mapOf("command" to JsonArray(emptyList())))
+        corrupt(sandbox(empty, fields(empty).map { if (it.first == "launch[0].command")
+            it.first to acpSandboxCanonicalStringDigest(emptyList()) else it }))
+    }
+    @Test fun `case executable manifests must match both contained runtime bindings`() {
+        val f = fixture()
+        for (index in listOf(1, 2)) for (field in listOf("launch[0].executable.manifest", "launch[0].executable.configuredManifest"))
+            corrupt(sandbox(f, fields(f, index).map { if (it.first == field) field to "9".repeat(64) else it }, index))
+        for (name in listOf("originalExecutable", "rebuiltExecutable")) {
+            val executable = f.root.getValue(name).jsonObject
+            for (changed in listOf(executable - "runtimeManifestSha256",
+                    executable + ("runtimeManifestSha256" to JsonPrimitive("PRIVATE-not-a-digest")),
+                    executable + ("runtimeManifestSha256" to JsonPrimitive("9".repeat(64)))))
+                corrupt(rebind(f, JsonObject(f.root + (name to JsonObject(changed)))))
+        }
+    }
+    @Test fun `sandbox writable quota fields must match the scope quota after digest rebinding`() {
+        val f = fixture()
+        for ((field, changed) in mapOf("provider" to "other", "mount" to "2", "bytes" to "4097", "entries" to "21", "path" to "9".repeat(64)))
+            corrupt(sandbox(f, fields(f).map { if (it.first == "authority[0].quota.$field") it.first to changed else it }))
+    }
+    @Test fun `complete contained launch and exactly one writable authority are required for case evidence`() {
+        val f = fixture(); val values = fields(f)
+        for ((field, changed) in mapOf("provider" to "other", "launch[0].purpose" to "other", "network" to "false",
+                "launch[0].gate.positiveByte" to "false", "launch[0].mergeError" to "true",
+                "launch[0].writableMountClosure" to "PRIVATE-not-a-digest", "authority[0].mode" to "READ_ONLY"))
+            corrupt(sandbox(f, values.map { if (it.first == field) field to changed else it }))
+        corrupt(sandbox(f, values.filterNot { it.first == "cgroup.memory" }))
+        corrupt(sandbox(f, values + ("launch[1].purpose" to "CANDIDATE_VALIDATION")))
+        corrupt(sandbox(f, values + ("authority[1].mode" to "READ_WRITE")))
     }
 
     @Test fun `ordered receipt scopes derive exact exit stdout and stderr comparisons`() {

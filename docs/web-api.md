@@ -982,6 +982,12 @@ The source/corpus/proof bindings are checked before case projection. A closed or
 sequence of one build scope and one reference/candidate pair per corpus input supplies
 exact exit-code, standard-output and standard-error comparisons. Canonical base64 is
 validated and compared without allocating another complete decoded output payload.
+Before deriving outcomes, the selected case reader reuses the canonical pure sandbox
+binding verifier. It recomputes the ordered field digest, rejects empty or duplicate
+inventories, checks the contained-launch flags, and binds the nonempty command,
+executable runtime manifests and single writable authority to each scope's records.
+Self-consistent receipt hashes cannot replace those checks. These are retained-record
+consistency checks and confer no execution or acceptance authority.
 Matching ordinary nonzero exits remain matching comparisons; folded signal-like exits
 cannot establish a runtime failure or crash cause.
 

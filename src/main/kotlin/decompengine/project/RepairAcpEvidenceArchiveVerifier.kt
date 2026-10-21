@@ -1487,6 +1487,10 @@ private fun verifyValidationQuota(value: JsonElement): JsonObject {
     return quota
 }
 
+/** Pure retained-record binding checks shared with the selected case reader; no launch or admission. */
+internal fun requireRecordedRepairValidationSandbox(scope: JsonObject, executableManifest: String?) =
+    verifyValidationSandbox(scope, executableManifest)
+
 private fun verifyValidationSandbox(scope: JsonObject, executableManifest: String?) {
     val pairs = scope.requiredArray("sandboxFields", "validation scope").map { entry ->
         val pair = entry as? JsonArray ?: error("validation sandbox field is not a pair")
