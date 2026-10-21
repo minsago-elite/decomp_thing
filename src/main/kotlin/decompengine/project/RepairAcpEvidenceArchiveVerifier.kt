@@ -19,6 +19,9 @@ import decompengine.repair.requireSingleLegacyRollbackOrigin
 import decompengine.repair.RepairValidationDiagnosticBinding
 import decompengine.repair.parseRepairValidationDiagnosticBinding
 import decompengine.repair.requireRepairValidationDiagnosticAssociation
+import decompengine.repair.RepairValidationObservationLog
+import decompengine.repair.parseRepairValidationObservationLog
+import decompengine.repair.requireRepairValidationObservationAssociation
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.nio.file.Files
@@ -1409,6 +1412,7 @@ private data class ReleaseRepairRun(
     val rollbackFailureAttemptId: String?,
     val rollbackResolution: String?,
     val validationDiagnostic: RepairValidationDiagnosticBinding?,
+    val validationObservations: RepairValidationObservationLog,
 )
 
 private fun JsonObject.optionalSha256(field: String, label: String): String? = optionalString(field, label)?.also {
@@ -1435,9 +1439,10 @@ private fun JsonObject.optionalValidationProof(field: String, label: String): Re
 private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
     val root = element.requiredObject("repair release run")
     val version = root.requiredInt("schemaVersion", "repair release run")
-    require(version in 1..3) { "unsupported repair release run schema" }
+    require(version in 1..4) { "unsupported repair release run schema" }
     root.requireExactKeys(RUN_FIELDS + (if (version >= 2) RUN_ROLLBACK_FIELDS else emptySet()) +
-        (if (version >= 3) setOf("validationDiagnostic") else emptySet()), "repair release run")
+        (if (version >= 3) setOf("validationDiagnostic") else emptySet()) +
+        (if (version >= 4) setOf("validationObservations") else emptySet()), "repair release run")
     val failureAttempt = if (version >= 2) root.optionalString("rollbackFailureAttemptId", "repair release run") else null
     val resolution = if (version >= 2) root.optionalString("rollbackResolution", "repair release run") else null
     val status = root.requiredString("status", "repair release run")
@@ -1465,6 +1470,9 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
         if (version >= 3) root.getValue("validationDiagnostic").takeUnless { it is JsonNull }?.let {
             parseRepairValidationDiagnosticBinding(it.requiredObject("repair release validation diagnostic"))
         } else null,
+        if (version >= 4) parseRepairValidationObservationLog(root.requiredArray("validationObservations",
+            "repair release run"), root.requiredInt("attemptedCount", "repair release run").toLong() + 1)
+        else RepairValidationObservationLog.EMPTY,
     )
 }
 
@@ -1494,8 +1502,9 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
     ) { "repair release requires complete strict-contained build and behavior validation" }
     val runById = graph.runs.associateBy(ReleaseRepairRun::id)
     require(runById.size == graph.runs.size) { "repair release run identities are duplicated" }
-    val diagnostics = graph.runs.mapNotNull { it.validationDiagnostic }
-    require(diagnostics.map { it.invocation.id }.distinct().size == diagnostics.size)
+    val validationIds = graph.runs.flatMap { run -> run.validationObservations.entries.map { it.invocation.id } +
+        listOfNotNull(run.validationDiagnostic?.invocation?.id) }
+    require(validationIds.distinct().size == validationIds.size)
     val attemptsByRun = graph.nodes.drop(1).groupBy { node ->
         requireNotNull(node.repairMetadata?.runId) { "repair release revision has no durable run identity" }
     }
@@ -1520,6 +1529,24 @@ private fun verifyRunContract(graph: ReleaseRepairGraph) {
             require(run.status !in setOf("fully_accepted", "compile_valid"))
             requireRepairValidationDiagnosticAssociation(binding, run.id, graph.profileSha256, graph.indexSha256,
                 run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256)
+        }
+        run.validationObservations.entries.forEach { observation ->
+            observation.requireRetainedBudget(graph.budget.maximumIndexEvidenceBytes)
+            val invocation = observation.invocation
+            val candidate = requireNotNull(nodes[invocation.candidateRevisionId])
+            require(candidate.id == run.baselineId || candidate.repairMetadata?.runId == run.id)
+            requireRepairValidationObservationAssociation(observation, run.id, graph.profileSha256, graph.indexSha256,
+                run.regressionCorpusSha256, candidate.id, candidate.sourceRevisionSha256, run.originalBinarySha256)
+            candidate.validationProof?.takeIf { candidate.repairMetadata?.runId == run.id }?.let { proof ->
+                require(observation.proof.sourceRevisionSha256 == proof.sourceRevisionSha256 &&
+                    observation.proof.profileSha256 == proof.profileSha256 && observation.proof.indexSha256 == proof.indexSha256 &&
+                    observation.proof.regressionCorpusSha256 == proof.regressionCorpusSha256 &&
+                    observation.proof.originalBinarySha256 == proof.originalBinarySha256 &&
+                    observation.proof.rebuiltBinarySha256 == proof.rebuiltBinarySha256 &&
+                    observation.proof.runtimeSha256 == proof.runtimeSha256 && observation.proof.evidenceSha256 == proof.evidenceSha256 &&
+                    observation.proof.cleanupVerified == proof.cleanupVerified &&
+                    observation.proof.assurance.name.lowercase() == proof.assurance)
+            }
         }
         attemptsByRun[run.id].orEmpty().forEach { node ->
             require(node.repairMetadata?.regressionCorpusSha256 == run.regressionCorpusSha256) {

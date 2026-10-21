@@ -90,6 +90,7 @@ internal data class RecordedRepairHistoryView(
     val page: RepairRecordedHistoryPage? = null,
     val runId: String? = null,
     val validationDiagnostics: Map<RepairRecordedIdentity, RecordedRepairValidationDiagnosticView> = emptyMap(),
+    val validationObservations: Map<RepairRecordedIdentity, RecordedRepairValidationObservationView> = emptyMap(),
 )
 
 internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =
@@ -104,9 +105,13 @@ internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot,
             attempt.before?.artifact?.let(::add)
             attempt.after?.artifact?.let(::add)
             attempt.invocation?.artifact?.let(::add)
+            if (page.selection.evidenceAttempt != null) attempt.validationObservation?.let {
+                add(it.primary.artifact); it.diff?.artifact?.let(::add)
+            }
         }
         page.evidenceRuns.forEach { run ->
             run.validationDiagnostic?.let { binding -> add(binding.receipt); add(binding.diagnostic) }
+            run.baselineValidationObservation?.let { add(it.primary.artifact); it.diff?.artifact?.let(::add) }
         }
     }
 }

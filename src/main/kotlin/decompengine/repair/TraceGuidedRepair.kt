@@ -1733,12 +1733,15 @@ class TraceGuidedRepairLoop private constructor(
             "validation proof lacks original binary identity"
         })
         val logPath = reportsDir.resolve("$label.validation.json")
-        if (!allowTestOnlyValidation) {
-            require(sha256(readStableRepairFile(reportsDir, logPath.fileName.toString(), resourceBudget.maximumProjectionBytes)) == proof.evidenceSha256) {
+        val receiptBytes = if (!allowTestOnlyValidation) {
+            val bytes = readStableRepairFile(reportsDir, logPath.fileName.toString(), resourceBudget.maximumProjectionBytes)
+            require(sha256(bytes) == proof.evidenceSha256) {
                 "validation receipt bytes differ from the registered provider proof"
             }
-        }
-        return when (outcome) {
+            bytes.size.toLong()
+        } else null
+        var diffArtifact: RepairValidationPublishedArtifact? = null
+        val assessment = when (outcome) {
             is RepairCandidateValidationOutcome.CompileFailed -> RepairAssessment.CompileError(outcome.failure, logPath, proof)
             is RepairCandidateValidationOutcome.CompileValid -> RepairAssessment.CompileOnly(proof, logPath)
             is RepairCandidateValidationOutcome.BehaviorChecked -> {
@@ -1762,11 +1765,23 @@ class TraceGuidedRepairLoop private constructor(
                 else {
                     val diff = StructuredDiffBuilder.from(report.id, report.cases)
                     val path = reportsDir.resolve("${report.id}.diff.json")
-                    writeRepairEvidenceAtomically(path, diff.toJson())
+                    val payload = diff.toJson()
+                    writeRepairEvidenceAtomically(path, payload)
+                    diffArtifact = repairValidationPublishedTextArtifact(path, payload)
                     RepairAssessment.BehaviorError(diff, path, proof)
                 }
             }
         }
+        if (receiptBytes != null) {
+            val observed = when (outcome) {
+                is RepairCandidateValidationOutcome.CompileFailed -> RepairValidationObservedOutcome.COMPILE_FAILED
+                is RepairCandidateValidationOutcome.CompileValid -> RepairValidationObservedOutcome.COMPILE_VALID
+                is RepairCandidateValidationOutcome.BehaviorChecked -> RepairValidationObservedOutcome.BEHAVIOR_CHECKED
+            }
+            graph.recordValidationObservation(invocation, proof, observed,
+                RepairValidationPublishedArtifact(logPath, proof.evidenceSha256, receiptBytes), diffArtifact)
+        }
+        return assessment
     }
 
     private fun prepareProjectState(graph: ModuleRevisionGraph, additions: Collection<ProcessInput>): RetainedRegressionCorpus {

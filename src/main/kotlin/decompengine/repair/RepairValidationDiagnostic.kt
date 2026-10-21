@@ -200,14 +200,14 @@ internal fun planRepairValidationDiagnosticRetention(publication: RepairValidati
     return RepairValidationDiagnosticRetention(publication.copy(receiptPath = primary, diagnosticPath = diagnostic), binding)
 }
 
-private fun validationDigest(value: String): Boolean = value.matches(Regex("[0-9a-f]{64}"))
-private fun validationReportPath(value: String): Boolean {
+internal fun validationDigest(value: String): Boolean = value.matches(Regex("[0-9a-f]{64}"))
+internal fun validationReportPath(value: String): Boolean {
     val parts = value.split('/')
     return value.length <= 4096 && parts.size in 2..32 && parts.first() == "reports" &&
         parts.drop(1).all { it != "." && it != ".." && it.matches(Regex("[A-Za-z0-9._-]{1,160}")) } &&
         parts[1] !in setOf("repair-revisions", "runs", "source-tree") && value != "reports/repair_history.json"
 }
-private fun JsonObject.validationText(name: String): String =
+internal fun JsonObject.validationText(name: String): String =
     (getValue(name) as? JsonPrimitive)?.takeIf { it.isString }?.content ?: error("validation text type")
-private fun JsonObject.validationNumber(name: String): JsonPrimitive =
+internal fun JsonObject.validationNumber(name: String): JsonPrimitive =
     (getValue(name) as? JsonPrimitive)?.takeUnless { it.isString } ?: error("validation scalar type")

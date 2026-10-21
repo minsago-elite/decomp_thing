@@ -7,6 +7,9 @@ import decompengine.repair.validateRepairHistoryProjection
 import decompengine.repair.RepairRecordedHistoryPage
 import decompengine.repair.RepairRecordedHistorySelection
 import decompengine.repair.RepairRecordedReceiptCheck
+import decompengine.repair.RepairRecordedIdentity
+import decompengine.repair.RepairRecordedValidationObservation
+import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.recordedRepairSummary
 import decompengine.repair.recordedRepairEvidenceLabel
 import decompengine.repair.recordedRepairAssuranceLabel
@@ -602,6 +605,38 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
         val target = "/jobs/${job.id}?$parameters"
         return "<a href=\"${target.escapeHtml()}\">$label</a>"
     }
+    fun normalEvidence(binding: RepairRecordedValidationObservation?, owner: RepairRecordedIdentity,
+        isRun: Boolean = false, offerRunLink: Boolean = false): String {
+        if (binding == null) return ""
+        val chosen = if (isRun) page.selection.evidenceRun == owner.value else page.selection.evidenceAttempt == owner.value
+        if (!chosen) return if (offerRunLink) "<p>" + link("Inspect baseline validation evidence",
+            page.selection.pageNumber, page.selection.casePageNumber, evidenceRun = owner.value) + "</p>" else ""
+        val detail = view.validationObservations[owner]
+        if (detail?.primaryState == RepairEvidenceArtifactState.CORRUPT)
+            return "<p>Recorded validation receipt is corrupt or does not match this assessment.</p>"
+        val target = view.targets[binding.primary.artifact]
+        if (detail?.primaryState != RepairEvidenceArtifactState.AVAILABLE || target == null)
+            return "<p>Recorded validation receipt is unavailable for this assessment.</p>"
+        val operation = when (binding.outcome) {
+            RepairValidationObservedOutcome.COMPILE_FAILED -> "Compilation failed"
+            RepairValidationObservedOutcome.COMPILE_VALID -> "Compilation checked"
+            RepairValidationObservedOutcome.BEHAVIOR_CHECKED -> "Behavior checked"
+        }
+        val derived = binding.diff?.let { diff ->
+            val diffTarget = view.targets[diff.artifact]
+            when {
+                detail.diffState == RepairEvidenceArtifactState.CORRUPT -> "<br>Derived diff is corrupt or changed."
+                detail.diffState == RepairEvidenceArtifactState.AVAILABLE && diffTarget != null ->
+                    "<br><a href=\"${artifactHref(job, diffTarget)}\">Open retained derived diff</a>"
+                else -> "<br>Derived diff is unavailable."
+            }
+        }.orEmpty()
+        return "<p>Recorded validation: $operation · Receipt records ${detail.completedCasePairs} of ${detail.inputCount} completed case pairs." +
+            "<br>Comparison policy: exact bytes (v1)." +
+            "<br>Source snapshot: <code>${binding.proof.sourceRevisionSha256.escapeHtml()}</code> · " +
+            "<code>${binding.candidate.value.escapeHtml()}</code>" +
+            "<br><a href=\"${artifactHref(job, target)}\">Open retained primary validation receipt</a>$derived</p>"
+    }
     val visible = page.attempts
     val items = visible.joinToString("") { attempt ->
         val index = attempt.iterationIndex ?: attempt.ordinal
@@ -613,7 +648,8 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
                 else references.joinToString("", "<ul class=\"repair-case-references\">", "</ul>") {
                     "<li><code>${it.value.escapeHtml()}</code></li>" }
         val omittedCases = attempt.retainedCases.size - references.size
-        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null) {
+        val inspectEvidence = if (attempt.before?.artifact != null || attempt.after?.artifact != null || attempt.invocation != null ||
+            attempt.validationObservation != null) {
             if (page.selection.evidenceAttempt == attempt.identity.value)
                 "<p>Inspecting this iteration's evidence. " + link("Show page evidence", page.selection.pageNumber,
                     page.selection.casePageNumber) + "</p>"
@@ -626,7 +662,8 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
           <p>Recorded run: <code>${(attempt.run?.value ?: "none").escapeHtml()}</code></p>
           <p>Rollback: ${decompengine.repair.recordedRepairRollbackLabel(attempt.rollback).escapeHtml()}</p>
           <p>Evidence assurance: ${assurance(attempt).escapeHtml()}</p>
-          $inspectEvidence${evidence("Before", attempt.before)}${evidence("After", attempt.after)}
+          $inspectEvidence${evidence("Before", attempt.before)}${if (attempt.validationObservation == null) evidence("After", attempt.after) else ""}
+          ${normalEvidence(attempt.validationObservation, attempt.identity)}
           <p class="regressions"><b>Retained regression cases:</b> ${attempt.retainedCases.size}</p>
           $cases${if (omittedCases > 0) "<p>$omittedCases case references omitted from this page.</p>" else ""}
         </div></article>""".trimIndent()
@@ -638,7 +675,7 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
         }.orEmpty()
         val diagnostic = run.validationDiagnostic?.let { binding ->
             val detail = view.validationDiagnostics[run.identity]
-            val inspect = link("Inspect run validation diagnostic", page.selection.pageNumber,
+            val inspect = link("Inspect run validation evidence", page.selection.pageNumber,
                 page.selection.casePageNumber, evidenceRun = run.identity.value)
             when {
                 page.selection.evidenceRun != run.identity.value -> "<br>$inspect"
@@ -656,7 +693,9 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             }
         }.orEmpty()
         "<p class=\"repair-run\">Repair run: ${repairRunLabel(run.status.name.lowercase()).escapeHtml()} · " +
-            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure$diagnostic</p>"
+            "${run.attemptedCount}/${run.maximumAttempts} attempts · <code>${run.identity.value.escapeHtml()}</code>$failure$diagnostic</p>" +
+            normalEvidence(run.baselineValidationObservation, run.identity, isRun = true,
+                offerRunLink = run.validationDiagnostic == null)
     }
     val failures = snapshot.attempts.count { it.rollback?.failureCode != null } +
         if (snapshot.pending?.rollback?.failureCode != null) 1 else 0

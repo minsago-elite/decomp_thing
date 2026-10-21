@@ -399,7 +399,7 @@ class RepairHistorySnapshotTest {
         } }
         val snapshot = view(captured)
         val attempt = snapshot.attempts.single()
-        assertEquals(4, snapshot.viewSchemaVersion)
+        assertEquals(5, snapshot.viewSchemaVersion)
         assertEquals(1, attempt.iterationIndex)
         assertEquals(RepairRecordedFailureKind.COMPILE, attempt.failureKind)
         assertEquals(RepairRecordedEvidenceKind.BUILD, attempt.before?.kind)

@@ -281,3 +281,45 @@ successful case, acceptance or release qualification. Full stable case IDs, norm
 text/binary comparisons, validated source navigation and the live case adapter remain separate work.
 The new schema and reader data controls await their own normal Actions; this follow-up adds no
 actual native process, provider, controller or browser test context.
+
+### Normal returned observations (prepared follow-up)
+
+The local follow-up records returned compile-failed, compile-valid and behavior-checked operations
+after the existing receipt/proof, source/profile/index/corpus, ordered-input and isolation checks.
+The observation commits before the later acceptance, provisional or rejection decision, so a
+normal rejected candidate and a historical baseline can retain their own operation evidence.
+The run and candidate jointly identify the association: reusing an accepted revision as a later
+baseline does not replace its earlier observation. These records supply correlation, not acceptance.
+
+The primary receipt and a derived mismatch diff have separate typed roles, exact byte commitments
+and immutable invocation-named canonical copies. Supported external and relative report directories
+use the same retention path. Both source and canonical copies count against the configured evidence
+budget, and the canonical pair fits within the existing 64 MiB inspection allowance. The fixed
+comparison policy is `exact-bytes-v1`; matching ordinary nonzero exit statuses retain their existing
+comparison semantics. Ambiguous process statuses do not gain a runtime-crash classification.
+
+Run schema4 adds a bounded immutable observation log, with at most one entry per candidate and at
+most the attempted count plus the baseline. Original run schemas1/2/3 keep their previous encodings
+and omit the new field. Canonical, history and release archive readers check ownership and proof
+correlation independently; the original acceptance-proof gates remain in force. A later fatal
+diagnostic preserves an existing schema4 log.
+
+The recorded view schema5 carries opaque primary/diff references. Only explicit graph-bound attempt
+or baseline selection reads these new artifacts, through the existing checked namespace and shared
+byte/call allowance. Closed operation labels and input/completed-pair counts are available only
+after the primary commitment and semantic checks. A missing or changed diff is reported separately
+without converting it into a primary receipt. Private runtime, command, input and output text is not
+projected into these labels. This is recorded operation metadata; it supplies no new case acceptance,
+native actor, current-source validation or release qualification.
+
+The reader also checks executable-role combinations and the original nonempty behavior-corpus
+requirement. Input IDs, argument strings and stdin must reproduce the exact registered corpus
+commitment. That check streams canonical base64 into the original byte/hex framing without creating
+a whole decoded/hex input copy. Private input fields remain absent from the finite view.
+
+Thirty new authored data/path/callback/string controls cover the prepared codec, budget,
+retention, canonical/archive association, selection, reader and rendered-link boundaries.
+The CLI caller normalization has its own separate pure path control.
+This follow-up is local and unpublished, and has not run its own
+normal Actions. Complete stable case identities and outcomes, normalization/truncation, accessible
+text/binary previews, validated-source navigation and the live case adapter remain required work.

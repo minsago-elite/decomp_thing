@@ -151,6 +151,20 @@ internal class RepairStateStore private constructor(
     }
 
     /** Uses the same descriptor-pinned no-replace publication as immutable invocation receipts. */
+    fun writeImmutableValidationDiff(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}\\.diff\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024)
+        if (exists(reports, name)) {
+            require(readRequiredStable(reports, reportsPath, name, 64L * 1024 * 1024,
+                "immutable validation diff").bytes.contentEquals(bytes)) {
+                "immutable validation diff already has different bytes"
+            }
+            return
+        }
+        writeAtomically(reports, name, bytes, "validation-diff", requireAbsent = true)
+    }
+
+    /** Uses the same descriptor-pinned no-replace publication as immutable invocation receipts. */
     fun writeImmutableValidationDiagnostic(name: String, bytes: ByteArray) {
         require(name.matches(Regex("validation_[0-9a-f]{32}\\.validation-failure\\.json")))
         require(bytes.size in 1..4096)

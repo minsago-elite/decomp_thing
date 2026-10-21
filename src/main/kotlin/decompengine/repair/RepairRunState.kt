@@ -1,6 +1,7 @@
 package decompengine.repair
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -41,16 +42,22 @@ data class RepairRunState(
     // Preserve schema-1 bytes on read; only new records or an actual committed failure upgrade.
     val schemaVersion: Int = 2,
     val validationDiagnostic: RepairValidationDiagnosticBinding? = null,
+    val validationObservations: RepairValidationObservationLog = RepairValidationObservationLog.EMPTY,
 ) {
     val remainingAttempts: Int get() = maximumAttempts - attemptedCount
     val terminal: Boolean get() = status != RepairRunStatus.RUNNING
 
     init {
-        require(schemaVersion in 1..3)
+        require(schemaVersion in 1..4)
         require((status == RepairRunStatus.ROLLBACK_FAILED) == (rollbackFailureAttemptId != null))
         require((rollbackFailureAttemptId == null) == (rollbackResolution == null))
         require(schemaVersion >= 2 || rollbackFailureAttemptId == null)
         require(schemaVersion >= 3 || validationDiagnostic == null)
+        require(schemaVersion >= 4 || validationObservations.entries.isEmpty())
+        require(validationObservations.entries.size.toLong() <= attemptedCount.toLong() + 1)
+        validationObservations.entries.forEach {
+            require(it.invocation.runId == id && it.invocation.regressionCorpusSha256 == regressionCorpusSha256)
+        }
         validationDiagnostic?.let {
             require(it.invocation.runId == id && it.invocation.regressionCorpusSha256 == regressionCorpusSha256)
             require(status !in setOf(RepairRunStatus.FULLY_ACCEPTED, RepairRunStatus.COMPILE_VALID))
@@ -91,18 +98,20 @@ data class RepairRunState(
             put("artifactPath", evidence.artifactPath?.let(::JsonPrimitive) ?: JsonNull)
         } } ?: JsonNull)
         if (schemaVersion >= 3) put("validationDiagnostic", validationDiagnostic?.toJsonObject() ?: JsonNull)
+        if (schemaVersion >= 4) put("validationObservations", validationObservations.toJsonArray())
     }.toString()
 }
 
 internal fun parseRepairRunState(payload: String): RepairRunState {
     val value = Json.parseToJsonElement(payload).jsonObject
     val version = value.getValue("schemaVersion").jsonPrimitive.int
-    require(version in 1..3)
+    require(version in 1..4)
     val common = setOf("schemaVersion", "id", "status", "baselineId", "acceptedHeadId", "provisionalHeadId",
         "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
         "expectedObservationsSha256", "originalBinarySha256", "lastEvidence")
     val fields = common + (if (version >= 2) setOf("rollbackFailureAttemptId", "rollbackResolution") else emptySet()) +
-        (if (version >= 3) setOf("validationDiagnostic") else emptySet())
+        (if (version >= 3) setOf("validationDiagnostic") else emptySet()) +
+        (if (version >= 4) setOf("validationObservations") else emptySet())
     require(value.keys.all { it in fields }) { "unknown repair run field" }
     if (version >= 2) {
         require(value.keys == fields) { "incomplete schema-$version repair run" }
@@ -110,7 +119,7 @@ internal fun parseRepairRunState(payload: String): RepairRunState {
             val primitive = value.getValue(name) as? JsonPrimitive ?: error("repair run $name is not numeric")
             require(!primitive.isString && primitive.longOrNull != null)
         }
-        for (name in fields - setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis", "lastEvidence", "validationDiagnostic")) {
+        for (name in fields - setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis", "lastEvidence", "validationDiagnostic", "validationObservations")) {
             val element = value.getValue(name)
             val nullable = name in setOf("acceptedHeadId", "provisionalHeadId", "expectedObservationsSha256",
                 "originalBinarySha256", "rollbackFailureAttemptId", "rollbackResolution")
@@ -150,6 +159,9 @@ internal fun parseRepairRunState(payload: String): RepairRunState {
         if (version >= 3) value.getValue("validationDiagnostic").takeUnless { it is JsonNull }?.let {
             parseRepairValidationDiagnosticBinding(it as? JsonObject ?: error("validation diagnostic type"))
         } else null,
+        if (version >= 4) parseRepairValidationObservationLog(value.getValue("validationObservations") as? JsonArray
+            ?: error("validation observation array type"), value.getValue("attemptedCount").jsonPrimitive.int.toLong() + 1)
+        else RepairValidationObservationLog.EMPTY,
     )
 }
 
