@@ -80,11 +80,11 @@ final class AcpCompatibilityFailureSummary {
                     } catch (Throwable unavailable) { /* Preserve the original scalar witness. */ }
                 }
             }
-            var sites = new ArrayList<String>(2);
+            var sites = new ArrayList<String>(6);
             var stack = current.getStackTrace();
-            for (var index = 0; index < Math.min(32, stack.length) && sites.size() < 2; index++) {
+            for (var index = 0; index < Math.min(32, stack.length) && sites.size() < 6; index++) {
                 var site = siteLabel(stack[index]);
-                if (site != null) sites.add(site);
+                if (site != null && !sites.contains(site)) sites.add(site);
             }
             causes.add(witness == null ? typeLabel(current) + "[" + String.join(",", sites) + "]" : witness);
             if (current.getCause() != null && pending.size() < 16) pending.add(current.getCause());
@@ -127,6 +127,9 @@ final class AcpCompatibilityFailureSummary {
             case "decompengine.acp.RuntimePrivateControlScope#requireMountsUnchanged",
                  "decompengine.acp.RuntimePrivateControlScope$MountEventCheck#requireUnchanged" -> "mount-check";
             case "decompengine.acp.RuntimePrivateControlScope#requireDescriptor" -> "descriptor-revalidation";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#buildRuntimeManifestOwned" -> "runtime-manifest";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#stagePrivateRuntimeSnapshot" -> "runtime-snapshot";
+            case "decompengine.acp.LinuxBubblewrapBoundaryKt#pinMounts" -> "launch-pinning";
             case "decompengine.acp.RuntimePrivateControlScope#currentRoot" -> "root-identity";
             case "decompengine.acp.RuntimePrivateControlScope#requireRootUnexposed" -> "private-control-coverage";
             case "decompengine.acp.LinuxBubblewrapBoundaryKt#requirePrivateControlRegistryHealthy" -> "registry-health";
