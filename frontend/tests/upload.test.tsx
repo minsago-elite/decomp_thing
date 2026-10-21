@@ -263,7 +263,7 @@ it.each(['INVALID_ELF', 'UPLOAD_TOO_LARGE'] as const)('retains authoritative %s 
   await mount(); const file = select();
   fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
   const error = await screen.findByRole('alert');
-  const authoritativeMessage = error.textContent!;
+  const authoritativeMessage = error.textContent;
   const picker = screen.getByLabelText<HTMLInputElement>('Binary file');
   expect(authoritativeMessage).toContain(`Reference ID: ${requestId}.`);
   fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
@@ -271,7 +271,7 @@ it.each(['INVALID_ELF', 'UPLOAD_TOO_LARGE'] as const)('retains authoritative %s 
   expect(picker.getAttribute('aria-invalid')).toBe('true');
   expect(picker.getAttribute('aria-errormessage')).toBe(error.id);
   expect(screen.getByRole('alert').textContent).toBe(authoritativeMessage);
-  await act(async () => { rejectRetry!(new ApiClientError('network_error')); });
+  await act(async () => { rejectRetry!(new ApiClientError('network_error')); await Promise.resolve(); });
   expect(screen.getByRole('alert').textContent).toContain(authoritativeMessage);
   expect(screen.getByRole('alert').textContent).toContain('Upload was not confirmed');
   expect(screen.getByRole('alert').textContent?.split(authoritativeMessage)).toHaveLength(2);
