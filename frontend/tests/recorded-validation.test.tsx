@@ -207,7 +207,7 @@ it('pages complete comparison categories in memory with at most twenty positions
   expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
   fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(60);
   fireEvent.click(screen.getByRole('button', { name: 'Next comparison window' })); expect(table.querySelectorAll('tbody tr')).toHaveLength(15);
-  expect((screen.getByRole('button', { name: 'Next comparison window' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole('button', { name: 'Next comparison window' }).hasAttribute('disabled')).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(3);
 });
 
@@ -631,7 +631,8 @@ it('jumps across matching pages using mismatch metadata without changing receipt
   expect(screen.getByRole('button', { name: 'Next page with a mismatch' }).hasAttribute('disabled')).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Previous page with a mismatch' }));
   await screen.findByText('case_22'); expect(fetcher).toHaveBeenCalledTimes(5);
-  expect(fetcher.mock.calls.slice(1).map(call => new URL(String(call[0]), 'https://fixture.invalid').searchParams.get('historyValidationPage')))
+  expect(fetcher.mock.calls.slice(1).map(([route]) => new URL(typeof route === 'string' ? route : route instanceof URL ? route.href : route.url,
+    'https://fixture.invalid').searchParams.get('historyValidationPage')))
     .toEqual(['1', '2', '4', '2']);
   for (const [route, options] of fetcher.mock.calls.slice(1)) {
     expect(route).toContain(`historyGraph=${'a'.repeat(64)}`); expect(route).toContain('historyRunEvidence=run_00000001');
