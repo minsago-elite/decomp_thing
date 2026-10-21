@@ -106,3 +106,32 @@ internal data class GeneratedCValidationFailureRecord(
         const val MAXIMUM_BYTES = 4096
     }
 }
+
+/** Reset commits before validation; a later encoding/write failure cannot retain an older reason. */
+internal class GeneratedCValidationFailurePublication private constructor(private val replace: (String) -> Unit) {
+    fun publish(record: GeneratedCValidationFailureRecord, receiptBytes: Long, maximumBytes: Long) {
+        replace(record.encodeWithinReceiptBudget(receiptBytes, maximumBytes).toString(Charsets.UTF_8))
+    }
+
+    companion object {
+        fun start(replace: (String) -> Unit): GeneratedCValidationFailurePublication {
+            replace("")
+            return GeneratedCValidationFailurePublication(replace)
+        }
+    }
+}
+
+/** Preserve the cleanup throwable and original failure while notifying only diagnostic state. */
+internal fun finishGeneratedCValidationSnapshot(primary: Throwable?, close: () -> Unit, onFailure: () -> Unit) {
+    try {
+        close()
+    } catch (cleanup: Throwable) {
+        try {
+            onFailure()
+        } catch (observation: Throwable) {
+            if (observation !== cleanup) cleanup.addSuppressed(observation)
+        }
+        primary?.let(cleanup::addSuppressed)
+        throw cleanup
+    }
+}

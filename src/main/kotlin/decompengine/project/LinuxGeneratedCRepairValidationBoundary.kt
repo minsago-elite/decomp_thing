@@ -94,6 +94,9 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
         val config = configuration
         val inputs = request.inputs
         if (request.originalBinary != null) require(inputs.isNotEmpty()) { "behavior validation requires the full nonempty retained corpus" }
+        val diagnosticPublication = GeneratedCValidationFailurePublication.start { content ->
+            writeRepairEvidenceAtomically(request.reportsDir.resolve("${request.label}.validation-failure.json"), content)
+        }
         val receipt = GeneratedCValidationReceipt(request, config, behaviorBudgetEvidence)
         val aggregateOutput = AtomicLong()
         var original: CapturedGeneratedExecutable? = null
@@ -103,7 +106,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
         var failurePhase = GeneratedCValidationFailurePhase.SOURCE_PREPARATION
         var failureInputIndex = -1
         try {
-            withSnapshot(config, request.budget, deadline) { snapshot ->
+            withSnapshot(config, request.budget, deadline, onCloseFailure = {
+                failurePhase = GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION
+                failureInputIndex = -1
+            }) { snapshot ->
                 snapshot.populate(request)
                 receipt.snapshot(snapshot)
                 original = request.originalBinary?.let(snapshot::captureOriginal)
@@ -188,9 +194,8 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                     request.regressionCorpusSha256, config.configurationSha256, kind,
                     GeneratedCValidationFailureReason.from(kind, problem), failurePhase,
                     inputs.size, failureInputIndex.takeIf { it >= 0 })
-                writeRepairEvidenceAtomically(request.reportsDir.resolve("${request.label}.validation-failure.json"),
-                    diagnostic.encodeWithinReceiptBudget(bytes.size.toLong(),
-                        minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024)).toString(Charsets.UTF_8))
+                diagnosticPublication.publish(diagnostic, bytes.size.toLong(),
+                    minOf(request.budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024))
             } catch (archive: Throwable) { problem.addSuppressed(archive) }
             if (problem is InterruptedException) Thread.currentThread().interrupt()
             throw problem
@@ -226,6 +231,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
         config: GeneratedCRepairRuntimeConfiguration,
         budget: RepairResourceBudget,
         deadline: GeneratedCValidationDeadline,
+        onCloseFailure: () -> Unit = {},
         action: (GeneratedCValidationSnapshot) -> T,
     ): T {
         val permit = productionAcpExecutionScheduler.acquire("generated-c-validation:${config.sourceTmpfs}:${config.outputTmpfs}",
@@ -244,11 +250,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
             throw failure
         } finally {
             try {
-                snapshot?.close()
-            } catch (cleanup: Throwable) {
-                cleanupUnverified = true
-                primary?.let(cleanup::addSuppressed)
-                throw cleanup
+                finishGeneratedCValidationSnapshot(primary, close = { snapshot?.close() }, onFailure = {
+                    cleanupUnverified = true
+                    onCloseFailure()
+                })
             } finally {
                 permit.finish(cleanupUnverified)
             }

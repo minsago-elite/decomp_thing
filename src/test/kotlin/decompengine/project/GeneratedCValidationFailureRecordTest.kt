@@ -16,6 +16,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class GeneratedCValidationFailureRecordTest {
@@ -168,5 +169,132 @@ class GeneratedCValidationFailureRecordTest {
         }
         assertFailsWith<IllegalArgumentException> { record().encodeWithinReceiptBudget(-1, 4096) }
         assertFailsWith<IllegalArgumentException> { record().encodeWithinReceiptBudget(0, -1) }
+    }
+
+    @Test
+    fun `starting a reused label clears its prior supplement even when validation succeeds`() {
+        var stored = record().copy(reason = GeneratedCValidationFailureReason.TIMEOUT).encode().toString(Charsets.UTF_8)
+        GeneratedCValidationFailurePublication.start { stored = it }
+        assertEquals("", stored)
+    }
+
+    @Test
+    fun `identical receipt with withheld new reason cannot retain the previous timeout diagnostic`() {
+        var stored = record().copy(reason = GeneratedCValidationFailureReason.TIMEOUT).encode().toString(Charsets.UTF_8)
+        val writes = mutableListOf<String>()
+        val publication = GeneratedCValidationFailurePublication.start { stored = it; writes += it }
+        assertFailsWith<RepairBudgetExceededException> { publication.publish(record(), 100, 100) }
+        assertEquals("", stored)
+        assertEquals(listOf(""), writes)
+    }
+
+    @Test
+    fun `failed atomic publication after reset leaves unavailable data instead of the prior diagnostic`() {
+        var stored = "previous diagnostic"
+        val problem = IOException("authored publication failure")
+        val publication = GeneratedCValidationFailurePublication.start {
+            if (it.isEmpty()) stored = it else throw problem
+        }
+        val thrown = assertFailsWith<IOException> { publication.publish(record(), 100, 4096) }
+        assertSame(problem, thrown)
+        assertEquals("", stored)
+    }
+
+    @Test
+    fun `a new diagnostic replaces reset data with the current reason and receipt binding`() {
+        val writes = mutableListOf<String>()
+        val publication = GeneratedCValidationFailurePublication.start { writes += it }
+        publication.publish(record(), 100, 4096)
+        assertEquals(2, writes.size)
+        assertEquals("", writes.first())
+        val current = Json.parseToJsonElement(writes.last()).jsonObject
+        assertEquals("resource-exhausted", current.getValue("reason").jsonPrimitive.content)
+        assertEquals(record().receiptSha256, current.getValue("receiptSha256").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `reset failure aborts before the caller can start validation`() {
+        var started = false
+        val failure = IOException("authored reset failure")
+        val thrown = assertFailsWith<IOException> {
+            GeneratedCValidationFailurePublication.start { throw failure }.also { started = true }
+        }
+        assertSame(failure, thrown)
+        assertFalse(started)
+    }
+
+    @Test
+    fun `failure before supplemental publication also leaves the reused label invalidated`() {
+        var stored = "previous diagnostic"
+        val primary = IllegalStateException("authored validation failure")
+        val thrown = assertFailsWith<IllegalStateException> {
+            GeneratedCValidationFailurePublication.start { stored = it }
+            throw primary
+        }
+        assertSame(primary, thrown)
+        assertEquals("", stored)
+    }
+
+    @Test
+    fun `snapshot close failure during unwinding records finalization and clears the earlier case`() {
+        for (initial in listOf(GeneratedCValidationFailurePhase.BUILD,
+            GeneratedCValidationFailurePhase.ORIGINAL_OPERATION, GeneratedCValidationFailurePhase.REBUILT_OPERATION)) {
+            for (primary in listOf<Throwable?>(null, IllegalStateException("authored operation failure"))) {
+                var phase = initial
+                var inputIndex: Int? = if (initial.hasCase) 1 else null
+                val cleanup = IOException("authored close failure")
+                val thrown = assertFailsWith<IOException> {
+                    try {
+                        if (primary != null) throw primary
+                    } finally {
+                        finishGeneratedCValidationSnapshot(primary, close = { throw cleanup }, onFailure = {
+                            phase = GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION
+                            inputIndex = null
+                        })
+                    }
+                }
+                assertSame(cleanup, thrown)
+                assertEquals(listOfNotNull(primary), cleanup.suppressed.toList())
+                assertEquals(GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION, phase)
+                assertEquals(null, inputIndex)
+            }
+        }
+    }
+
+    @Test
+    fun `successful snapshot close preserves the original failing operation and exception`() {
+        var phase = GeneratedCValidationFailurePhase.ORIGINAL_OPERATION
+        var inputIndex: Int? = 1
+        val primary = IllegalStateException("authored operation failure")
+        var closes = 0
+        var notifications = 0
+        val thrown = assertFailsWith<IllegalStateException> {
+            try {
+                throw primary
+            } finally {
+                finishGeneratedCValidationSnapshot(primary, close = { closes++ }, onFailure = {
+                    notifications++
+                    phase = GeneratedCValidationFailurePhase.SNAPSHOT_FINALIZATION
+                    inputIndex = null
+                })
+            }
+        }
+        assertSame(primary, thrown)
+        assertEquals(1, closes)
+        assertEquals(0, notifications)
+        assertEquals(GeneratedCValidationFailurePhase.ORIGINAL_OPERATION, phase)
+        assertEquals(1, inputIndex)
+    }
+
+    @Test
+    fun `diagnostic observer failure cannot replace the snapshot cleanup throwable`() {
+        val primary = IllegalStateException("authored primary")
+        val cleanup = IOException("authored cleanup")
+        val observation = IllegalArgumentException("authored observer")
+        val thrown = assertFailsWith<IOException> {
+            finishGeneratedCValidationSnapshot(primary, close = { throw cleanup }, onFailure = { throw observation })
+        }
+        assertSame(cleanup, thrown)
+        assertEquals(listOf(observation, primary), cleanup.suppressed.toList())
     }
 }

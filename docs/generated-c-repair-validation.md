@@ -188,6 +188,10 @@ When the provider has retained its existing failure receipt, it also attempts to
 `<label>.validation-failure.json`. This schema-version-1 producer diagnostic binds the exact
 validation receipt SHA-256 and its source/profile/index/corpus/runtime commitments. The existing
 version-2 receipt, registered proof, acceptance rules and archive verification are unchanged.
+Before validation, the same atomic publisher replaces any prior supplement for that label with
+zero bytes. A reset failure aborts before validation starts. Success, a withheld diagnostic, or a
+later publication failure leaves unavailable diagnostic data instead of a previous reason with
+an accidentally identical receipt digest. An empty supplement is not a valid schema1 record.
 Diagnostic publication failure is suppressed on the original failure; it cannot replace that
 failure, retry validation, or remove the primary receipt.
 The primary receipt and supplement together must fit the existing retained-receipt byte ceiling;
@@ -206,6 +210,9 @@ child started, stopped, or caused the failure. A case operation may record its z
 in the exact bound receipt's input array; other phases use an explicit null position. The recorded
 input count describes the corpus, not completed, successful or skipped executions. Existing
 completed scopes, cleanup evidence and observation commitments must be interpreted separately.
+If snapshot closure itself throws during unwinding, the phase becomes snapshot finalization and
+the earlier case position is cleared. Successful closure preserves the original operation phase.
+The original cleanup throwable and prior failure remain linked even if diagnostic notification fails.
 
 A future case adapter must check the selected receipt digest and source/run/revision/corpus
 bindings before joining a diagnostic. This supplemental record is not a validation result,
