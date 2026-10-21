@@ -114,9 +114,32 @@ function checkValidationCases(value: ValidationCases, summary: ValidationSummary
     if (same) pageMatches++;
   });
   if (matched !== null) requireValue(pageMatches <= matched && matched <= pageMatches + total - BigInt(value.items.length));
+  let indexedMismatchPages: number[] | null = null;
+  if (value.comparisonIndex != null) {
+    requireValue(behavior && total <= 10000n);
+    const size = Number(total), hex = value.comparisonIndex.mismatchBitmapHex;
+    requireValue(hex.length === 2 * Math.ceil(size / 8));
+    const mismatch = (ordinal: number) => (parseInt(hex.slice((ordinal >>> 3) * 2, (ordinal >>> 3) * 2 + 2), 16)
+      & (1 << (ordinal & 7))) !== 0;
+    let differences = 0;
+    const pages = new Set<number>();
+    for (let ordinal = 0; ordinal < size; ordinal++) if (mismatch(ordinal)) {
+      differences++; pages.add(Math.floor(ordinal / 20) + 1);
+    }
+    for (let ordinal = size; ordinal < Math.ceil(size / 8) * 8; ordinal++) requireValue(!mismatch(ordinal));
+    requireValue(BigInt(differences) === total - (matched ?? total));
+    value.items.forEach(item => requireValue(mismatch(Number(item.ordinal) - 1) === (item.outcome === 'mismatch')));
+    indexedMismatchPages = [...pages];
+  }
   const navigation = [value.firstMismatchPage, value.previousMismatchPage, value.nextMismatchPage];
   if (navigation.every(page => page === undefined)) return; // Older v1 producers did not report mismatch navigation.
   requireValue(navigation.every(page => page !== undefined));
+  if (indexedMismatchPages !== null) {
+    const expected = [indexedMismatchPages[0] ?? null,
+      indexedMismatchPages.filter(page => page < value.page).at(-1) ?? null,
+      indexedMismatchPages.find(page => page > value.page) ?? null];
+    requireValue(navigation.every((page, index) => page === expected[index]));
+  }
   if (matched === null || matched === total) {
     requireValue(navigation.every(page => page === null));
     return;

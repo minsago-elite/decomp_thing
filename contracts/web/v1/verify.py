@@ -114,12 +114,33 @@ def check_validation_cases(data: dict) -> None:
         page_matches += int(same)
     if matched is not None and not page_matches <= matched <= page_matches + total - len(value["items"]):
         raise ValueError("validation case page contradicts the full matched count")
+    indexed_pages = None
+    comparison = value.get("comparisonIndex")
+    if comparison is not None:
+        if not behavior or total > 10000:
+            raise ValueError("complete mismatch indexes require a supported behavior population")
+        bitmap = bytes.fromhex(comparison["mismatchBitmapHex"])
+        if len(bitmap) != (total + 7) // 8:
+            raise ValueError("mismatch bitmap length differs from the complete population")
+        def mismatch(ordinal: int) -> bool:
+            return bool(bitmap[ordinal // 8] & (1 << (ordinal % 8)))
+        differences = [ordinal for ordinal in range(total) if mismatch(ordinal)]
+        if any(mismatch(ordinal) for ordinal in range(total, len(bitmap) * 8)) or len(differences) != total - matched:
+            raise ValueError("mismatch bitmap padding or complete count disagrees")
+        if any(mismatch(int(item["ordinal"]) - 1) != (item["outcome"] == "mismatch") for item in value["items"]):
+            raise ValueError("mismatch bitmap contradicts the observed page")
+        indexed_pages = sorted({ordinal // 20 + 1 for ordinal in differences})
     names = ("firstMismatchPage", "previousMismatchPage", "nextMismatchPage")
     if not any(name in value for name in names):
         return  # Older v1 producers omitted mismatch navigation entirely.
     if not all(name in value for name in names):
         raise ValueError("mismatch navigation must be reported as a complete group")
     first, previous, following = (value[name] for name in names)
+    if indexed_pages is not None and (first, previous, following) != (
+            indexed_pages[0] if indexed_pages else None,
+            next((page for page in reversed(indexed_pages) if page < value["page"]), None),
+            next((page for page in indexed_pages if page > value["page"]), None)):
+        raise ValueError("mismatch page navigation contradicts the complete bitmap")
     if matched is None or matched == total:
         if any(value[name] is not None for name in names):
             raise ValueError("uncompared or fully matching cases cannot have mismatch navigation")
@@ -588,6 +609,20 @@ def check_validation_mismatch_controls(validate) -> int:
         return document
     for number in range(1, 5):
         check(page(number), True)
+        indexed = page(number)
+        indexed["data"]["validationCases"]["comparisonIndex"] = {
+            "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": "0000200000000010"}
+        check(indexed, True)
+    for bitmap in ("", "0", "GG", "000020000000001000", "0000000000000030",
+                   "0000000000000000", "0100000000000010"):
+        document = page(1)
+        document["data"]["validationCases"]["comparisonIndex"] = {
+            "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": bitmap}
+        check(document, False)
+    document = page(2)
+    document["data"]["validationCases"].update(nextMismatchPage=3, comparisonIndex={
+        "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": "0000200000000010"})
+    check(document, False)
     for fields in ({"firstMismatchPage": None}, {"firstMismatchPage": 1}, {"firstMismatchPage": 5},
                    {"previousMismatchPage": 1}, {"nextMismatchPage": 1}, {"nextMismatchPage": 3},
                    {"nextMismatchPage": None}, {"previousMismatchPage": 0}, {"nextMismatchPage": 2.5}):

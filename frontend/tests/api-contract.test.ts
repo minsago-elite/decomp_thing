@@ -28,6 +28,33 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('accepts complete bounded mismatch bitmaps on every case page and legacy omission', () => {
+    for (let page = 1; page <= 4; page++) for (const mode of ['producer', 'response'] as const) {
+      const document = mismatchContract(page);
+      document.data.validationCases!.comparisonIndex = { referenceObservationsSha256: 'c'.repeat(64),
+        mismatchBitmapHex: '0000200000000010' };
+      expect(decodeContract(JSON.stringify(document), { mode })).toEqual(document);
+    }
+    const document = decodeResponse(fixture('report-normal-cases'), 'report');
+    document.data.validationCases!.comparisonIndex = { referenceObservationsSha256: 'c'.repeat(64), mismatchBitmapHex: '00' };
+    expect(decodeResponse(JSON.stringify(document), 'report')).toEqual(document);
+    document.data.validationCases!.comparisonIndex = null;
+    expect(decodeResponse(JSON.stringify(document), 'report')).toEqual(document);
+  });
+  it('rejects mismatch bitmap shape padding totals visible cases and navigation contradictions', () => {
+    for (const bitmap of ['', '0', 'GG', '000020000000001000', '0000000000000030',
+      '0000000000000000', '0100000000000010']) for (const mode of ['producer', 'response'] as const) {
+      const document = mismatchContract();
+      document.data.validationCases!.comparisonIndex = { referenceObservationsSha256: 'c'.repeat(64), mismatchBitmapHex: bitmap };
+      expect(() => decodeContract(JSON.stringify(document), { mode })).toThrow(ApiClientError);
+    }
+    const document = mismatchContract(2);
+    document.data.validationCases!.comparisonIndex = { referenceObservationsSha256: 'c'.repeat(64), mismatchBitmapHex: '0000200000000010' };
+    document.data.validationCases!.nextMismatchPage = 3;
+    expect(() => decodeResponse(JSON.stringify(document), 'report')).toThrow(ApiClientError);
+    document.data.validationCases!.comparisonPolicy = 'changed-normalization' as never;
+    expect(() => decodeResponse(JSON.stringify(document), 'report')).toThrow(ApiClientError);
+  });
   it('accepts complete mismatch navigation across the selected receipt and legacy omission', () => {
     for (let page = 1; page <= 4; page++) for (const mode of ['producer', 'response'] as const) {
       const document = mismatchContract(page);

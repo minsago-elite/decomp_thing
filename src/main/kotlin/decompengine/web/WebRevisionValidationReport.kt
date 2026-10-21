@@ -259,6 +259,10 @@ private fun recordedValidationCaseDetail(page: RepairRecordedHistoryPage, owner:
     put("firstMismatchPage", cases.firstMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
     put("previousMismatchPage", cases.previousMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
     put("nextMismatchPage", cases.nextMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
+    put("comparisonIndex", cases.comparisonIndex?.let { index -> buildJsonObject {
+        put("referenceObservationsSha256", index.referenceObservationsSha256)
+        put("mismatchBitmapHex", index.mismatchBitmapHex)
+    } } ?: JsonNull)
     put("items", JsonArray(cases.cases.map { value -> buildJsonObject {
         put("caseId", value.identity.value); put("ordinal", value.ordinal.toString())
         put("outcome", value.outcome.name.lowercase().replace('_', '-'))

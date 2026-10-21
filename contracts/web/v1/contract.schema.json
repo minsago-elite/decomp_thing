@@ -3921,6 +3921,25 @@
       ],
       "additionalProperties": false
     },
+    "validationComparisonIndex": {
+      "type": "object",
+      "properties": {
+        "referenceObservationsSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "mismatchBitmapHex": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{2})+$",
+          "minLength": 2,
+          "maxLength": 2500
+        }
+      },
+      "required": [
+        "referenceObservationsSha256",
+        "mismatchBitmapHex"
+      ],
+      "additionalProperties": false
+    },
     "validationCases": {
       "type": "object",
       "properties": {
@@ -4049,6 +4068,16 @@
           "items": {
             "$ref": "#/definitions/validationCase"
           }
+        },
+        "comparisonIndex": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/validationComparisonIndex"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

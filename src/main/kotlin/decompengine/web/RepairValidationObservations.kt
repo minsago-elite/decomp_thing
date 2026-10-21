@@ -138,6 +138,11 @@ internal data class RecordedRepairValidationCase(
     val rebuiltStderrPreview: RecordedRepairValidationPreview? = null,
 )
 
+internal data class RecordedRepairValidationComparisonIndex(
+    val referenceObservationsSha256: String,
+    val mismatchBitmapHex: String,
+)
+
 internal class RecordedRepairValidationCasePage(
     val state: RecordedRepairValidationCaseState,
     val pageNumber: Int,
@@ -148,11 +153,13 @@ internal class RecordedRepairValidationCasePage(
     val firstMismatchPage: Int? = null,
     val previousMismatchPage: Int? = null,
     val nextMismatchPage: Int? = null,
+    val comparisonIndex: RecordedRepairValidationComparisonIndex? = null,
 ) {
     val cases: List<RecordedRepairValidationCase> = Collections.unmodifiableList(ArrayList(cases))
 }
 
 private const val RECORDED_VALIDATION_CASES_PER_PAGE = 20
+private const val RECORDED_VALIDATION_COMPARISON_MAX_INPUTS = 10_000
 private val RECORDED_VALIDATION_CASE_DIGEST = Regex("[0-9a-f]{64}")
 
 /** The normal receipt is already source/corpus/proof-bound by the caller. Fatal receipts use a separate projection. */
@@ -240,6 +247,8 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         var firstMismatchPage: Int? = null
         var previousMismatchPage: Int? = null
         var nextMismatchPage: Int? = null
+        val mismatchBitmap = if (behavior && ids.size <= RECORDED_VALIDATION_COMPARISON_MAX_INPUTS)
+            ByteArray((ids.size + 7) / 8) else null
         for (index in ids.indices) {
             val first = if (behavior) scope(1 + 2 * index, "reference", ids[index]) else null
             val second = if (behavior) scope(2 + 2 * index, "candidate", ids[index]) else null
@@ -254,6 +263,10 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
             val matched = exitEqual == true && stdoutEqual == true && stderrEqual == true
             if (matched) matches++
             if (behavior && !matched) {
+                if (mismatchBitmap != null) {
+                    val byte = index ushr 3
+                    mismatchBitmap[byte] = (mismatchBitmap[byte].toInt() or (1 shl (index and 7))).toByte()
+                }
                 val mismatchPage = index / RECORDED_VALIDATION_CASES_PER_PAGE + 1
                 if (firstMismatchPage == null) firstMismatchPage = mismatchPage
                 if (mismatchPage < pageNumber) previousMismatchPage = mismatchPage
@@ -277,7 +290,9 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         if (pageNumber > pages) RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.OUT_OF_RANGE,
             pageNumber, pages, ids.size)
         else RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.AVAILABLE, pageNumber, pages,
-            ids.size, matches.takeIf { behavior }, rows, firstMismatchPage, previousMismatchPage, nextMismatchPage)
+            ids.size, matches.takeIf { behavior }, rows, firstMismatchPage, previousMismatchPage, nextMismatchPage,
+            mismatchBitmap?.let { RecordedRepairValidationComparisonIndex(
+                requireNotNull(binding.expectedObservationsSha256), HexFormat.of().formatHex(it)) })
     }.getOrElse { RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.CORRUPT, pageNumber) }
 }
 

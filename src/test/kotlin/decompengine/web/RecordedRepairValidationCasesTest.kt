@@ -1213,4 +1213,51 @@ class RecordedRepairValidationCasesTest {
         assertFalse("PRIVATE" in rendered)
     }
 
+    @Test fun `complete comparison bitmap includes every mismatch beyond the selected page`() {
+        val f = mismatchPagesFixture(61, 1, 9, 21, 61)
+        for (number in 1..4) {
+            val value = page(f, number)
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, value.state)
+            val index = requireNotNull(value.comparisonIndex)
+            assertEquals("0101100000000010", index.mismatchBitmapHex)
+            assertEquals(f.binding.expectedObservationsSha256, index.referenceObservationsSha256)
+            assertEquals(57, value.matchedCount)
+        }
+    }
+    @Test fun `uncompared unavailable out of range and corrupt evidence has no complete comparison index`() {
+        for (outcome in RepairValidationObservedOutcome.entries) {
+            val value = page(fixture(count = 9, outcome = outcome))
+            if (outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED)
+                assertEquals("0000", requireNotNull(value.comparisonIndex).mismatchBitmapHex)
+            else assertNull(value.comparisonIndex)
+        }
+        val f = fixture(count = 21)
+        assertNull(page(f.copy(binding = f.binding.copy(context = null))).comparisonIndex)
+        assertNull(page(f, 3).comparisonIndex)
+        val rows = f.root.getValue("scopes").jsonArray.toMutableList()
+        rows[42] = JsonObject(rows[42].jsonObject + ("inputId" to JsonPrimitive("PRIVATE-other")))
+        assertNull(page(scopes(f, rows)).comparisonIndex)
+    }
+    @Test fun `complete comparison reference commitment follows full durable observations outside the page`() {
+        val f = fixture(count = 61)
+        val changedReference = output(f, 121, mapOf("stdoutBase64" to encoded(byteArrayOf(1, 2))))
+        val changedBoth = output(changedReference, 122, mapOf("stdoutBase64" to encoded(byteArrayOf(1, 2))))
+        val first = requireNotNull(page(f).comparisonIndex)
+        val second = requireNotNull(page(changedBoth).comparisonIndex)
+        assertEquals(first.mismatchBitmapHex, second.mismatchBitmapHex)
+        assertNotEquals(first.referenceObservationsSha256, second.referenceObservationsSha256)
+        assertEquals(changedBoth.binding.expectedObservationsSha256, second.referenceObservationsSha256)
+    }
+    @Test fun `API exposes only the checked compact comparison index with the selected receipt bindings`() {
+        val f = mismatchPagesFixture(21, 21)
+        val report = apiReport(f)
+        val cases = report.getValue("validationCases").jsonObject
+        val index = cases.getValue("comparisonIndex").jsonObject
+        assertEquals("000010", index.getValue("mismatchBitmapHex").jsonPrimitive.content)
+        assertEquals(f.binding.expectedObservationsSha256, index.getValue("referenceObservationsSha256").jsonPrimitive.content)
+        assertEquals(setOf("mismatchBitmapHex", "referenceObservationsSha256"), index.keys)
+        assertEquals(f.binding.proof.regressionCorpusSha256, cases.getValue("corpusSha256").jsonPrimitive.content)
+        assertFalse("PRIVATE" in index.toString())
+    }
+
 }
