@@ -542,3 +542,26 @@ it('discards old job metadata when the requested identity changes during a refre
     expect(transport.get).toHaveBeenCalledTimes(3);
   } finally { auth.dispose(); }
 });
+
+
+it('clears retained job metadata and navigation after a generic unverified storage refusal', async () => {
+  const auth = await metadataSession(); const selected = job(3);
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce({ data: selected })
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode: 'JOB_STORAGE_UNAVAILABLE', requestId }));
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Stored job metadata is unavailable');
+    expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(screen.queryByRole('heading', { name: selected.displayFilename })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Browse attempt history' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Workflow availability for this job' })).toBeNull();
+    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(document.body.textContent).not.toContain('JOB_STORAGE_UNAVAILABLE');
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job']);
+  } finally { auth.dispose(); }
+});

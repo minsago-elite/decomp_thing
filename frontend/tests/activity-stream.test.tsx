@@ -182,18 +182,28 @@ it('coalesces rendered context usage bursts while preserving checked records rec
   const live = connection(); fetcher.mockResolvedValueOnce(live.response);
   await start();
   const pause = screen.getByRole('button', { name: 'Pause activity' }); pause.focus();
-  const receivedAt = new Date().toISOString();
-  await act(async () => { await Promise.resolve(); live.send(...Array.from({ length: 100 }, (_, index) => contextUpdate(index + 1))); });
+  const firstReceivedAt = new Date().toISOString();
+  await act(async () => { await Promise.resolve(); live.send(contextUpdate(1)); });
+  await advance(0);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(firstReceivedAt);
+  await advance(25);
+  const latestReceivedAt = new Date().toISOString();
+  expect(latestReceivedAt).not.toBe(firstReceivedAt);
+  await act(async () => { await Promise.resolve(); live.send(...Array.from({ length: 99 }, (_, index) => contextUpdate(index + 2))); });
   await advance(0);
   expect(screen.getAllByRole('listitem')).toHaveLength(2);
   expect(transport.get).toHaveBeenCalledTimes(2);
-  await advance(99);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(firstReceivedAt);
+  await advance(74);
   expect(screen.getAllByRole('listitem')).toHaveLength(2);
   await advance(1);
   expect(screen.getAllByRole('listitem')).toHaveLength(101);
   expect(screen.getByText(`Sequence ${contextUpdate(100).sequence}`)).toBeTruthy();
   const times = [...document.querySelectorAll('time')].map(time => time.getAttribute('datetime'));
-  expect(times).toContain(receivedAt);
+  expect(times).toContain(latestReceivedAt);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).toBe(latestReceivedAt);
+  expect(screen.getByText(/Last activity received:/).querySelector('time')?.getAttribute('datetime')).not.toBe(firstReceivedAt);
   expect(times).not.toContain(new Date().toISOString());
   expect(document.activeElement).toBe(pause);
   expect(document.body.textContent).not.toContain('37.125');
@@ -210,6 +220,9 @@ it('coalesces rendered context usage bursts while preserving checked records rec
 
 it('flushes pending context rows on pause and discards a later pending display on fresh history reset', async () => {
   const evidence = JSON.stringify({ snapshot, page });
+  const timeouts = vi.spyOn(globalThis, 'setTimeout');
+  const cancellations = vi.spyOn(globalThis, 'clearTimeout');
+  let finishFresh: (response: unknown) => void = () => undefined;
   const one = connection(); const two = connection();
   fetcher.mockResolvedValueOnce(one.response).mockResolvedValueOnce(two.response);
   await start();
@@ -227,14 +240,31 @@ it('flushes pending context rows on pause and discards a later pending display o
   await advance(2500);
   await act(async () => { await Promise.resolve(); two.send(contextUpdate(3), contextUpdate(4)); }); await advance(0);
   expect(screen.getAllByRole('listitem')).toHaveLength(4);
-  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
+  const scheduled = timeouts.mock.calls.map((args, index) => ({ args, index })).filter(call => call.args[1] === 100).at(-1);
+  if (!scheduled || typeof scheduled.args[0] !== 'function') throw new Error('No pending display callback');
+  const staleCallback = scheduled.args[0];
+  expect(staleCallback.length).toBe(0);
+  const scheduledResult = timeouts.mock.results[scheduled.index];
+  if (scheduledResult?.type !== 'return') throw new Error('No pending display handle');
+  // Keep the new snapshot unresolved so a fresh response cannot hide a stale cleanup publication.
+  transport.get.mockImplementationOnce(() => new Promise(resolve => { finishFresh = resolve; }))
+    .mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
   await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Read fresh activity history' })); });
   expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   expect(two.cancel).toHaveBeenCalledOnce();
+  expect(cancellations).toHaveBeenCalledWith(scheduledResult.value);
+  expect(transport.get).toHaveBeenCalledTimes(4);
+  await act(async () => { Reflect.apply(staleCallback, undefined, []); await Promise.resolve(); });
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  expect(transport.get).toHaveBeenCalledTimes(4);
   await advance(100);
   expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   expect(screen.queryByRole('alert')).toBeNull();
   expect(fetcher).toHaveBeenCalledTimes(2);
+  await act(async () => { finishFresh(snapshot); await Promise.resolve(); });
+  await advance(0);
+  expect(transport.get).toHaveBeenCalledTimes(5);
+  expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   expect(JSON.stringify({ snapshot, page })).toBe(evidence);
 });
 

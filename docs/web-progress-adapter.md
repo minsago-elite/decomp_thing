@@ -816,3 +816,19 @@ retry, hard refusals, both response-binding levels, invalid-query recovery and
 late responses after deployment rebinding. These controls add no physical browser
 or provider/native trial; full route/panel, form and accessibility qualification
 remains outstanding.
+
+
+Generic `JOB_STORAGE_UNAVAILABLE` responses are also unverifiable metadata, since
+the public adapter uses that fixed code for unrecognized persisted-storage
+classifications. Job, attempt and history refreshes clear retained content for
+that response instead of treating its HTTP 503 as a transient outage. Dedicated
+in-memory route controls cover all three consumers and the sanitized reference.
+
+The live burst control delivers the first context observation and the pending
+observations at different fake-clock times within one display window, then checks
+the latest observation's exact receipt time separately from the first receipt and
+render time. The reset control captures the actual cancelled display callback and
+invokes it after reset. It keeps the new snapshot unresolved while checking that
+neither cleanup nor that late callback restores old rows, so a fast fresh response
+cannot hide an incorrect stale publication. These remain mock transport/fake-clock
+controls, with no physical browser or native/provider trial.
