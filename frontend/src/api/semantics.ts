@@ -114,6 +114,26 @@ function checkValidationCases(value: ValidationCases, summary: ValidationSummary
     if (same) pageMatches++;
   });
   if (matched !== null) requireValue(pageMatches <= matched && matched <= pageMatches + total - BigInt(value.items.length));
+  const navigation = [value.firstMismatchPage, value.previousMismatchPage, value.nextMismatchPage];
+  if (navigation.every(page => page === undefined)) return; // Older v1 producers did not report mismatch navigation.
+  requireValue(navigation.every(page => page !== undefined));
+  if (matched === null || matched === total) {
+    requireValue(navigation.every(page => page === null));
+    return;
+  }
+  const first = value.firstMismatchPage, previous = value.previousMismatchPage, next = value.nextMismatchPage;
+  if (first == null) throw new ApiClientError('invalid_response');
+  const knownPages = new Set(navigation.filter((page): page is number => page != null));
+  requireValue([...knownPages].every(page => page >= 1 && page <= value.totalPages && page >= first));
+  requireValue(previous == null ? first >= value.page : previous < value.page && first < value.page);
+  requireValue(next == null || next > value.page);
+  if (first > value.page) requireValue(next === first);
+  const pageMismatches = BigInt(value.items.length) - pageMatches;
+  if (pageMismatches > 0n) requireValue(first <= value.page);
+  if (first === value.page) requireValue(pageMismatches > 0n);
+  const outside = total - matched - pageMismatches;
+  requireValue(BigInt([...knownPages].filter(page => page !== value.page).length) <= outside);
+  if (outside > 0n) requireValue(previous != null || next != null);
 }
 
 function checkRun(run: Run): void {

@@ -1139,4 +1139,78 @@ class RecordedRepairValidationCasesTest {
         assertTrue("Recorded exact-byte comparisons</caption>" in html(f))
     }
 
+    private fun mismatchPagesFixture(count: Int, vararg ordinals: Int): Fixture {
+        var value = fixture(count = count)
+        for (ordinal in ordinals) {
+            require(ordinal in 1..count)
+            value = output(value, ordinal * 2, mapOf("stdoutBase64" to encoded(byteArrayOf(0, -2))))
+        }
+        return rebind(value, JsonObject(value.root + ("matches" to JsonPrimitive(ordinals.isEmpty()))))
+    }
+    @Test fun `mismatch navigation skips matching pages while retaining the full checked receipt counts`() {
+        val f = mismatchPagesFixture(61, 22, 61)
+        val expected = listOf(Triple(2, null, 2), Triple(2, null, 4), Triple(2, 2, 4), Triple(2, 2, null))
+        for (number in 1..4) {
+            val value = page(f, number)
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, value.state)
+            assertEquals(expected[number - 1], Triple(value.firstMismatchPage, value.previousMismatchPage, value.nextMismatchPage))
+            assertEquals(61, value.inputCount); assertEquals(59, value.matchedCount)
+            assertTrue(value.cases.size <= 20)
+            assertEquals((1..61).filter { (it - 1) / 20 + 1 == number }, value.cases.map { it.ordinal })
+        }
+    }
+    @Test fun `mismatch page boundaries deduplicate several differences on the same page`() {
+        val f = mismatchPagesFixture(41, 1, 20, 21, 40, 41)
+        for (number in 1..3) {
+            val value = page(f, number)
+            assertEquals(1, value.firstMismatchPage)
+            assertEquals((number - 1).takeIf { it > 0 }, value.previousMismatchPage)
+            assertEquals((number + 1).takeIf { it <= 3 }, value.nextMismatchPage)
+            assertEquals(36, value.matchedCount)
+        }
+        val unavailable = page(f, Int.MAX_VALUE)
+        assertEquals(RecordedRepairValidationCaseState.OUT_OF_RANGE, unavailable.state)
+        assertNull(unavailable.firstMismatchPage); assertNull(unavailable.previousMismatchPage); assertNull(unavailable.nextMismatchPage)
+    }
+    @Test fun `matching compile only and compile failed observations never invent mismatch pages`() {
+        for (outcome in RepairValidationObservedOutcome.entries) {
+            val f = fixture(count = 21, outcome = outcome)
+            val value = page(f)
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, value.state)
+            assertNull(value.firstMismatchPage); assertNull(value.previousMismatchPage); assertNull(value.nextMismatchPage)
+            val detail = apiReport(f).getValue("validationCases").jsonObject
+            for (name in listOf("firstMismatchPage", "previousMismatchPage", "nextMismatchPage")) assertEquals(JsonNull, detail.getValue(name))
+        }
+    }
+    @Test fun `corrupt later evidence withholds every mismatch link as well as case comparisons`() {
+        val f = mismatchPagesFixture(61, 22, 61)
+        val changedScopes = f.root.getValue("scopes").jsonArray.toMutableList()
+        changedScopes[122] = JsonObject(changedScopes[122].jsonObject + ("inputId" to JsonPrimitive("PRIVATE-other")))
+        val bad = scopes(f, changedScopes)
+        val value = page(bad)
+        assertEquals(RecordedRepairValidationCaseState.CORRUPT, value.state)
+        assertNull(value.firstMismatchPage); assertNull(value.previousMismatchPage); assertNull(value.nextMismatchPage)
+        val report = apiReport(bad)
+        assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonNull, report.getValue("validationCases"))
+        assertFalse("Validation mismatch pages" in html(bad))
+    }
+    @Test fun `API and HTML mismatch links retain graph owner source corpus and receipt identity`() {
+        val f = mismatchPagesFixture(61, 22, 61)
+        val report = apiReport(f, casePage = 3); val detail = report.getValue("validationCases").jsonObject
+        assertEquals(2, detail.getValue("firstMismatchPage").jsonPrimitive.int)
+        assertEquals(2, detail.getValue("previousMismatchPage").jsonPrimitive.int)
+        assertEquals(4, detail.getValue("nextMismatchPage").jsonPrimitive.int)
+        assertEquals(graph, detail.getValue("graphSha256").jsonPrimitive.content)
+        assertEquals(f.binding.proof.sourceRevisionSha256, detail.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(f.binding.proof.regressionCorpusSha256, detail.getValue("corpusSha256").jsonPrimitive.content)
+        assertEquals(apiReport(f).getValue("reportId"), report.getValue("reportId"))
+        val rendered = html(f, 3)
+        assertTrue("Validation mismatch pages" in rendered); assertTrue("First page with a mismatch" in rendered)
+        assertTrue("Previous page with a mismatch" in rendered); assertTrue("Next page with a mismatch" in rendered)
+        assertTrue("historyValidationPage=2" in rendered); assertTrue("historyValidationPage=4" in rendered)
+        assertTrue("historyGraph=$graph" in rendered); assertTrue("historyRunEvidence=run_00000001" in rendered)
+        assertFalse("PRIVATE" in rendered)
+    }
+
 }

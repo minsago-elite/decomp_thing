@@ -426,3 +426,85 @@ it('uses the selected failed-operation source commitment for source resolution',
   expect((await screen.findByRole('link', { name: 'Open source with this validated digest' })).getAttribute('href')).toContain(`sourceSha256=${source}`);
   expect(fetcher).toHaveBeenCalledTimes(4);
 });
+
+function mismatchPageFixture(page = 1) {
+  const document = reportFixture(), detail = document.data.validationCases!, item = detail.items[0]!, start = (page - 1) * 20;
+  document.data.summary = { result: 'failed', casesCompared: '61', sourceSha256: detail.sourceSha256 };
+  document.data.validationCases = { ...detail, page, totalInputs: '61', matchedInputs: '59', totalPages: 4,
+    previousPage: page > 1 ? page - 1 : null, nextPage: page < 4 ? page + 1 : null,
+    firstMismatchPage: 2, previousMismatchPage: page > 2 ? 2 : null, nextMismatchPage: page < 2 ? 2 : page < 4 ? 4 : null,
+    items: Array.from({ length: Math.min(20, 61 - start) }, (_, index) => {
+      const ordinal = start + index + 1, mismatch = ordinal === 22 || ordinal === 61;
+      return { ...item, caseId: `case_${ordinal}`, ordinal: String(ordinal), stdoutMatches: !mismatch,
+        outcome: mismatch ? 'mismatch' as const : 'matched' as const,
+        rebuiltStdoutPreview: mismatch ? { ...item.rebuiltStdoutPreview!, hex: '00 fe 0a' } : item.rebuiltStdoutPreview };
+    }) };
+  return document;
+}
+
+it('jumps across matching pages using mismatch metadata without changing receipt context or adding reads', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture()))
+    .mockResolvedValueOnce(response(mismatchPageFixture(1))).mockResolvedValueOnce(response(mismatchPageFixture(2)))
+    .mockResolvedValueOnce(response(mismatchPageFixture(4))).mockResolvedValueOnce(response(mismatchPageFixture(2)));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover(); await inspect();
+  expect(screen.getByRole('button', { name: 'Previous page with a mismatch' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'First page with a mismatch' }));
+  await screen.findByText('case_22');
+  expect(screen.getByRole('button', { name: 'First page with a mismatch' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Next page with a mismatch' }));
+  await screen.findByText('case_61');
+  expect(screen.getByRole('button', { name: 'Next page with a mismatch' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Previous page with a mismatch' }));
+  await screen.findByText('case_22'); expect(fetcher).toHaveBeenCalledTimes(5);
+  expect(fetcher.mock.calls.slice(1).map(call => new URL(String(call[0]), 'https://fixture.invalid').searchParams.get('historyValidationPage')))
+    .toEqual(['1', '2', '4', '2']);
+  for (const [route, options] of fetcher.mock.calls.slice(1)) {
+    expect(route).toContain(`historyGraph=${'a'.repeat(64)}`); expect(route).toContain('historyRunEvidence=run_00000001');
+    expect(options?.method).toBe('GET');
+  }
+  const exported = savedValidation(screen.getByRole('link', { name: 'Download this validation page JSON' }).getAttribute('href')!);
+  expect(exported.validationCases?.page).toBe(2); expect(exported.validationCases?.nextMismatchPage).toBe(4);
+});
+
+it('clears mismatch navigation and downloads when a jumped page belongs to a changed receipt', async () => {
+  const changed = mismatchPageFixture(2); changed.data.reportId = 'validation_other';
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture()))
+    .mockResolvedValueOnce(response(mismatchPageFixture())).mockResolvedValueOnce(response(changed));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover(); await inspect();
+  fireEvent.click(screen.getByRole('button', { name: 'First page with a mismatch' }));
+  await screen.findByRole('alert'); expect(screen.queryByRole('table', { name: 'Recorded validation cases' })).toBeNull();
+  expect(screen.queryByRole('navigation', { name: 'Validation mismatch pages' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('keeps ordinary paging when an older mismatched receipt omits navigation metadata', async () => {
+  const legacy = mismatchPageFixture(); delete legacy.data.validationCases!.firstMismatchPage;
+  delete legacy.data.validationCases!.previousMismatchPage; delete legacy.data.validationCases!.nextMismatchPage;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture())).mockResolvedValueOnce(response(legacy));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover(); await inspect();
+  expect(screen.getByText('This adapter did not report mismatch-page links. Use ordinary case paging to inspect this receipt.')).toBeTruthy();
+  expect(screen.queryByRole('navigation', { name: 'Validation mismatch pages' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Next validation cases' }).hasAttribute('disabled')).toBe(false);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it('does not offer mismatch navigation for matching or unobserved compile-only cases', async () => {
+  for (const compilation of [false, true]) {
+    const document = reportFixture(), history = historyFixture(), detail = document.data.validationCases!, item = detail.items[0]!;
+    Object.assign(detail, { firstMismatchPage: null, previousMismatchPage: null, nextMismatchPage: null });
+    if (compilation) {
+      history.data.items[0]!.normalOutcome = 'compile-valid';
+      document.data.summary = { result: 'unknown', casesCompared: '0', sourceSha256: detail.sourceSha256 };
+      document.data.validationCases = { ...detail, normalOutcome: 'compile-valid', matchedInputs: null,
+        items: [{ ...item, outcome: 'compile-only', exitCodeMatches: null, stdoutMatches: null, stderrMatches: null,
+          originalStdoutBytes: null, rebuiltStdoutBytes: null, originalStderrBytes: null, rebuiltStderrBytes: null,
+          originalStdoutPreview: null, rebuiltStdoutPreview: null, originalStderrPreview: null, rebuiltStderrPreview: null }] };
+    }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(history)).mockResolvedValueOnce(response(document));
+    vi.stubGlobal('fetch', fetcher); const view = mount(); await discover(); await inspect();
+    expect(screen.queryByRole('navigation', { name: 'Validation mismatch pages' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'First page with a mismatch' })).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2); view.unmount();
+  }
+});

@@ -5,13 +5,60 @@ import { describe, expect, it } from 'vitest';
 import { decodeContract, decodeResponse, encodeRequest } from '../src/api/decode';
 import { ApiClientError } from '../src/api/errors';
 import { parseBoundedJson } from '../src/api/json';
-import type { Run } from '../src/api/generated';
+import type { ResponseOf, Run } from '../src/api/generated';
 
 const root = resolve(process.cwd(), '../contracts/web/v1');
 const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.json`), 'utf8');
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
+function mismatchContract(page = 1) {
+  const document = JSON.parse(fixture('report-normal-cases')) as ResponseOf<'report'>;
+  const detail = document.data.validationCases!, item = detail.items[0]!, start = (page - 1) * 20;
+  document.data.summary = { result: 'failed', casesCompared: '61', sourceSha256: detail.sourceSha256 };
+  document.data.validationCases = { ...detail, totalInputs: '61', matchedInputs: '59', page, totalPages: 4,
+    previousPage: page > 1 ? page - 1 : null, nextPage: page < 4 ? page + 1 : null,
+    firstMismatchPage: 2, previousMismatchPage: page > 2 ? 2 : null, nextMismatchPage: page < 2 ? 2 : page < 4 ? 4 : null,
+    items: Array.from({ length: Math.min(20, 61 - start) }, (_, index) => {
+      const ordinal = start + index + 1, mismatch = ordinal === 22 || ordinal === 61;
+      return { ...item, caseId: `case_${ordinal}`, ordinal: String(ordinal), stdoutMatches: !mismatch,
+        outcome: mismatch ? 'mismatch' as const : 'matched' as const,
+        rebuiltStdoutPreview: mismatch ? { ...item.rebuiltStdoutPreview!, hex: '00 fe 0a' } : item.rebuiltStdoutPreview };
+    }) };
+  return document;
+}
+
 describe('generated v1 contract pipeline', () => {
+  it('accepts complete mismatch navigation across the selected receipt and legacy omission', () => {
+    for (let page = 1; page <= 4; page++) for (const mode of ['producer', 'response'] as const) {
+      const document = mismatchContract(page);
+      expect(decodeContract(JSON.stringify(document), { mode })).toEqual(document);
+    }
+    const legacy = mismatchContract();
+    delete legacy.data.validationCases!.firstMismatchPage;
+    delete legacy.data.validationCases!.previousMismatchPage;
+    delete legacy.data.validationCases!.nextMismatchPage;
+    expect(decodeResponse(JSON.stringify(legacy), 'report')).toEqual(legacy);
+    const matching = decodeResponse(fixture('report-normal-cases'), 'report');
+    Object.assign(matching.data.validationCases!, { firstMismatchPage: null, previousMismatchPage: null, nextMismatchPage: null });
+    expect(decodeResponse(JSON.stringify(matching), 'report')).toEqual(matching);
+  });
+  it('rejects incomplete out of range contradictory or count impossible mismatch page metadata', () => {
+    const document = mismatchContract(), detail = document.data.validationCases!;
+    const invalid = [{ firstMismatchPage: undefined }, { firstMismatchPage: null }, { firstMismatchPage: 1 },
+      { firstMismatchPage: 5 }, { previousMismatchPage: 1 }, { nextMismatchPage: 1 }, { nextMismatchPage: 3 },
+      { nextMismatchPage: null }, { nextMismatchPage: 2.5 }, { previousMismatchPage: 0 }];
+    for (const fields of invalid) for (const mode of ['producer', 'response'] as const) {
+      expect(() => decodeContract(JSON.stringify({ ...document, data: { ...document.data,
+        validationCases: { ...detail, ...fields } } }), { mode })).toThrow(ApiClientError);
+    }
+    const third = mismatchContract(3), cases = third.data.validationCases!;
+    const impossible = { ...third, data: { ...third.data, validationCases: { ...cases, matchedInputs: '60',
+      firstMismatchPage: 1, previousMismatchPage: 2, nextMismatchPage: 4 } } };
+    expect(() => decodeResponse(JSON.stringify(impossible), 'report')).toThrow(ApiClientError);
+    const matching = decodeResponse(fixture('report-normal-cases'), 'report');
+    Object.assign(matching.data.validationCases!, { firstMismatchPage: 1, previousMismatchPage: null, nextMismatchPage: null });
+    expect(() => decodeResponse(JSON.stringify(matching), 'report')).toThrow(ApiClientError);
+  });
   it('binds escaped preview text to strict UTF8 bytes including BOM controls and incomplete suffixes', () => {
     const document = decodeResponse(fixture('report-normal-cases'), 'report');
     const detail = document.data.validationCases!, item = detail.items[0]!;

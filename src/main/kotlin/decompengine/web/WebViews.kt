@@ -657,11 +657,17 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             if (cases.pageNumber > 1) add(caseLink("Previous validation cases", cases.pageNumber - 1))
             if (cases.pageNumber < cases.totalPages) add(caseLink("More validation cases", cases.pageNumber + 1))
         }.joinToString(" · ")
+        val mismatchNavigation = buildList {
+            cases.firstMismatchPage?.takeIf { it != cases.pageNumber }?.let { add(caseLink("First page with a mismatch", it)) }
+            cases.previousMismatchPage?.let { add(caseLink("Previous page with a mismatch", it)) }
+            cases.nextMismatchPage?.let { add(caseLink("Next page with a mismatch", it)) }
+        }.joinToString(" · ")
         return "<p>$counts Validation case page ${cases.pageNumber} of ${cases.totalPages} (at most 20 cases). " +
             "Comparisons describe retained bytes; missing observations are not skipped or successful executions.</p>" +
             "<p>Comparison uses every retained byte without normalization. Previews show at most 128 bytes per stream; " +
             "text escapes backslashes, line endings, tabs and control characters. Previews do not change the full-byte comparison.</p>$table" +
-            if (navigation.isEmpty()) "" else "<nav aria-label=\"Recorded validation case pages\">$navigation</nav>"
+            (if (navigation.isEmpty()) "" else "<nav aria-label=\"Recorded validation case pages\">$navigation</nav>") +
+            (if (mismatchNavigation.isEmpty()) "" else "<nav aria-label=\"Validation mismatch pages\">$mismatchNavigation</nav>")
     }
     fun normalEvidence(binding: RepairRecordedValidationObservation?, owner: RepairRecordedIdentity,
         isRun: Boolean = false, offerRunLink: Boolean = false): String {

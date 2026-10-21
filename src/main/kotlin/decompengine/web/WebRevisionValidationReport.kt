@@ -256,6 +256,9 @@ private fun recordedValidationCaseDetail(page: RepairRecordedHistoryPage, owner:
     put("totalInputs", cases.inputCount.toString()); put("matchedInputs", cases.matchedCount?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
     put("previousPage", (cases.pageNumber - 1).takeIf { it > 0 }?.let(::JsonPrimitive) ?: JsonNull)
     put("nextPage", if (cases.pageNumber < cases.totalPages) JsonPrimitive(cases.pageNumber + 1) else JsonNull)
+    put("firstMismatchPage", cases.firstMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
+    put("previousMismatchPage", cases.previousMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
+    put("nextMismatchPage", cases.nextMismatchPage?.let(::JsonPrimitive) ?: JsonNull)
     put("items", JsonArray(cases.cases.map { value -> buildJsonObject {
         put("caseId", value.identity.value); put("ordinal", value.ordinal.toString())
         put("outcome", value.outcome.name.lowercase().replace('_', '-'))

@@ -114,6 +114,29 @@ def check_validation_cases(data: dict) -> None:
         page_matches += int(same)
     if matched is not None and not page_matches <= matched <= page_matches + total - len(value["items"]):
         raise ValueError("validation case page contradicts the full matched count")
+    names = ("firstMismatchPage", "previousMismatchPage", "nextMismatchPage")
+    if not any(name in value for name in names):
+        return  # Older v1 producers omitted mismatch navigation entirely.
+    if not all(name in value for name in names):
+        raise ValueError("mismatch navigation must be reported as a complete group")
+    first, previous, following = (value[name] for name in names)
+    if matched is None or matched == total:
+        if any(value[name] is not None for name in names):
+            raise ValueError("uncompared or fully matching cases cannot have mismatch navigation")
+        return
+    if first is None:
+        raise ValueError("mismatched observations require a first mismatch page")
+    known = {value[name] for name in names if value[name] is not None}
+    if any(page < first or page < 1 or page > pages for page in known) or \
+            ((first < value["page"]) if previous is None else not (first < value["page"] and previous < value["page"])) or \
+            (following is not None and following <= value["page"]) or (first > value["page"] and following != first):
+        raise ValueError("mismatch navigation leaves or contradicts the selected window")
+    page_mismatches = len(value["items"]) - page_matches
+    if (page_mismatches > 0 and first > value["page"]) or (first == value["page"] and page_mismatches == 0):
+        raise ValueError("first mismatch page contradicts the observed page")
+    outside = total - matched - page_mismatches
+    if len(known - {value["page"]}) > outside or (outside > 0 and previous is None and following is None):
+        raise ValueError("mismatch navigation contradicts the number of unshown differences")
 
 # #604's outcome index is deliberately narrower than the full fixture manifest.
 # These expectations cannot be changed merely by relabeling a fixture in JSON.
@@ -528,6 +551,67 @@ def check_validation_display_controls(validate) -> int:
     return checked
 
 
+def check_validation_mismatch_controls(validate) -> int:
+    """Authored multi-page receipt metadata; no execution, HTTP or browser instance."""
+    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    checked = 0
+    def check(document, valid):
+        nonlocal checked
+        try:
+            validate(document)
+            check_semantics(document)
+        except (fastjsonschema.JsonSchemaException, ValueError):
+            if valid:
+                raise ValueError("valid mismatch page metadata was rejected")
+        else:
+            if not valid:
+                raise ValueError("contradictory mismatch page metadata was accepted")
+        checked += 1
+    def page(number):
+        document = json.loads(json.dumps(original))
+        detail = document["data"]["validationCases"]
+        document["data"]["summary"].update(result="failed", casesCompared="61")
+        template = detail["items"][0]
+        items = []
+        for ordinal in range((number - 1) * 20 + 1, min(number * 20, 61) + 1):
+            item = json.loads(json.dumps(template))
+            item.update(caseId=f"case_{ordinal}", ordinal=str(ordinal))
+            if ordinal in (22, 61):
+                item.update(outcome="mismatch", stdoutMatches=False)
+                item["rebuiltStdoutPreview"]["hex"] = "00 fe 0a"
+            items.append(item)
+        detail.update(page=number, totalPages=4, totalInputs="61", matchedInputs="59", items=items,
+                      previousPage=number - 1 if number > 1 else None,
+                      nextPage=number + 1 if number < 4 else None,
+                      firstMismatchPage=2, previousMismatchPage=2 if number > 2 else None,
+                      nextMismatchPage=2 if number < 2 else 4 if number < 4 else None)
+        return document
+    for number in range(1, 5):
+        check(page(number), True)
+    for fields in ({"firstMismatchPage": None}, {"firstMismatchPage": 1}, {"firstMismatchPage": 5},
+                   {"previousMismatchPage": 1}, {"nextMismatchPage": 1}, {"nextMismatchPage": 3},
+                   {"nextMismatchPage": None}, {"previousMismatchPage": 0}, {"nextMismatchPage": 2.5}):
+        document = page(1)
+        document["data"]["validationCases"].update(fields)
+        check(document, False)
+    document = page(1)
+    del document["data"]["validationCases"]["firstMismatchPage"]
+    check(document, False)
+    for field in ("previousMismatchPage", "nextMismatchPage"):
+        del document["data"]["validationCases"][field]
+    check(document, True)
+    document = page(3)
+    document["data"]["validationCases"].update(matchedInputs="60", firstMismatchPage=1,
+                                                previousMismatchPage=2, nextMismatchPage=4)
+    check(document, False)
+    document = json.loads(json.dumps(original))
+    document["data"]["validationCases"].update(firstMismatchPage=None, previousMismatchPage=None, nextMismatchPage=None)
+    check(document, True)
+    document["data"]["validationCases"]["firstMismatchPage"] = 1
+    check(document, False)
+    return checked
+
+
 def main() -> int:
     manifest = json.loads((ROOT / "fixtures.json").read_text())
     schema = json.loads((ROOT / manifest["schema"]).read_text())
@@ -567,12 +651,17 @@ def main() -> int:
         validation_display_controls = check_validation_display_controls(validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
         failures.append(f"validation display controls: {error}")
+    try:
+        mismatch_controls = check_validation_mismatch_controls(validate)
+    except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
+        failures.append(f"validation mismatch controls: {error}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(f"v1 design contracts: {accepted} valid fixtures accepted; {rejected} invalid fixtures rejected; {len(OUTCOME_EXPECTATIONS)} web outcomes verified")
     print(f"run lifecycle metadata: {lifecycle_controls} envelope controls verified")
     print(f"validation display metadata: {validation_display_controls} authored envelope controls verified")
+    print(f"validation mismatch navigation: {mismatch_controls} authored envelope controls verified")
     return 0
 
 

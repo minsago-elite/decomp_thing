@@ -144,6 +144,20 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             </td>
           </tr>)}</tbody></table>
         </div>
+        {cases.normalOutcome === 'behavior-checked' && cases.matchedInputs !== cases.totalInputs && <>
+          <p>{copy.mismatchScope}</p>
+          {cases.firstMismatchPage === undefined ? <p>{copy.mismatchUnavailable}</p> : <nav aria-label={copy.mismatchNavigation}>
+            <button type="button" disabled={loading || cases.firstMismatchPage == null || cases.firstMismatchPage === cases.page} onClick={() => {
+              if (history && selected && cases.firstMismatchPage != null) void readCases(history, selected, cases.firstMismatchPage, report.reportId);
+            }}>{copy.firstMismatch}</button>
+            <button type="button" disabled={loading || cases.previousMismatchPage == null} onClick={() => {
+              if (history && selected && cases.previousMismatchPage != null) void readCases(history, selected, cases.previousMismatchPage, report.reportId);
+            }}>{copy.previousMismatch}</button>
+            <button type="button" disabled={loading || cases.nextMismatchPage == null} onClick={() => {
+              if (history && selected && cases.nextMismatchPage != null) void readCases(history, selected, cases.nextMismatchPage, report.reportId);
+            }}>{copy.nextMismatch}</button>
+          </nav>}
+        </>}
         <nav aria-label={copy.caseNavigation}>
           <button type="button" disabled={loading || cases.previousPage === null} onClick={() => {
             if (history && selected && cases.previousPage !== null) void readCases(history, selected, cases.previousPage, report.reportId);

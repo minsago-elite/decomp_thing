@@ -145,6 +145,9 @@ internal class RecordedRepairValidationCasePage(
     val inputCount: Int = 0,
     val matchedCount: Int? = null,
     cases: List<RecordedRepairValidationCase> = emptyList(),
+    val firstMismatchPage: Int? = null,
+    val previousMismatchPage: Int? = null,
+    val nextMismatchPage: Int? = null,
 ) {
     val cases: List<RecordedRepairValidationCase> = Collections.unmodifiableList(ArrayList(cases))
 }
@@ -234,6 +237,9 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         val referenceDigest = MessageDigest.getInstance("SHA-256")
         if (behavior) referenceDigest.update((binding.proof.originalBinarySha256 + "\n").toByteArray(Charsets.UTF_8))
         var matches = 0
+        var firstMismatchPage: Int? = null
+        var previousMismatchPage: Int? = null
+        var nextMismatchPage: Int? = null
         for (index in ids.indices) {
             val first = if (behavior) scope(1 + 2 * index, "reference", ids[index]) else null
             val second = if (behavior) scope(2 + 2 * index, "candidate", ids[index]) else null
@@ -247,6 +253,12 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
             val stderrEqual = first?.let { it.stderr.first == requireNotNull(second).stderr.first }
             val matched = exitEqual == true && stdoutEqual == true && stderrEqual == true
             if (matched) matches++
+            if (behavior && !matched) {
+                val mismatchPage = index / RECORDED_VALIDATION_CASES_PER_PAGE + 1
+                if (firstMismatchPage == null) firstMismatchPage = mismatchPage
+                if (mismatchPage < pageNumber) previousMismatchPage = mismatchPage
+                if (mismatchPage > pageNumber && nextMismatchPage == null) nextMismatchPage = mismatchPage
+            }
             if (index.toLong() < from || index.toLong() >= from + RECORDED_VALIDATION_CASES_PER_PAGE) continue
             val outcome = when {
                 binding.outcome == RepairValidationObservedOutcome.COMPILE_FAILED -> RecordedRepairValidationCaseOutcome.COMPILE_FAILED
@@ -265,7 +277,7 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         if (pageNumber > pages) RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.OUT_OF_RANGE,
             pageNumber, pages, ids.size)
         else RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.AVAILABLE, pageNumber, pages,
-            ids.size, matches.takeIf { behavior }, rows)
+            ids.size, matches.takeIf { behavior }, rows, firstMismatchPage, previousMismatchPage, nextMismatchPage)
     }.getOrElse { RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.CORRUPT, pageNumber) }
 }
 
