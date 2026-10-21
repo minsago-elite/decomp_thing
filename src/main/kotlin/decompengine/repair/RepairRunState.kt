@@ -159,8 +159,9 @@ internal fun parseRepairRunState(payload: String): RepairRunState {
         if (version >= 3) value.getValue("validationDiagnostic").takeUnless { it is JsonNull }?.let {
             parseRepairValidationDiagnosticBinding(it as? JsonObject ?: error("validation diagnostic type"))
         } else null,
-        if (version >= 4) parseRepairValidationObservationLog(value.getValue("validationObservations") as? JsonArray
-            ?: error("validation observation array type"), value.getValue("attemptedCount").jsonPrimitive.int.toLong() + 1)
+        if (version >= 4) parseRepairValidationObservationLog(requireNotNull(value.getValue("validationObservations") as? JsonArray) {
+            "validation observation array type"
+        }, value.getValue("attemptedCount").jsonPrimitive.int.toLong() + 1)
         else RepairValidationObservationLog.EMPTY,
     )
 }

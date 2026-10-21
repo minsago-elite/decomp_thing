@@ -112,7 +112,10 @@ class RepairValidationObservationTest {
         assertEquals(listOf(value), log.entries)
         assertFailsWith<UnsupportedOperationException> { (log.entries as MutableList<RepairValidationObservation>).clear() }
         assertFailsWith<IllegalArgumentException> { log.appended(value) }
-        assertFailsWith<IllegalArgumentException> { log.appended(value.copy(invocation = value.invocation.copy(id = "validation_" + "b".repeat(32)))) }
+        val invocation = value.invocation.copy(id = "validation_" + "b".repeat(32))
+        val sameCandidate = value.copy(invocation = invocation,
+            primary = value.primary.copy(path = "reports/${invocation.id}.validation.json"))
+        assertFailsWith<IllegalArgumentException> { log.appended(sameCandidate) }
         assertEquals(RepairValidationObservationLog.EMPTY, RepairValidationObservationLog(emptyList()))
     }
 
@@ -165,8 +168,10 @@ class RepairValidationObservationTest {
         val log = RepairValidationObservationLog(listOf(value))
         assertFailsWith<IllegalArgumentException> { run(4, log).copy(id = "run_00000002") }
         assertFailsWith<IllegalArgumentException> { run(4, log).copy(regressionCorpusSha256 = "b".repeat(64)) }
-        val next = value.copy(invocation = value.invocation.copy(id = "validation_" + "b".repeat(32),
-            candidateRevisionId = "revision_00000001_" + "c".repeat(16)))
+        val invocation = value.invocation.copy(id = "validation_" + "b".repeat(32),
+            candidateRevisionId = "revision_00000001_" + "c".repeat(16))
+        val next = value.copy(invocation = invocation,
+            primary = value.primary.copy(path = "reports/${invocation.id}.validation.json"))
         assertFailsWith<IllegalArgumentException> { run(4, log.appended(next)) }
         assertEquals(2, run(4).copy(attemptedCount = 1, validationObservations = log.appended(next)).validationObservations.entries.size)
     }
