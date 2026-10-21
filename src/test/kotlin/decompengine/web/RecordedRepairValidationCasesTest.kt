@@ -4,6 +4,7 @@ import decompengine.acp.acpSandboxCanonicalStringDigest
 import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
 import decompengine.oracle.core.OracleJson
+import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.project.requireRecordedRepairValidationOutputQuota
@@ -119,7 +120,8 @@ class RecordedRepairValidationCasesTest {
             put("sourceRevisionSha256", AuthoredValidationReceiptMetadata.sourceSha256)
             put("runtimeSha256", AuthoredValidationReceiptMetadata.runtimeSha256)
             put("regressionCorpusSha256", corpus); put("runtimeConfiguration", AuthoredValidationReceiptMetadata.runtime)
-            put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", AuthoredValidationReceiptMetadata.snapshot)
+            put("behaviorBudgetEvidence", GeneratedCValidationBudgetPolicy.DEFAULT.admit(AuthoredValidationReceiptMetadata.context.budget))
+            put("sourceSnapshot", AuthoredValidationReceiptMetadata.snapshot)
             put("buildOutputLink", buildJsonObject {
                 put("path", "build"); put("role", "application-owned-output-link"); put("target", "/PRIVATE-output/program")
                 put("quota", outputQuota())
@@ -1062,6 +1064,67 @@ class RecordedRepairValidationCasesTest {
         val compilation = fixture(outcome = RepairValidationObservedOutcome.COMPILE_VALID)
         assertEquals("available", apiReport(compilation.copy(binding = compilation.binding.copy(expectedObservationsSha256 = null)))
             .getValue("state").jsonPrimitive.content)
+    }
+    private fun withBehaviorBudget(f: Fixture, budget: RepairResourceBudget): Fixture {
+        val context = requireNotNull(f.binding.context).copy(budget = budget)
+        val changed = rebind(f, JsonObject(f.root +
+            ("behaviorBudgetEvidence" to GeneratedCValidationBudgetPolicy.DEFAULT.evidence(budget))))
+        return changed.copy(binding = changed.binding.copy(context = context))
+    }
+    @Test fun `case inspection requires the exact graph and host behavior budget evidence`() {
+        val f = fixture()
+        assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(f).state)
+        val foreign = GeneratedCValidationBudgetPolicy.DEFAULT.evidence(RepairResourceBudget(maximumBehaviorExecutionMillis = 4999))
+        for (evidence in listOf(JsonNull, JsonObject(emptyMap()), foreign)) {
+            val bad = rebind(f, JsonObject(f.root + ("behaviorBudgetEvidence" to evidence)))
+            corrupt(bad)
+            val report = apiReport(bad)
+            assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+    }
+    @Test fun `per stream graph limits cover build reference and candidate output before case exposure`() {
+        val budget = RepairResourceBudget(maximumBehaviorStdoutBytes = 3, maximumBehaviorStderrBytes = 3,
+            maximumBehaviorOutputBytes = 64)
+        for (index in 0..2) for (field in listOf("stdoutBase64", "stderrBase64")) {
+            var changed = output(fixture(count = 1), index, mapOf(field to encoded(byteArrayOf(1, 2, 3))))
+            if (index != 0) changed = rebind(changed, JsonObject(changed.root + ("matches" to JsonPrimitive(false))))
+            val atLimit = withBehaviorBudget(changed, budget)
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(atLimit).state)
+            val exceeded = if (field == "stdoutBase64") budget.copy(maximumBehaviorStdoutBytes = 2)
+                else budget.copy(maximumBehaviorStderrBytes = 2)
+            val bad = withBehaviorBudget(changed, exceeded)
+            corrupt(bad)
+            val report = apiReport(bad)
+            assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+    }
+    @Test fun `cumulative graph output limits include build and later scopes outside the selected page`() {
+        val f = fixture(count = 21)
+        val budget = RepairResourceBudget(maximumBehaviorStdoutBytes = 2, maximumBehaviorStderrBytes = 1,
+            maximumBehaviorOutputBytes = 129)
+        val atLimit = withBehaviorBudget(f, budget)
+        val bad = withBehaviorBudget(f, budget.copy(maximumBehaviorOutputBytes = 128))
+        for (number in listOf(1, 2)) {
+            assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(atLimit, number).state)
+            assertEquals(RecordedRepairValidationCaseState.CORRUPT, page(bad, number).state)
+            assertTrue(page(bad, number).cases.isEmpty())
+            val report = apiReport(bad, casePage = number)
+            assertEquals("invalid", report.getValue("state").jsonPrimitive.content)
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertFalse("Recorded exact-byte comparisons</caption>" in html(bad))
+    }
+    @Test fun `graph behavior budgets cannot exceed any independent host ceiling`() {
+        val f = fixture()
+        val boundary = RepairResourceBudget(maximumBehaviorExecutionMillis = 30000)
+        assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(withBehaviorBudget(f, boundary)).state)
+        val over = listOf(boundary.copy(maximumBehaviorStdoutBytes = 8L * 1024 * 1024 + 1),
+            boundary.copy(maximumBehaviorStderrBytes = 8L * 1024 * 1024 + 1),
+            boundary.copy(maximumBehaviorOutputBytes = 16L * 1024 * 1024 + 1),
+            boundary.copy(maximumBehaviorExecutionMillis = 30001))
+        for (budget in over) corrupt(withBehaviorBudget(f, budget))
     }
     @Test fun `HTML withholds case rows and previews for missing corrupt unlinked diffs or withheld identities`() {
         val f = fixture(mismatch = true)

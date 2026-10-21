@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
 import decompengine.project.requireRecordedRepairValidationOutputQuota
@@ -163,6 +164,7 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.UNAVAILABLE, pageNumber)
     return runCatching {
         val behavior = binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED
+        require(root.getValue("behaviorBudgetEvidence") == GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget))
         val profile = ReconstructionProfiles.named(context.profileId)
         require((root.getValue("profileId") as? JsonPrimitive)?.content == context.profileId)
         val (sourceMount, outputMount) = requireRecordedRepairValidationRuntime(
@@ -187,6 +189,7 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
         }
         val manifests = if (behavior) mapOf("reference" to manifest("originalExecutable"),
             "candidate" to manifest("rebuiltExecutable")) else emptyMap()
+        var outputBytes = 0L
         fun scope(index: Int, role: String, input: String?): Output {
             val scope = scopes[index] as? JsonObject ?: error("validation case scope type")
             require(scope.keys == setOf("role", "inputId", "output", "sandboxSha256", "sandboxFields", "writableQuota", "cleanupVerified"))
@@ -214,8 +217,13 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
             val exit = (output.getValue("exitCode") as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
             require(exit != null && exit in 0..127)
             requireRecordedRepairValidationSandbox(scope, manifests[role])
-            return Output(exit, recordedValidationEncodedBytes(output.getValue("stdoutBase64")),
-                recordedValidationEncodedBytes(output.getValue("stderrBase64")))
+            val stdout = recordedValidationEncodedBytes(output.getValue("stdoutBase64"))
+            val stderr = recordedValidationEncodedBytes(output.getValue("stderrBase64"))
+            outputBytes = Math.addExact(outputBytes, Math.addExact(stdout.second, stderr.second))
+            require(stdout.second <= context.budget.maximumBehaviorStdoutBytes &&
+                stderr.second <= context.budget.maximumBehaviorStderrBytes &&
+                outputBytes <= context.budget.maximumBehaviorOutputBytes)
+            return Output(exit, stdout, stderr)
         }
         val build = scope(0, "build", null)
         require(if (binding.outcome == RepairValidationObservedOutcome.COMPILE_FAILED) build.exit != 0 else build.exit == 0)
