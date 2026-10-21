@@ -22,6 +22,7 @@ import decompengine.repair.requireRepairValidationDiagnosticAssociation
 import decompengine.repair.RepairValidationObservation
 import decompengine.repair.requireRepairValidationDiffRole
 import decompengine.repair.repairValidationDiffInputIds
+import decompengine.repair.validationObservationReceiptPath
 import decompengine.repair.RepairValidationObservedArtifact
 import decompengine.repair.RepairValidationProof
 import decompengine.repair.RepairValidationObservationLog
@@ -202,8 +203,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
             graph.profileSha256 == repairProfile.configurationSha256(graph.budget)
         ) { "repair release evidence uses an unsupported repair profile" }
         verifyRunContract(graph)
-        val observedDiffPaths = graph.runs.flatMap { run ->
-            run.validationObservations.entries.mapNotNull { it.diff?.path }
+        val observedArtifactPaths = graph.runs.flatMap { run ->
+            run.validationObservations.entries.flatMap { listOfNotNull(it.primary.path, it.diff?.path) }
         }.toSet()
         graph.runs.forEach { run ->
             verifyRepairValidationObservedArtifactsForArchive(run.validationObservations.entries,
@@ -215,7 +216,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             path in setOf(REPAIR_HISTORY_PATH, REPAIR_GRAPH_PATH, REPAIR_RECOVERY_BINDING_PATH) ||
                 REPAIR_RECEIPT_PATH.matches(path) ||
                 REPAIR_LEGACY_PATH.matches(path) ||
-                path in observedDiffPaths ||
+                path in observedArtifactPaths ||
                 path.startsWith(REPAIR_BLOB_PREFIX)
         }
         require(unknownRepairPaths.isEmpty()) {
@@ -1349,7 +1350,7 @@ internal fun selectRepairValidationReceiptForArchive(evidenceSha256: String,
     primary: RepairValidationObservedArtifact?, payloadSha256: Map<String, String>,
     payloadSizes: Map<String, Long>): String {
     if (primary != null) {
-        require(primary.path.matches(Regex("reports/validation_[0-9a-f]{32}\\.validation\\.json")) &&
+        require(validationObservationReceiptPath(primary.path) && primary.path.endsWith("_${primary.sha256}.json") &&
             primary.sha256 == evidenceSha256 && payloadSha256[primary.path] == evidenceSha256 &&
             payloadSizes[primary.path] == primary.bytes) {
             "repair validation receipt is missing or differs from its canonical observation"

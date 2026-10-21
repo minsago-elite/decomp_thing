@@ -2248,7 +2248,7 @@ internal class ModuleRevisionGraph private constructor(
 
     init {
         validateLoadedState()
-        cleanupUnreferencedValidationDiffs()
+        cleanupUnreferencedValidationArtifacts()
         cleanupSourceTemporaries(state.pending)
         recoverPendingAttempt()
         state.runs.lastOrNull()?.takeUnless { it.terminal }?.let {
@@ -2448,7 +2448,7 @@ internal class ModuleRevisionGraph private constructor(
         val observation = retention.observation
         requireRepairValidationObservationAssociation(observation, run.id, state.profileSha256, state.indexSha256,
             run.regressionCorpusSha256, invocation.candidateRevisionId, source, run.originalBinarySha256)
-        cleanupUnreferencedValidationDiffs()
+        cleanupUnreferencedValidationArtifacts()
         val existing = run.validationObservations.entries.singleOrNull { it.invocation.id == invocation.id }
         if (existing != null) {
             require(existing == observation)
@@ -2460,12 +2460,18 @@ internal class ModuleRevisionGraph private constructor(
                 write = { name, bytes ->
                     if (name.startsWith("repair-revisions/validation-diffs/"))
                         stateStore.writeImmutableValidationDiff(name.removePrefix("repair-revisions/validation-diffs/"), bytes)
-                    else stateStore.writeImmutableValidationReceipt(name, bytes)
+                    else {
+                        require(name.startsWith("repair-revisions/validation-receipts/"))
+                        stateStore.writeImmutableNormalValidationReceipt(name.removePrefix("repair-revisions/validation-receipts/"), bytes)
+                    }
                 },
                 readRetained = { name, limit ->
                     if (name.startsWith("repair-revisions/validation-diffs/"))
                         stateStore.readImmutableValidationDiff(name.removePrefix("repair-revisions/validation-diffs/"), limit)
-                    else stateStore.readValidationReport("reports/$name", limit)
+                    else {
+                        require(name.startsWith("repair-revisions/validation-receipts/"))
+                        stateStore.readImmutableNormalValidationReceipt(name.removePrefix("repair-revisions/validation-receipts/"), limit)
+                    }
                 },
             )
             persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) + run.copy(schemaVersion = 4,
@@ -3950,17 +3956,28 @@ internal class ModuleRevisionGraph private constructor(
         stateStore.synchronizeBlobs()
     }
 
-    /** Same verified quarantine/unlink guard as source blobs; no archive or receipt authority is relaxed. */
-    private fun cleanupUnreferencedValidationDiffs() {
-        val retained = state.runs.flatMap { run -> run.validationObservations.entries.mapNotNull { it.diff } }
-        val plan = planRepairValidationDiffDirectory(
-            stateStore.validationDiffNames(repairValidationDiffDirectoryEntryLimit(state.budget)), retained,
-            repairValidationDiffDirectoryEntryLimit(state.budget))
-        plan.temporaryTargets.forEach(stateStore::cleanupValidationDiffTemporary)
+    /** Reconcile only normal graph-owned roles, with one shared allowance for both quarantine reads. */
+    private fun cleanupUnreferencedValidationArtifacts() {
+        val observations = state.runs.flatMap { it.validationObservations.entries }
+        val maximumEntries = repairValidationDiffDirectoryEntryLimit(state.budget)
+        // Admit both whole directories before any cleanup; fatal root receipts are never swept here.
+        val receipts = planRepairValidationReceiptDirectory(stateStore.normalValidationReceiptNames(maximumEntries),
+            observations.map { it.primary }, maximumEntries)
+        val diffs = planRepairValidationDiffDirectory(stateStore.validationDiffNames(maximumEntries),
+            observations.mapNotNull { it.diff }, maximumEntries)
+        receipts.temporaryTargets.forEach(stateStore::cleanupNormalValidationReceiptTemporary)
+        diffs.temporaryTargets.forEach(stateStore::cleanupValidationDiffTemporary)
         var remaining = minOf(state.budget.maximumIndexEvidenceBytes, 2L * MAXIMUM_REPAIR_PROJECTION_BYTES)
-        plan.orphans.forEachIndexed { cleanupIndex, orphan ->
+        receipts.orphans.forEachIndexed { cleanupIndex, orphan ->
+            val (identity, size) = stateStore.normalValidationReceiptMetadata(orphan.observedName)
+            remaining = reserveRepairValidationArtifactCleanupBytes(size, remaining)
+            cleanupRepairOwnedEntry(requireNotNull(stateStore.normalValidationReceiptsPath()), "", orphan.targetName,
+                setOf(orphan.sha256), identity.key, size, "normal-validation-receipt-gc", orphan.targetName,
+                cleanupIndex, faultInjector, required = true)
+        }
+        diffs.orphans.forEachIndexed { cleanupIndex, orphan ->
             val (identity, size) = stateStore.validationDiffMetadata(orphan.observedName)
-            remaining = reserveRepairValidationDiffCleanupBytes(size, remaining)
+            remaining = reserveRepairValidationArtifactCleanupBytes(size, remaining)
             cleanupRepairOwnedEntry(requireNotNull(stateStore.validationDiffsPath()), "", orphan.targetName,
                 setOf(orphan.sha256), identity.key, size, "validation-diff-gc", orphan.targetName,
                 cleanupIndex, faultInjector, required = true)

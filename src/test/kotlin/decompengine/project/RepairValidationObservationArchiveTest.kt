@@ -36,7 +36,7 @@ class RepairValidationObservationArchiveTest {
             invocation.indexSha256, invocation.regressionCorpusSha256, "6".repeat(64), "7".repeat(64), "8".repeat(64),
             sha256(receipt), true, RepairValidationAssurance.STRICT_CONTAINED)
         return RepairValidationObservation(invocation, proof, RepairValidationObservedOutcome.BEHAVIOR_CHECKED,
-            RepairValidationObservedArtifact("reports/${invocation.id}.validation.json", sha256(receipt), receipt.size.toLong()),
+            RepairValidationObservedArtifact(repairValidationReceiptPath(invocation.id, sha256(receipt)), sha256(receipt), receipt.size.toLong()),
             RepairValidationObservedArtifact(repairValidationDiffPath(sha256(derived)), sha256(derived), derived.size.toLong()))
     }
     private fun payloads(observations: List<RepairValidationObservation>): Map<String, ByteArray> = buildMap {
@@ -94,10 +94,22 @@ class RepairValidationObservationArchiveTest {
         val path = "reports/initial.validation.json"
         assertEquals(path, selectRepairValidationReceiptForArchive(value.proof.evidenceSha256, null,
             mapOf(path to value.primary.sha256), emptyMap()))
-        for (paths in listOf(emptyMap(), mapOf(path to value.primary.sha256, value.primary.path to value.primary.sha256))) {
+        for (paths in listOf(emptyMap(), mapOf(path to value.primary.sha256, "reports/other.validation.json" to value.primary.sha256))) {
             assertFailsWith<IllegalArgumentException> {
                 selectRepairValidationReceiptForArchive(value.proof.evidenceSha256, null, paths, emptyMap())
             }
+        }
+    }
+
+    @Test
+    fun `managed normal primary bytes cannot make a legacy receipt digest lookup ambiguous`() {
+        val value = observation()
+        val legacy = "reports/initial.validation.json"
+        assertEquals(legacy, selectRepairValidationReceiptForArchive(value.proof.evidenceSha256, null,
+            mapOf(legacy to value.primary.sha256, value.primary.path to value.primary.sha256), emptyMap()))
+        assertFailsWith<IllegalArgumentException> {
+            selectRepairValidationReceiptForArchive(value.proof.evidenceSha256, null,
+                mapOf(value.primary.path to value.primary.sha256), emptyMap())
         }
     }
 
@@ -205,7 +217,8 @@ class RepairValidationObservationArchiveTest {
             verify(value, bytes)
             val unexpected = JsonObject(root + ("originalExecutable" to primary.getValue("originalExecutable"))).toString().toByteArray()
             val rebound = value.copy(proof = value.proof.copy(evidenceSha256 = sha256(unexpected)),
-                primary = value.primary.copy(sha256 = sha256(unexpected), bytes = unexpected.size.toLong()))
+                primary = value.primary.copy(path = repairValidationReceiptPath(value.invocation.id, sha256(unexpected)),
+                    sha256 = sha256(unexpected), bytes = unexpected.size.toLong()))
             assertFailsWith<IllegalArgumentException> { verify(rebound, unexpected) }
         }
     }

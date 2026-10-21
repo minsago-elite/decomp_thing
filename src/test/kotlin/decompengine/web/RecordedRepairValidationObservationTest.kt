@@ -57,7 +57,7 @@ class RecordedRepairValidationObservationTest {
             recordedRepairArtifactReference(corpus, path), sha256(bytes), bytes.size.toLong())
         val binding = RepairRecordedValidationObservation(invocation.commitmentSha256(),
             RepairRecordedIdentity(invocation.candidateRevisionId, false), proof, outcome,
-            artifact("reports/${invocation.id}.validation.json", primaryBytes),
+            artifact(repairValidationReceiptPath(invocation.id, sha256(primaryBytes)), primaryBytes),
             diffBytes?.let { artifact(repairValidationDiffPath(sha256(it)), it) })
         return Fixture(binding, primary, primaryBytes, diff, diffBytes)
     }
@@ -67,12 +67,15 @@ class RecordedRepairValidationObservationTest {
         val bytes = OracleJson.canonicalBytes(primary)
         return f.copy(primary = primary, primaryBytes = bytes, binding = f.binding.copy(
             proof = f.binding.proof.copy(evidenceSha256 = sha256(bytes)),
-            primary = f.binding.primary.copy(sha256 = sha256(bytes), bytes = bytes.size.toLong())))
+            primary = f.binding.primary.copy(artifact = recordedRepairArtifactReference(f.binding.proof.regressionCorpusSha256,
+                repairValidationReceiptPath("validation_" + "b".repeat(32), sha256(bytes))),
+                sha256 = sha256(bytes), bytes = bytes.size.toLong())))
     }
     private fun withDiff(f: Fixture, diff: JsonObject): Fixture {
         val bytes = OracleJson.canonicalBytes(diff)
         return f.copy(diff = diff, diffBytes = bytes, binding = f.binding.copy(
-            diff = requireNotNull(f.binding.diff).copy(sha256 = sha256(bytes), bytes = bytes.size.toLong())))
+            diff = requireNotNull(f.binding.diff).copy(artifact = recordedRepairArtifactReference(f.binding.proof.regressionCorpusSha256,
+                repairValidationDiffPath(sha256(bytes))), sha256 = sha256(bytes), bytes = bytes.size.toLong())))
     }
 
     @Test
@@ -194,7 +197,7 @@ class RecordedRepairValidationObservationTest {
         assertEquals(setOf(f.binding.primary.artifact, requireNotNull(f.binding.diff).artifact),
             recordedRepairArtifactReferences(snapshot, selected))
         val nonce = "validation_" + "b".repeat(32)
-        val paths = linkedMapOf(f.binding.primary.artifact to "reports/$nonce.validation.json",
+        val paths = linkedMapOf(f.binding.primary.artifact to repairValidationReceiptPath(nonce, f.binding.primary.sha256),
             requireNotNull(f.binding.diff).artifact to repairValidationDiffPath(requireNotNull(f.binding.diff).sha256))
         val capture = RepairHistoryArtifactCapture(snapshot, paths)
         assertTrue(capture.selectedPaths(default).isEmpty())
@@ -222,7 +225,7 @@ class RecordedRepairValidationObservationTest {
         val default = RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), 20)
         val selected = RepairRecordedHistoryPage.select(snapshot,
             RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceAttempt = identity.value), 20)
-        val paths = linkedMapOf(binding.primary.artifact to "reports/$nonce.validation.json",
+        val paths = linkedMapOf(binding.primary.artifact to repairValidationReceiptPath(nonce, binding.primary.sha256),
             requireNotNull(binding.diff).artifact to repairValidationDiffPath(requireNotNull(binding.diff).sha256))
         val capture = RepairHistoryArtifactCapture(snapshot, paths)
         assertTrue(recordedRepairArtifactReferences(snapshot, default).isEmpty())
@@ -256,7 +259,7 @@ class RecordedRepairValidationObservationTest {
             else RepairRecordedHistorySelection(), 20)
         val context = WebReportContext(Path.of("authored-reports"), "reports/runs/run_selected", "run_selected")
         val nonce = "validation_" + "b".repeat(32)
-        val primary = WebArtifactSummary("${context.artifactPrefix}/source-tree/reports/$nonce.validation.json", "Repair evidence", f.primaryBytes.size.toLong())
+        val primary = WebArtifactSummary("${context.artifactPrefix}/source-tree/" + repairValidationReceiptPath(nonce, f.binding.primary.sha256), "Repair evidence", f.primaryBytes.size.toLong())
         val diff = WebArtifactSummary("${context.artifactPrefix}/source-tree/${repairValidationDiffPath(f.diffBytes?.let(::sha256) ?: "0".repeat(64))}", "Repair evidence", f.diffBytes?.size?.toLong() ?: 0L)
         val listing = listOf(primary, diff) + if (duplicatePrimary) listOf(primary) else emptyList()
         val targets = recordedRepairArtifactReferences(snapshot, page).mapNotNull { reference ->
@@ -282,6 +285,18 @@ class RecordedRepairValidationObservationTest {
     }
 
     @Test
+    fun `normal primary namespace admits only exact invocation and digest names`() {
+        val context = WebReportContext(Path.of("authored-reports"), "reports/runs/run_selected", "run_selected")
+        val path = repairValidationReceiptPath("validation_" + "b".repeat(32), "c".repeat(64))
+        val prefix = "${context.artifactPrefix}/source-tree/"
+        assertEquals(path, recordedRepairLogicalArtifactPath(prefix + path, context))
+        for (bad in listOf(path + ".cleanup", path.replace(".json", ".validation.json"),
+                path.replace("validation-receipts/", "validation-receipts/nested/"),
+                path.replace("c".repeat(64), "private")))
+            assertNull(recordedRepairLogicalArtifactPath(prefix + bad, context))
+    }
+
+    @Test
     fun `normal validation keeps the later regression and no improvement disposition visible`() {
         for (kind in listOf(RepairRecordedEvidenceKind.REGRESSION, RepairRecordedEvidenceKind.VALIDATION)) {
             val html = rendered(fixture(), disposition = kind)
@@ -303,8 +318,9 @@ class RecordedRepairValidationObservationTest {
         assertTrue("Comparison policy: exact bytes (v1)." in html)
         assertTrue("Open retained primary validation receipt" in html)
         assertTrue("Open retained derived diff" in html)
-        val prefix = "/jobs/${"a".repeat(32)}/artifacts/reports/runs/run_selected/source-tree/reports/validation_${"b".repeat(32)}"
-        assertTrue("href=\"$prefix.validation.json\"" in html)
+        val primaryTarget = "/jobs/${"a".repeat(32)}/artifacts/reports/runs/run_selected/source-tree/" +
+            repairValidationReceiptPath("validation_" + "b".repeat(32), f.binding.primary.sha256)
+        assertTrue("href=\"$primaryTarget\"" in html)
         val diffTarget = "/jobs/${"a".repeat(32)}/artifacts/reports/runs/run_selected/source-tree/" +
             repairValidationDiffPath(requireNotNull(f.binding.diff).sha256)
         assertTrue("href=\"$diffTarget\"" in html)

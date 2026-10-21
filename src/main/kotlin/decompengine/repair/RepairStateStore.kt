@@ -26,6 +26,7 @@ internal class RepairStateStore private constructor(
 ) : AutoCloseable {
     private var closed = false
     private var validationDiffs: LinuxDescriptor? = null
+    private var normalValidationReceipts: LinuxDescriptor? = null
 
     val projectPath: Path = LinuxFilesystemSyscalls.descriptorPath(projectRoot)
     val reportsPath: Path = LinuxFilesystemSyscalls.descriptorPath(reports)
@@ -149,6 +150,74 @@ internal class RepairStateStore private constructor(
             return
         }
         writeAtomically(reports, name, bytes, "validation-receipt", requireAbsent = true)
+    }
+
+    /** Normal primary roles carry invocation and digest ownership; fatal root receipts are separate. */
+    fun writeImmutableNormalValidationReceipt(name: String, bytes: ByteArray) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")))
+        require(bytes.size.toLong() in 1..64L * 1024 * 1024 &&
+            decompengine.project.sha256(bytes) == name.removeSuffix(".json").substringAfterLast('_'))
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = true))
+        if (exists(parent, name)) {
+            require(readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+                64L * 1024 * 1024, "immutable normal validation receipt").bytes.contentEquals(bytes)) {
+                "immutable normal validation receipt already has different bytes"
+            }
+            return
+        }
+        writeAtomically(parent, name, bytes, "normal-validation-receipt", requireAbsent = true)
+    }
+
+    fun readImmutableNormalValidationReceipt(name: String, maximumBytes: Long): ByteArray {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")) && maximumBytes in 1..64L * 1024 * 1024)
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = false))
+        return readRequiredStable(parent, LinuxFilesystemSyscalls.descriptorPath(parent), name,
+            maximumBytes, "immutable normal validation receipt").bytes
+    }
+
+    fun normalValidationReceiptNames(maximumEntries: Int): List<String> =
+        normalValidationReceiptDirectory(create = false)?.let { LinuxFilesystemSyscalls.directoryEntryNames(it, maximumEntries) }
+            ?: emptyList()
+
+    fun normalValidationReceiptsPath(): Path? = normalValidationReceiptDirectory(create = false)?.let { LinuxFilesystemSyscalls.descriptorPath(it) }
+
+    fun cleanupNormalValidationReceiptTemporary(name: String) {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json")))
+        normalValidationReceiptDirectory(create = false)?.let { cleanupAtomicTemporary(it, name) }
+    }
+
+    /** Inspect the exact named inode before reserving both quarantine verification reads. */
+    fun normalValidationReceiptMetadata(name: String): Pair<LinuxFileIdentity, Long> {
+        require(name.matches(Regex("validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json(?:\\.cleanup)?")))
+        val parent = requireNotNull(normalValidationReceiptDirectory(create = false))
+        val opened = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name))
+        return opened.use { held ->
+            requireManagedRegularFile(held.identity, parent.identity, "normal validation receipt cleanup")
+            val size = Files.readAttributes(LinuxFilesystemSyscalls.descriptorPath(held), BasicFileAttributes::class.java).size()
+            require(LinuxFilesystemSyscalls.identity(held.fd) == held.identity)
+            requireNamedIdentity(parent, name, held.identity, "normal validation receipt cleanup")
+            held.identity to size
+        }
+    }
+
+    private fun normalValidationReceiptDirectory(create: Boolean): LinuxDescriptor? {
+        checkOpen()
+        normalValidationReceipts?.let { return it }
+        val opened = if (create) openOrCreateDirectory(revisions, "validation-receipts") else try {
+            LinuxFilesystemSyscalls.openDirectoryAt(revisions.fd, "validation-receipts")
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == LinuxFilesystemSyscalls.ENOENT) return null
+            throw failure
+        }
+        try {
+            requireSecureDirectory(opened.identity, revisions.identity, "normal validation receipt directory")
+            requireNamedIdentity(revisions, "validation-receipts", opened.identity, "normal validation receipt directory")
+            normalValidationReceipts = opened
+            return opened
+        } catch (failure: Throwable) {
+            opened.close()
+            throw failure
+        }
     }
 
     /** Content-addressed derived roles have an independent bounded directory, not one root entry per observation. */
@@ -353,11 +422,15 @@ internal class RepairStateStore private constructor(
         if (closed) return
         closed = true
         try {
-            validationDiffs?.close()
+            normalValidationReceipts?.close()
         } finally {
-            blobs.close()
-            revisions.close()
-            reports.close()
+            try {
+                validationDiffs?.close()
+            } finally {
+                blobs.close()
+                revisions.close()
+                reports.close()
+            }
         }
     }
 

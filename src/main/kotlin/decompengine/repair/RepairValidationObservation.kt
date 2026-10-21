@@ -22,13 +22,25 @@ enum class RepairValidationObservedOutcome { COMPILE_FAILED, COMPILE_VALID, BEHA
 /** A primary receipt and a derived diff have distinct roles even when both are JSON. */
 data class RepairValidationObservedArtifact(val path: String, val sha256: String, val bytes: Long) {
     init {
-        require((validationReportPath(path) || validationObservationDiffPath(path)) &&
+        require((validationReportPath(path) || validationObservationReceiptPath(path) || validationObservationDiffPath(path)) &&
             validationDigest(sha256) && bytes in 1..64L * 1024 * 1024)
     }
 
     internal fun toJsonObject() = JsonObject(mapOf("path" to JsonPrimitive(path),
         "sha256" to JsonPrimitive(sha256), "bytes" to JsonPrimitive(bytes)))
 }
+
+internal const val REPAIR_VALIDATION_RECEIPT_PREFIX = "reports/repair-revisions/validation-receipts/"
+private val VALIDATION_RECEIPT_NAME = Regex("validation_[0-9a-f]{32}_([0-9a-f]{64})\\.json")
+private val VALIDATION_RECEIPT_TEMP = Regex("\\.(validation_[0-9a-f]{32}_[0-9a-f]{64}\\.json)\\.repair-atomic\\.tmp")
+
+internal fun repairValidationReceiptPath(invocationId: String, digest: String): String {
+    require(invocationId.matches(Regex("validation_[0-9a-f]{32}")) && validationDigest(digest))
+    return REPAIR_VALIDATION_RECEIPT_PREFIX + invocationId + "_" + digest + ".json"
+}
+
+internal fun validationObservationReceiptPath(path: String): Boolean =
+    path.startsWith(REPAIR_VALIDATION_RECEIPT_PREFIX) && VALIDATION_RECEIPT_NAME.matches(path.removePrefix(REPAIR_VALIDATION_RECEIPT_PREFIX))
 
 internal const val REPAIR_VALIDATION_DIFF_PREFIX = "reports/repair-revisions/validation-diffs/"
 private val VALIDATION_DIFF_NAME = Regex("([0-9a-f]{64})\\.json")
@@ -46,33 +58,42 @@ internal fun validationObservationDiffPath(path: String): Boolean =
 internal fun repairValidationDiffDirectoryEntryLimit(budget: RepairResourceBudget): Int =
     Math.addExact(Math.multiplyExact(budget.maximumRevisionNodes, 2), 16)
 
-internal data class RepairValidationDiffOrphan(val targetName: String, val observedName: String, val sha256: String)
-internal data class RepairValidationDiffDirectoryPlan(val temporaryTargets: List<String>, val orphans: List<RepairValidationDiffOrphan>)
+internal data class RepairValidationArtifactOrphan(val targetName: String, val observedName: String, val sha256: String)
+internal data class RepairValidationArtifactDirectoryPlan(val temporaryTargets: List<String>, val orphans: List<RepairValidationArtifactOrphan>)
 
 /** Admit every name before any cleanup. Only exact, content-addressed application roles are owned. */
 internal fun planRepairValidationDiffDirectory(names: List<String>, retained: List<RepairValidationObservedArtifact>,
-    maximumEntries: Int): RepairValidationDiffDirectoryPlan {
+    maximumEntries: Int): RepairValidationArtifactDirectoryPlan = planRepairValidationArtifactDirectory(names, retained,
+        maximumEntries, REPAIR_VALIDATION_DIFF_PREFIX, VALIDATION_DIFF_NAME, VALIDATION_DIFF_TEMP)
+
+internal fun planRepairValidationReceiptDirectory(names: List<String>, retained: List<RepairValidationObservedArtifact>,
+    maximumEntries: Int): RepairValidationArtifactDirectoryPlan = planRepairValidationArtifactDirectory(names, retained,
+        maximumEntries, REPAIR_VALIDATION_RECEIPT_PREFIX, VALIDATION_RECEIPT_NAME, VALIDATION_RECEIPT_TEMP)
+
+private fun planRepairValidationArtifactDirectory(names: List<String>, retained: List<RepairValidationObservedArtifact>,
+    maximumEntries: Int, prefix: String, namePattern: Regex, temporaryPattern: Regex): RepairValidationArtifactDirectoryPlan {
     require(maximumEntries >= 0 && names.size <= maximumEntries && names.distinct().size == names.size)
     val active = linkedMapOf<String, String>()
     val temporaries = ArrayList<String>()
     for (name in names) {
-        val temporary = VALIDATION_DIFF_TEMP.matchEntire(name)
+        val temporary = temporaryPattern.matchEntire(name)
         if (temporary != null) { temporaries += temporary.groupValues[1]; continue }
         val base = name.removeSuffix(".cleanup")
-        require(VALIDATION_DIFF_NAME.matches(base)) { "validation diff directory contains an unowned entry" }
-        require(active.putIfAbsent(base, name) == null) { "validation diff has both active and quarantined entries" }
+        require(namePattern.matches(base)) { "validation artifact directory contains an unowned entry" }
+        require(active.putIfAbsent(base, name) == null) { "validation artifact has both active and quarantined entries" }
     }
     val retainedByName = linkedMapOf<String, RepairValidationObservedArtifact>()
     retained.forEach { artifact ->
-        require(artifact.path == repairValidationDiffPath(artifact.sha256))
-        val name = artifact.sha256 + ".json"
+        require(artifact.path.startsWith(prefix))
+        val name = artifact.path.removePrefix(prefix)
+        require(namePattern.matchEntire(name)?.groupValues?.get(1) == artifact.sha256)
         val previous = retainedByName.putIfAbsent(name, artifact)
         require(previous == null || previous == artifact)
-        require(active[name] == name) { "retained validation diff is missing or quarantined" }
+        require(active[name] == name) { "retained validation artifact is missing or quarantined" }
     }
-    return RepairValidationDiffDirectoryPlan(Collections.unmodifiableList(ArrayList(temporaries)),
+    return RepairValidationArtifactDirectoryPlan(Collections.unmodifiableList(ArrayList(temporaries)),
         Collections.unmodifiableList(active.filterKeys { it !in retainedByName }.map { (base, observed) ->
-            RepairValidationDiffOrphan(base, observed, base.removeSuffix(".json"))
+            RepairValidationArtifactOrphan(base, observed, requireNotNull(namePattern.matchEntire(base)).groupValues[1])
         }))
 }
 
@@ -96,9 +117,9 @@ internal fun repairValidationDiffInputIds(root: JsonObject): List<String> {
 }
 
 /** Cleanup's quarantine guard verifies the exact admitted payload twice before unlink. */
-internal fun reserveRepairValidationDiffCleanupBytes(bytes: Long, remaining: Long): Long {
+internal fun reserveRepairValidationArtifactCleanupBytes(bytes: Long, remaining: Long): Long {
     require(bytes in 1..64L * 1024 * 1024 && remaining in 0..2L * 64 * 1024 * 1024)
-    if (bytes > remaining / 2) throw RepairBudgetExceededException("validation diff cleanup exceeds its evidence allowance")
+    if (bytes > remaining / 2) throw RepairBudgetExceededException("validation artifact cleanup exceeds its evidence allowance")
     return remaining - 2L * bytes
 }
 
@@ -138,7 +159,7 @@ data class RepairValidationObservation(
         require(proof.originalBinarySha256 == null || validationDigest(proof.originalBinarySha256))
         require(proof.rebuiltBinarySha256 == null || validationDigest(proof.rebuiltBinarySha256))
         require(primary.sha256 == proof.evidenceSha256)
-        require(primary.path == "reports/${invocation.id}.validation.json")
+        require(primary.path == repairValidationReceiptPath(invocation.id, primary.sha256))
         require(outcome != RepairValidationObservedOutcome.COMPILE_FAILED || proof.rebuiltBinarySha256 == null)
         require(outcome != RepairValidationObservedOutcome.COMPILE_VALID ||
             proof.originalBinarySha256 == null && proof.rebuiltBinarySha256 != null)
@@ -210,7 +231,7 @@ internal fun planRepairValidationObservationRetention(invocation: RepairValidati
         it.copy(path = path)
     }
     fun artifact(value: RepairValidationPublishedArtifact, suffix: String) = RepairValidationObservedArtifact(
-        if (suffix == "diff") repairValidationDiffPath(value.sha256) else "reports/${invocation.id}.validation.json",
+        if (suffix == "diff") repairValidationDiffPath(value.sha256) else repairValidationReceiptPath(invocation.id, value.sha256),
         value.sha256, value.bytes)
     val observation = RepairValidationObservation(invocation, proof, outcome, artifact(normalizedPrimary, "validation"),
         normalizedDiff?.let { artifact(it, "diff") })

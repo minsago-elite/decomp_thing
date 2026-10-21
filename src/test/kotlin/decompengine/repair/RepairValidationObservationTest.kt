@@ -27,7 +27,7 @@ class RepairValidationObservationTest {
             "7".repeat(64).takeUnless { outcome == RepairValidationObservedOutcome.COMPILE_FAILED }, "8".repeat(64), "9".repeat(64),
             true, RepairValidationAssurance.STRICT_CONTAINED)
         return RepairValidationObservation(i, proof, outcome,
-            RepairValidationObservedArtifact("reports/${i.id}.validation.json", proof.evidenceSha256, 80))
+            RepairValidationObservedArtifact(repairValidationReceiptPath(i.id, proof.evidenceSha256), proof.evidenceSha256, 80))
     }
 
     private fun run(version: Int, log: RepairValidationObservationLog = RepairValidationObservationLog.EMPTY) =
@@ -114,7 +114,7 @@ class RepairValidationObservationTest {
         assertFailsWith<IllegalArgumentException> { log.appended(value) }
         val invocation = value.invocation.copy(id = "validation_" + "b".repeat(32))
         val sameCandidate = value.copy(invocation = invocation,
-            primary = value.primary.copy(path = "reports/${invocation.id}.validation.json"))
+            primary = value.primary.copy(path = repairValidationReceiptPath(invocation.id, value.primary.sha256)))
         assertFailsWith<IllegalArgumentException> { log.appended(sameCandidate) }
         assertEquals(RepairValidationObservationLog.EMPTY, RepairValidationObservationLog(emptyList()))
     }
@@ -171,7 +171,7 @@ class RepairValidationObservationTest {
         val invocation = value.invocation.copy(id = "validation_" + "b".repeat(32),
             candidateRevisionId = "revision_00000001_" + "c".repeat(16))
         val next = value.copy(invocation = invocation,
-            primary = value.primary.copy(path = "reports/${invocation.id}.validation.json"))
+            primary = value.primary.copy(path = repairValidationReceiptPath(invocation.id, value.primary.sha256)))
         assertFailsWith<IllegalArgumentException> { run(4, log.appended(next)) }
         assertEquals(2, run(4).copy(attemptedCount = 1, validationObservations = log.appended(next)).validationObservations.entries.size)
     }
@@ -189,7 +189,7 @@ class RepairValidationObservationTest {
         val writes = linkedMapOf<String, ByteArray>()
         plan.retain(read = { path, limit -> reads.getValue(path).also { assertEquals(it.size.toLong(), limit) } },
             write = { name, bytes -> writes[name] = bytes }, readRetained = { name, _ -> writes.getValue(name) })
-        assertEquals(listOf("${value.invocation.id}.validation.json", "repair-revisions/validation-diffs/${derived.sha256}.json"), writes.keys.toList())
+        assertEquals(listOf(repairValidationReceiptPath(value.invocation.id, sha256(primary)).removePrefix("reports/"), "repair-revisions/validation-diffs/${derived.sha256}.json"), writes.keys.toList())
         assertEquals(source.sha256, plan.observation.primary.sha256)
         assertEquals(derived.sha256, plan.observation.diff?.sha256)
         assertFalse(plan.observation.toJsonObject().toString().contains("operator"))
@@ -236,7 +236,7 @@ class RepairValidationObservationTest {
         val first = observation()
         val invocation = first.invocation.copy(runId = "run_00000002", id = "validation_" + "b".repeat(32))
         val second = first.copy(invocation = invocation,
-            primary = first.primary.copy(path = "reports/${invocation.id}.validation.json"))
+            primary = first.primary.copy(path = repairValidationReceiptPath(invocation.id, first.primary.sha256)))
         fun check(value: RepairValidationObservation, run: String) = requireRepairValidationObservationAssociation(value,
             run, value.invocation.profileSha256, value.invocation.indexSha256, value.invocation.regressionCorpusSha256,
             value.invocation.candidateRevisionId, value.invocation.sourceRevisionSha256, value.proof.originalBinarySha256)
