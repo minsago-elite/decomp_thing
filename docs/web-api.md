@@ -972,3 +972,43 @@ Successful changes and no-ops use the durable receipts described in [pin audit/r
 The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. The authenticated attempt page now provides explicit read/pin/unpin controls with fresh-read reconciliation. Audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.
 
 Private bootstrap now includes an optional `runtime.progressRetention` sample with enabled configuration, sample time, completed attempt checks, expired journals, failed checks and the last diagnostic code. Runtime displays this process-local sample from the last session check without launching another probe. The SPA `terminalEventRetentionMs` value is 86400000: the threshold for timed expiry, not a guarantee against earlier size/count eviction or a maximum scan delay. See [production retention](web-progress-adapter.md#spa-production-retention-and-sampled-status).
+
+
+### Recorded repair validation case comparisons
+
+The embedded repair-history view can inspect the selected canonical normal-validation
+receipt using the existing checked artifact listing and request-wide byte allowance.
+The source/corpus/proof bindings are checked before case projection. A closed ordered
+sequence of one build scope and one reference/candidate pair per corpus input supplies
+exact exit-code, standard-output and standard-error comparisons. Canonical base64 is
+validated and compared without allocating another complete decoded output payload.
+Matching ordinary nonzero exits remain matching comparisons; folded signal-like exits
+cannot establish a runtime failure or crash cause.
+
+Case identities use the same opaque corpus-bound identity as retained repair cases.
+The table includes at most twenty rows and finite byte counts. Each compared output
+stream has a preview of at most its first 128 bytes. Hexadecimal preserves every
+retained prefix byte; escaped UTF-8 text is also shown when that prefix is valid.
+An incomplete UTF-8 character at a truncated boundary stays in hexadecimal only;
+malformed bytes are never replaced to manufacture a text preview. Backslashes,
+line endings, tabs and control characters are escaped in text. Every preview states
+its observed size, displayed byte count and whether it is complete or truncated.
+Empty observed output stays distinct from unobserved case output. Comparison still
+uses the entire retained byte sequence without normalization, so equal previews
+cannot conceal a mismatch outside the prefix. Separate
+`historyValidationPage` navigation retains the selected graph, report run and evidence
+owner; pages beyond the captured count show an explicit out-of-range state and a
+graph-bound return link. History and retained-case-reference pagination stay separate.
+
+Empty scope evidence is unavailable. Missing, foreign, duplicated, misordered or
+inconsistent scopes withhold case comparisons. Compile failure and compile-only
+validation leave case pairs unobserved; neither becomes a skipped or successful run.
+Fatal diagnostic phase/position identifies an enclosing producer operation and does
+not prove that a child process started or completed. The normal case table does not
+infer those fatal outcomes.
+
+This is read-only presentation of retained evidence. It does not add execution or
+acceptance authority. The versioned revision-validation API, complete fatal-case
+outcome adapter and source links to the validated snapshot remain separate unfinished work. Native actor attribution,
+physical resource bounds, positive authentication and decompilation effectiveness
+require their own evidence.
