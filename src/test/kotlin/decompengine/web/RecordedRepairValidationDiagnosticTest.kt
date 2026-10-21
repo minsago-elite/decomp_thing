@@ -5,6 +5,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCValidationFailurePhase
 import decompengine.project.GeneratedCValidationFailureReason
 import decompengine.project.GeneratedCValidationFailureRecord
+import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.sha256
 import decompengine.repair.*
 import kotlinx.serialization.json.JsonArray
@@ -289,6 +290,7 @@ class RecordedRepairValidationDiagnosticTest {
             "profileId" to JsonPrimitive(AuthoredValidationReceiptMetadata.profileId),
             "runtimeConfiguration" to AuthoredValidationReceiptMetadata.runtime,
             "runtimeSha256" to JsonPrimitive(AuthoredValidationReceiptMetadata.runtimeSha256),
+            "behaviorBudgetEvidence" to GeneratedCValidationBudgetPolicy.DEFAULT.admit(AuthoredValidationReceiptMetadata.context.budget),
             "sourceRevisionSha256" to JsonPrimitive(invocation.sourceRevisionSha256),
             "sourceSnapshot" to AuthoredValidationReceiptMetadata.snapshot))
         val receipt = OracleJson.canonicalBytes(value)
@@ -604,6 +606,78 @@ class RecordedRepairValidationDiagnosticTest {
         }
         val valid = rebound(configured(mapOf("sandboxConfigurationFile" to JsonPrimitive("/PRIVATE-runtime/other-config"))))
         assertEquals("available", reportState(failureReport(valid)))
+    }
+
+    @Test fun `producer empty source snapshot keeps early failures partial without source attributed labels`() {
+        val f = apiFailureFixture()
+        val empty = withPrimary(f, JsonObject(f.primary + mapOf(
+            "sourceSnapshot" to JsonObject(emptyMap()), "buildOutputLink" to JsonObject(emptyMap()))))
+        for (reason in GeneratedCValidationFailureReason.entries) {
+            val value = apiFailureVariant(empty, reason, GeneratedCValidationFailurePhase.SOURCE_PREPARATION)
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(value).state)
+            val report = failureReport(value)
+            assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            assertFalse(report.toString().contains("PRIVATE"))
+        }
+    }
+
+    @Test fun `nonempty malformed snapshot lookalikes never become the producer unavailable sentinel`() {
+        val f = apiFailureFixture(); val snapshot = AuthoredValidationReceiptMetadata.snapshot
+        val emptyFiles = JsonArray(emptyList())
+        val variants = listOf(JsonObject(mapOf("extra" to JsonPrimitive(true))),
+            JsonObject(mapOf("files" to emptyFiles)), JsonArray(emptyList()),
+            JsonObject(snapshot + mapOf("files" to emptyFiles,
+                "manifestSha256" to JsonPrimitive(sha256(OracleJson.canonicalBytes(emptyFiles))))))
+        for (value in variants) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to value)))
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertEquals("available", reportState(failureReport(f)))
+    }
+
+    @Test fun `source bound failure details require the exact selected behavior budget evidence`() {
+        val f = apiFailureFixture(); val context = requireNotNull(f.binding.context)
+        val original = GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget)
+        val otherBudget = context.budget.copy(maximumBehaviorStdoutBytes = context.budget.maximumBehaviorStdoutBytes - 1)
+        val other = GeneratedCValidationBudgetPolicy.DEFAULT.admit(otherBudget)
+        kotlin.test.assertNotEquals(original, other)
+        for (value in listOf(JsonObject(emptyMap()), JsonObject(original + ("extra" to JsonPrimitive(true))), other)) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("behaviorBudgetEvidence" to value)))
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        val changedContext = f.copy(binding = f.binding.copy(context = context.copy(budget = otherBudget)))
+        val coherent = withPrimary(changedContext, JsonObject(changedContext.primary + ("behaviorBudgetEvidence" to other)))
+        assertEquals("available", reportState(failureReport(coherent)))
+    }
+
+    @Test fun `failure source quota commitment follows its bound runtime source mount after coherent relocation`() {
+        val f = apiFailureFixture(); val snapshot = AuthoredValidationReceiptMetadata.snapshot
+        val quota = snapshot.getValue("quota") as JsonObject
+        val movedPath = "/PRIVATE-other-source"
+        val movedQuota = JsonObject(quota + ("mountPathSha256" to JsonPrimitive(sha256(movedPath.toByteArray(Charsets.UTF_8)))))
+        kotlin.test.assertNotEquals(quota, movedQuota)
+        val movedSnapshot = JsonObject(snapshot + ("quota" to movedQuota))
+        val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to movedSnapshot)))
+        assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+        val report = failureReport(bad)
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        val runtime = AuthoredValidationReceiptMetadata.runtime
+        val configuration = runtime.getValue("runtime") as JsonObject
+        val movedRuntime = JsonObject(runtime + ("runtime" to JsonObject(configuration + ("sourceTmpfs" to JsonPrimitive(movedPath)))))
+        val digest = sha256(OracleJson.canonicalBytes(movedRuntime))
+        val coherent = withPrimary(f, JsonObject(f.primary + mapOf("sourceSnapshot" to movedSnapshot,
+            "runtimeConfiguration" to movedRuntime, "runtimeSha256" to JsonPrimitive(digest)))).let { changed ->
+            changed.withRecord(changed.record.copy(runtimeSha256 = digest)).let {
+                it.copy(binding = it.binding.copy(runtimeSha256 = digest)) }
+        }
+        assertEquals("available", reportState(failureReport(coherent)))
     }
 
 }

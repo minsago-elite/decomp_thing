@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.project.sha256
 import decompengine.project.parseGeneratedCValidationFailureRecord
+import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.requireRecordedRepairValidationSourceSnapshot
 import decompengine.project.requireRecordedRepairValidationRuntime
 import decompengine.project.ReconstructionProfiles
@@ -90,15 +91,21 @@ internal fun recordedValidationFailureReport(jobId: String, runId: String, captu
                         require(casePhase == (checked.inputIndex != null))
                         if (phase in setOf("source-preparation", "build", "build-finalization", "capture-rebuilt")) require(completed == 0)
                         val context = binding.context
-                        if (root.getValue("sourceSnapshot") != JsonNull && context != null) {
+                        val sourceSnapshot = root.getValue("sourceSnapshot")
+                        val hasSourceSnapshot = sourceSnapshot != JsonNull &&
+                            !(sourceSnapshot is JsonObject && sourceSnapshot.isEmpty())
+                        if (hasSourceSnapshot && context != null) {
                             require(root.getValue("profileId").jsonPrimitive.content == context.profileId)
-                            requireRecordedRepairValidationRuntime(root.getValue("runtimeConfiguration"),
+                            require(root.getValue("behaviorBudgetEvidence") == GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget))
+                            val (sourceMount, _) = requireRecordedRepairValidationRuntime(root.getValue("runtimeConfiguration"),
                                 binding.runtimeSha256, context.profileId)
-                            requireRecordedRepairValidationSourceSnapshot(root.getValue("sourceSnapshot"),
+                            val sourceQuota = requireRecordedRepairValidationSourceSnapshot(sourceSnapshot,
                                 binding.sourceRevisionSha256, context.budget,
                                 ReconstructionProfiles.named(context.profileId).layout.declaration("build-definition").materialize())
+                            require(sourceQuota.getValue("mountPathSha256") ==
+                                JsonPrimitive(sha256(sourceMount.toString().toByteArray(Charsets.UTF_8))))
                         }
-                        if (root.getValue("sourceSnapshot") == JsonNull || context == null) {
+                        if (!hasSourceSnapshot || context == null) {
                             state = "partial"; limitation = "The retained source inventory or bound profile is unavailable; no source-attributed diagnostic is exposed."
                         } else if (run.identity.rawIdentityWithheld || binding.candidate.rawIdentityWithheld) {
                             state = "partial"; limitation = "The selected failure identity is withheld; no diagnostic detail is exposed."
