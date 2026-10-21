@@ -188,7 +188,8 @@ class RecordedRepairValidationCasesTest {
         val mapping = mapOf("provider" to "provider", "mount" to "mountId", "bytes" to "maximumBytes",
             "entries" to "maximumEntries", "path" to "mountPathSha256")
         val values = fields(f, index).map { (name, value) ->
-            name to (mapping[name.substringAfterLast(".quota.")]?.let { quota.getValue(it).jsonPrimitive.content } ?: value)
+            val key = if (name.startsWith("authority[0].quota.")) mapping[name.removePrefix("authority[0].quota.")] else null
+            name to (key?.let { quota.getValue(it).jsonPrimitive.content } ?: value)
         }
         val rows = f.root.getValue("scopes").jsonArray.toMutableList()
         rows[index] = JsonObject(rows[index].jsonObject + mapOf("writableQuota" to quota,
@@ -233,6 +234,11 @@ class RecordedRepairValidationCasesTest {
             "mountPathSha256" to JsonPrimitive(sha256("/PRIVATE-other".toByteArray(Charsets.UTF_8)))))
         var changed = f
         for (index in 0 until f.root.getValue("scopes").jsonArray.size) changed = withScopeQuota(changed, index, quota)
+        for (index in 0 until f.root.getValue("scopes").jsonArray.size) {
+            assertEquals("bubblewrap+systemd-cgroup-v2", fields(changed, index).toMap().getValue("provider"))
+            requireRecordedRepairValidationSandbox(changed.root.getValue("scopes").jsonArray[index].jsonObject,
+                executableManifest(changed.root.getValue("scopes").jsonArray[index].jsonObject.getValue("role").jsonPrimitive.content))
+        }
         val link = f.root.getValue("buildOutputLink").jsonObject
         changed = rebind(changed, JsonObject(changed.root + ("buildOutputLink" to JsonObject(link +
             mapOf("target" to JsonPrimitive("/PRIVATE-other/program"), "quota" to quota)))))
