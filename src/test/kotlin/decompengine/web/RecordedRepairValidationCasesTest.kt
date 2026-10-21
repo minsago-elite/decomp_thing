@@ -6,6 +6,7 @@ import decompengine.jobs.Job
 import decompengine.oracle.core.OracleJson
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
+import decompengine.project.requireRecordedRepairValidationOutputQuota
 import decompengine.repair.*
 import decompengine.validation.ProcessInput
 import java.nio.file.Path
@@ -32,6 +33,10 @@ class RecordedRepairValidationCasesTest {
         fields.forEach { (name, value) -> append(name.length).append(':').append(name)
             .append(value.length).append(':').append(value).append(';') }
     }.toByteArray(Charsets.UTF_8))
+    private fun outputQuota() = buildJsonObject {
+        put("provider", "dedicated-tmpfs-size+nr_inodes"); put("mountId", 1); put("maximumBytes", 4096)
+        put("maximumEntries", 20); put("mountPathSha256", sha256("/PRIVATE-output".toByteArray(Charsets.UTF_8)))
+    }
     private fun scope(role: String, id: String?, exit: Int = 0, stdout: ByteArray = byteArrayOf(0, -1),
         stderr: ByteArray = byteArrayOf(10)): JsonObject = buildJsonObject {
         put("role", role); put("inputId", id?.let(::JsonPrimitive) ?: JsonNull)
@@ -40,10 +45,7 @@ class RecordedRepairValidationCasesTest {
             put("command", JsonArray(command.map(::JsonPrimitive)))
             put("exitCode", exit); put("stdoutBase64", encoded(stdout)); put("stderrBase64", encoded(stderr)); put("networkIsolated", true)
         })
-        val quota = buildJsonObject {
-            put("provider", "dedicated-tmpfs-size+nr_inodes"); put("mountId", 1); put("maximumBytes", 4096)
-            put("maximumEntries", 20); put("mountPathSha256", "7".repeat(64))
-        }
+        val quota = outputQuota()
         put("writableQuota", quota)
         val fields = linkedMapOf("provider" to "bubblewrap+systemd-cgroup-v2",
             "launch[0].purpose" to "CANDIDATE_VALIDATION", "launch[0].mergeError" to "false",
@@ -77,7 +79,11 @@ class RecordedRepairValidationCasesTest {
             for ((name, digit) in listOf("sourceRevisionSha256" to '2', "profileSha256" to '3', "indexSha256" to '4', "runtimeSha256" to '8'))
                 put(name, digit.toString().repeat(64))
             put("regressionCorpusSha256", corpus); put("runtimeConfiguration", JsonObject(emptyMap()))
-            put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", JsonNull); put("buildOutputLink", JsonNull)
+            put("behaviorBudgetEvidence", JsonObject(emptyMap())); put("sourceSnapshot", JsonNull)
+            put("buildOutputLink", buildJsonObject {
+                put("path", "build"); put("role", "application-owned-output-link"); put("target", "/PRIVATE-output/program")
+                put("quota", outputQuota())
+            })
             fun executable(hash: String?, role: String) = hash?.let { buildJsonObject {
                 put("sha256", it); put("runtimeManifestSha256", requireNotNull(executableManifest(role)))
             } } ?: JsonNull
@@ -176,6 +182,63 @@ class RecordedRepairValidationCasesTest {
             assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(changed).state)
             assertTrue(page(changed).cases.all { it.outcome == RecordedRepairValidationCaseOutcome.MATCHED })
         }
+    }
+
+    private fun withScopeQuota(f: Fixture, index: Int, quota: JsonObject): Fixture {
+        val mapping = mapOf("provider" to "provider", "mount" to "mountId", "bytes" to "maximumBytes",
+            "entries" to "maximumEntries", "path" to "mountPathSha256")
+        val values = fields(f, index).map { (name, value) ->
+            name to (mapping[name.substringAfterLast(".quota.")]?.let { quota.getValue(it).jsonPrimitive.content } ?: value)
+        }
+        val rows = f.root.getValue("scopes").jsonArray.toMutableList()
+        rows[index] = JsonObject(rows[index].jsonObject + mapOf("writableQuota" to quota,
+            "sandboxFields" to sandboxFields(values), "sandboxSha256" to JsonPrimitive(sandboxDigest(values))))
+        return scopes(f, rows)
+    }
+    @Test fun `recorded comparisons require a typed application owned build output quota link`() {
+        val f = fixture(); val link = f.root.getValue("buildOutputLink").jsonObject
+        val values = listOf(JsonNull, JsonArray(emptyList()), JsonObject(emptyMap()),
+            JsonObject(link + ("path" to JsonPrimitive("PRIVATE-other"))),
+            JsonObject(link + ("role" to JsonPrimitive("unrelated-output"))),
+            JsonObject(link + ("target" to JsonPrimitive("PRIVATE-relative/program"))),
+            JsonObject(link + ("target" to JsonPrimitive("/PRIVATE-output/../PRIVATE-other/program"))),
+            JsonObject(link + ("target" to JsonPrimitive("/PRIVATE-other/program"))),
+            JsonObject(link + ("quota" to JsonNull)), JsonObject(link + ("extra" to JsonPrimitive("PRIVATE"))))
+        values.forEach { value ->
+            corrupt(rebind(f, JsonObject(f.root + ("buildOutputLink" to value))))
+            assertFails { requireRecordedRepairValidationOutputQuota(value) }
+        }
+    }
+    @Test fun `self consistent scope quotas must equal the application owned output quota across every role`() {
+        val f = fixture(); val quota = outputQuota()
+        val variants = listOf(quota + ("mountId" to JsonPrimitive(2)), quota + ("maximumBytes" to JsonPrimitive(8192)),
+            quota + ("maximumEntries" to JsonPrimitive(40)), quota + ("mountPathSha256" to JsonPrimitive("9".repeat(64))))
+        for (index in 0 until f.root.getValue("scopes").jsonArray.size) for (variant in variants) {
+            val changed = withScopeQuota(f, index, JsonObject(variant))
+            val scope = changed.root.getValue("scopes").jsonArray[index].jsonObject
+            requireRecordedRepairValidationSandbox(scope, executableManifest(scope.getValue("role").jsonPrimitive.content))
+            corrupt(changed)
+        }
+    }
+    @Test fun `a rebound output link cannot borrow independently consistent scopes from another staging area`() {
+        val f = fixture(); val link = f.root.getValue("buildOutputLink").jsonObject
+        val quota = JsonObject(outputQuota() + ("mountPathSha256" to JsonPrimitive(sha256("/PRIVATE-other".toByteArray(Charsets.UTF_8)))))
+        val changedLink = JsonObject(link + mapOf("target" to JsonPrimitive("/PRIVATE-other/program"), "quota" to quota))
+        assertEquals(quota, requireRecordedRepairValidationOutputQuota(changedLink))
+        corrupt(rebind(f, JsonObject(f.root + ("buildOutputLink" to changedLink))))
+    }
+    @Test fun `coherent output link and every scope quota preserve existing normal case comparisons`() {
+        val f = fixture(); val quota = JsonObject(outputQuota() + mapOf("mountId" to JsonPrimitive(2),
+            "maximumBytes" to JsonPrimitive(8192), "maximumEntries" to JsonPrimitive(40),
+            "mountPathSha256" to JsonPrimitive(sha256("/PRIVATE-other".toByteArray(Charsets.UTF_8)))))
+        var changed = f
+        for (index in 0 until f.root.getValue("scopes").jsonArray.size) changed = withScopeQuota(changed, index, quota)
+        val link = f.root.getValue("buildOutputLink").jsonObject
+        changed = rebind(changed, JsonObject(changed.root + ("buildOutputLink" to JsonObject(link +
+            mapOf("target" to JsonPrimitive("/PRIVATE-other/program"), "quota" to quota)))))
+        assertEquals(RecordedRepairValidationCaseState.AVAILABLE, page(changed).state)
+        assertTrue(page(changed).cases.all { it.outcome == RecordedRepairValidationCaseOutcome.MATCHED })
+        assertFalse("PRIVATE" in page(changed).cases.toString())
     }
 
     @Test fun `hash bound receipts with stale sandbox digests cannot expose case comparisons`() {

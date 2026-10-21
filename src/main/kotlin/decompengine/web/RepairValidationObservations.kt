@@ -4,6 +4,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.sha256
 import decompengine.project.requireRecordedRepairValidationSandbox
+import decompengine.project.requireRecordedRepairValidationOutputQuota
 import decompengine.repair.RepairRecordedValidationObservation
 import decompengine.repair.RepairValidationObservedOutcome
 import decompengine.repair.requireRepairValidationDiffRole
@@ -155,6 +156,7 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
     if (scopes.isEmpty()) return RecordedRepairValidationCasePage(RecordedRepairValidationCaseState.UNAVAILABLE, pageNumber)
     return runCatching {
         val behavior = binding.outcome == RepairValidationObservedOutcome.BEHAVIOR_CHECKED
+        val outputQuota = requireRecordedRepairValidationOutputQuota(root.getValue("buildOutputLink"))
         require(scopes.size.toLong() == if (behavior) 1L + 2L * inputs.size else 1L)
         data class Output(val exit: Int, val stdout: Pair<String, Long>, val stderr: Pair<String, Long>)
         fun text(value: JsonElement): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -185,6 +187,7 @@ private fun checkedRecordedRepairValidationCases(binding: RepairRecordedValidati
             require(text(quota.getValue("provider")) == "dedicated-tmpfs-size+nr_inodes" &&
                 listOf("mountId", "maximumBytes", "maximumEntries").all { positive(quota.getValue(it)) } &&
                 text(quota.getValue("mountPathSha256")).matches(RECORDED_VALIDATION_CASE_DIGEST))
+            require(quota == outputQuota)
             val output = scope.getValue("output") as? JsonObject ?: error("validation case output type")
             require(output.keys == setOf("command", "exitCode", "stdoutBase64", "stderrBase64", "networkIsolated"))
             val command = output.getValue("command") as? JsonArray ?: error("validation case command type")

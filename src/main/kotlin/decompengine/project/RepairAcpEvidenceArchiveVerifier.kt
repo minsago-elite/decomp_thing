@@ -1491,6 +1491,20 @@ private fun verifyValidationQuota(value: JsonElement): JsonObject {
 internal fun requireRecordedRepairValidationSandbox(scope: JsonObject, executableManifest: String?) =
     verifyValidationSandbox(scope, executableManifest)
 
+/** Declared application-owned output metadata only; no filesystem or execution authority. */
+internal fun requireRecordedRepairValidationOutputQuota(value: JsonElement): JsonObject {
+    val link = value.requiredObject("validation output link")
+    link.requireExactKeys(setOf("path", "role", "target", "quota"), "validation output link")
+    require(link.requiredString("path", "validation output link") == "build" &&
+        link.requiredString("role", "validation output link") == "application-owned-output-link")
+    val target = Path.of(link.requiredString("target", "validation output link"))
+    require(target.isAbsolute && target == target.normalize() && target.parent != null)
+    val quota = verifyValidationQuota(link.getValue("quota"))
+    require(quota.requiredSha256("mountPathSha256", "validation quota") ==
+        sha256(target.parent.toString().toByteArray(Charsets.UTF_8)))
+    return quota
+}
+
 private fun verifyValidationSandbox(scope: JsonObject, executableManifest: String?) {
     val pairs = scope.requiredArray("sandboxFields", "validation scope").map { entry ->
         val pair = entry as? JsonArray ?: error("validation sandbox field is not a pair")
