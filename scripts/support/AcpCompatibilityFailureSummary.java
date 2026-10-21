@@ -122,7 +122,10 @@ final class AcpCompatibilityFailureSummary {
     }
 
     private static String siteLabel(StackTraceElement frame) {
-        return switch (frame.getClassName() + "#" + frame.getMethodName()) {
+        var siteClass = frame.getClassName();
+        var siteMethod = frame.getMethodName();
+        if (siteClass == null || siteMethod == null || siteClass.length() > 96 || siteMethod.length() > 64) return null;
+        return switch (siteClass + "#" + siteMethod) {
             case "decompengine.acp.RuntimePrivateControlScope#checkpoint" -> "private-control-checkpoint";
             case "decompengine.acp.RuntimePrivateControlScope#requireMountsUnchanged",
                  "decompengine.acp.RuntimePrivateControlScope$MountEventCheck#requireUnchanged" -> "mount-check";
