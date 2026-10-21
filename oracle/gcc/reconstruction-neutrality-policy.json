@@ -139,6 +139,10 @@
       "reason": "Generated-C repair diagnostic receipt pairing and bounded read-only presentation."
     },
     {
+      "path": "src/main/kotlin/decompengine/web/RepairValidationObservations.kt",
+      "reason": "Generated-C normal validation primary receipt and derived-diff role integrity presentation."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCValidationSnapshot.kt",
       "reason": "Generated-C repair validation workspace staging and snapshot policy."
     },

@@ -9,6 +9,10 @@ import java.nio.file.Files
 import java.util.Collections
 import java.util.TreeMap
 
+/** CLI spelling resolves before the strict provider request, without probing the filesystem. */
+internal fun repairReportsDirectory(projectDir: Path, selected: Path?): Path =
+    (selected ?: projectDir.resolve("reports")).toAbsolutePath().normalize()
+
 /** Immutable source input to validation. The canonical project is never the candidate workspace. */
 class RepairCandidateValidationRequest(
     val projectDir: Path,

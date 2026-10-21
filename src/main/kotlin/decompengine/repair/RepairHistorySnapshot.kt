@@ -17,7 +17,7 @@ internal class RepairHistorySnapshot internal constructor(
     val pending: RepairRecordedAttempt?,
     retainedCases: List<RepairRecordedIdentity>,
 ) {
-    val viewSchemaVersion: Int get() = 4
+    val viewSchemaVersion: Int get() = 5
     val qualification: RepairRecordedQualification get() = RepairRecordedQualification.RECORDED_METADATA_ONLY
     val runs: List<RepairRecordedRun> = immutableRecordedList(runs)
     val attempts: List<RepairRecordedAttempt> = immutableRecordedList(attempts)
@@ -224,6 +224,7 @@ internal class RepairRecordedAttempt internal constructor(
     val before: RepairRecordedEvidence?,
     val after: RepairRecordedEvidence?,
     val corpusSha256: String? = null,
+    val validationObservation: RepairRecordedValidationObservation? = null,
 ) {
     val retainedCases: List<RepairRecordedIdentity> = immutableRecordedList(retainedCases)
 }
@@ -243,6 +244,7 @@ internal data class RepairRecordedRun internal constructor(
     val rollbackFailureAttempt: RepairRecordedIdentity?,
     val rollbackResolution: RepairRollbackState?,
     val validationDiagnostic: RepairRecordedValidationDiagnostic? = null,
+    val baselineValidationObservation: RepairRecordedValidationObservation? = null,
 ) {
     val remainingAttempts: Int get() = maximumAttempts - attemptedCount
 }
@@ -265,6 +267,24 @@ internal data class RepairRecordedValidationDiagnostic internal constructor(
     val failureKind: RepairValidationFailureKind,
     val cleanupVerified: Boolean,
 )
+
+internal data class RepairRecordedValidationObservedArtifact internal constructor(
+    val artifact: RepairRecordedArtifactReference,
+    val sha256: String,
+    val bytes: Long,
+)
+
+/** The canonical run checked the invocation relation; private report paths are withheld. */
+internal data class RepairRecordedValidationObservation internal constructor(
+    val invocationSha256: String,
+    val candidate: RepairRecordedIdentity,
+    val proof: RepairValidationProof,
+    val outcome: RepairValidationObservedOutcome,
+    val primary: RepairRecordedValidationObservedArtifact,
+    val diff: RepairRecordedValidationObservedArtifact?,
+) {
+    val comparisonPolicy: String get() = "exact-bytes-v1"
+}
 
 /** Input only; the byte facade copies each admitted payload before parsing it. */
 internal class RepairHistoryDeclaredGraph(val name: String, val bytes: ByteArray)

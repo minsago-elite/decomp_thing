@@ -90,6 +90,7 @@ internal data class RecordedRepairHistoryView(
     val page: RepairRecordedHistoryPage? = null,
     val runId: String? = null,
     val validationDiagnostics: Map<RepairRecordedIdentity, RecordedRepairValidationDiagnosticView> = emptyMap(),
+    val validationObservations: Map<RepairRecordedIdentity, RecordedRepairValidationObservationView> = emptyMap(),
 )
 
 internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =
@@ -104,9 +105,13 @@ internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot,
             attempt.before?.artifact?.let(::add)
             attempt.after?.artifact?.let(::add)
             attempt.invocation?.artifact?.let(::add)
+            if (page.selection.evidenceAttempt != null) attempt.validationObservation?.let {
+                add(it.primary.artifact); it.diff?.artifact?.let(::add)
+            }
         }
         page.evidenceRuns.forEach { run ->
             run.validationDiagnostic?.let { binding -> add(binding.receipt); add(binding.diagnostic) }
+            run.baselineValidationObservation?.let { add(it.primary.artifact); it.diff?.artifact?.let(::add) }
         }
     }
 }
@@ -123,7 +128,7 @@ internal fun recordedRepairLogicalArtifactPath(target: String, reports: WebRepor
     if (logical.length > 4096 || parts.size !in 2..32 ||
         parts.any { it == "." || it == ".." || !SAFE_REPAIR_ARTIFACT_SEGMENT.matches(it) }) return null
     if (logical == "reports/repair_history.json") return null
-    if (parts[1] == "repair-revisions" &&
+    if (parts[1] == "repair-revisions" && !validationObservationReceiptPath(logical) && !validationObservationDiffPath(logical) &&
         (parts.size != 3 || !Regex("revision_[0-9]{8}_[0-9a-f]{16}\\.acp-receipt\\.json").matches(parts[2]))) return null
     return logical
 }

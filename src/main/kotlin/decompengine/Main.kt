@@ -398,7 +398,7 @@ private fun runRepair(args: List<String>) {
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val originalBinary: Path = original
     val projectDirectory: Path = project
-    val reportsDir = reports ?: projectDirectory.resolve("reports")
+    val reportsDir = decompengine.repair.repairReportsDirectory(projectDirectory, reports)
     val environment = System.getenv()
     val exitCode = runRepairCliAction(environment.values) { redactor ->
         val regressionInputs = if (exploreInputs) {
