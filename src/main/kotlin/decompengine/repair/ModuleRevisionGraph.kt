@@ -1622,7 +1622,7 @@ private fun withCommittedRollbackFailure(candidate: RevisionGraphState, record: 
         RepairRunStatus.VALIDATION_FAILED, RepairRunStatus.ROLLBACK_FAILED))
     require(run.rollbackFailureAttemptId == null || run.rollbackFailureAttemptId == pending.id)
     return marked.copy(runs = candidate.runs.dropLast(1) + run.copy(
-        schemaVersion = 2, status = RepairRunStatus.ROLLBACK_FAILED,
+        schemaVersion = maxOf(run.schemaVersion, 2), status = RepairRunStatus.ROLLBACK_FAILED,
         rollbackFailureAttemptId = pending.id, rollbackResolution = record.state))
 }
 
@@ -2386,6 +2386,47 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun portableEvidence(evidence: RepairEvidence?): RepairEvidence? = evidence?.let {
         RepairEvidence(portableEvidenceText(it.kind), portableEvidenceText(it.summary), it.artifactPath?.let(::portableEvidencePath))
+    }
+
+    @Synchronized
+    internal fun validationInvocation(attempt: ModuleRevisionAttempt?): RepairValidationInvocation = graphOperation {
+        val run = requireNotNull(state.runs.lastOrNull()).also { require(!it.terminal) }
+        val pending = attempt?.let(::requirePending)
+        require(pending == null || pending.repairMetadata?.runId == run.id)
+        val candidate = pending?.id ?: workingHeadId()
+        val source = pending?.let { requireNotNull(it.candidateSourceRevisionSha256) }
+            ?: state.nodes.single { it.id == candidate }.sourceRevisionSha256
+        RepairValidationInvocation("validation_" + java.util.UUID.randomUUID().toString().replace("-", ""),
+            run.id, candidate, source, state.profileSha256, state.indexSha256, run.regressionCorpusSha256)
+    }
+
+    /** Retain only the publication returned for this exact call, before failure unwinding. */
+    @Synchronized
+    internal fun recordValidationDiagnostic(invocation: RepairValidationInvocation,
+        publication: RepairValidationDiagnosticPublication) = graphOperation {
+        require(publication.invocation == invocation)
+        val run = requireNotNull(state.runs.lastOrNull()).also { require(!it.terminal) }
+        val pending = state.pending?.takeIf { it.id == invocation.candidateRevisionId }
+        val node = state.nodes.singleOrNull { it.id == invocation.candidateRevisionId }
+        require((pending != null) != (node != null))
+        require(if (pending != null) pending.repairMetadata?.runId == run.id
+            else node?.id == run.baselineId || node?.repairMetadata?.runId == run.id)
+        val source = pending?.candidateSourceRevisionSha256 ?: requireNotNull(node).sourceRevisionSha256
+        val retention = planRepairValidationDiagnosticRetention(publication, state.budget.maximumIndexEvidenceBytes)
+        val binding = retention.binding
+        requireRepairValidationDiagnosticAssociation(binding, run.id, state.profileSha256, state.indexSha256,
+            run.regressionCorpusSha256, invocation.candidateRevisionId, requireNotNull(source))
+        require(run.validationDiagnostic == null || run.validationDiagnostic == binding)
+        retention.retain(
+            read = { path, limit -> readStableRepairFile(path.parent, path.fileName.toString(), limit) },
+            write = { name, bytes ->
+                if (name.endsWith(".validation-failure.json")) stateStore.writeImmutableValidationDiagnostic(name, bytes)
+                else stateStore.writeImmutableValidationReceipt(name, bytes)
+            },
+            readRetained = { name, limit -> stateStore.readValidationReport("reports/$name", limit) },
+        )
+        persist(requireCommitReadyState(state.copy(runs = state.runs.dropLast(1) +
+            run.copy(schemaVersion = maxOf(run.schemaVersion, 3), validationDiagnostic = binding))))
     }
 
     private fun workingHeadId(): String = state.provisionalHeadId ?: state.headId
@@ -4498,6 +4539,8 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
         }
     }
     require(state.runs.size <= state.budget.maximumRevisionNodes)
+    val diagnostics = state.runs.mapNotNull { it.validationDiagnostic }
+    require(diagnostics.map { it.invocation.id }.distinct().size == diagnostics.size)
     state.runs.forEachIndexed { index, run ->
         require(run.id == "run_${(index + 1).toString().padStart(8, '0')}")
         require(run.baselineId in nodes && (run.acceptedHeadId == null || run.acceptedHeadId in nodes))
@@ -4506,6 +4549,18 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
         val attempts = state.nodes.count { it.repairMetadata?.runId == run.id } +
             if (state.pending?.repairMetadata?.runId == run.id) 1 else 0
         require(run.attemptedCount == attempts) { "repair run attempt count differs from its durable attempts" }
+        run.validationDiagnostic?.let { binding ->
+            binding.requireRetainedBudget(state.budget.maximumIndexEvidenceBytes)
+            val invocation = binding.invocation
+            val pending = state.pending?.takeIf { it.id == invocation.candidateRevisionId }
+            val node = nodes[invocation.candidateRevisionId]
+            require((pending != null) != (node != null))
+            require(if (pending != null) pending.repairMetadata?.runId == run.id
+                else node?.id == run.baselineId || node?.repairMetadata?.runId == run.id)
+            requireRepairValidationDiagnosticAssociation(binding, run.id, state.profileSha256, state.indexSha256,
+                run.regressionCorpusSha256, invocation.candidateRevisionId,
+                requireNotNull(pending?.candidateSourceRevisionSha256 ?: node?.sourceRevisionSha256))
+        }
         val failedAttempt = run.rollbackFailureAttemptId
         if (failedAttempt != null) {
             val pending = state.pending?.takeIf { it.id == failedAttempt }
@@ -5122,17 +5177,18 @@ internal fun compareCapturedRepairHistoryProjection(
             require(rows.size <= requestedBudget.maximumRevisionNodes)
             rows.map { element ->
                 val row = historyObject(element)
-                val runVersion = historyInteger(row.getValue("schemaVersion")).also { require(it in 1..2) }.toInt()
+                val runVersion = historyInteger(row.getValue("schemaVersion")).also { require(it in 1..3) }.toInt()
                 val fields = setOf("schemaVersion", "id", "status", "baselineId", "acceptedHeadId", "provisionalHeadId",
                     "regressionCorpusSha256", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis",
                     "expectedObservationsSha256", "originalBinarySha256", "lastEvidence") +
-                    (if (runVersion == 2) setOf("rollbackFailureAttemptId", "rollbackResolution") else emptySet())
+                    (if (runVersion >= 2) setOf("rollbackFailureAttemptId", "rollbackResolution") else emptySet()) +
+                    (if (runVersion >= 3) setOf("validationDiagnostic") else emptySet())
                 historyFields(row, fields, runVersion)
                 val numeric = setOf("schemaVersion", "maximumAttempts", "attemptedCount", "startedEpochMillis", "deadlineEpochMillis")
                 numeric.forEach { historyInteger(row.getValue(it)) }
                 val nullable = setOf("acceptedHeadId", "provisionalHeadId", "expectedObservationsSha256", "originalBinarySha256",
                     "rollbackFailureAttemptId", "rollbackResolution")
-                (fields - numeric - "lastEvidence").forEach { field ->
+                (fields - numeric - setOf("lastEvidence", "validationDiagnostic")).forEach { field ->
                     if (field in nullable) historyNullableString(row.getValue(field)) else historyString(row.getValue(field))
                 }
                 historyEvidence(row.getValue("lastEvidence"), runVersion)
@@ -5335,7 +5391,14 @@ private fun recordedHistoryCapture(
         RepairRecordedRun(it.schemaVersion, identities.revision(it.id), it.status, identities.revision(it.baselineId),
             identity(it.acceptedHeadId), identity(it.provisionalHeadId), it.regressionCorpusSha256, it.maximumAttempts,
             it.attemptedCount, it.startedEpochMillis, it.deadlineEpochMillis, identity(it.rollbackFailureAttemptId),
-            it.rollbackResolution)
+            it.rollbackResolution, it.validationDiagnostic?.let { binding ->
+                RepairRecordedValidationDiagnostic(binding.invocation.commitmentSha256(),
+                    identities.revision(binding.invocation.candidateRevisionId), binding.invocation.sourceRevisionSha256,
+                    binding.invocation.profileSha256, binding.invocation.indexSha256, binding.invocation.regressionCorpusSha256,
+                    binding.runtimeSha256, artifact(binding.receiptPath), binding.receiptSha256, binding.receiptBytes,
+                    artifact(binding.diagnosticPath), binding.diagnosticSha256, binding.diagnosticBytes,
+                    binding.failureKind, binding.cleanupVerified)
+            })
     }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
@@ -6663,7 +6726,7 @@ private fun declaredMigrationCredit(state: RevisionGraphState, wire: NullRollbac
         val actual = state.runs.singleOrNull { it.id == runId } ?: return 0L
         var expected = oldRun
         if (record.failureCode != null) {
-            expected = oldRun.copy(schemaVersion = 2, status = RepairRunStatus.ROLLBACK_FAILED,
+            expected = oldRun.copy(schemaVersion = maxOf(oldRun.schemaVersion, 2), status = RepairRunStatus.ROLLBACK_FAILED,
                 rollbackFailureAttemptId = pending.id, rollbackResolution = record.state)
         } else if (node?.recoveredAfterCrash == true && oldRun.status == RepairRunStatus.RUNNING && actual.status == RepairRunStatus.INTERRUPTED) {
             expected = oldRun.copy(status = RepairRunStatus.INTERRUPTED, lastEvidence = RESTART_INTERRUPTION_EVIDENCE)

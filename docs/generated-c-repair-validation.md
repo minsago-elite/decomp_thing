@@ -181,3 +181,99 @@ authority before execution, retain it until the entire candidate tree is quiesce
 bounded final counters and exact supported terminal status before cgroup removal. Missing or
 inconsistent observations must fail closed and their evidence must survive run/archive binding.
 This checkpoint does not introduce a native supervisor change or a polling approximation.
+
+## Supplemental failure diagnostic
+
+When the provider has retained its existing failure receipt, it also attempts to retain
+`<label>.validation-failure.json`. The legacy schema-version-1 producer diagnostic binds the exact
+validation receipt SHA-256 and its source/profile/index/corpus/runtime commitments. The existing
+version-2 receipt, registered proof, acceptance rules and archive verification are unchanged.
+Before validation, the same atomic publisher replaces any prior supplement for that label with
+zero bytes. A reset failure aborts before validation starts. Success, a withheld diagnostic, or a
+later publication failure leaves unavailable diagnostic data instead of a previous reason with
+an accidentally identical receipt digest. An empty supplement is not a valid schema1 record.
+Diagnostic publication failure is suppressed on the original failure; it cannot replace that
+failure, retry validation, or remove the primary receipt.
+The primary receipt and retained supplement copies together must fit the existing retained-receipt byte ceiling;
+the supplement is withheld with a suppressed budget failure when that ceiling has no capacity.
+An absent supplement is unavailable diagnostic data, not a successful or skipped execution.
+
+The existing primary failure classification retains its cleanup/cancellation priority. A separate
+closed reason distinguishes an enclosing deadline or typed agent timeout from other resource
+exhaustion. Unknown I/O failure remains validation failure. No exception message, command, host
+path, peer text, input ID or input bytes enter this record. Its canonical encoding is limited to
+4,096 bytes with fixed string, node and number bounds.
+
+The phase records the enclosing producer operation at entry, including preparation, build,
+original/rebuilt operation and finalization. It does not identify a native actor or prove that a
+child started, stopped, or caused the failure. A case operation may record its zero-based position
+in the exact bound receipt's input array; other phases use an explicit null position. The recorded
+input count describes the corpus, not completed, successful or skipped executions. Existing
+completed scopes, cleanup evidence and observation commitments must be interpreted separately.
+If snapshot closure itself throws during unwinding, the phase becomes snapshot finalization and
+the earlier case position is cleared. Successful closure preserves the original operation phase.
+The original cleanup throwable and prior failure remain linked even if diagnostic notification fails.
+
+### Selected invocation and canonical retention
+
+The repair graph supplies a distinct `validation_<32 lowercase hex digits>` identity for each
+baseline or candidate assessment. The typed request binds that identity to its run, candidate
+revision, source, profile, index and corpus. With this request, the supplemental document uses
+schema2 and includes the exact invocation. Identical primary receipts cannot identify a later call.
+Requests without this context retain legacy schema1 diagnostics and cannot obtain a bound view.
+
+The provider attaches a publication descriptor only after the bounded supplemental write returns.
+The primary marker is attached first and survives any auxiliary failure. Already attached
+exceptions are not duplicated, and an auxiliary provider marker is retained as a
+wrapped cause rather than a competing top-level provider. The original status classifier therefore
+continues to see its single original marker. Before canonical storage,
+the caller checks both paths against its exact request, and the graph authenticates both reported
+byte commitments through descriptor-pinned stable reads. It retains the primary as
+`reports/<validation identity>.validation.json` and the supplement as
+`reports/<validation identity>.validation-failure.json`, independently of the supported `--reports`
+directory. Absolute external directories, relative directories and other project directories use
+the same canonical pair. Both files use the existing descriptor-pinned atomic no-replace publisher:
+existing identical bytes are idempotent; different bytes are refused.
+
+New canonical bindings use schema2 with these fixed portable names. The operator-selected pair and
+its canonical copies count as `2 * (primary bytes + diagnostic bytes)` against the configured
+`maximumIndexEvidenceBytes`; the canonical pair also fits within the existing 64 MiB inspection
+allowance. This does not increase either configured limit. Schema1 bindings preserve their original
+encoding and retention accounting. A copy or verification failure leaves no committed binding.
+
+Only after both immutable copies are retained and checked does the graph commit its portable descriptor
+to the owning run using run schema3. Legacy run schemas1/2 preserve their previous encoding and
+have no invented descriptor. Run, candidate, source/profile/index/corpus associations and unique
+invocation identities are checked in canonical, read-only history and release archive readers.
+Rollback and interruption preserve this correlation; it never supplies acceptance or release proof.
+Uncommitted orphan files are not selected by the history capture.
+
+### Read-only run diagnostic selection
+
+The recorded history view exposes opaque artifact references and commitments, without provider
+paths or private summary text. `historyRunEvidence=<recorded run reference>` requires the captured
+`historyGraph` digest and selects a run on the current bounded history page. It cannot be combined
+with `historyEvidence`, and it does not require a candidate attempt for a baseline failure.
+Default history pages do not read run diagnostic payloads.
+
+For durable web jobs, the canonical capture also contributes both explicitly selected run diagnostic
+paths to the bounded artifact listing beneath `source-tree`. This includes baseline failures with no
+candidate attempt. Unselected run diagnostics and missing capture mappings add no paths; a page from
+another snapshot is refused before the listing can use it.
+
+The existing checked selected-report namespace and duplicate-target refusal apply before reads.
+Primary and diagnostic bytes share the existing 64 MiB request-wide byte/call allowance. An explicit
+bound receipt reserves its admitted byte count instead of the generic 16 MiB presentation limit;
+its parser uses that same admitted size, capped at 64 MiB. Typed run references bypass the generic
+artifact pass, so that pass cannot cache a failed smaller read before the bound read. Byte capture
+may be cached by path, while integrity is checked separately for each selected invocation. The reader
+checks both exact byte commitments, schema2 invocation commitment, source/profile/index/corpus/runtime,
+primary outcome/cleanup, input count and any case position before exposing closed reason/phase labels.
+Missing or empty data is unavailable; changed, unbound, malformed or cross-paired data is withheld.
+Neither private receipt content nor exception/peer text is projected into these labels.
+
+This selection does not start validation. It does not establish a native actor, current source,
+successful case, acceptance or release qualification. Full stable case IDs, normalized accessible
+text/binary comparisons, validated source navigation and the live case adapter remain separate work.
+The new schema and reader data controls await their own normal Actions; this follow-up adds no
+actual native process, provider, controller or browser test context.
