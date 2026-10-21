@@ -244,8 +244,11 @@ internal class WebApiController(
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
                     requireJsonAccept(exchange)
                     val parts = resource.split('/')
-                    sendWebApiResponse(exchange, 200, "report",
-                        revisionValidationReports.read(parts[1], parts[3], exchange.requestURI.rawQuery))
+                    val query = exchange.requestURI.rawQuery
+                    val report = if (query?.split('&')?.any { it.substringBefore('=') == "historyFailureRun" } == true)
+                        revisionValidationReports.failure(parts[1], parts[3], query, jobs::readRecordedValidationFailureReport)
+                    else revisionValidationReports.read(parts[1], parts[3], query)
+                    sendWebApiResponse(exchange, 200, "report", report)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

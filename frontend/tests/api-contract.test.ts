@@ -12,6 +12,31 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('decodes failed-operation diagnostics separately from case comparisons and preserves exact reported counts', () => {
+    const document = decodeResponse(fixture('report-validation-failure'), 'report');
+    expect(document.data.summary).toBeNull(); expect(document.data.validationCases).toBeNull();
+    expect(document.data.validationFailure?.reason).toBe('timeout');
+    expect(document.data.validationFailure?.inputOrdinal).toBe('2');
+    const history = decodeResponse(fixture('validation-history-failure'), 'validationHistory');
+    expect(history.data.items[1]?.ownerKind).toBe('run-failure'); expect(history.data.items[1]?.normalOutcome).toBeNull();
+    const value = document.data.validationFailure!;
+    const large = { ...document, data: { ...document.data, validationFailure: { ...value, phase: 'post-execution',
+      inputOrdinal: null, inputCount: '9007199254740993', reportedCompletedPairs: '9007199254740992' } } };
+    expect(decodeResponse(JSON.stringify(large), 'report').data.validationFailure?.inputCount).toBe('9007199254740993');
+  });
+  it('rejects conflicting failed-operation positions reasons cleanup and comparison authority', () => {
+    const document = decodeResponse(fixture('report-validation-failure'), 'report'), value = document.data.validationFailure!;
+    const invalid = [{ ...value, inputOrdinal: null }, { ...value, inputOrdinal: '0' }, { ...value, inputOrdinal: '4' },
+      { ...value, phase: 'build' }, { ...value, reportedCompletedPairs: '0' }, { ...value, reportedCompletedPairs: '4' },
+      { ...value, classification: 'cancelled' }, { ...value, reportedCleanupVerified: false }, { ...value, authority: 'canonical-validation' }];
+    for (const validationFailure of invalid) expect(() => decodeResponse(JSON.stringify({ ...document,
+      data: { ...document.data, validationFailure } }), 'report')).toThrow(ApiClientError);
+    for (const data of [{ ...document.data, summary: { result: 'passed', casesCompared: '1', sourceSha256: value.sourceSha256 } },
+      { ...document.data, validationCases: decodeResponse(fixture('report-normal-cases'), 'report').data.validationCases },
+      { ...document.data, acceptance: 'accepted' }]) {
+      expect(() => decodeResponse(JSON.stringify({ ...document, data }), 'report')).toThrow(ApiClientError);
+    }
+  });
   it('decodes bounded validation owner discovery while retaining a historical receipt corpus', () => {
     const document = decodeResponse(fixture('validation-history'), 'validationHistory');
     expect(document.data.items[0]?.canInspect).toBe(true);
@@ -28,7 +53,7 @@ describe('generated v1 contract pipeline', () => {
     const document = decodeResponse(fixture('validation-history'), 'validationHistory'), value = document.data, item = value.items[0]!;
     const invalid = [{ ...value, authority: 'canonical-validation' }, { ...value, state: 'not-recorded' },
       { ...value, graphSha256: null }, { ...value, page: 2 }, { ...value, nextPage: 2 }, { ...value, previousPage: 1 },
-      { ...value, items: [item, item] }, { ...value, items: Array.from({ length: 42 }, (_, i) => ({ ...item, ownerId: `run_${i}` })) },
+      { ...value, items: [item, item] }, { ...value, items: Array.from({ length: 62 }, (_, i) => ({ ...item, ownerId: `run_${i}` })) },
       ...[{ ...item, canInspect: false }, { ...item, hasReceipt: false }, { ...item, identityWithheld: true },
         { ...item, normalOutcome: null }, { ...item, corpusSha256: null }, { ...item, sourceSha256: null },
         { ...item, candidateId: null }].map(row => ({ ...value, items: [row] }))];

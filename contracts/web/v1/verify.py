@@ -258,8 +258,13 @@ def check_semantics(document: dict) -> None:
         if len({(item["ownerKind"], item["ownerId"]) for item in data["items"]}) != len(data["items"]):
             raise ValueError("validation history repeats an owner")
         for item in data["items"]:
-            if item["canInspect"] != (item["hasReceipt"] and not item["identityWithheld"]) or item["hasReceipt"] != (item["normalOutcome"] is not None):
+            if item["canInspect"] != (item["hasReceipt"] and not item["identityWithheld"]):
                 raise ValueError("validation inspection requires a recorded receipt and disclosed identity")
+            if item["ownerKind"] == "run-failure":
+                if not item["hasReceipt"] or item["normalOutcome"] is not None or item.get("failureKind") is None:
+                    raise ValueError("failed operation discovery requires its own failure binding")
+            elif item.get("failureKind") is not None or item["hasReceipt"] != (item["normalOutcome"] is not None):
+                raise ValueError("normal operation discovery cannot borrow a failure binding")
             if any((item[key] is not None) != item["canInspect"] for key in ("candidateId", "sourceSha256", "corpusSha256")):
                 raise ValueError("validation owner commitments must follow inspection availability")
     elif kind == "error":
@@ -344,6 +349,23 @@ def check_semantics(document: dict) -> None:
             if summary is None or summary.get("result") != "passed":
                 raise ValueError("accepted report requires a passed validation summary")
         check_validation_cases(data)
+        failure = data.get("validationFailure")
+        if failure is not None:
+            total, completed = int(failure["inputCount"]), int(failure["reportedCompletedPairs"])
+            if completed > total or failure["reportedCleanupVerified"] != (failure["classification"] != "cleanup-unverified"):
+                raise ValueError("failed operation count or reported cleanup contradicts its classification")
+            expected = "resource-exhausted" if failure["reason"] == "timeout" else failure["reason"]
+            if failure["classification"] != expected:
+                raise ValueError("failed operation reason contradicts its classification")
+            case_phase = failure["phase"] in ("before-case", "original-operation", "rebuilt-operation")
+            if case_phase != (failure["inputOrdinal"] is not None):
+                raise ValueError("failed operation position must identify an enclosing case phase")
+            if failure["inputOrdinal"] is not None:
+                ordinal = int(failure["inputOrdinal"])
+                if not 1 <= ordinal <= total or completed + 1 != ordinal:
+                    raise ValueError("failed operation position contradicts its reported completed prefix")
+            if failure["phase"] in ("source-preparation", "build", "build-finalization", "capture-rebuilt") and completed != 0:
+                raise ValueError("pre-comparison operation cannot claim completed pairs")
     elif kind == "snapshot":
         check_run(data["run"])
         if (data["throughCursor"] is None) != (data["throughSequence"] is None):

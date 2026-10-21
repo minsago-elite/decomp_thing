@@ -40,23 +40,29 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
     const controller = begin(history, owner);
     try {
-      const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : 'historyRunEvidence';
+      const failureOwner = owner.ownerKind === 'run-failure';
+      const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
       const query = `historyGraph=${history.graphSha256}&historyPage=${history.page}&${ownerKey}=${owner.ownerId}&historyValidationPage=${page}`;
       const { data } = await client.get('report', `${root}/reports/revision-validation?${query}`, { signal: controller.signal });
       if (controller.signal.aborted) return;
       const cases = data.validationCases;
+      const failure = data.validationFailure;
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== owner.candidateId ||
         data.reportType !== 'revision-validation' || data.authority !== 'observations' || data.acceptance !== 'not-evaluated' ||
         data.acceptanceArtifactId !== null || data.sourceArtifact !== null || (reportId !== undefined && data.reportId !== reportId) ||
         (data.summary !== null && (!('sourceSha256' in data.summary) || data.summary.sourceSha256 !== owner.sourceSha256)) ||
-        (data.state === 'available' && !cases) ||
+        (data.state === 'available' && !(failureOwner ? failure : cases)) ||
+        (failureOwner ? Boolean(cases) || data.summary !== null : Boolean(failure)) ||
+        (failure && (failure.graphSha256 !== history.graphSha256 || failure.ownerId !== owner.ownerId ||
+          failure.sourceSha256 !== owner.sourceSha256 || failure.corpusSha256 !== owner.corpusSha256 ||
+          failure.classification !== owner.failureKind)) ||
         (cases && (cases.graphSha256 !== history.graphSha256 || cases.ownerKind !== owner.ownerKind || cases.ownerId !== owner.ownerId ||
           cases.sourceSha256 !== owner.sourceSha256 || cases.corpusSha256 !== owner.corpusSha256 ||
           cases.normalOutcome !== owner.normalOutcome || cases.page !== page))) throw new Error('validation receipt binding');
       setStored({ binding, history, selected: owner, report: data, loading: false, error: '' });
     } catch (failure: unknown) { failed(controller, failure); }
   }
-  const history = view?.history, report = view?.report, cases = report?.validationCases, selected = view?.selected;
+  const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
   const loading = view?.loading ?? false;
   const flag = (value: boolean | null) => value === null ? copy.notCompared : value ? copy.matches : copy.differs;
   return <section aria-labelledby="recorded-validation-title">
@@ -76,9 +82,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
           </tr></thead><tbody>{history.items.map(owner => <tr key={`${owner.ownerKind}:${owner.ownerId}`}>
             <th scope="row">{owner.ownerKind}: <code>{owner.ownerId}</code></th>
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
-            <td>{owner.normalOutcome ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
-              aria-label={`${copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
-              onClick={() => { void readCases(history, owner); }}>{copy.inspect}</button></td>
+            <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
+              aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
+              onClick={() => { void readCases(history, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
           </tr>)}</tbody></table>
         </div>
         {history.items.length === 0 && <p>{copy.noOwners}</p>}
@@ -99,6 +105,15 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       {report.summary && 'result' in report.summary && <dl>
         <dt>{copy.result}</dt><dd>{report.summary.result}</dd><dt>{copy.compared}</dt><dd>{report.summary.casesCompared}</dd>
       </dl>}
+      {failure && <section aria-labelledby="validation-failure-title">
+        <h3 id="validation-failure-title">{copy.failureTitle}</h3><p>{copy.failureScope}</p>
+        <dl><dt>{copy.failureReason}</dt><dd>{failure.reason}</dd><dt>{copy.failurePhase}</dt><dd>{failure.phase}</dd>
+          <dt>{copy.source}</dt><dd><code>{failure.sourceSha256}</code></dd><dt>{copy.corpus}</dt><dd><code>{failure.corpusSha256}</code></dd>
+          <dt>{copy.inputs}</dt><dd>{failure.inputCount}</dd><dt>{copy.failurePosition}</dt><dd>{failure.inputOrdinal ?? copy.notRecorded}</dd>
+          <dt>{copy.reportedPairs}</dt><dd>{failure.reportedCompletedPairs}</dd>
+          <dt>{copy.reportedCleanup}</dt><dd>{failure.reportedCleanupVerified ? copy.producerReportsComplete : copy.unverifiedCleanup}</dd>
+        </dl>
+      </section>}
       {cases ? <>
         <dl><dt>{copy.source}</dt><dd><code>{cases.sourceSha256}</code></dd><dt>{copy.corpus}</dt><dd><code>{cases.corpusSha256}</code></dd>
           <dt>{copy.inputs}</dt><dd>{cases.totalInputs}</dd><dt>{copy.matched}</dt><dd>{cases.matchedInputs ?? copy.notCompared}</dd></dl>
@@ -124,7 +139,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             if (history && selected && cases.nextPage !== null) void readCases(history, selected, cases.nextPage, report.reportId);
           }}>{copy.nextCases}</button>
         </nav>
-      </> : <p>{copy.noCases}</p>}
+      </> : !failure && <p>{copy.noCases}</p>}
     </>}
   </section>;
 }

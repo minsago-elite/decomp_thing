@@ -43,21 +43,27 @@ internal fun webValidationHistory(jobId: String, runId: String, value: WebValida
     require(value.recorded.status != RepairHistoryReadStatus.RECORDED || snapshot != null)
     require((page == null) == (value.recorded.status != RepairHistoryReadStatus.RECORDED || snapshot == null))
     if (page != null) require(page.snapshot === snapshot)
-    fun owner(kind: String, identity: RepairRecordedIdentity, binding: RepairRecordedValidationObservation?): JsonObject = buildJsonObject {
-        val withheld = identity.rawIdentityWithheld || binding?.candidate?.rawIdentityWithheld == true
+    fun owner(kind: String, identity: RepairRecordedIdentity, binding: RepairRecordedValidationObservation?,
+        failure: RepairRecordedValidationDiagnostic? = null): JsonObject = buildJsonObject {
+        require(binding == null || failure == null)
+        val candidate = binding?.candidate ?: failure?.candidate
+        val present = binding != null || failure != null
+        val withheld = identity.rawIdentityWithheld || candidate?.rawIdentityWithheld == true
         put("ownerKind", kind)
         put("ownerId", if (identity.rawIdentityWithheld) "withheld_" + sha256(identity.value.toByteArray(Charsets.UTF_8)).take(32) else identity.value)
-        put("identityWithheld", withheld); put("hasReceipt", binding != null); put("canInspect", binding != null && !withheld)
-        put("candidateId", binding?.takeUnless { withheld }?.candidate?.let { JsonPrimitive(it.value) } ?: JsonNull)
-        put("sourceSha256", binding?.takeUnless { withheld }?.proof?.sourceRevisionSha256?.let(::JsonPrimitive) ?: JsonNull)
-        put("corpusSha256", binding?.takeUnless { withheld }?.proof?.regressionCorpusSha256?.let(::JsonPrimitive) ?: JsonNull)
+        put("identityWithheld", withheld); put("hasReceipt", present); put("canInspect", present && !withheld)
+        put("candidateId", candidate?.takeUnless { withheld }?.let { JsonPrimitive(it.value) } ?: JsonNull)
+        put("sourceSha256", (binding?.proof?.sourceRevisionSha256 ?: failure?.sourceRevisionSha256)?.takeUnless { withheld }?.let(::JsonPrimitive) ?: JsonNull)
+        put("corpusSha256", (binding?.proof?.regressionCorpusSha256 ?: failure?.regressionCorpusSha256)?.takeUnless { withheld }?.let(::JsonPrimitive) ?: JsonNull)
         put("normalOutcome", binding?.outcome?.name?.lowercase()?.replace('_', '-')?.let(::JsonPrimitive) ?: JsonNull)
+        put("failureKind", failure?.failureKind?.name?.lowercase()?.replace('_', '-')?.let(::JsonPrimitive) ?: JsonNull)
     }
     val items = buildList {
         page?.attempts?.forEach { add(owner("attempt", it.identity, it.validationObservation)) }
         page?.runs?.forEach { add(owner("run-baseline", it.identity, it.baselineValidationObservation)) }
+        page?.runs?.forEach { run -> run.validationDiagnostic?.let { add(owner("run-failure", run.identity, null, it)) } }
     }
-    require(items.size <= 41 && items.map { it.getValue("ownerKind") to it.getValue("ownerId") }.distinct().size == items.size)
+    require(items.size <= 61 && items.map { it.getValue("ownerKind") to it.getValue("ownerId") }.distinct().size == items.size)
     return buildJsonObject {
         put("binding", buildJsonObject { put("jobId", jobId); put("runId", runId); put("revisionId", JsonNull) })
         put("authority", "recorded-metadata")

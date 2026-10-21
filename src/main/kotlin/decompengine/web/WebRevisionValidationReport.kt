@@ -62,6 +62,18 @@ internal class WebRevisionValidationReports(
         }
     }
 
+    fun failure(jobId: String, runId: String, rawQuery: String?,
+        captureFailure: (String, String, RepairRecordedHistorySelection) -> WebRevisionValidationFailureCapture): JsonObject {
+        requireIdentity(jobId, runId)
+        val selection = parseWebValidationFailureQuery(rawQuery)
+        return oneRead {
+            val value = captureFailure(jobId, runId, selection)
+            if (value.page.selection != selection || value.page.snapshot.graphSha256 != selection.expectedGraphSha256)
+                throw WebAccessDenied(409, "REPORT_CHANGED", "The selected recorded failure changed. Reload its evidence.")
+            recordedValidationFailureReport(jobId, runId, value)
+        }
+    }
+
     private fun requireIdentity(jobId: String, runId: String) {
         if (!jobId.matches(Regex("[a-f0-9]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
             throw WebAccessDenied(404, "NOT_FOUND", "The selected report is unavailable.")
@@ -92,6 +104,24 @@ internal fun captureRecordedValidationReport(
     artifacts: (RepairHistoryReadResult, RepairRecordedHistoryPage) -> List<WebArtifactSummary>?,
     read: (String, Long) -> ByteArray?,
 ): WebRevisionValidationCapture {
+    val value = captureSelectedValidationEvidence(selection, context, version, history, artifacts, read) { page ->
+        selectedValidationBinding(page)?.let { listOf(it.primary) + listOfNotNull(it.diff) }.orEmpty()
+    }
+    return WebRevisionValidationCapture(value.page, value.payloads.getOrNull(0), value.payloads.getOrNull(1))
+}
+
+internal data class WebSelectedValidationEvidence(val page: RepairRecordedHistoryPage, val payloads: List<ByteArray?>)
+
+/** Both normal and failed-operation receipts use the same selected, version-bracketed byte allowance. */
+internal fun captureSelectedValidationEvidence(
+    selection: RepairRecordedHistorySelection,
+    context: WebReportContext,
+    version: () -> String,
+    history: () -> RepairHistoryReadResult,
+    artifacts: (RepairHistoryReadResult, RepairRecordedHistoryPage) -> List<WebArtifactSummary>?,
+    read: (String, Long) -> ByteArray?,
+    selectArtifacts: (RepairRecordedHistoryPage) -> List<RepairRecordedValidationObservedArtifact>,
+): WebSelectedValidationEvidence {
     val before = version()
     val recorded = history()
     val page = try { requireNotNull(recordedRepairHistoryPage(recorded, selection, 20)) }
@@ -99,8 +129,9 @@ internal fun captureRecordedValidationReport(
         val status = if (failure.problem == RepairRecordedSelectionProblem.OUT_OF_RANGE) 400 else 409
         throw WebAccessDenied(status, "REPORT_CHANGED", "The selected recorded history is unavailable or changed. Reload its evidence.")
     }
-    val binding = selectedValidationBinding(page)
-    val listed = if (binding == null) null else runCatching { artifacts(recorded, page) }.getOrNull()
+    val selected = selectArtifacts(page)
+    require(selected.size <= 2)
+    val listed = if (selected.isEmpty()) null else runCatching { artifacts(recorded, page) }.getOrNull()
     var remaining = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES
     val captured = mutableMapOf<String, ByteArray?>()
     fun bytes(artifact: RepairRecordedValidationObservedArtifact): ByteArray? {
@@ -114,13 +145,12 @@ internal fun captureRecordedValidationReport(
         captured[target] = value
         return value
     }
-    val primary = binding?.let { bytes(it.primary) }
-    val diff = binding?.diff?.let(::bytes)
+    val payloads = selected.map(::bytes)
     val after = history()
     if (version() != before || after.status != RepairHistoryReadStatus.RECORDED ||
         after.snapshot?.graphSha256 != page.snapshot.graphSha256)
         throw WebAccessDenied(409, "REPORT_CHANGED", "The selected recorded history or attempt changed during this read.")
-    return WebRevisionValidationCapture(page, primary, diff)
+    return WebSelectedValidationEvidence(page, payloads)
 }
 
 /** Existing report contract with optional bounded normal case detail; fatal outcomes are not inferred. */

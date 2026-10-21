@@ -1091,7 +1091,8 @@ The new source awaits its own ordinary Actions and review.
 The private `GET`/`HEAD R/validation-history` response uses the closed v1
 `validationHistory` envelope. An initial read needs no query. `historyGraph` pins a
 continuation to the captured graph; canonical `historyPage` selects a fixed window
-of at most 20 finalized attempts, 20 repair runs and one pending attempt on the
+of at most 20 finalized attempts, 20 repair-run baselines, 20 recorded failed
+operations from those repair runs, and one pending attempt on the
 latest page. These are operation families within the selected durable run, not
 additional jobs or runs to execute. All other selection parameters are refused.
 
@@ -1118,3 +1119,44 @@ route control cover this addition. These are authored component and protocol con
 they do not establish physical browser/HTTP, authentication, native cleanup or ACP
 decompilation effectiveness. The original acceptance scopes remain open until their
 required evidence is available. This source still needs its own Actions and review.
+
+### Selected failed-operation diagnostics
+
+`R/reports/revision-validation?historyGraph=<digest>&historyFailureRun=<run>`
+explicitly selects a repair run's recorded failure diagnostic. This selector cannot
+be combined with an attempt or baseline selector. History discovery uses the distinct
+`run-failure` owner kind and a finite `failureKind`; its candidate/source/corpus can
+differ from that same run's baseline. Only the first diagnostic page is supported;
+no case-page continuation or case comparison result is invented for a fatal receipt.
+
+Normal and failed-operation capture share the existing checked inventory/target
+resolver, descriptor-backed reader, 64 MiB request allowance, graph and durable-version
+brackets, and single admission slot. The selected receipt and its required diagnostic
+are separately byte/hash checked against the invocation-owned binding. Their source,
+corpus, runtime, classification, candidate and invocation association must agree.
+The disclosed input population is rederived against the selected historical corpus.
+Missing primary bytes remain `unknown`; missing required diagnostics are `partial`;
+unsupported declared versions and inconsistent evidence remain distinct refusals.
+
+An available report carries optional closed `validationFailure` with
+`authority: "producer-diagnostic"`, graph/owner/source/corpus bindings, finite reason
+and enclosing phase, exact decimal input/count strings, optional one-based input
+position and explicitly producer-reported cleanup. The report summary and
+`validationCases` are null, and repair acceptance remains unevaluated. Timeout,
+resource exhaustion, cancellation, unverified cleanup and other validation failures
+retain their separate producer labels. A before-case or original/rebuilt operation
+phase requires a position matching the reported completed prefix. Earlier phases
+cannot claim completed case pairs. No raw exception, command, path or peer text is
+returned.
+
+These diagnostics identify an enclosing producer operation. They do not prove which
+child process started or failed, actual process absence, independent cleanup, or
+successful case comparisons. Per-case fatal outcome production, partial comparison
+inspection, skipped/unsupported case evidence, bounded difference windows, source
+navigation and complete export remain required in the original full scopes.
+
+The SPA offers an explicit failure action, verifies the selected bindings and clears
+unverified evidence. Sixteen added DTO/callback methods, four shared wire fixtures,
+two decoder controls and four mocked-fetch/JSDOM controls cover this extension.
+They do not add actual execution contexts or physical qualification. Own Actions,
+generated drift verification and automatic review are still required.

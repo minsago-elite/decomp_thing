@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationHistory, ValidationSummary } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -20,11 +20,25 @@ function checkValidationHistory(value: ValidationHistory): void {
   requireValue(new Set(value.items.map(item => `${item.ownerKind}:${item.ownerId}`)).size === value.items.length);
   value.items.forEach(item => {
     requireValue(item.canInspect === (item.hasReceipt && !item.identityWithheld));
-    requireValue(item.hasReceipt === (item.normalOutcome !== null));
+    if (item.ownerKind === 'run-failure') requireValue(item.hasReceipt && item.normalOutcome === null && item.failureKind != null);
+    else requireValue(item.failureKind == null && item.hasReceipt === (item.normalOutcome !== null));
     const refs = [item.candidateId, item.sourceSha256, item.corpusSha256];
     requireValue(refs.every(field => item.canInspect ? field !== null : field === null));
     // The selected receipt may precede growth of the current retained corpus.
   });
+}
+
+function checkValidationFailure(value: ValidationFailure): void {
+  const total = BigInt(value.inputCount), completed = BigInt(value.reportedCompletedPairs);
+  requireValue(completed <= total && value.reportedCleanupVerified === (value.classification !== 'cleanup-unverified'));
+  requireValue(value.classification === (value.reason === 'timeout' ? 'resource-exhausted' : value.reason));
+  const casePhase = ['before-case', 'original-operation', 'rebuilt-operation'].includes(value.phase);
+  requireValue(casePhase === (value.inputOrdinal !== null));
+  if (value.inputOrdinal !== null) {
+    const ordinal = BigInt(value.inputOrdinal);
+    requireValue(ordinal >= 1n && ordinal <= total && completed + 1n === ordinal);
+  }
+  if (['source-preparation', 'build', 'build-finalization', 'capture-rebuilt'].includes(value.phase)) requireValue(completed === 0n);
 }
 
 function checkValidationPreview(value: ValidationBytePreview | null, bytes: string | null): void {
@@ -281,6 +295,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         if (!summary || !('result' in summary)) throw new ApiClientError('invalid_response');
         checkValidationCases(validationCases, summary);
       }
+      if (document.data.validationFailure) checkValidationFailure(document.data.validationFailure);
       break;
     }
     case 'artifact':

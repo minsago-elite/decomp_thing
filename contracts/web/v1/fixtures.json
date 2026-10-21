@@ -673,6 +673,22 @@
     {
       "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/report-validation-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/validation-history-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-failure-position.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-history-failure-borrow.json",
+      "valid": false
     }
   ]
 }

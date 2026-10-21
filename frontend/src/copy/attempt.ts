@@ -24,6 +24,11 @@ export const recordedValidationCopy = {
   bytes: 'Observed bytes', prefix: 'Prefix bytes', truncated: 'Prefix truncated.', complete: 'Complete output prefix.',
   hex: 'Hexadecimal prefix', text: 'Escaped UTF-8 prefix', empty: 'Empty observed output',
   noText: 'No UTF-8 text preview is available; inspect the hexadecimal prefix.',
+  inspectFailure: 'Inspect failure', failureTitle: 'Recorded failed operation',
+  failureScope: 'These producer diagnostics identify an enclosing operation. They do not establish an individual child-process outcome, successful case comparisons, process absence or independent cleanup verification.',
+  failureReason: 'Producer failure reason', failurePhase: 'Enclosing operation', failurePosition: 'Recorded input position',
+  reportedPairs: 'Producer-reported completed pairs', reportedCleanup: 'Producer-reported cleanup',
+  producerReportsComplete: 'Reported complete; not independently verified here', unverifiedCleanup: 'Unverified',
 } as const;
 
 export const activityCopy = {

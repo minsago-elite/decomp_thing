@@ -9,6 +9,8 @@ import { RecordedValidationEvidence } from '../src/jobs/RecordedValidationEviden
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const historyFixture = () => fixture<ResponseOf<'validationHistory'>>('validation-history');
 const reportFixture = () => fixture<ResponseOf<'report'>>('report-normal-cases');
+const failureHistoryFixture = () => fixture<ResponseOf<'validationHistory'>>('validation-history-failure');
+const failureReportFixture = () => fixture<ResponseOf<'report'>>('report-validation-failure');
 const jobId = historyFixture().data.binding.jobId, runId = historyFixture().data.binding.runId;
 const inspectName = /^Inspect cases:/;
 function response(document: { requestId: string }, status = 200) {
@@ -155,4 +157,59 @@ it('renders output prefixes as text and retains large exact byte counts with exp
   expect(view.container.querySelector('img')).toBeNull();
   expect(screen.getAllByText(/9007199254740993/)).toHaveLength(2);
   expect(screen.getAllByText(/Prefix truncated/)).toHaveLength(2);
+});
+
+it('selects a failed operation explicitly without borrowing its normal baseline or comparison result', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(failureHistoryFixture())).mockResolvedValueOnce(response(failureReportFixture()));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover();
+  fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+  expect(await screen.findByRole('heading', { name: 'Recorded failed operation' })).toBeTruthy();
+  expect(fetcher.mock.calls[1]?.[0]).toContain('historyFailureRun=run_00000001');
+  expect(fetcher.mock.calls[1]?.[0]).not.toContain('historyRunEvidence=');
+  expect(screen.getByText('timeout')).toBeTruthy(); expect(screen.getByText('rebuilt-operation')).toBeTruthy();
+  expect(screen.queryByRole('table', { name: 'Recorded validation cases' })).toBeNull();
+  expect(screen.queryByText('Recorded result')).toBeNull();
+  expect(screen.getByText('Reported complete; not independently verified here')).toBeTruthy();
+});
+
+it('refuses a failed-operation diagnostic from a different snapshot candidate source corpus or classification', async () => {
+  for (const field of ['graph', 'owner', 'revision', 'source', 'corpus', 'classification'] as const) {
+    const report = failureReportFixture(), failure = report.data.validationFailure!;
+    if (field === 'graph') failure.graphSha256 = '9'.repeat(64);
+    if (field === 'owner') failure.ownerId = 'run_other';
+    if (field === 'revision') report.data.binding.revisionId = 'revision_other';
+    if (field === 'source') failure.sourceSha256 = '9'.repeat(64);
+    if (field === 'corpus') failure.corpusSha256 = '9'.repeat(64);
+    if (field === 'classification') { failure.classification = 'cancelled'; failure.reason = 'cancelled'; }
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(failureHistoryFixture())).mockResolvedValueOnce(response(report)));
+    const view = mount(); await discover(); fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+    await screen.findByRole('alert'); expect(screen.queryByRole('table')).toBeNull(); view.unmount();
+  }
+});
+
+it('keeps timeout resource cancellation cleanup and other producer failure labels distinct', async () => {
+  for (const reason of ['timeout', 'resource-exhausted', 'cancelled', 'cleanup-unverified', 'validation-failed'] as const) {
+    const history = failureHistoryFixture(), report = failureReportFixture(), failure = report.data.validationFailure!;
+    failure.reason = reason; failure.classification = reason === 'timeout' ? 'resource-exhausted' : reason;
+    failure.reportedCleanupVerified = reason !== 'cleanup-unverified'; history.data.items[1]!.failureKind = failure.classification;
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(history)).mockResolvedValueOnce(response(report)));
+    const view = mount(); await discover(); fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+    await screen.findByRole('heading', { name: 'Recorded failed operation' });
+    expect(screen.getAllByText(reason).length).toBeGreaterThan(0);
+    if (reason === 'cleanup-unverified') expect(screen.getByText('Unverified')).toBeTruthy();
+    expect(screen.queryByRole('table', { name: 'Recorded validation cases' })).toBeNull();
+    expect(screen.queryByText('passed')).toBeNull(); view.unmount();
+  }
+});
+
+it('aborts an obsolete failed-operation read and never displays its late diagnostic', async () => {
+  let finish: (value: Response) => void = () => undefined;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(failureHistoryFixture()))
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  vi.stubGlobal('fetch', fetcher); const view = mount(); await discover();
+  fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2)); const signal = fetcher.mock.calls[1]?.[1]?.signal;
+  view.unmount(); expect(signal?.aborted).toBe(true);
+  await act(async () => { finish(response(failureReportFixture())); await Promise.resolve(); });
+  expect(screen.queryByRole('heading', { name: 'Recorded failed operation' })).toBeNull();
 });

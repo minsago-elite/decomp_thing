@@ -1181,6 +1181,16 @@
               "type": "null"
             }
           ]
+        },
+        "validationFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/validationFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1301,6 +1311,59 @@
               },
               "summary": {
                 "$ref": "#/definitions/validationSummary"
+              },
+              "binding": {
+                "properties": {
+                  "revisionId": {
+                    "$ref": "#/definitions/id"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "validationFailure"
+            ],
+            "properties": {
+              "validationFailure": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reportType": {
+                "const": "revision-validation"
+              },
+              "adapterVersion": {
+                "const": 1
+              },
+              "producerSchemaVersion": {
+                "const": 2
+              },
+              "state": {
+                "const": "available"
+              },
+              "authority": {
+                "const": "observations"
+              },
+              "acceptance": {
+                "const": "not-evaluated"
+              },
+              "acceptanceArtifactId": {
+                "type": "null"
+              },
+              "sourceArtifact": {
+                "type": "null"
+              },
+              "summary": {
+                "type": "null"
+              },
+              "validationCases": {
+                "type": "null"
               },
               "binding": {
                 "properties": {
@@ -3978,7 +4041,8 @@
         "ownerKind": {
           "enum": [
             "attempt",
-            "run-baseline"
+            "run-baseline",
+            "run-failure"
           ]
         },
         "ownerId": {
@@ -4030,6 +4094,21 @@
                 "compile-failed",
                 "compile-valid",
                 "behavior-checked"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failureKind": {
+          "anyOf": [
+            {
+              "enum": [
+                "resource-exhausted",
+                "cancelled",
+                "cleanup-unverified",
+                "validation-failed"
               ]
             },
             {
@@ -4157,7 +4236,7 @@
         },
         "items": {
           "type": "array",
-          "maxItems": 41,
+          "maxItems": 61,
           "items": {
             "$ref": "#/definitions/validationOwner"
           }
@@ -4243,6 +4322,94 @@
           }
         }
       ]
+    },
+    "validationFailure": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "const": "producer-diagnostic"
+        },
+        "ownerKind": {
+          "const": "run-failure"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/id"
+        },
+        "graphSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "corpusSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "classification": {
+          "enum": [
+            "resource-exhausted",
+            "cancelled",
+            "cleanup-unverified",
+            "validation-failed"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "timeout",
+            "resource-exhausted",
+            "cancelled",
+            "cleanup-unverified",
+            "validation-failed"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "source-preparation",
+            "build",
+            "build-finalization",
+            "capture-rebuilt",
+            "before-case",
+            "original-operation",
+            "rebuilt-operation",
+            "snapshot-finalization",
+            "post-execution"
+          ]
+        },
+        "inputCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "inputOrdinal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reportedCompletedPairs": {
+          "$ref": "#/definitions/uint64"
+        },
+        "reportedCleanupVerified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "authority",
+        "ownerKind",
+        "ownerId",
+        "graphSha256",
+        "sourceSha256",
+        "corpusSha256",
+        "classification",
+        "reason",
+        "phase",
+        "inputCount",
+        "inputOrdinal",
+        "reportedCompletedPairs",
+        "reportedCleanupVerified"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
