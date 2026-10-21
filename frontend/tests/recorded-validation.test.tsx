@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { expect, it, vi } from 'vitest';
 import type { ResponseOf } from '../src/api/generated';
 import { RecordedValidationEvidence } from '../src/jobs/RecordedValidationEvidence';
+import { ValidationSourceSnapshot } from '../src/jobs/ValidationSourceSnapshot';
 
 // Authored wire DTOs and an in-memory fetch only; no server, browser session or validation process.
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
@@ -11,6 +12,17 @@ const historyFixture = () => fixture<ResponseOf<'validationHistory'>>('validatio
 const reportFixture = () => fixture<ResponseOf<'report'>>('report-normal-cases');
 const failureHistoryFixture = () => fixture<ResponseOf<'validationHistory'>>('validation-history-failure');
 const failureReportFixture = () => fixture<ResponseOf<'report'>>('report-validation-failure');
+function sourceRunFixture() {
+  const document = fixture<ResponseOf<'run'>>('run-completed-unaccepted');
+  document.data.jobId = historyFixture().data.binding.jobId; document.data.runId = historyFixture().data.binding.runId;
+  document.data.resultRevisionId = 'retained_workflow_revision'; return document;
+}
+function sourceDirectoryFixture(source = reportFixture().data.validationCases!.sourceSha256) {
+  const document = fixture<ResponseOf<'revisionDirectory'>>('revision-directory-root');
+  const run = sourceRunFixture().data;
+  document.data.binding = { jobId: run.jobId, runId: run.runId, revisionId: run.resultRevisionId! };
+  document.data.sourceSha256 = source; return document;
+}
 const jobId = historyFixture().data.binding.jobId, runId = historyFixture().data.binding.runId;
 const inspectName = /^Inspect cases:/;
 function response(document: { requestId: string }, status = 200) {
@@ -212,4 +224,82 @@ it('aborts an obsolete failed-operation read and never displays its late diagnos
   view.unmount(); expect(signal?.aborted).toBe(true);
   await act(async () => { finish(response(failureReportFixture())); await Promise.resolve(); });
   expect(screen.queryByRole('heading', { name: 'Recorded failed operation' })).toBeNull();
+});
+
+it('resolves retained source by the validation digest across distinct revision namespaces and pins the link', async () => {
+  const source = sourceDirectoryFixture();
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture())).mockResolvedValueOnce(response(reportFixture()))
+    .mockResolvedValueOnce(response(sourceRunFixture())).mockResolvedValueOnce(response(source));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover(); await inspect(); expect(fetcher).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  const link = await screen.findByRole('link', { name: 'Open source with this validated digest' });
+  const url = new URL(link.getAttribute('href')!, 'https://source.invalid');
+  expect(url.pathname).toContain('/revisions/retained_workflow_revision/sources/root');
+  expect(url.searchParams.get('sourceSha256')).toBe(source.data.sourceSha256);
+  expect(url.searchParams.get('metadataVersion')).toBe(source.data.metadataVersion);
+  expect(fetcher).toHaveBeenCalledTimes(4);
+  expect(fetcher.mock.calls[3]?.[0]).toContain('/revisions/retained_workflow_revision/source-directories/root?limit=50');
+  expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+});
+
+it('withholds source links for missing nonterminal or cross-bound retained candidates and source metadata', async () => {
+  for (const field of ['job', 'run', 'missing', 'running', 'directory-job', 'revision', 'source'] as const) {
+    const run = sourceRunFixture(), directory = sourceDirectoryFixture();
+    if (field === 'job') run.data.jobId = '9'.repeat(32);
+    if (field === 'run') run.data.runId = 'run_other';
+    if (field === 'missing') run.data.resultRevisionId = null;
+    if (field === 'running') { run.data.state = 'running'; run.data.terminalReason = null; run.data.endedAt = null; }
+    if (field === 'directory-job') directory.data.binding.jobId = '9'.repeat(32);
+    if (field === 'revision') directory.data.binding.revisionId = 'revision_other';
+    if (field === 'source') directory.data.sourceSha256 = '9'.repeat(64);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(run)).mockResolvedValueOnce(response(directory));
+    vi.stubGlobal('fetch', fetcher);
+    const view = render(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="root_validation"
+      sourceSha256={reportFixture().data.validationCases!.sourceSha256} basePath="/nested" />);
+    expect(fetcher).not.toHaveBeenCalled(); fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+    await screen.findByRole('alert'); expect(screen.queryByRole('link')).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(['job', 'run', 'missing', 'running'].includes(field) ? 1 : 2); view.unmount();
+  }
+});
+
+it('clears a previously matched source link when a later explicit metadata read is denied', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(sourceRunFixture())).mockResolvedValueOnce(response(sourceDirectoryFixture()))
+    .mockResolvedValueOnce(response(sourceRunFixture(), 403));
+  vi.stubGlobal('fetch', fetcher);
+  render(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="root_validation"
+    sourceSha256={reportFixture().data.validationCases!.sourceSha256} basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  await screen.findByRole('link', { name: 'Open source with this validated digest' });
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  await screen.findByRole('alert'); expect(screen.queryByRole('link')).toBeNull();
+  expect(screen.queryByText('retained_workflow_revision')).toBeNull(); expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('aborts obsolete source resolution and keeps a newer matched link when the old read settles late', async () => {
+  let finish: (value: Response) => void = () => undefined;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(sourceRunFixture()))
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  vi.stubGlobal('fetch', fetcher);
+  const view = render(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="root_validation"
+    sourceSha256={reportFixture().data.validationCases!.sourceSha256} basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2)); const obsolete = fetcher.mock.calls[1]?.[1]?.signal;
+  view.rerender(<ValidationSourceSnapshot jobId={jobId} runId={runId} validationRevisionId="root_validation_new" sourceSha256={'9'.repeat(64)} basePath="/nested" />);
+  await waitFor(() => expect(obsolete?.aborted).toBe(true));
+  fetcher.mockResolvedValueOnce(response(sourceRunFixture())).mockResolvedValueOnce(response(sourceDirectoryFixture('9'.repeat(64))));
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  await screen.findByRole('link', { name: 'Open source with this validated digest' });
+  await act(async () => { finish(response(sourceDirectoryFixture())); await Promise.resolve(); });
+  expect(screen.getByRole('link', { name: 'Open source with this validated digest' }).getAttribute('href')).toContain(`sourceSha256=${'9'.repeat(64)}`);
+});
+
+it('uses the selected failed-operation source commitment for source resolution', async () => {
+  const failure = failureReportFixture(), source = failure.data.validationFailure!.sourceSha256;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(failureHistoryFixture())).mockResolvedValueOnce(response(failure))
+    .mockResolvedValueOnce(response(sourceRunFixture())).mockResolvedValueOnce(response(sourceDirectoryFixture(source)));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover(); fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+  await screen.findByRole('heading', { name: 'Recorded failed operation' });
+  fireEvent.click(screen.getByRole('button', { name: 'Find matching source snapshot' }));
+  expect((await screen.findByRole('link', { name: 'Open source with this validated digest' })).getAttribute('href')).toContain(`sourceSha256=${source}`);
+  expect(fetcher).toHaveBeenCalledTimes(4);
 });

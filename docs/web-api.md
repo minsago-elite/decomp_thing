@@ -764,7 +764,7 @@ for hex. Both representations keep the response below 1 MiB and expose the compl
 byte range and continuation explicitly. Shared consumers reject inconsistent byte
 lengths, completeness, continuations and line metadata, including malformed surrogates.
 
-The `content` route accepts no query and returns the complete verified bytes as a
+The `content` route accepts an optional canonical `metadataVersion` commitment and returns the complete verified bytes as a
 no-store, nosniff `application/octet-stream` attachment. The ASCII fallback filename
 and encoded UTF-8 basename cannot insert header syntax; the response also carries a
 sandbox/default-deny CSP. HEAD verifies the same captured file and returns its length
@@ -1160,3 +1160,44 @@ unverified evidence. Eighteen added DTO/callback methods, four shared wire fixtu
 two decoder controls and four mocked-fetch/JSDOM controls cover this extension.
 They do not add actual execution contexts or physical qualification. Own Actions,
 generated drift verification and automatic review are still required.
+
+### Validation source snapshot links
+
+A checked normal case report or failed-operation diagnostic offers an explicit
+source-resolution action. Repair-graph revision references and durable workflow
+candidate references have separate namespaces. The action reads the selected
+workflow run and its retained result candidate's root source metadata, then requires
+its recomputed input-source commitment to equal the selected validation's source
+SHA-256. It offers a source link only after that match. Missing retained candidates,
+nonterminal runs, unavailable metadata and mismatched job/run/revision/source values
+leave the source link unavailable. The reader does not substitute a different
+workflow run or infer source from a display label.
+
+A matched link carries the exact observed `sourceSha256` and `metadataVersion` in
+the application URL. Directory pages, breadcrumbs, file links, refreshes and line/
+range navigation preserve this pair. Both first-page and continued directory/file
+responses must match it; changed observations clear the displayed source metadata.
+Incomplete, repeated, malformed and foreign query fields are refused before reads.
+A pin by itself does not request source text or enable the preview control. Actual
+bootstrap source-chunk advertising remains zero.
+
+Metadata requests retain their existing API selectors and authorization. Explicit
+source downloads and digest HEAD observations carry the captured `metadataVersion`
+to the content endpoint. That optional query accepts one lowercase 64-digit digest;
+other/repeated parameters are rejected. The existing checked capture compares the
+metadata commitment before invoking any source-body callback. Legacy content reads
+without the optional commitment remain supported. File identity, source SHA-256,
+manifest roles, byte limits and digest/identity rechecks remain required.
+
+The link identifies retained workflow source with the validation's exact source
+commitment. It does not establish accepted reconstruction, independent file-content
+verification, compiler/behavior equivalence or physical HTTP/browser qualification.
+Historical repair revisions without corresponding retained workflow source remain
+unavailable and still require the original full historical-source/retention scope.
+Complete diagnostic locations, export and all other case/report families remain open.
+
+Three added backend methods use authored metadata/bytes/callbacks only. Thirteen new
+frontend controls cover pin parsing, route/range propagation, exact digest HEAD,
+source resolution and in-memory session navigation without new actual execution
+contexts. The original controller/native fixtures and source-chunk limits are
+unchanged. This source awaits its own Actions and review.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import type { RevisionFile, SourceChunk } from '../api/generated';
+import type { SourceSnapshotPin } from '../app/paths';
 import { sourceCopy as copy } from '../copy/sources';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -13,8 +14,8 @@ import type { HighlightResult } from './highlightOperation';
 import { sourceHighlightRuntime } from './highlightRuntime';
 
 /** One deliberately opened range. Highlighting separately requires an explicit local action. */
-export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search }: {
-  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string;
+export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin }: {
+  selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin;
 }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
@@ -53,7 +54,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   useEffect(() => {
     if (current.state !== 'loading' && moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
   }, [current.state, key]);
-  function go(offset: string) { moveFocus.current = true; location.route(sourcePositionPath(basePath, selected, { offset, line: null })); }
+  function go(offset: string) { moveFocus.current = true; location.route(sourcePositionPath(basePath, selected, { offset, line: null }, snapshotPin)); }
   return <section class="source-preview" aria-labelledby="source-preview-title" aria-busy={loading}>
     <h3 id="source-preview-title" ref={heading} tabIndex={-1}>{copy.previewTitle}</h3>
     <p>{copy.previewBoundary}</p>
@@ -84,7 +85,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
       <div class="source-rows" role="region" aria-label={copy.rangeContent} tabIndex={0}>
         {view.rows.map((row, index) => <div class="source-row" key={`${row.offset}/${index}`}>
           {row.line === null ? <span class="source-position"><code>{row.offset}</code></span>
-            : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line })}
+            : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line }, snapshotPin)}
               onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) moveFocus.current = true; }}
               aria-label={textMessage(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
           <pre dir="ltr">{highlighted?.mode === 'formatted'

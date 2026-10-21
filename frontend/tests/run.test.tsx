@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, Run, Report, ResponseOf } from '../src/api/generated';
+import type { Bootstrap, Run, Report, ResponseOf, RevisionDirectory, RevisionFile } from '../src/api/generated';
+import { sourceCopy } from '../src/copy/sources';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
@@ -45,6 +46,53 @@ async function session() {
   await value.initialize({ kind: 'absent' });
   return value;
 }
+
+it('preserves a validation source pin through directory and file navigation without automatically reading a preview', async () => {
+  const auth = await session();
+  const directory = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/revision-directory-root.json'), 'utf8')) as { data: RevisionDirectory }).data;
+  const file = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/revision-file-root.json'), 'utf8')) as { data: RevisionFile }).data;
+  const selected = { jobId: sample.jobId, runId: sample.runId, revisionId: 'retained_workflow_revision' };
+  directory.binding = selected; file.binding = selected;
+  const query = `sourceSha256=${directory.sourceSha256}&metadataVersion=${directory.metadataVersion}`;
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'revisionDirectory' ? directory : file }));
+  history.replaceState(null, '', `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}/sources/root?${query}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Makefile' });
+    expect(link.getAttribute('href')).toContain(query); expect(transport.get).toHaveBeenCalledOnce();
+    fireEvent.click(link);
+    await screen.findByRole('button', { name: sourceCopy.openPreview });
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(location.search).toBe(`?${query}`);
+    expect(screen.getByRole('link', { name: sourceCopy.returnDirectory }).getAttribute('href')).toContain(query);
+    expect(screen.getByRole('link', { name: sourceCopy.download }).getAttribute('href')).toContain(`/content?metadataVersion=${file.metadataVersion}`);
+    expect(screen.queryByRole('region', { name: sourceCopy.rangeContent })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('refuses changed pinned source metadata and incomplete pin URLs before exposing another snapshot', async () => {
+  const auth = await session();
+  const directory = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/revision-directory-root.json'), 'utf8')) as { data: RevisionDirectory }).data;
+  directory.binding = { jobId: sample.jobId, runId: sample.runId, revisionId: 'retained_workflow_revision' };
+  const path = `/nested/jobs/${sample.jobId}/runs/${sample.runId}/revisions/retained_workflow_revision/sources/root`;
+  const query = `sourceSha256=${directory.sourceSha256}&metadataVersion=${directory.metadataVersion}`;
+  const changed = { ...directory, metadataVersion: '9'.repeat(64), page: { ...directory.page, snapshotVersion: '9'.repeat(64) } };
+  transport.get.mockResolvedValueOnce({ data: directory }).mockResolvedValueOnce({ data: changed });
+  history.replaceState(null, '', `${path}?${query}`);
+  try {
+    const view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'Makefile' });
+    fireEvent.click(screen.getByRole('button', { name: sourceCopy.refresh }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', sourceCopy.expired);
+    expect(screen.queryByRole('link', { name: 'Makefile' })).toBeNull();
+    expect(location.search).toBe(`?${query}`); expect(transport.get).toHaveBeenCalledTimes(2);
+    view.unmount(); transport.get.mockReset();
+    history.replaceState(null, '', `${path}?sourceSha256=${directory.sourceSha256}`);
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', sourceCopy.invalid);
+    expect(transport.get).not.toHaveBeenCalled();
+  } finally { auth.dispose(); }
+});
 
 it('pins attempt identity and shows completed candidate separately from acceptance and missing usage', async () => {
   const auth = await session();

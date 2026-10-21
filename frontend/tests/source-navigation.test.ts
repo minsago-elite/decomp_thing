@@ -5,9 +5,9 @@ import { expect, it } from 'vitest';
 import type { RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
 import { decodeContract, decodeResponse } from '../src/api/decode';
-import { sourceDirectoryPath, sourceFilePath, sourceReadRoute } from '../src/app/paths';
+import { sourceDirectoryPath, sourceDownloadRoute, sourceFilePath, sourceReadRoute } from '../src/app/paths';
 import { sourceCopy as copy } from '../src/copy/sources';
-import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage } from '../src/sources/navigation';
+import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../src/sources/navigation';
 import type { SourceReadState } from '../src/sources/navigation';
 
 // Synthetic wire DTOs and controlled callbacks only: no DOM, server, browser, worker or fetch is started.
@@ -21,6 +21,50 @@ function file(): RevisionFile {
   dto.binding = { ...selected }; return dto;
 }
 async function settle() { for (let index = 0; index < 6; index++) await Promise.resolve(); }
+
+it('carries source and metadata commitments across directories files and pinned downloads', () => {
+  const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) }, id = file().item.fileId;
+  const directory = new URL(sourceDirectoryPath('/nested', selected, 'root', 'page_2', pin), 'https://source.invalid');
+  expect(directory.searchParams.get('cursor')).toBe('page_2');
+  expect(directory.searchParams.get('sourceSha256')).toBe(pin.sourceSha256);
+  expect(directory.searchParams.get('metadataVersion')).toBe(pin.metadataVersion);
+  expect(sourceFilePath('/nested', selected, id, pin)).toContain(`?sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`);
+  expect(sourceDownloadRoute(selected, id, pin.metadataVersion)).toBe(`${sourceReadRoute(selected, 'download', id)}?metadataVersion=${pin.metadataVersion}`);
+  for (const value of ['', 'F'.repeat(64), '../private', '%66'.repeat(64)]) {
+    expect(() => sourceDirectoryPath('/nested', selected, 'root', undefined, { ...pin, sourceSha256: value })).toThrow();
+    expect(() => sourceFilePath('/nested', selected, id, { ...pin, metadataVersion: value })).toThrow();
+  }
+});
+
+it('strips a complete snapshot pin while retaining only the separately validated family continuation', () => {
+  const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) };
+  const suffix = `sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
+  expect(sourceSnapshotSelection(`?${suffix}`)).toEqual({ pin, search: '' });
+  const page = sourceSnapshotSelection(`?cursor=page%5F2&${suffix}`);
+  expect(page.pin).toEqual(pin); expect(sourceCursor(page.search)).toBe('page_2');
+  expect(sourceSnapshotSelection(`?${suffix}&byte=0&line=1`).search).toBe('?byte=0&line=1');
+  expect(sourceSnapshotSelection('?cursor=page_2')).toEqual({ pin: null, search: '?cursor=page_2' });
+});
+
+it('refuses partial repeated malformed and mixed source pin queries before navigation reads', () => {
+  const sha = 'e'.repeat(64), version = 'f'.repeat(64);
+  for (const query of [`?sourceSha256=${sha}`, `?metadataVersion=${version}`, `?sourceSha256=${sha}&metadataVersion=`,
+    `?sourceSha256=${sha}&metadataVersion=${version}&sourceSha256=${sha}`, `?sourceSha256=${sha.toUpperCase()}&metadataVersion=${version}`,
+    `?sourceSha256=%65${sha.slice(1)}&metadataVersion=${version}`, `?sourceSha256=${sha}&metadataVersion=${version}&`,
+    `?sourceSha256=${sha}&metadataVersion=${version}&${'x'.repeat(768)}`]) expect(() => sourceSnapshotSelection(query)).toThrow(ApiClientError);
+  const foreign = sourceSnapshotSelection(`?sourceSha256=${sha}&metadataVersion=${version}&path=PRIVATE`);
+  expect(() => sourceCursor(foreign.search)).toThrow(ApiClientError);
+});
+
+it('refuses a changed pinned file or first directory page without silently replacing the snapshot', () => {
+  const page = directory(), item = file(), pin = { sourceSha256: page.sourceSha256, metadataVersion: page.metadataVersion };
+  expect(bindDirectory(page, { ...selected, directoryId: 'root' }, pin)).toBe(page);
+  expect(bindFile(item, { ...selected, fileId: item.item.fileId }, pin)).toBe(item);
+  for (const field of ['sourceSha256', 'metadataVersion'] as const) {
+    expect(() => bindDirectory({ ...page, [field]: '9'.repeat(64) }, { ...selected, directoryId: 'root' }, pin)).toThrow(ApiClientError);
+    expect(() => bindFile({ ...item, [field]: '9'.repeat(64) }, { ...selected, fileId: item.item.fileId }, pin)).toThrow(ApiClientError);
+  }
+});
 
 it('builds stable source links entirely from opaque job run revision directory and file identities', () => {
   const dir = 'dir_1_1_' + 'b'.repeat(64); const id = file().item.fileId;

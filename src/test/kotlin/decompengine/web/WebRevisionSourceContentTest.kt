@@ -246,4 +246,59 @@ class WebRevisionSourceContentTest {
             assertNull(headWebSessionErrorCode("HEAD", 401, code))
         }
     }
+
+    @Test fun `download metadata commitment query is optional canonical and independent of path selectors`() {
+        assertNull(parseWebSourceDownloadVersion(null)); assertNull(parseWebSourceDownloadVersion(""))
+        val version = "b".repeat(64)
+        assertEquals(version, parseWebSourceDownloadVersion("metadataVersion=$version"))
+    }
+    @Test fun `malformed repeated and foreign download commitments are refused before capture`() {
+        val version = "b".repeat(64)
+        for (raw in listOf("metadataVersion", "metadataVersion=", "metadataVersion=${"B".repeat(64)}",
+            "metadataVersion=${"b".repeat(63)}", "metadataVersion=%62${"b".repeat(63)}", "path=PRIVATE",
+            "metadataVersion=$version&metadataVersion=$version", "metadataVersion=$version&offset=0", "metadataVersion=$version&",
+            "metadataVersion=$version\nPRIVATE", "metadataVersion=${"b".repeat(129)}")) {
+            assertEquals(422, assertFailsWith<WebAccessDenied> { parseWebSourceDownloadVersion(raw) }.status)
+        }
+    }
+    @Test fun `pinned download metadata mismatch prevents source body callbacks while matching captures stay readable`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val payload = "int retained;\n".toByteArray(); val input = captured("input".toByteArray(), 1)
+        val paths = listOf("Makefile", "src/modules/unit.c")
+        val files = paths.map { path ->
+            val declaration = profile.layout.declarationForPath(path)
+            GeneratedFileEvidence(path, WebExplorationArtifact.sha256(if (path == "Makefile") byteArrayOf() else payload), "fixture",
+                acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) false else null,
+                roles = declaration.roles, contentKind = declaration.contentKind)
+        }
+        val source = files.joinToString("") { "${it.path.length}:${it.path}:${if (it.path == "Makefile") 0 else payload.size}:${it.sha256}\n" }
+        val reference = WebRevisionSourceReference(jobId, runId, revisionId, revisionSourceDigest(source), "version_1")
+        val manifest = captured(SourceTreeManifest(profileId = profile.id, profileSha256 = profile.sha256, inputSha256 = input.sha256,
+            files = files, unresolvedEntityIds = emptyList()).toJson().toByteArray(), 2)
+        val descriptor = captured(buildJsonObject {
+            put("schemaVersion", 3); put("sourceRevisionSha256", reference.sourceSha256)
+            put("sourceInputs", JsonArray(files.map { file -> buildJsonObject {
+                put("path", file.path); put("bytes", if (file.path == "Makefile") 0 else payload.size); put("sha256", file.sha256)
+            } }))
+        }.toString().toByteArray(), 3)
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { input }, { _, path, _ ->
+            when {
+                path.endsWith("/source_tree_manifest.json") -> manifest
+                path.endsWith("/build_contract.json") -> descriptor
+                else -> error("Unexpected metadata target")
+            }
+        })
+        val metadata = evidence.readRevision(reference)
+        val id = revisionSourceFileId(reference, 1, paths[1]); var bodies = 0
+        val version = parseWebSourceDownloadVersion("metadataVersion=${metadata.metadataVersion}")
+        val content = evidence.readFile(reference, id, WebSourceReadPurpose.DOWNLOAD, version) { _, _, _, _ -> bodies++; captured(payload, 4) }
+        assertContentEquals(payload, content.download()); assertEquals(2, bodies)
+        bodies = 0
+        assertEquals("CURSOR_EXPIRED", assertFailsWith<WebAccessDenied> {
+            evidence.readFile(reference, id, WebSourceReadPurpose.DOWNLOAD, parseWebSourceDownloadVersion("metadataVersion=${"9".repeat(64)}")) {
+                _, _, _, _ -> bodies++; captured(payload, 4)
+            }
+        }.code)
+        assertEquals(0, bodies)
+    }
 }

@@ -29,6 +29,10 @@ export const recordedValidationCopy = {
   failureReason: 'Producer failure reason', failurePhase: 'Enclosing operation', failurePosition: 'Recorded input position',
   reportedPairs: 'Producer-reported completed pairs', reportedCleanup: 'Producer-reported cleanup',
   producerReportsComplete: 'Reported complete; not independently verified here', unverifiedCleanup: 'Unverified',
+  sourceTitle: 'Source at this validation', findSource: 'Find matching source snapshot', readingSource: 'Reading retained source commitments…',
+  sourceBoundary: 'A link is available only when retained workflow source metadata has this validation’s exact source commitment. Reading metadata does not verify file bytes or repair acceptance.',
+  sourceUnavailable: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+  retainedRevision: 'Retained workflow revision', openSource: 'Open source with this validated digest',
 } as const;
 
 export const activityCopy = {

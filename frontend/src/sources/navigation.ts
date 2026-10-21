@@ -2,13 +2,32 @@ import type { RevisionDirectory, RevisionFile } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { sourceCopy as copy } from '../copy/sources';
 import { sourceReadRoute } from '../app/paths';
-import type { SourceSelection } from '../app/paths';
+import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 
 export const SOURCE_PAGE_LIMIT = 50;
 export const SOURCE_FILE_LIMIT = 8388608n;
 export type DirectorySelection = SourceSelection & { directoryId: string };
 export type FileSelection = SourceSelection & { fileId: string };
-export type SourceSnapshot = { metadataVersion: string; sourceSha256: string };
+export type SourceSnapshot = SourceSnapshotPin;
+
+/** Strip only a complete literal pin pair; the existing family parser still validates the remainder. */
+export function sourceSnapshotSelection(search: string): { pin: SourceSnapshotPin | null; search: string } {
+  if (search === '') return { pin: null, search };
+  if (search.length > 768 || !search.startsWith('?')) throw new ApiClientError('invalid_request');
+  const parts = search.slice(1).split('&'), pins = new Map<string, string>(), rest: string[] = [];
+  for (const part of parts) {
+    const split = part.indexOf('='), name = split === -1 ? part : part.slice(0, split);
+    if (name === 'sourceSha256' || name === 'metadataVersion') {
+      const value = part.slice(split + 1);
+      if (split === -1 || pins.has(name) || !/^[a-f0-9]{64}$/.test(value)) throw new ApiClientError('invalid_request');
+      pins.set(name, value);
+    } else rest.push(part);
+  }
+  if (pins.size === 0) return { pin: null, search };
+  if (pins.size !== 2 || rest.some(part => part === '')) throw new ApiClientError('invalid_request');
+  return { pin: { sourceSha256: pins.get('sourceSha256')!, metadataVersion: pins.get('metadataVersion')! },
+    search: rest.length === 0 ? '' : `?${rest.join('&')}` };
+}
 
 export function sourceReadMessage(failure: unknown): string {
   let text: string = copy.unavailable;
@@ -63,9 +82,12 @@ export function bindDirectory(data: RevisionDirectory, selected: DirectorySelect
   return data;
 }
 
-export function bindFile(data: RevisionFile, selected: FileSelection): RevisionFile {
+export function bindFile(data: RevisionFile, selected: FileSelection, expected?: SourceSnapshot): RevisionFile {
   checkBinding(data.binding, selected);
   if (data.item.fileId !== selected.fileId) throw new ApiClientError('invalid_response');
+  if (expected && (data.metadataVersion !== expected.metadataVersion || data.sourceSha256 !== expected.sourceSha256)) {
+    throw new ApiClientError('http_error', { serverCode: 'CURSOR_EXPIRED' });
+  }
   return data;
 }
 

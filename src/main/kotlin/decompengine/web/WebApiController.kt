@@ -190,11 +190,11 @@ internal class WebApiController(
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
                     } else {
-                        requireNoWebApiQuery(exchange)
+                        val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                         }
-                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD)
+                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD, metadataVersion)
                         val bytes = content.download()
                         val name = java.net.URLEncoder.encode(content.downloadName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
                         webApiHeaders(exchange, UUID.randomUUID().toString())

@@ -3,6 +3,7 @@ import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner 
 import { withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { usePrivateTransport } from '../session/PrivateTransport';
+import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 
 export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
@@ -102,6 +103,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       <p>{copy.reportState}: {report.state}</p>
       <p>{copy.acceptance}</p>
       <ul aria-label={copy.reportLimitations}>{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
+      {report.state === 'available' && report.binding.revisionId !== null && (cases || failure) &&
+        <ValidationSourceSnapshot key={report.reportId} jobId={jobId} runId={runId} validationRevisionId={report.binding.revisionId}
+          sourceSha256={cases?.sourceSha256 ?? failure!.sourceSha256} basePath={basePath} />}
       {report.summary && 'result' in report.summary && <dl>
         <dt>{copy.result}</dt><dd>{report.summary.result}</dd><dt>{copy.compared}</dt><dd>{report.summary.casesCompared}</dd>
       </dl>}

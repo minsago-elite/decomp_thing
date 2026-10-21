@@ -1,6 +1,6 @@
 import type { RevisionFile } from './generated';
 import { ApiClientError } from './errors';
-import { sourceReadRoute } from '../app/paths';
+import { sourceDownloadRoute } from '../app/paths';
 
 /** A byte-commitment check, never compiler, behavior, archive or acceptance authority. */
 export interface SourceDigestExpectation {
@@ -22,7 +22,7 @@ export function sourceDigestExpectation(metadata: RevisionFile): SourceDigestExp
     || !/^file_(0|[1-9][0-9]{0,4})_[a-f0-9]{64}$/.test(item.fileId)
     || Number(item.fileId.split('_')[1]) >= 25000) throw new ApiClientError('invalid_request');
   let route: string;
-  try { route = sourceReadRoute(binding, 'download', item.fileId); }
+  try { route = sourceDownloadRoute(binding, item.fileId, metadataVersion); }
   catch { throw new ApiClientError('invalid_request'); }
   return Object.freeze({ jobId: binding.jobId, runId: binding.runId, revisionId: binding.revisionId, fileId: item.fileId,
     sourceSha256, metadataVersion, sha256: item.sha256, sizeBytes: item.sizeBytes, route });
