@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
-import type { Bootstrap, Run, Report } from '../src/api/generated';
+import type { Bootstrap, Run, Report, ResponseOf } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
@@ -13,6 +13,29 @@ vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/run-completed-unaccepted.json'), 'utf8')) as { data: Run }).data;
 const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
 beforeEach(() => { transport.get.mockReset(); });
+
+it('wires explicit validation discovery into the attempt and discards its private data on sign out', async () => {
+  const auth = await session();
+  const metadata = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/validation-history.json'), 'utf8')) as ResponseOf<'validationHistory'>;
+  const report = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-normal-cases.json'), 'utf8')) as ResponseOf<'report'>;
+  metadata.data.binding = { jobId: sample.jobId, runId: sample.runId, revisionId: null };
+  report.data.binding = { ...report.data.binding, jobId: sample.jobId, runId: sample.runId };
+  transport.get.mockImplementation((kind) => Promise.resolve(kind === 'validationHistory' ? metadata : kind === 'report' ? report : { data: sample }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('button', { name: 'Read validation evidence' });
+    expect(transport.get).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Inspect cases:/ }));
+    await screen.findByRole('table', { name: 'Recorded validation cases' });
+    expect(transport.get).toHaveBeenCalledTimes(3);
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await screen.findByText('Connect a local session to view this attempt.');
+    expect(screen.queryByRole('table', { name: 'Recorded validation cases' })).toBeNull();
+    expect(screen.queryByText('b'.repeat(64))).toBeNull();
+  } finally { auth.dispose(); }
+});
 
 async function session() {
   const value = createBrowserSession({

@@ -11,6 +11,7 @@ import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
+import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
@@ -83,6 +84,7 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
       <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
       <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+      <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
         : <p>{sourceCopy.noRevision}</p>}
     </>}

@@ -665,6 +665,14 @@
       "file": "fixtures/invalid-report-case-preview-truncation.json",
       "valid": false,
       "reason": "A bounded preview must state truncation from its exact observed and prefix byte counts."
+    },
+    {
+      "file": "fixtures/validation-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
+      "valid": false
     }
   ]
 }

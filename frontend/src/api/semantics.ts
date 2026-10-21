@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationSummary } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -6,6 +6,26 @@ import type { ApiResource } from '../app/paths';
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
+
+function checkValidationHistory(value: ValidationHistory): void {
+  if (value.state !== 'recorded') {
+    requireValue([value.graphSha256, value.corpusSha256, value.page, value.totalPages,
+      value.previousPage, value.nextPage].every(field => field === null) && value.items.length === 0);
+    return;
+  }
+  if (value.page === null || value.totalPages === null) throw new ApiClientError('invalid_response');
+  requireValue(value.page <= value.totalPages && value.graphSha256 !== null && value.corpusSha256 !== null);
+  requireValue(value.previousPage === (value.page > 1 ? value.page - 1 : null));
+  requireValue(value.nextPage === (value.page < value.totalPages ? value.page + 1 : null));
+  requireValue(new Set(value.items.map(item => `${item.ownerKind}:${item.ownerId}`)).size === value.items.length);
+  value.items.forEach(item => {
+    requireValue(item.canInspect === (item.hasReceipt && !item.identityWithheld));
+    requireValue(item.hasReceipt === (item.normalOutcome !== null));
+    const refs = [item.candidateId, item.sourceSha256, item.corpusSha256];
+    requireValue(refs.every(field => item.canInspect ? field !== null : field === null));
+    // The selected receipt may precede growth of the current retained corpus.
+  });
+}
 
 function checkValidationPreview(value: ValidationBytePreview | null, bytes: string | null): void {
   if (value === null || bytes === null) throw new ApiClientError('invalid_response');
@@ -149,6 +169,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
   }
   switch (document.kind) {
+    case 'validationHistory':
+      checkValidationHistory(document.data);
+      break;
     case 'error': {
       const { code, recovery, retryable, retryAfterMs } = document.error;
       requireValue((code === 'EVENT_GAP') === (recovery !== undefined));

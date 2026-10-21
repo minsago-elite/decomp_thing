@@ -12,6 +12,28 @@ const fixture = (name: string) => readFileSync(resolve(root, `fixtures/${name}.j
 const manifest = JSON.parse(readFileSync(resolve(root, 'fixtures.json'), 'utf8')) as { fixtures: { file: string; valid: boolean }[] };
 
 describe('generated v1 contract pipeline', () => {
+  it('decodes bounded validation owner discovery while retaining a historical receipt corpus', () => {
+    const document = decodeResponse(fixture('validation-history'), 'validationHistory');
+    expect(document.data.items[0]?.canInspect).toBe(true);
+    expect(document.data.items[0]?.corpusSha256).not.toBe(document.data.corpusSha256);
+    const missing = { ...document, data: { ...document.data, state: 'not-recorded', graphSha256: null, corpusSha256: null,
+      page: null, totalPages: null, previousPage: null, nextPage: null, items: [] } };
+    expect(decodeResponse(JSON.stringify(missing), 'validationHistory').data.page).toBeNull();
+    const item = document.data.items[0]!;
+    const withheld = { ...document, data: { ...document.data, items: [{ ...item, identityWithheld: true, canInspect: false,
+      candidateId: null, sourceSha256: null, corpusSha256: null }] } };
+    expect(decodeResponse(JSON.stringify(withheld), 'validationHistory').data.items[0]?.canInspect).toBe(false);
+  });
+  it('rejects contradictory validation discovery authority inspection identities and page navigation', () => {
+    const document = decodeResponse(fixture('validation-history'), 'validationHistory'), value = document.data, item = value.items[0]!;
+    const invalid = [{ ...value, authority: 'canonical-validation' }, { ...value, state: 'not-recorded' },
+      { ...value, graphSha256: null }, { ...value, page: 2 }, { ...value, nextPage: 2 }, { ...value, previousPage: 1 },
+      { ...value, items: [item, item] }, { ...value, items: Array.from({ length: 42 }, (_, i) => ({ ...item, ownerId: `run_${i}` })) },
+      ...[{ ...item, canInspect: false }, { ...item, hasReceipt: false }, { ...item, identityWithheld: true },
+        { ...item, normalOutcome: null }, { ...item, corpusSha256: null }, { ...item, sourceSha256: null },
+        { ...item, candidateId: null }].map(row => ({ ...value, items: [row] }))];
+    for (const data of invalid) expect(() => decodeResponse(JSON.stringify({ ...document, data }), 'validationHistory')).toThrow(ApiClientError);
+  });
   it('decodes bounded validation case windows exact counts and unobserved compilation rows', () => {
     const document = decodeResponse(fixture('report-normal-cases'), 'report');
     const detail = document.data.validationCases, item = detail?.items[0];

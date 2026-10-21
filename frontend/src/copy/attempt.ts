@@ -2,6 +2,30 @@
 
 import { textMessage } from '../shared/messages';
 
+export const recordedValidationCopy = {
+  title: 'Recorded validation evidence', read: 'Read validation evidence', loading: 'Reading validation evidence…',
+  scope: 'Select a recorded operation to inspect its normal validation receipt. Reads never execute cases or start a workflow.',
+  failed: 'Validation evidence could not be verified. Read its latest history or check the session.',
+  historyState: 'History state', historyPage: 'History page', historyNavigation: 'Validation history pages',
+  previousHistory: 'Newer validation operations', nextHistory: 'Earlier validation operations',
+  owners: 'Recorded validation operations', operation: 'Recorded operation', candidate: 'Candidate', source: 'Source SHA-256',
+  receipt: 'Receipt metadata', inspect: 'Inspect cases', withheld: 'Unavailable or withheld', notRecorded: 'Not recorded',
+  noOwners: 'No operations are retained on this history page.', limitations: 'History limitations',
+  reportState: 'Report state', reportLimitations: 'Validation report limitations',
+  acceptance: 'These are recorded observations. Repair acceptance has not been evaluated by this view.',
+  result: 'Recorded result', compared: 'Cases compared', corpus: 'Validated corpus SHA-256', inputs: 'Recorded inputs',
+  matched: 'Matched inputs', notCompared: 'Not compared', matches: 'Matches', differs: 'Differs',
+  casePage: 'Case page', cases: 'Recorded validation cases', case: 'Case', outcome: 'Recorded outcome',
+  exit: 'Exit code', stdout: 'Standard output', stderr: 'Standard error', previews: 'Bounded output prefixes',
+  originalStdout: 'Original standard output', rebuiltStdout: 'Rebuilt standard output',
+  originalStderr: 'Original standard error', rebuiltStderr: 'Rebuilt standard error',
+  caseNavigation: 'Validation case pages', previousCases: 'Previous validation cases', nextCases: 'Next validation cases',
+  noCases: 'Verified case details are unavailable for this receipt. No case result is inferred.',
+  bytes: 'Observed bytes', prefix: 'Prefix bytes', truncated: 'Prefix truncated.', complete: 'Complete output prefix.',
+  hex: 'Hexadecimal prefix', text: 'Escaped UTF-8 prefix', empty: 'Empty observed output',
+  noText: 'No UTF-8 text preview is available; inspect the hexadecimal prefix.',
+} as const;
+
 export const activityCopy = {
   "deliveryStatus": "{status} {fallback} {visible} matching observations shown; {retained} of at most {capacity} observations retained on this page.",
   "paused": "Activity paused.",

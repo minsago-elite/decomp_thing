@@ -804,4 +804,125 @@ class RecordedRepairValidationCasesTest {
         assertTrue("historyGraph=$graph" in rendered); assertTrue("historyRunEvidence=run_00000001" in rendered)
         assertFalse("historyValidationPage=" in rendered); assertFalse("PRIVATE" in rendered)
     }
+
+    private fun discoverySnapshot(f: Fixture, count: Int = 25, pending: Boolean = true,
+        runBinding: RepairRecordedValidationObservation = f.binding): RepairHistorySnapshot {
+        val base = apiSnapshot(f)
+        fun attempt(index: Int, kind: RepairRecordedAttemptKind = RepairRecordedAttemptKind.FINALIZED) = RepairRecordedAttempt(
+            kind = kind, identity = RepairRecordedIdentity("revision_$index", false), parent = null, ordinal = index,
+            status = null, sourceRevisionSha256 = f.binding.proof.sourceRevisionSha256, run = null,
+            publicationMode = null, rollback = null, invocation = null, retainedCases = emptyList(), iterationIndex = null,
+            failureKind = RepairRecordedFailureKind.OTHER, before = null, after = null,
+            corpusSha256 = f.binding.proof.regressionCorpusSha256, validationObservation = f.binding)
+        return RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, "d".repeat(64), base.publishedHead,
+            null, null, (1..count).map { base.runs.single().copy(identity = RepairRecordedIdentity("run_$it", false),
+                baselineValidationObservation = runBinding) }, (1..count).map { attempt(it) },
+            if (pending) attempt(count + 1, RepairRecordedAttemptKind.PENDING) else null, emptyList())
+    }
+    private fun discoveryCapture(snapshot: RepairHistorySnapshot, selection: RepairRecordedHistorySelection = RepairRecordedHistorySelection()) =
+        WebValidationHistoryCapture(RepairHistoryReadResult.recorded(snapshot), RepairRecordedHistoryPage.select(snapshot, selection, 20))
+
+    @Test fun `validation discovery rejects noncanonical selection before any capture`() {
+        var captures = 0
+        val reports = WebRevisionValidationReports { _, _, _ -> error("receipt must not be read") }
+        for (query in listOf("", "historyPage=2", "historyPage=01", "historyPage=2147483648", "historyGraph=$graph&historyGraph=$graph",
+            "historyGraph=$graph&historyEvidence=revision_1", "historyGraph=$graph&historyValidationPage=1", "PRIVATE=1")) {
+            assertEquals(400, assertFailsWith<WebAccessDenied> { reports.history(apiJob, apiRun, query) { _, _, _ ->
+                captures++; error("invalid selection was captured") } }.status)
+        }
+        assertEquals(404, assertFailsWith<WebAccessDenied> { reports.history("PRIVATE/..", apiRun, null) { _, _, _ ->
+            captures++; error("invalid identity was captured") } }.status)
+        assertEquals(0, captures)
+        assertTrue(parseWebValidationHistoryQuery(null).isDefault)
+        assertEquals(2, parseWebValidationHistoryQuery("historyGraph=$graph&historyPage=2").pageNumber)
+    }
+    @Test fun `validation discovery captures metadata twice with durable version bracketing`() {
+        val snapshot = discoverySnapshot(fixture()); var histories = 0; var versions = 0
+        val result = captureValidationHistory(RepairRecordedHistorySelection(), { versions++; "version_1" },
+            { histories++; RepairHistoryReadResult.recorded(snapshot) })
+        assertSame(snapshot, result.page!!.snapshot); assertEquals(2, histories); assertEquals(2, versions)
+    }
+    @Test fun `validation discovery pages both operation families with pending only on latest page`() {
+        val snapshot = discoverySnapshot(fixture())
+        val first = webValidationHistory(apiJob, apiRun, discoveryCapture(snapshot))
+        val selection = parseWebValidationHistoryQuery("historyGraph=$graph&historyPage=2")
+        val second = webValidationHistory(apiJob, apiRun, discoveryCapture(snapshot, selection))
+        assertEquals(41, first.getValue("items").jsonArray.size); assertEquals(10, second.getValue("items").jsonArray.size)
+        assertEquals(2, first.getValue("nextPage").jsonPrimitive.int); assertEquals(JsonNull, first.getValue("previousPage"))
+        assertEquals(1, second.getValue("previousPage").jsonPrimitive.int); assertEquals(JsonNull, second.getValue("nextPage"))
+        val identities = (first.getValue("items").jsonArray + second.getValue("items").jsonArray).map {
+            val row = it.jsonObject; row.getValue("ownerKind") to row.getValue("ownerId") }
+        assertEquals(51, identities.toSet().size)
+        assertEquals(400, assertFailsWith<WebAccessDenied> { captureValidationHistory(
+            RepairRecordedHistorySelection(pageNumber = 3, expectedGraphSha256 = graph), { "v1" },
+            { RepairHistoryReadResult.recorded(snapshot) }) }.status)
+    }
+    @Test fun `validation discovery distinguishes absent and unavailable without invented zero population`() {
+        val reports = WebRevisionValidationReports { _, _, _ -> error("no receipt capture") }
+        for ((recorded, state) in listOf(RepairHistoryReadResult.absent() to "not-recorded", RepairHistoryReadResult.unavailable() to "unavailable")) {
+            val result = reports.history(apiJob, apiRun, null) { _, _, selection -> captureValidationHistory(selection, { "v1" }, { recorded }) }
+            assertEquals(state, result.getValue("state").jsonPrimitive.content)
+            for (key in listOf("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage"))
+                assertEquals(JsonNull, result.getValue(key))
+            assertTrue(result.getValue("items").jsonArray.isEmpty())
+        }
+    }
+    @Test fun `validation discovery refuses stale graph and mutation during metadata capture`() {
+        val f = fixture(); val snapshot = apiSnapshot(f)
+        assertEquals(409, assertFailsWith<WebAccessDenied> { captureValidationHistory(
+            RepairRecordedHistorySelection(expectedGraphSha256 = "9".repeat(64)), { "v1" }, { RepairHistoryReadResult.recorded(snapshot) }) }.status)
+        for (change in listOf("version", "graph", "status")) {
+            var reads = 0
+            assertEquals(409, assertFailsWith<WebAccessDenied> { captureValidationHistory(RepairRecordedHistorySelection(),
+                { if (reads == 2 && change == "version") "v2" else "v1" }, {
+                    reads++
+                    if (reads == 2 && change == "status") RepairHistoryReadResult.unavailable()
+                    else RepairHistoryReadResult.recorded(if (reads == 2 && change == "graph") apiSnapshot(f, digest = "9".repeat(64)) else snapshot)
+                }) }.status)
+        }
+    }
+    @Test fun `validation discovery withholds private owner and candidate references and all their commitments`() {
+        val f = fixture(); val base = apiSnapshot(f)
+        for (privateOwner in listOf(true, false)) {
+            val run = base.runs.single().copy(identity = RepairRecordedIdentity(if (privateOwner) "/PRIVATE-owner" else "run_1", privateOwner),
+                baselineValidationObservation = f.binding.copy(candidate = RepairRecordedIdentity("/PRIVATE-candidate", true)))
+            val snapshot = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, base.corpusSha256,
+                base.publishedHead, null, null, listOf(run), emptyList(), null, emptyList())
+            val result = webValidationHistory(apiJob, apiRun, discoveryCapture(snapshot))
+            assertFalse("PRIVATE" in result.toString())
+            val row = result.getValue("items").jsonArray.single().jsonObject
+            assertTrue(row.getValue("identityWithheld").jsonPrimitive.boolean)
+            assertTrue(row.getValue("hasReceipt").jsonPrimitive.boolean); assertFalse(row.getValue("canInspect").jsonPrimitive.boolean)
+            for (key in listOf("candidateId", "sourceSha256", "corpusSha256")) assertEquals(JsonNull, row.getValue(key))
+        }
+    }
+    @Test fun `validation discovery retains selected historical corpus separately from current corpus`() {
+        val f = fixture(); val result = webValidationHistory(apiJob, apiRun, discoveryCapture(discoverySnapshot(f, count = 1, pending = false)))
+        assertEquals("d".repeat(64), result.getValue("corpusSha256").jsonPrimitive.content)
+        for (row in result.getValue("items").jsonArray) {
+            assertEquals(f.binding.proof.regressionCorpusSha256, row.jsonObject.getValue("corpusSha256").jsonPrimitive.content)
+            assertTrue(row.jsonObject.getValue("canInspect").jsonPrimitive.boolean)
+        }
+        val base = apiSnapshot(f)
+        val missing = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, base.corpusSha256,
+            base.publishedHead, null, null, listOf(base.runs.single().copy(baselineValidationObservation = null)),
+            emptyList(), null, emptyList())
+        val row = webValidationHistory(apiJob, apiRun, discoveryCapture(missing)).getValue("items").jsonArray.single().jsonObject
+        assertFalse(row.getValue("hasReceipt").jsonPrimitive.boolean); assertFalse(row.getValue("canInspect").jsonPrimitive.boolean)
+        for (key in listOf("candidateId", "sourceSha256", "corpusSha256", "normalOutcome")) assertEquals(JsonNull, row.getValue(key))
+    }
+    @Test fun `validation history and receipt reads share admission and release it after failure`() {
+        val f = fixture(); lateinit var reports: WebRevisionValidationReports
+        reports = WebRevisionValidationReports { _, _, _ ->
+            assertEquals(429, assertFailsWith<WebAccessDenied> { reports.history(apiJob, apiRun, null) { _, _, _ -> error("busy") } }.status)
+            apiCapture(f)
+        }
+        assertFailsWith<IllegalStateException> { reports.history(apiJob, apiRun, null) { _, _, _ ->
+            assertEquals(429, assertFailsWith<WebAccessDenied> { reports.read(apiJob, apiRun, apiQuery) }.status)
+            error("authored failure")
+        } }
+        assertEquals("available", reports.read(apiJob, apiRun, apiQuery).getValue("state").jsonPrimitive.content)
+        val value = reports.history(apiJob, apiRun, null) { _, _, _ -> discoveryCapture(apiSnapshot(f)) }
+        assertEquals("recorded", value.getValue("state").jsonPrimitive.content)
+    }
 }

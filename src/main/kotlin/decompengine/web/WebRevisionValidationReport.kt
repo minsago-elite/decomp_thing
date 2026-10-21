@@ -40,17 +40,37 @@ internal class WebRevisionValidationReports(
     private val reading = AtomicBoolean(false)
 
     fun read(jobId: String, runId: String, rawQuery: String?): JsonObject {
-        if (!jobId.matches(Regex("[a-f0-9]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
-            throw WebAccessDenied(404, "NOT_FOUND", "The selected report is unavailable.")
+        requireIdentity(jobId, runId)
         val query = WebRevisionValidationQuery.parse(rawQuery)
-        if (!reading.compareAndSet(false, true))
-            throw WebAccessDenied(429, "VALIDATION_REPORT_BUSY", "Another validation report read is in progress. Try this read again later.")
-        return try {
+        return oneRead {
             val value = capture(jobId, runId, query.selection)
             if (value.page.selection != query.selection || value.page.snapshot.graphSha256 != query.selection.expectedGraphSha256)
                 throw WebAccessDenied(409, "REPORT_CHANGED", "The selected recorded history changed. Reload its evidence.")
             recordedValidationReport(jobId, runId, value, query.casePageNumber)
-        } finally { reading.set(false) }
+        }
+    }
+
+    fun history(jobId: String, runId: String, rawQuery: String?,
+        captureHistory: (String, String, RepairRecordedHistorySelection) -> WebValidationHistoryCapture): JsonObject {
+        requireIdentity(jobId, runId)
+        val selection = parseWebValidationHistoryQuery(rawQuery)
+        return oneRead {
+            val value = captureHistory(jobId, runId, selection)
+            if (value.page?.selection != selection && (value.page != null || !selection.isDefault))
+                throw WebAccessDenied(409, "REPORT_CHANGED", "The selected history metadata changed. Read its latest snapshot.")
+            webValidationHistory(jobId, runId, value)
+        }
+    }
+
+    private fun requireIdentity(jobId: String, runId: String) {
+        if (!jobId.matches(Regex("[a-f0-9]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
+            throw WebAccessDenied(404, "NOT_FOUND", "The selected report is unavailable.")
+    }
+
+    private fun <T> oneRead(read: () -> T): T {
+        if (!reading.compareAndSet(false, true))
+            throw WebAccessDenied(429, "VALIDATION_REPORT_BUSY", "Another validation evidence read is in progress. Try this read again later.")
+        return try { read() } finally { reading.set(false) }
     }
 }
 

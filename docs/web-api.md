@@ -1079,9 +1079,42 @@ Every response has observation authority and `acceptance: "not-evaluated"`.
 No accepted artifact, raw command, host path, credential, source-artifact download URL
 or unverified fatal-case result is manufactured. A source commitment is not a navigable
 validated-source snapshot. Fatal outcome production, bounded mismatch-centered diff
-windows, SPA history/owner discovery and case selection, validated-source navigation,
+windows, validated-source navigation,
 complete export and new physical HTTP/browser qualification remain required by their
 original owners. Twenty-one API controls use authored DTOs and callbacks only; three
 shared wire fixtures and three pure decoder controls cover the new protocol boundaries.
 The original41 case-control bodies and actual execution fixtures are unchanged.
 The new source awaits its own ordinary Actions and review.
+
+### Validation history discovery and SPA selection
+
+The private `GET`/`HEAD R/validation-history` response uses the closed v1
+`validationHistory` envelope. An initial read needs no query. `historyGraph` pins a
+continuation to the captured graph; canonical `historyPage` selects a fixed window
+of at most 20 finalized attempts, 20 repair runs and one pending attempt on the
+latest page. These are operation families within the selected durable run, not
+additional jobs or runs to execute. All other selection parameters are refused.
+
+The producer reads existing history metadata with graph and durable-attempt version
+checks around the capture. It does not read a selected receipt or source body.
+`hasReceipt` records metadata presence only. `canInspect` additionally requires
+disclosed owner and candidate identities; withheld references cannot select evidence.
+Each inspectable owner carries the source and corpus commitments of its own recorded
+operation. An older receipt corpus can differ from the history's current corpus.
+Absent and unavailable history remain distinct states with null graph, population
+and navigation fields. Discovery and receipt projection share one admission slot.
+
+The attempt SPA provides explicit history reads, operation selection and case-page
+navigation. Each response must match the requested job, durable run, graph, owner,
+candidate, source and selected receipt corpus. Case continuations also retain the
+report identity. Obsolete reads are aborted on selection/context changes or unmount;
+failed, denied and unverified reads clear the displayed evidence. There are no
+automatic reads or retries in this panel. Output prefixes render as escaped text,
+with exact byte-count strings, explicit truncation and absent/binary/empty distinctions.
+
+Eight new metadata controls use DTOs and callbacks. Two shared discovery fixtures,
+two decoder controls, eight in-memory fetch/JSDOM controls and one existing-session
+route control cover this addition. These are authored component and protocol controls;
+they do not establish physical browser/HTTP, authentication, native cleanup or ACP
+decompilation effectiveness. The original acceptance scopes remain open until their
+required evidence is available. This source still needs its own Actions and review.

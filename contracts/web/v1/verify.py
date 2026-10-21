@@ -245,7 +245,24 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind == "error":
+    if kind == "validationHistory":
+        if data["state"] != "recorded":
+            if any(data[key] is not None for key in ("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage")) or data["items"]:
+                raise ValueError("unrecorded validation history cannot invent a population or snapshot")
+            return
+        page, total = data["page"], data["totalPages"]
+        if page is None or total is None or page > total or data["graphSha256"] is None or data["corpusSha256"] is None:
+            raise ValueError("validation history requires its recorded graph and page")
+        if data["previousPage"] != (page - 1 if page > 1 else None) or data["nextPage"] != (page + 1 if page < total else None):
+            raise ValueError("validation history navigation disagrees with its page")
+        if len({(item["ownerKind"], item["ownerId"]) for item in data["items"]}) != len(data["items"]):
+            raise ValueError("validation history repeats an owner")
+        for item in data["items"]:
+            if item["canInspect"] != (item["hasReceipt"] and not item["identityWithheld"]) or item["hasReceipt"] != (item["normalOutcome"] is not None):
+                raise ValueError("validation inspection requires a recorded receipt and disclosed identity")
+            if any((item[key] is not None) != item["canInspect"] for key in ("candidateId", "sourceSha256", "corpusSha256")):
+                raise ValueError("validation owner commitments must follow inspection availability")
+    elif kind == "error":
         error = document["error"]
         recovery = error.get("recovery")
         if (error["code"] == "EVENT_GAP") != (recovery is not None):
