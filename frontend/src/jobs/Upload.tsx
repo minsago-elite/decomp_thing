@@ -42,6 +42,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' }>({ message: '', kind: 'status' });
+  const [rejectedFileMessage, setRejectedFileMessage] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
@@ -81,13 +82,14 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
 
   function select(files: FileList | null) {
     if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked') return;
-    if (!files || files.length !== 1) { setFeedback({ message: copy.chooseOneBinaryAtATime, kind: 'input-error' }); return; }
+    if (!files || files.length !== 1) { setFeedback({ message: copy.chooseOneBinaryAtATime, kind: attempt ? 'error' : 'input-error' }); return; }
     const file = files[0];
     if (!file) return;
     if (retained.kind === 'pending' && (retained.ticket.filename !== file.name || retained.ticket.size !== file.size)) {
       setFeedback({ message: copy.chooseTheOriginalFilenameAndSizeToRetryThisUpload, kind: 'input-error' }); return;
     }
     setAttempt({ file, ticket: retained.kind === 'pending' ? retained.ticket : recovery.ticket(file, crypto.randomUUID().replaceAll('-', '')) });
+    setRejectedFileMessage(null);
     setFeedback({ message: BigInt(file.size) >= maxBytes && maxBytes > 0n
       ? copy.thisFileLeavesNoRoomForMultipartOverheadWithinThe : '', kind: 'status' });
   }
@@ -112,12 +114,15 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, uploadId, signal: controller.signal });
       if (!live.current || controller.signal.aborted) return;
       try { recovery.clear(); } catch { /* The confirmed job remains navigable; retained ticket can replay it safely. */ }
+      setRejectedFileMessage(null);
       setFeedback({ message: copy.jobPublicationConfirmedOpeningTheJob, kind: 'status' });
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
       if (!live.current) return;
       const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
-      setPhase('retry'); setFeedback({ message: withApiFailureReference(failureMessage(error), error), kind: invalidInput ? 'input-error' : 'error' });
+      const message = withApiFailureReference(failureMessage(error), error);
+      if (invalidInput) setRejectedFileMessage(message);
+      setPhase('retry'); setFeedback({ message, kind: invalidInput ? 'input-error' : 'error' });
     } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
   }
   function discard() {
@@ -125,9 +130,13 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     try { recovery.clear(); setRetained({ kind: 'empty' }); }
     catch { setFeedback({ message: copy.retryContextCouldNotBeClearedCheckTabStorageBefore, kind: 'error' }); return; }
     focusPicker.current = true;
-    setAttempt(null); setPhase('idle'); setFeedback({ message: '', kind: 'status' });
+    setAttempt(null); setPhase('idle'); setRejectedFileMessage(null); setFeedback({ message: '', kind: 'status' });
     if (input.current) input.current.value = '';
   }
+  const invalidField = feedback.kind === 'input-error' || rejectedFileMessage !== null;
+  const errorFeedback = feedback.kind !== 'status' || rejectedFileMessage !== null;
+  const feedbackMessage = rejectedFileMessage && feedback.message !== rejectedFileMessage
+    ? [rejectedFileMessage, feedback.message].filter(Boolean).join(' ') : feedback.message;
   return <section class="upload-panel" aria-labelledby="upload-title">
     <h2 id="upload-title">{copy.uploadABinary}</h2>
     <p id="upload-guidance">{displayMessage(copy.guidance, { limit: limits ? displayMessage(copy.requestLimit, { bytes: limits.maxUploadBytes }) : '' })}</p>
@@ -137,7 +146,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       }}>
         <label htmlFor="binary-file">{copy.binaryFile}</label>
         <input ref={input} id="binary-file" type="file" aria-describedby="upload-guidance upload-feedback"
-          aria-invalid={feedback.kind === 'input-error' || undefined} aria-errormessage={feedback.kind === 'input-error' ? 'upload-feedback' : undefined}
+          aria-invalid={invalidField || undefined} aria-errormessage={invalidField ? 'upload-feedback' : undefined}
           disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked'} onChange={event => select(event.currentTarget.files)} />
         <p>{copy.useTheFilePickerOrDropOneFileHere}</p>
       </div>
@@ -153,8 +162,8 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
           : progress?.state === 'validating' ? copy.requestReceivedValidatingTheFileAndPublishingTheJob
           : progress?.state === 'unconfirmed' ? copy.publicationIsUnconfirmedWaitingForTheUploadResponse
           : copy.transferringTheFileReceivedBytesDoNotConfirmJobPublication}</p></div>}
-      <p id="upload-feedback" role={feedback.kind === 'status' ? 'status' : 'alert'}
-        class={feedback.kind === 'status' ? undefined : 'notice notice-error'}>{feedback.message}</p>
+      <p id="upload-feedback" role={errorFeedback ? 'alert' : 'status'}
+        class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}
       <div class="job-actions">
         <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? copy.retryThisUpload : copy.uploadBinary}</button>

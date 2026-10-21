@@ -252,3 +252,55 @@ it.each([
   expect(transport.upload.mock.calls[1]?.[0]).toBe(file);
   expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).toBe(transport.upload.mock.calls[0]?.[1].idempotencyKey);
 });
+
+
+it.each(['INVALID_ELF', 'UPLOAD_TOO_LARGE'] as const)('retains authoritative %s field errors through pending and network-failed retries until acceptance', async serverCode => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  let rejectRetry: ((error: ApiClientError) => void) | undefined;
+  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode, status: serverCode === 'INVALID_ELF' ? 422 : 413, requestId }))
+    .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRetry = reject; }))
+    .mockResolvedValueOnce(fixture<ResponseOf<'job'>>('job-lossless'));
+  await mount(); const file = select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  const error = await screen.findByRole('alert');
+  const authoritativeMessage = error.textContent!;
+  const picker = screen.getByLabelText<HTMLInputElement>('Binary file');
+  expect(authoritativeMessage).toContain(`Reference ID: ${requestId}.`);
+  fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(picker.getAttribute('aria-invalid')).toBe('true');
+  expect(picker.getAttribute('aria-errormessage')).toBe(error.id);
+  expect(screen.getByRole('alert').textContent).toBe(authoritativeMessage);
+  await act(async () => { rejectRetry!(new ApiClientError('network_error')); });
+  expect(screen.getByRole('alert').textContent).toContain(authoritativeMessage);
+  expect(screen.getByRole('alert').textContent).toContain('Upload was not confirmed');
+  expect(screen.getByRole('alert').textContent?.split(authoritativeMessage)).toHaveLength(2);
+  expect(picker.getAttribute('aria-invalid')).toBe('true');
+  expect(picker.getAttribute('aria-errormessage')).toBe(error.id);
+  fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
+  await waitFor(() => expect(transport.route).toHaveBeenCalledOnce());
+  expect(picker.hasAttribute('aria-invalid')).toBe(false);
+  expect(picker.hasAttribute('aria-errormessage')).toBe(false);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(transport.upload).toHaveBeenCalledTimes(3);
+  expect(transport.upload.mock.calls.every(([selected, options]) => selected === file && options.idempotencyKey === transport.upload.mock.calls[0]?.[1].idempotencyKey)).toBe(true);
+});
+
+it('reports a rejected multiple-file replacement without invalidating or implicitly uploading the retained valid selection', async () => {
+  transport.upload.mockResolvedValue(fixture<ResponseOf<'job'>>('job-lossless'));
+  await mount(); const original = select();
+  const picker = screen.getByLabelText<HTMLInputElement>('Binary file'); picker.focus();
+  fireEvent.drop(picker.parentElement!, { dataTransfer: { files: [new File(['one'], 'one.elf'), new File(['two'], 'two.elf')] } });
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Choose one binary at a time.');
+  expect(picker.hasAttribute('aria-invalid')).toBe(false);
+  expect(picker.hasAttribute('aria-errormessage')).toBe(false);
+  expect(document.activeElement).toBe(picker);
+  expect(screen.getByText(/Selected: binary.elf/)).toBeTruthy();
+  const submit = screen.getByRole<HTMLButtonElement>('button', { name: 'Upload binary' });
+  expect(submit.disabled).toBe(false);
+  expect(transport.upload).not.toHaveBeenCalled();
+  fireEvent.click(submit);
+  await waitFor(() => expect(transport.route).toHaveBeenCalledOnce());
+  expect(transport.upload).toHaveBeenCalledOnce();
+  expect(transport.upload.mock.calls[0]?.[0]).toBe(original);
+});

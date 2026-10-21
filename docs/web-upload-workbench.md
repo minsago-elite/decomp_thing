@@ -106,3 +106,11 @@ The additional mock-view controls cover selection correction, restored-ticket
 mismatch, invalid/oversized rejection, error association, focus continuity and
 network/session/capacity retry identity. Full keyboard/screen-reader and physical
 browser qualification remains a separate requirement.
+
+An authoritative invalid/oversized-file message stays associated with the retained
+file during a pending retry and after a later transport failure. New operation
+feedback is combined with that bounded message without accumulating retry history.
+Server acceptance or an explicit new selection/discard clears the file error. A
+rejected multi-file replacement leaves an existing valid selection valid and
+reports the rejected replacement separately; uploading that file still requires
+the explicit submit action. Mock controls cover both error lifetimes.
