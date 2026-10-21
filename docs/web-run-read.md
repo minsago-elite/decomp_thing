@@ -117,3 +117,25 @@ asset-recovery and missing-route checks. Pinned Chrome used test-only --no-sandb
 This is packaged integration coverage with inert persisted fixtures, distinct from
 mock transport tests and from live workflow execution. Evidence/source/artifact
 navigation, active history changes and broader fixture families remain outstanding.
+
+
+## Recorded harness identity
+
+The attempt metadata includes its persisted `harnessCapabilityId` beside the
+recorded workflow identity. It is an opaque public capability ID, not a current
+server selection or a reconstruction of private configuration. An explicit null
+is shown as not recorded for that attempt; malformed or foreign values are shown
+as not verified. The view does not coerce objects or display path/markup-shaped,
+overlong or final-newline values. It never infers evidence-only mode, provider
+choice, authentication, availability or acceptance from this field.
+
+The row uses the same job/attempt/session/deployment-bound retained metadata as
+the rest of the page: a same-identity transient refresh may keep it, while an
+unverified/refused/different-identity response clears it. No new read, command,
+preflight, adapter registration or automatic retry is introduced. Server defaults,
+workflow launch, immutable submitted configuration across all choices and actual
+packaged/assistive-technology qualification remain separate full requirements.
+
+Nine additional mock-consumer controls are prepared for exact recorded identity,
+explicit null, invalid/foreign values and refresh retention/refusal. These are
+source controls pending own Actions qualification; no local subject was run.
