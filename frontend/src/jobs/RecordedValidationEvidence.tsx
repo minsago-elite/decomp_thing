@@ -4,6 +4,7 @@ import { withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
+import { validationPageDownload } from './recordedValidationExport';
 
 export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
@@ -64,6 +65,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     } catch (failure: unknown) { failed(controller, failure); }
   }
   const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
+  const download = useMemo(() => report && history && selected
+    ? validationPageDownload(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
+  [report, history, selected, jobId, runId]);
   const loading = view?.loading ?? false;
   const flag = (value: boolean | null) => value === null ? copy.notCompared : value ? copy.matches : copy.differs;
   return <section aria-labelledby="recorded-validation-title">
@@ -102,6 +106,11 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     {report && <>
       <p>{copy.reportState}: {report.state}</p>
       <p>{copy.acceptance}</p>
+      {report.state === 'available' && (cases || failure) && <>
+        <p>{copy.exportScope}</p>
+        {download ? <a href={download.href} download={download.filename}>{cases ? copy.exportPage : copy.exportFailure}</a>
+          : <p>{copy.exportUnavailable}</p>}
+      </>}
       <ul aria-label={copy.reportLimitations}>{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {report.state === 'available' && report.binding.revisionId !== null && (cases || failure) &&
         <ValidationSourceSnapshot key={report.reportId} jobId={jobId} runId={runId} validationRevisionId={report.binding.revisionId}

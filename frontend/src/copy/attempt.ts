@@ -3,8 +3,11 @@
 import { textMessage } from '../shared/messages';
 
 export const recordedValidationCopy = {
+  exportPage: 'Download this validation page JSON', exportFailure: 'Download this failure diagnostic JSON',
+  exportScope: 'The download contains this selected observation only, including its snapshot commitments and bounded previews. Other pages, full output bytes and source files are not included. Saving it does not run validation.',
+  exportUnavailable: 'This observation cannot be exported within the supported format and 192 KiB limit.',
   title: 'Recorded validation evidence', read: 'Read validation evidence', loading: 'Reading validation evidence…',
-  scope: 'Select a recorded operation to inspect its normal validation receipt. Reads never execute cases or start a workflow.',
+  scope: 'Select a recorded operation to inspect its retained validation receipt or enclosing failure diagnostic. Reads never execute cases or start a workflow.',
   failed: 'Validation evidence could not be verified. Read its latest history or check the session.',
   historyState: 'History state', historyPage: 'History page', historyNavigation: 'Validation history pages',
   previousHistory: 'Newer validation operations', nextHistory: 'Earlier validation operations',

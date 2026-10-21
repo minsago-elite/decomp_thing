@@ -2,9 +2,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { expect, it, vi } from 'vitest';
-import type { ResponseOf } from '../src/api/generated';
+import type { Report, ResponseOf } from '../src/api/generated';
 import { RecordedValidationEvidence } from '../src/jobs/RecordedValidationEvidence';
 import { ValidationSourceSnapshot } from '../src/jobs/ValidationSourceSnapshot';
+import { MAX_VALIDATION_EXPORT_BYTES, validationPageDownload } from '../src/jobs/recordedValidationExport';
 
 // Authored wire DTOs and an in-memory fetch only; no server, browser session or validation process.
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
@@ -37,6 +38,128 @@ async function inspect() {
   fireEvent.click(screen.getByRole('button', { name: inspectName }));
   await screen.findByRole('table', { name: 'Recorded validation cases' });
 }
+
+type SavedValidation = Pick<Report, 'reportId' | 'binding' | 'summary' | 'validationCases' | 'validationFailure'> & {
+  format: string; exportSchemaVersion: number; scope: string; limitations: string[];
+};
+function savedValidation(href: string): SavedValidation {
+  expect(href.startsWith('data:application/json;charset=utf-8,')).toBe(true);
+  return JSON.parse(decodeURIComponent(href.slice(href.indexOf(',') + 1))) as SavedValidation;
+}
+function exportSelection(failed = false) {
+  const history = (failed ? failureHistoryFixture() : historyFixture()).data;
+  const owner = history.items.find(item => item.canInspect && (failed ? item.ownerKind === 'run-failure' : item.ownerKind !== 'run-failure'));
+  if (!owner) throw new Error('Authored selected owner is absent');
+  return { jobId, runId, graphSha256: history.graphSha256, owner };
+}
+
+it('exports the checked selected case page with exact identities comparisons and byte prefixes', () => {
+  const report = reportFixture().data, selected = exportSelection();
+  const download = validationPageDownload(report, selected);
+  if (!download) throw new Error('Authored case page was not exported');
+  const saved = savedValidation(download.href);
+  expect(saved).toMatchObject({ format: 'decomp-recorded-validation-observation', exportSchemaVersion: 1,
+    scope: 'selected-case-page', reportId: report.reportId, binding: report.binding, summary: report.summary });
+  expect(saved.validationCases).toEqual(report.validationCases); expect(saved.validationFailure).toBeNull();
+  expect(download.filename).toBe('validation-page-1.json');
+  expect(download.bytes).toBe(new TextEncoder().encode(decodeURIComponent(download.href.slice(download.href.indexOf(',') + 1))).length);
+  expect(download.bytes).toBeLessThanOrEqual(MAX_VALIDATION_EXPORT_BYTES);
+  expect(validationPageDownload(report, selected)?.href).toBe(download.href);
+  expect(saved.limitations.join(' ')).toContain('not a complete receipt');
+});
+
+it('exports failed-operation producer reports losslessly without inventing case outcomes', () => {
+  const report = failureReportFixture().data, failure = report.validationFailure!;
+  const changed = { ...report, validationFailure: { ...failure, phase: 'post-execution' as const,
+    inputCount: '18446744073709551615', inputOrdinal: null, reportedCompletedPairs: '18446744073709551614' } };
+  const download = validationPageDownload(changed, exportSelection(true));
+  if (!download) throw new Error('Authored failure diagnostic was not exported');
+  const saved = savedValidation(download.href);
+  expect(download.filename).toBe('validation-failure.json'); expect(saved.scope).toBe('selected-failure-diagnostic');
+  expect(saved.validationCases).toBeNull(); expect(saved.summary).toBeNull();
+  expect(saved.validationFailure?.inputCount).toBe('18446744073709551615');
+  expect(saved.validationFailure?.reportedCompletedPairs).toBe('18446744073709551614');
+  expect(saved.limitations.join(' ')).toContain('not inferred per-case outcomes');
+});
+
+it('refuses exports across job run graph owner candidate source corpus or operation selections', () => {
+  const report = reportFixture().data, selected = exportSelection(), owner = selected.owner;
+  const invalid = [{ ...selected, jobId: 'e'.repeat(32) }, { ...selected, runId: 'run_other' },
+    { ...selected, graphSha256: 'e'.repeat(64) }, { ...selected, graphSha256: null },
+    ...[{ ...owner, ownerId: 'run_other' }, { ...owner, candidateId: 'revision_other' },
+      { ...owner, sourceSha256: 'e'.repeat(64) }, { ...owner, corpusSha256: 'e'.repeat(64) },
+      { ...owner, canInspect: false }, { ...owner, hasReceipt: false }, { ...owner, identityWithheld: true },
+      { ...owner, normalOutcome: 'compile-valid' as const }].map(value => ({ ...selected, owner: value })), exportSelection(true)];
+  for (const value of invalid) expect(validationPageDownload(report, value)).toBeNull();
+  for (const state of ['partial', 'unknown', 'invalid', 'unsupported', 'missing'] as const) {
+    expect(validationPageDownload({ ...report, state }, selected)).toBeNull();
+  }
+  expect(validationPageDownload({ ...report, acceptance: 'accepted' }, selected)).toBeNull();
+});
+
+it('projects additive private fields out of downloads and refuses oversized or inconsistent observations', () => {
+  const report = reportFixture().data, cases = report.validationCases!, item = cases.items[0]!;
+  const extended = { ...report, privateRoot: 'PRIVATE-canary', limitations: ['PRIVATE-producer-message'],
+    binding: { ...report.binding, privateHost: 'PRIVATE-canary' }, validationCases: { ...cases, privatePath: 'PRIVATE-canary',
+      items: [{ ...item, privateCommand: 'PRIVATE-canary', originalStdoutPreview: { ...item.originalStdoutPreview!, privatePeer: 'PRIVATE-canary' } }] } };
+  const download = validationPageDownload(extended, exportSelection());
+  if (!download) throw new Error('Compatible additive metadata was not projected');
+  expect(decodeURIComponent(download.href)).not.toContain('PRIVATE');
+  expect(savedValidation(download.href).validationCases).toEqual(cases);
+  expect(validationPageDownload({ ...report, limitations: ['x'.repeat(MAX_VALIDATION_EXPORT_BYTES)] }, exportSelection())).toBeNull();
+  expect(validationPageDownload({ ...report, validationCases: { ...cases, items: [{ ...item, stdoutMatches: false }] } }, exportSelection())).toBeNull();
+});
+
+it('offers case-page downloads only after checked reads and replaces them when explicit pagination changes the page', async () => {
+  const first = reportFixture(), detail = first.data.validationCases!, item = detail.items[0]!;
+  detail.totalInputs = '21'; detail.matchedInputs = '21'; detail.totalPages = 2; detail.nextPage = 2;
+  first.data.summary = { result: 'passed', casesCompared: '21', sourceSha256: detail.sourceSha256 };
+  detail.items = Array.from({ length: 20 }, (_, index) => ({ ...item, caseId: `case_${index + 1}`, ordinal: String(index + 1) }));
+  const last = structuredClone(first); last.data.validationCases = { ...detail, page: 2, previousPage: 1, nextPage: null,
+    items: [{ ...item, caseId: 'case_21', ordinal: '21' }] };
+  let finish: (value: Response) => void = () => undefined;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture())).mockResolvedValueOnce(response(first))
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  vi.stubGlobal('fetch', fetcher); mount();
+  expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  await discover(); await inspect();
+  const firstLink = screen.getByRole('link', { name: 'Download this validation page JSON' });
+  expect(firstLink.getAttribute('download')).toBe('validation-page-1.json');
+  expect(savedValidation(firstLink.getAttribute('href')!).validationCases?.items).toHaveLength(20);
+  fireEvent.click(screen.getByRole('button', { name: 'Next validation cases' }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+  expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  await act(async () => { finish(response(last)); await Promise.resolve(); });
+  const link = await screen.findByRole('link', { name: 'Download this validation page JSON' });
+  expect(link.getAttribute('download')).toBe('validation-page-2.json');
+  expect(savedValidation(link.getAttribute('href')!).validationCases?.items.map(row => row.caseId)).toEqual(['case_21']);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+  for (const [, options] of fetcher.mock.calls) expect(options?.method).toBe('GET');
+});
+
+it('offers failed diagnostic downloads without a validation request or source lookup', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(failureHistoryFixture())).mockResolvedValueOnce(response(failureReportFixture()));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover();
+  fireEvent.click(screen.getByRole('button', { name: /^Inspect failure:/ }));
+  const link = await screen.findByRole('link', { name: 'Download this failure diagnostic JSON' });
+  expect(link.getAttribute('download')).toBe('validation-failure.json');
+  expect(savedValidation(link.getAttribute('href')!).validationFailure).toEqual(failureReportFixture().data.validationFailure);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  for (const [, options] of fetcher.mock.calls) expect(options?.method).toBe('GET');
+});
+
+it('removes downloaded observations on denied rereads and attempt changes', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture())).mockResolvedValueOnce(response(reportFixture()))
+    .mockResolvedValueOnce(response(fixture<ResponseOf<'error'>>('error-denied'), 403));
+  vi.stubGlobal('fetch', fetcher); const view = mount(); await discover(); await inspect();
+  expect(screen.getByRole('link', { name: 'Download this validation page JSON' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
+  expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  await screen.findByRole('alert'); expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  view.rerender(<RecordedValidationEvidence jobId={jobId} runId="run_other" basePath="/nested" />);
+  expect(screen.queryByRole('link', { name: 'Download this validation page JSON' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
 
 it('discovers owners explicitly and reads the selected historical corpus with private GETs only', async () => {
   const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture())).mockResolvedValueOnce(response(reportFixture()));
