@@ -116,3 +116,50 @@ strict offline checks must pass before #97 can close. Then #95 still needs its
 relevant hosted chain green and no unresolved required A12 issue. This source
 checkpoint, synthetic tests, missing-prerequisite refusal, or dispatch workflow
 presence does not satisfy those remaining qualification gates.
+
+## Supplemental bubblewrap profile (no provisioned runtime)
+
+The historical profile above cannot be re-acquired, and the original issue permits a new, explicitly reviewed
+supplemental reference profile. `oracle/llvm/produced_program_bwrap.py` is that profile. It is a **separate module
+and evidence schema**: it does not reuse, relabel or replace the historical OCI profile or any recorded observation,
+and its authority block states `supplementalBubblewrapProfile: true`, `historicalOciProfileReused: false` and no
+candidate, Kotlin-runtime, effectiveness or release authority.
+
+**Executor.** Stock Linux plus `bubblewrap` and GNU `ld`. No container engine, image, pinned client, subordinate
+IDs or cgroup delegation. Every sandbox uses `--unshare-all --die-with-parent --new-session --cap-drop ALL
+--clearenv`, no network, and `RLIMIT_CPU/AS/NOFILE/FSIZE/CORE` plus a 10 s wall-clock kill of the process group.
+
+- *Compilation* runs the SHA-256-pinned locked Clang (84,561,368 bytes, `65e57857…`) on the reviewed
+  `produced-program-start.s` with the unchanged literal argv. Only the exact files in the loader closure of Clang and of
+  the host linker are bound read-only, so nothing depends on a host library layout; the linker and every bound library
+  are recorded with size and SHA-256.
+- *Execution* runs the produced static ELF in an otherwise empty root (no `/proc`, `/dev`, libraries or network) and
+  requires exit 42, stdout exactly `issue97-produced-program\n` and empty stderr.
+- The whole pair runs **twice** in fresh workspaces.
+
+**Explicit contract decisions.**
+
+- Clang's only diagnostic in this sandbox is `argument unused during compilation: '-no-pie'` (there is deliberately no
+  GCC installation for the driver to probe). The reviewed argv is pinned and is not changed; this exact stderr is the
+  expected compile stderr and any other value refuses.
+- Clang names its intermediate object with random hex and GNU ld records that name once in `.strtab`, so two otherwise
+  identical links differ in exactly those six characters (observed). The contract normalizes that single
+  `start-<6 hex>.o` name and nothing else, requires exactly one occurrence, records the normalized SHA-256 beside the
+  raw one, and requires both runs to match after normalization. The raw programs are not claimed byte-identical.
+
+```sh
+python3 -B -m oracle.llvm.produced_program_bwrap \
+  --artifact-root "$PWD/build/issue97-bwrap/artifacts" \
+  --temporary-root "$PWD/build/issue97-bwrap/tmp" \
+  --json-output "$PWD/build/issue97-bwrap/evidence/produced-program-observation.json"
+python3 -B -m oracle.llvm.produced_program_bwrap --verify-observation \
+  "$PWD/build/issue97-bwrap/evidence/produced-program-observation.json"
+```
+
+Hosted: `LLVM oracle model` dispatch choice `produced-program-bwrap-observation` (installs `bubblewrap`, enables
+unprivileged user namespaces as the cc1 workflow already does, fetches the authenticated locked Clang, runs the pure
+controls, observes, then re-verifies offline). Pure controls: `python3 -B -m unittest tests.oracle.test_produced_program_bwrap`.
+
+**Limits.** Offline verification cross-binds the supplied bytes; it is not an attestation that execution occurred.
+Linker and library bytes are host-dependent and are recorded, not pinned. This is a Python compatibility reference
+observation of the locked Clang's produced program, not evidence about any reconstructed candidate.

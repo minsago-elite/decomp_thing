@@ -12,7 +12,7 @@ on:
         type: choice
         required: true
         default: native-runtime-measurement
-        options: [native-runtime-measurement, produced-program-observation, runtime-capture-host-preflight]
+        options: [native-runtime-measurement, produced-program-observation, produced-program-bwrap-observation, runtime-capture-host-preflight]
       listener_continuity:
         description: "Opt in to schema-v3 kernel listener continuity; never authenticates the responder or approves a runtime"
         type: boolean
@@ -770,6 +770,71 @@ jobs:
         with:
           name: llvm-produced-program-compatibility-observation
           path: build/issue97-live/evidence
+          if-no-files-found: warn
+
+  produced-program-bwrap-observation:
+    # Supplemental reference profile (issue 97): stock ubuntu-24.04 plus bubblewrap, no historical OCI image,
+    # pinned Docker client, subordinate IDs or cgroup delegation. Separate from the historical job above.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'produced-program-bwrap-observation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/issue97-bwrap/gradle-home
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/issue97-bwrap/cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/issue97-bwrap/config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/issue97-bwrap/data
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=${{ github.workspace }}/build/issue97-bwrap/tmp -Djna.tmpdir=${{ github.workspace }}/build/issue97-bwrap/tmp -Duser.home=${{ github.workspace }}/build/issue97-bwrap/home
+      TMPDIR: ${{ github.workspace }}/build/issue97-bwrap/tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create repository-owned observation paths
+        run: install -d -m 0700 build/issue97-bwrap/tmp build/issue97-bwrap/home build/issue97-bwrap/evidence
+      - name: Install bubblewrap and allow unprivileged user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap binutils
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-all --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --symlink usr/bin /bin /usr/bin/true
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: true
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/issue97-bwrap/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/issue97-bwrap/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Fetch authenticated locked Clang artifacts
+        run: |
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+            --args="$GITHUB_WORKSPACE/build/issue97-bwrap/artifacts"
+      - name: Run pure supplemental-profile controls
+        run: python3 -B -m unittest tests.oracle.test_produced_program_bwrap -v
+      - name: Observe locked Clang compilation and exact produced-program execution under bubblewrap
+        env:
+          HOME: ${{ github.workspace }}/build/issue97-bwrap/home
+        run: |
+          python3 -B -m oracle.llvm.produced_program_bwrap \
+            --artifact-root "$GITHUB_WORKSPACE/build/issue97-bwrap/artifacts" \
+            --temporary-root "$GITHUB_WORKSPACE/build/issue97-bwrap/tmp" \
+            --json-output "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/produced-program-observation.json"
+      - name: Verify the retained observation offline
+        run: |
+          python3 -B -m oracle.llvm.produced_program_bwrap \
+            --verify-observation "$GITHUB_WORKSPACE/build/issue97-bwrap/evidence/produced-program-observation.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: llvm-produced-program-bwrap-observation
+          path: build/issue97-bwrap/evidence
           if-no-files-found: warn
 
   runtime-capture-host-preflight:
