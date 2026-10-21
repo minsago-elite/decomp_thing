@@ -563,7 +563,9 @@ class RecordedRepairValidationDiagnosticTest {
     @Test fun `failure detail rejects stale runtime configuration even when receipt and diagnostic hashes agree`() {
         val f = apiFailureFixture()
         val runtime = AuthoredValidationReceiptMetadata.runtime
-        val changed = JsonObject(runtime + ("sandboxConfigurationSha256" to JsonPrimitive("9".repeat(64))))
+        val changed = JsonObject(runtime + ("sandboxConfigurationSha256" to JsonPrimitive("8".repeat(64))))
+        kotlin.test.assertNotEquals(runtime, changed)
+        kotlin.test.assertNotEquals(f.binding.runtimeSha256, sha256(OracleJson.canonicalBytes(changed)))
         val bad = withPrimary(f, JsonObject(f.primary + ("runtimeConfiguration" to changed)))
         assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
         val report = failureReport(bad)
