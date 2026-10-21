@@ -70,6 +70,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/report-normal-not-recorded.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/report-invalid.json",
       "valid": true
     },
@@ -651,6 +655,39 @@
     },
     {
       "file": "fixtures/invalid-revision-file-path-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-normal-cases.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-report-case-preview-truncation.json",
+      "valid": false,
+      "reason": "A bounded preview must state truncation from its exact observed and prefix byte counts."
+    },
+    {
+      "file": "fixtures/validation-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-history-unrecorded-inspection.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/report-validation-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/validation-history-failure.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-failure-position.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-history-failure-borrow.json",
       "valid": false
     }
   ]

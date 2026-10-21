@@ -1,0 +1,49 @@
+{
+  "apiVersion": 1,
+  "kind": "validationHistory",
+  "requestId": "request_recorded_cases",
+  "data": {
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_selected",
+      "revisionId": null
+    },
+    "authority": "recorded-metadata",
+    "state": "recorded",
+    "graphSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "corpusSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 1,
+    "previousPage": null,
+    "nextPage": null,
+    "items": [
+      {
+        "ownerKind": "run-baseline",
+        "ownerId": "run_00000001",
+        "identityWithheld": false,
+        "hasReceipt": true,
+        "canInspect": true,
+        "candidateId": "root_111111111111111111111111",
+        "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "corpusSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "normalOutcome": "behavior-checked"
+      },
+      {
+        "ownerKind": "run-failure",
+        "ownerId": "run_00000001",
+        "identityWithheld": false,
+        "hasReceipt": true,
+        "canInspect": true,
+        "candidateId": "revision_00000001_eeeeeeeeeeeeeeee",
+        "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "corpusSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "normalOutcome": "compile-valid",
+        "failureKind": "resource-exhausted"
+      }
+    ],
+    "limitations": [
+      "Recorded metadata only; inspecting a receipt does not run validation or accept a repair."
+    ]
+  }
+}

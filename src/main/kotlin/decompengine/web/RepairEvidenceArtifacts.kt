@@ -66,20 +66,32 @@ internal const val MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS = 100
 internal fun visibleRecordedRepairAttempts(snapshot: RepairHistorySnapshot): List<RepairRecordedAttempt> =
     RepairRecordedHistoryPage.select(snapshot, RepairRecordedHistorySelection(), MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS).attempts
 
-internal data class RecordedRepairHistoryQuery(val runId: String?, val selection: RepairRecordedHistorySelection)
+internal data class RecordedRepairHistoryQuery(val runId: String?, val selection: RepairRecordedHistorySelection,
+    val validationCasePageNumber: Int = 1) {
+    init {
+        require(validationCasePageNumber > 0 && (validationCasePageNumber == 1 ||
+            selection.expectedGraphSha256 != null && (selection.evidenceAttempt != null || selection.evidenceRun != null))) {
+            "Recorded validation case selection is invalid."
+        }
+    }
+}
 internal fun parseRecordedRepairHistoryQuery(raw: String?): RecordedRepairHistoryQuery {
     if (raw == null) return RecordedRepairHistoryQuery(null, RepairRecordedHistorySelection())
     require(raw.isNotEmpty() && raw.length <= 512) { "Recorded history query is invalid." }
     val values = linkedMapOf<String, String>()
     for (part in raw.split('&')) {
         val pair = part.split('=', limit = 2)
-        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph", "historyEvidence", "historyRunEvidence") &&
+        require(pair.size == 2 && pair[0] in setOf("runId", "historyPage", "historyCasesPage", "historyGraph", "historyEvidence", "historyRunEvidence", "historyValidationPage") &&
             values.put(pair[0], pair[1]) == null) { "Recorded history query is invalid." }
     }
     val run = values["runId"]
     require(run == null || run.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Recorded history query is invalid." }
+    val validationPage = values["historyValidationPage"]?.let { value ->
+        require(value.matches(Regex("[1-9][0-9]{0,9}"))) { "Recorded validation case page is invalid." }
+        requireNotNull(value.toIntOrNull()) { "Recorded validation case page is invalid." }
+    } ?: 1
     return RecordedRepairHistoryQuery(run, parseRecordedRepairSelection(
-        values["historyPage"], values["historyCasesPage"], values["historyGraph"], values["historyEvidence"], values["historyRunEvidence"]))
+        values["historyPage"], values["historyCasesPage"], values["historyGraph"], values["historyEvidence"], values["historyRunEvidence"]), validationPage)
 }
 
 internal data class RecordedRepairHistoryView(
@@ -91,6 +103,7 @@ internal data class RecordedRepairHistoryView(
     val runId: String? = null,
     val validationDiagnostics: Map<RepairRecordedIdentity, RecordedRepairValidationDiagnosticView> = emptyMap(),
     val validationObservations: Map<RepairRecordedIdentity, RecordedRepairValidationObservationView> = emptyMap(),
+    val validationCasePageNumber: Int = 1,
 )
 
 internal fun recordedRepairArtifactReferences(snapshot: RepairHistorySnapshot): Set<RepairRecordedArtifactReference> =

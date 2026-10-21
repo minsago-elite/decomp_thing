@@ -22,7 +22,7 @@ const lookup = (values: Record<string, string>) => (name: string) => values[name
 it('copies exact source identities into a closed download route without treating labels or acceptance as authority', () => {
   const value = metadata(); value.item.displayName = '<script>https://example.invalid/private</script>';
   const expected = sourceDigestExpectation(value);
-  expect(expected.route).toBe(`/jobs/${value.binding.jobId}/runs/run_1/revisions/revision_1/source-files/${value.item.fileId}/content`);
+  expect(expected.route).toBe(`/jobs/${value.binding.jobId}/runs/run_1/revisions/revision_1/source-files/${value.item.fileId}/content?metadataVersion=${value.metadataVersion}`);
   value.binding.runId = 'changed'; value.item.sha256 = 'f'.repeat(64); value.item.sizeBytes = '0';
   expect(expected.runId).toBe('run_1'); expect(expected.sha256).toBe('e'.repeat(64)); expect(expected.sizeBytes).toBe('42');
   expect(Object.isFrozen(expected)).toBe(true);

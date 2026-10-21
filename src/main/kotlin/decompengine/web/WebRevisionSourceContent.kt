@@ -8,6 +8,13 @@ import kotlinx.serialization.json.*
 
 internal enum class WebSourceReadPurpose { PREVIEW, DOWNLOAD }
 
+/** Optional commitment restricts the existing download capture; it never selects a path or grants access. */
+internal fun parseWebSourceDownloadVersion(raw: String?): String? {
+    if (raw.isNullOrEmpty()) return null
+    if (raw.length <= 128) Regex("metadataVersion=([a-f0-9]{64})").matchEntire(raw)?.let { return it.groupValues[1] }
+    throw WebAccessDenied(422, "VALIDATION_FAILED", "Source downloads accept only one canonical metadataVersion commitment.")
+}
+
 internal fun revisionSourceFileIndex(fileId: String): Int {
     val match = Regex("file_(0|[1-9][0-9]{0,4})_([a-f0-9]{64})").matchEntire(fileId) ?: sourceFileNotFound()
     return match.groupValues[1].toInt().also { if (it >= WebSourceCatalogSnapshot.MAXIMUM_FILES) sourceFileNotFound() }

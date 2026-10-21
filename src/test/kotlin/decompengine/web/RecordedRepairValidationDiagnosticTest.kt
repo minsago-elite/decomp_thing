@@ -5,6 +5,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCValidationFailurePhase
 import decompengine.project.GeneratedCValidationFailureReason
 import decompengine.project.GeneratedCValidationFailureRecord
+import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.sha256
 import decompengine.repair.*
 import kotlinx.serialization.json.JsonArray
@@ -277,4 +278,406 @@ class RecordedRepairValidationDiagnosticTest {
             assertEquals(RepairEvidenceArtifactState.CORRUPT, view(f.copy(binding = f.binding.copy(receiptBytes = bytes))).state)
         }
     }
+
+    private val apiJob = "a".repeat(32)
+    private val apiRun = "run_selected"
+    private val failureQuery get() = "historyGraph=$graph&historyFailureRun=run_00000001"
+    private fun apiFailureFixture(): Fixture {
+        val f = fixture()
+        val corpus = recordedNormalValidationCorpusSha256(f.primary.getValue("inputs") as JsonArray)
+        val invocation = invocation().copy(regressionCorpusSha256 = corpus, sourceRevisionSha256 = AuthoredValidationReceiptMetadata.sourceSha256)
+        val value = JsonObject(f.primary + mapOf("regressionCorpusSha256" to JsonPrimitive(corpus),
+            "profileId" to JsonPrimitive(AuthoredValidationReceiptMetadata.profileId),
+            "runtimeConfiguration" to AuthoredValidationReceiptMetadata.runtime,
+            "runtimeSha256" to JsonPrimitive(AuthoredValidationReceiptMetadata.runtimeSha256),
+            "behaviorBudgetEvidence" to GeneratedCValidationBudgetPolicy.DEFAULT.admit(AuthoredValidationReceiptMetadata.context.budget),
+            "sourceRevisionSha256" to JsonPrimitive(invocation.sourceRevisionSha256),
+            "sourceSnapshot" to AuthoredValidationReceiptMetadata.snapshot))
+        val receipt = OracleJson.canonicalBytes(value)
+        val record = f.record.copy(receiptSha256 = sha256(receipt), regressionCorpusSha256 = corpus,
+            runtimeSha256 = AuthoredValidationReceiptMetadata.runtimeSha256,
+            sourceRevisionSha256 = invocation.sourceRevisionSha256, invocation = invocation)
+        val diagnostic = record.encode()
+        // Artifact references belong to the current graph corpus; the receipt proof has its own historical corpus.
+        return f.copy(primary = value, receipt = receipt, diagnostic = diagnostic, record = record,
+            binding = f.binding.copy(invocationSha256 = invocation.commitmentSha256(), regressionCorpusSha256 = corpus,
+                runtimeSha256 = AuthoredValidationReceiptMetadata.runtimeSha256,
+                sourceRevisionSha256 = invocation.sourceRevisionSha256, context = AuthoredValidationReceiptMetadata.context,
+                receiptSha256 = sha256(receipt), receiptBytes = receipt.size.toLong(),
+                diagnosticSha256 = sha256(diagnostic), diagnosticBytes = diagnostic.size))
+    }
+    private fun apiFailureVariant(f: Fixture, reason: GeneratedCValidationFailureReason,
+        phase: GeneratedCValidationFailurePhase, index: Int? = null, completed: Int = 0): Fixture {
+        val kind = reason.classification
+        val changed = f.withRecord(f.record.copy(classification = kind, reason = reason, phase = phase, inputIndex = index))
+            .let { it.copy(binding = it.binding.copy(failureKind = kind, cleanupVerified = kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED)) }
+        return withPrimary(changed, JsonObject(changed.primary + mapOf(
+            "outcome" to JsonPrimitive(kind.name.lowercase().replace('_', '-')),
+            "cleanupVerified" to JsonPrimitive(kind != RepairValidationFailureKind.CLEANUP_UNVERIFIED), "caseCount" to JsonPrimitive(completed))))
+    }
+    private fun apiFailureSnapshot(f: Fixture): RepairHistorySnapshot {
+        val base = snapshot(f.binding)
+        return RepairHistorySnapshot(base.graphSha256, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, base.runs.map { it.copy(corpusSha256 = f.binding.regressionCorpusSha256) }, emptyList(), null, emptyList())
+    }
+    private fun failurePage(f: Fixture, selection: RepairRecordedHistorySelection = parseWebValidationFailureQuery(failureQuery)) =
+        RepairRecordedHistoryPage.select(apiFailureSnapshot(f), selection, 20)
+    private fun failureCapture(f: Fixture, primary: ByteArray? = f.receipt, diagnostic: ByteArray? = f.diagnostic) =
+        WebRevisionValidationFailureCapture(failurePage(f), primary, diagnostic)
+    private fun failureReport(f: Fixture, primary: ByteArray? = f.receipt, diagnostic: ByteArray? = f.diagnostic) =
+        recordedValidationFailureReport(apiJob, apiRun, failureCapture(f, primary, diagnostic))
+    private val failureContext get() = WebReportContext(java.nio.file.Path.of("authored"), "reports/runs/$apiRun", apiRun)
+    private fun failureArtifacts(f: Fixture) = listOf(
+        WebArtifactSummary("reports/runs/$apiRun/source-tree/reports/fixture.validation.json", "PRIVATE-receipt", f.binding.receiptBytes),
+        WebArtifactSummary("reports/runs/$apiRun/source-tree/reports/${invocation().id}.validation-failure.json", "PRIVATE-diagnostic", f.binding.diagnosticBytes.toLong()))
+    private fun failureField(report: JsonObject, name: String) = (report.getValue("validationFailure") as JsonObject).getValue(name)
+    private fun reportState(report: JsonObject) = (report.getValue("state") as JsonPrimitive).content
+
+    @Test fun `failed operation query requires one canonical graph and exclusive run before capture`() {
+        var captures = 0
+        val reports = WebRevisionValidationReports { _, _, _ -> error("normal capture must not run") }
+        for (raw in listOf(null, "", "historyFailureRun=run_00000001", "historyGraph=$graph",
+            "$failureQuery&historyRunEvidence=run_00000001", "$failureQuery&historyEvidence=revision_1",
+            "$failureQuery&historyFailureRun=run_00000001", "$failureQuery&historyValidationPage=2",
+            "$failureQuery&historyPage=02", "$failureQuery&PRIVATE=1", failureQuery.replace("run_00000001", "..%2FPRIVATE"))) {
+            assertEquals(400, assertFailsWith<WebAccessDenied> { reports.failure(apiJob, apiRun, raw) { _, _, _ ->
+                captures++; error("invalid failure selection was captured") } }.status)
+        }
+        assertEquals(0, captures)
+        assertEquals("run_00000001", parseWebValidationFailureQuery(failureQuery).evidenceRun)
+    }
+    @Test fun `failed operation report exposes bound finite diagnostics without case comparison authority`() {
+        val f = apiFailureFixture(); val report = failureReport(f)
+        assertEquals("available", reportState(report)); assertEquals(JsonPrimitive("observations"), report.getValue("authority"))
+        assertEquals(JsonPrimitive("not-evaluated"), report.getValue("acceptance"))
+        for (key in listOf("summary", "sourceArtifact", "acceptanceArtifactId", "validationCases")) assertEquals(JsonNull, report.getValue(key))
+        assertEquals(JsonPrimitive("producer-diagnostic"), failureField(report, "authority"))
+        assertEquals(JsonPrimitive("timeout"), failureField(report, "reason"))
+        assertEquals(JsonPrimitive("source-preparation"), failureField(report, "phase"))
+        assertEquals(JsonPrimitive(f.binding.regressionCorpusSha256), failureField(report, "corpusSha256"))
+        assertEquals(JsonPrimitive("3"), failureField(report, "inputCount")); assertEquals(JsonNull, failureField(report, "inputOrdinal"))
+        assertFalse(report.toString().contains("PRIVATE"))
+    }
+    @Test fun `all finite failure reasons and enclosing phases retain their recorded distinctions`() {
+        val f = apiFailureFixture()
+        for (reason in GeneratedCValidationFailureReason.entries) for (phase in GeneratedCValidationFailurePhase.entries) {
+            val report = failureReport(apiFailureVariant(f, reason, phase, if (phase.hasCase) 0 else null))
+            assertEquals("available", reportState(report))
+            assertEquals(JsonPrimitive(reason.wireName), failureField(report, "reason"))
+            assertEquals(JsonPrimitive(phase.wireName), failureField(report, "phase"))
+            assertEquals(JsonPrimitive(reason != GeneratedCValidationFailureReason.CLEANUP_UNVERIFIED), failureField(report, "reportedCleanupVerified"))
+            assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+    }
+    @Test fun `failed operation case position is one based and retains only reported completed prefix`() {
+        val f = apiFailureVariant(apiFailureFixture(), GeneratedCValidationFailureReason.TIMEOUT,
+            GeneratedCValidationFailurePhase.REBUILT_OPERATION, index = 1, completed = 1)
+        val report = failureReport(f)
+        assertEquals("available", reportState(report)); assertEquals(JsonPrimitive("2"), failureField(report, "inputOrdinal"))
+        assertEquals(JsonPrimitive("1"), failureField(report, "reportedCompletedPairs")); assertEquals(JsonNull, report.getValue("summary"))
+    }
+    @Test fun `failed operation metadata rejects inconsistent phase position prefix and corpus`() {
+        val f = apiFailureFixture()
+        val missingPosition = apiFailureVariant(f, GeneratedCValidationFailureReason.TIMEOUT, GeneratedCValidationFailurePhase.BEFORE_CASE)
+        val wrongPrefix = apiFailureVariant(f, GeneratedCValidationFailureReason.TIMEOUT, GeneratedCValidationFailurePhase.REBUILT_OPERATION, index = 1)
+        val earlyPairs = apiFailureVariant(f, GeneratedCValidationFailureReason.TIMEOUT, GeneratedCValidationFailurePhase.BUILD, completed = 1)
+        for (value in listOf(missingPosition, wrongPrefix, earlyPairs, fixture())) {
+            val report = failureReport(value); assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        }
+    }
+    @Test fun `missing failed operation receipt and required diagnostic remain distinct unavailable states`() {
+        val f = apiFailureFixture()
+        for (primary in listOf(null, byteArrayOf())) {
+            val report = failureReport(f, primary = primary)
+            assertEquals("unknown", reportState(report)); assertEquals(JsonNull, report.getValue("producerSchemaVersion"))
+        }
+        for (diagnostic in listOf(null, byteArrayOf())) {
+            val report = failureReport(f, diagnostic = diagnostic)
+            assertEquals("partial", reportState(report)); assertEquals(JsonPrimitive(2), report.getValue("producerSchemaVersion"))
+            assertEquals(JsonNull, report.getValue("validationFailure"))
+        }
+    }
+    @Test fun `unsupported failed receipt schema and corrupt bound bytes never expose failure labels`() {
+        val f = apiFailureFixture(); val unsupported = withPrimary(f, JsonObject(f.primary + ("schemaVersion" to JsonPrimitive(3))))
+        assertEquals("unsupported", reportState(failureReport(unsupported)))
+        for (report in listOf(failureReport(f, primary = byteArrayOf(1)), failureReport(f, diagnostic = byteArrayOf(1)),
+            failureReport(f.copy(binding = f.binding.copy(sourceRevisionSha256 = "9".repeat(64)))))) {
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertFalse(report.toString().contains("PRIVATE"))
+        }
+    }
+    @Test fun `absent failure binding cannot borrow a baseline receipt or invent a fatal outcome`() {
+        val f = apiFailureFixture(); val selected = RepairRecordedHistoryPage.select(snapshot(null), parseWebValidationFailureQuery(failureQuery), 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(selected, f.receipt, f.diagnostic))
+        assertEquals("unknown", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        assertEquals(JsonNull, report.getValue("producerSchemaVersion"))
+    }
+    @Test fun `failed receipt selection refuses stale graph and missing owner before any payload work`() {
+        val f = apiFailureFixture(); var payloads = 0
+        for (selection in listOf(RepairRecordedHistorySelection(expectedGraphSha256 = "9".repeat(64), evidenceRun = "run_00000001"),
+            RepairRecordedHistorySelection(expectedGraphSha256 = graph, evidenceRun = "run_00000002"))) {
+            assertFailsWith<WebAccessDenied> { captureRecordedValidationFailureReport(selection, failureContext, { "v1" },
+                { RepairHistoryReadResult.recorded(apiFailureSnapshot(f)) }, { _, _ -> payloads++; failureArtifacts(f) },
+                { _, _ -> payloads++; error("payload must not be read") }) }
+        }
+        assertEquals(0, payloads)
+    }
+    @Test fun `failed receipt and diagnostic capture use checked targets and one shared byte allowance`() {
+        val f = apiFailureFixture(); val reads = mutableListOf<Pair<String, Long>>()
+        val capture = captureRecordedValidationFailureReport(parseWebValidationFailureQuery(failureQuery), failureContext, { "v1" },
+            { RepairHistoryReadResult.recorded(apiFailureSnapshot(f)) }, { _, _ -> failureArtifacts(f) }, { target, maximum ->
+                reads += target to maximum
+                if (target.endsWith(".validation-failure.json")) f.diagnostic else f.receipt })
+        assertEquals(2, reads.size); assertEquals(f.binding.receiptBytes, reads[0].second)
+        assertEquals(f.binding.diagnosticBytes.toLong(), reads[1].second)
+        assertEquals("available", reportState(recordedValidationFailureReport(apiJob, apiRun, capture)))
+        val oversized = f.binding.copy(receiptBytes = MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES)
+        var calls = 0
+        val withheld = captureRecordedValidationFailureReport(parseWebValidationFailureQuery(failureQuery), failureContext, { "v1" },
+            { RepairHistoryReadResult.recorded(apiFailureSnapshot(f.copy(binding = oversized))) }, { _, _ -> failureArtifacts(f) }, { _, maximum ->
+                calls++; assertEquals(MAXIMUM_RECORDED_REPAIR_EVIDENCE_REQUEST_BYTES, maximum); null })
+        assertEquals(1, calls); assertNull(withheld.primary); assertNull(withheld.diagnostic)
+    }
+    @Test fun `failed receipt capture rejects graph and durable attempt mutation after bounded reads`() {
+        val f = apiFailureFixture()
+        for (changeGraph in listOf(false, true)) {
+            var read = false
+            assertEquals(409, assertFailsWith<WebAccessDenied> { captureRecordedValidationFailureReport(
+                parseWebValidationFailureQuery(failureQuery), failureContext, { if (read && !changeGraph) "v2" else "v1" },
+                { val before = apiFailureSnapshot(f)
+                    if (read && changeGraph) RepairHistoryReadResult.recorded(RepairHistorySnapshot("9".repeat(64), 4,
+                        RepairRecordedGraphWire.COMPACT, before.corpusSha256, before.publishedHead, null, null, before.runs, emptyList(), null, emptyList()))
+                    else RepairHistoryReadResult.recorded(before) }, { _, _ -> failureArtifacts(f) },
+                { target, _ -> read = true; if (target.endsWith(".validation-failure.json")) f.diagnostic else f.receipt }) }.status)
+        }
+    }
+    @Test fun `failure history discovers distinct candidates and historical corpus without reading receipts`() {
+        val f = apiFailureFixture(); val before = apiFailureSnapshot(f)
+        val history = webValidationHistory(apiJob, apiRun, WebValidationHistoryCapture(RepairHistoryReadResult.recorded(before),
+            RepairRecordedHistoryPage.select(before, RepairRecordedHistorySelection(), 20)))
+        val rows = history.getValue("items") as JsonArray
+        assertEquals(2, rows.size)
+        val baseline = rows[0] as JsonObject; val failure = rows[1] as JsonObject
+        assertEquals(JsonPrimitive(false), baseline.getValue("hasReceipt"))
+        assertEquals(JsonPrimitive("run-failure"), failure.getValue("ownerKind")); assertEquals(JsonNull, failure.getValue("normalOutcome"))
+        assertEquals(JsonPrimitive("resource-exhausted"), failure.getValue("failureKind"))
+        assertEquals(JsonPrimitive(f.binding.regressionCorpusSha256), failure.getValue("corpusSha256"))
+        assertTrue(failure.getValue("corpusSha256") != history.getValue("corpusSha256"))
+        assertFalse(history.toString().contains("PRIVATE"))
+    }
+    @Test fun `failed operation report identity binds both artifacts and cannot collide with normal baseline`() {
+        val f = apiFailureFixture(); val report = failureReport(f)
+        val changed = f.withRecord(f.record.copy(reason = GeneratedCValidationFailureReason.RESOURCE_EXHAUSTED))
+        assertTrue(report.getValue("reportId") != failureReport(changed).getValue("reportId"))
+        val baseline = recordedValidationReport(apiJob, apiRun, WebRevisionValidationCapture(failurePage(f), null, null))
+        assertTrue(report.getValue("reportId") != baseline.getValue("reportId"))
+        assertEquals(JsonPrimitive(f.binding.candidate.value), (report.getValue("binding") as JsonObject).getValue("revisionId"))
+    }
+    @Test fun `failure normal and discovery reads share admission and release it after a failed callback`() {
+        val f = apiFailureFixture(); val reports = WebRevisionValidationReports { _, _, _ ->
+            WebRevisionValidationCapture(failurePage(f), null, null) }
+        assertFailsWith<IllegalStateException> { reports.failure(apiJob, apiRun, failureQuery) { _, _, _ ->
+            assertEquals(429, assertFailsWith<WebAccessDenied> { reports.read(apiJob, apiRun, failureQuery.replace("historyFailureRun", "historyRunEvidence")) }.status)
+            assertEquals(429, assertFailsWith<WebAccessDenied> { reports.history(apiJob, apiRun, null) { _, _, _ -> error("busy") } }.status)
+            assertEquals(429, assertFailsWith<WebAccessDenied> { reports.failure(apiJob, apiRun, failureQuery) { _, _, _ -> error("busy") } }.status)
+            error("authored callback failure")
+        } }
+        assertEquals("available", reportState(reports.failure(apiJob, apiRun, failureQuery) { _, _, _ -> failureCapture(f) }))
+    }
+
+    @Test fun `failure history windows bound all three owner families and pending to sixty one rows`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        fun attempt(index: Int, kind: RepairRecordedAttemptKind = RepairRecordedAttemptKind.FINALIZED) = RepairRecordedAttempt(
+            kind, RepairRecordedIdentity("revision_$index", false), null, index, null, null, null, null, null, null,
+            emptyList(), null, RepairRecordedFailureKind.OTHER, null, null)
+        val all = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, base.corpusSha256,
+            base.publishedHead, null, null, (1..25).map { base.runs.single().copy(identity = RepairRecordedIdentity("run_$it", false)) },
+            (1..25).map { attempt(it) }, attempt(26, RepairRecordedAttemptKind.PENDING), emptyList())
+        fun page(number: Int): JsonObject {
+            val selection = RepairRecordedHistorySelection(pageNumber = number, expectedGraphSha256 = graph)
+            return webValidationHistory(apiJob, apiRun, WebValidationHistoryCapture(RepairHistoryReadResult.recorded(all),
+                RepairRecordedHistoryPage.select(all, selection, 20)))
+        }
+        val first = page(1).getValue("items") as JsonArray; val second = page(2).getValue("items") as JsonArray
+        assertEquals(61, first.size); assertEquals(15, second.size)
+        val keys = (first + second).map { (it as JsonObject).let { row -> row.getValue("ownerKind") to row.getValue("ownerId") } }
+        assertEquals(76, keys.toSet().size)
+    }
+    @Test fun `withheld failed operation references cannot expose candidate commitments or diagnostic detail`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        val run = base.runs.single().copy(identity = RepairRecordedIdentity("run_00000001", true))
+        val withheld = RepairHistorySnapshot(graph, 4, RepairRecordedGraphWire.COMPACT, base.corpusSha256,
+            base.publishedHead, null, null, listOf(run), emptyList(), null, emptyList())
+        val page = RepairRecordedHistoryPage.select(withheld, parseWebValidationFailureQuery(failureQuery), 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
+        assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        val history = webValidationHistory(apiJob, apiRun, WebValidationHistoryCapture(RepairHistoryReadResult.recorded(withheld),
+            RepairRecordedHistoryPage.select(withheld, RepairRecordedHistorySelection(), 20)))
+        for (value in history.getValue("items") as JsonArray) {
+            val row = value as JsonObject; assertEquals(JsonPrimitive(false), row.getValue("canInspect"))
+            for (key in listOf("candidateId", "sourceSha256", "corpusSha256")) assertEquals(JsonNull, row.getValue(key))
+        }
+        assertFalse(report.toString().contains("PRIVATE")); assertFalse(history.toString().contains("PRIVATE"))
+    }
+
+    @Test fun `failure projection refuses an otherwise valid invocation attached to another selected run`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        val crossPaired = RepairHistorySnapshot(graph, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, listOf(base.runs.single().copy(identity = RepairRecordedIdentity("run_00000002", false))), emptyList(), null, emptyList())
+        val selection = parseWebValidationFailureQuery(failureQuery.replace("run_00000001", "run_00000002"))
+        val page = RepairRecordedHistoryPage.select(crossPaired, selection, 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+    }
+    @Test fun `failure projection binds the selected run corpus while allowing a different current graph corpus`() {
+        val f = apiFailureFixture(); val base = apiFailureSnapshot(f)
+        assertTrue(base.corpusSha256 != f.binding.regressionCorpusSha256)
+        assertEquals("available", reportState(failureReport(f)))
+        val crossPaired = RepairHistorySnapshot(graph, 4, base.graphWire, base.corpusSha256, base.publishedHead,
+            null, null, listOf(base.runs.single().copy(corpusSha256 = "9".repeat(64))), emptyList(), null, emptyList())
+        val page = RepairRecordedHistoryPage.select(crossPaired, parseWebValidationFailureQuery(failureQuery), 20)
+        val report = recordedValidationFailureReport(apiJob, apiRun, WebRevisionValidationFailureCapture(page, f.receipt, f.diagnostic))
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+    }
+    @Test fun `failed receipt inventories must recompute the selected revision even when every receipt hash is rebound`() {
+        val f = apiFailureFixture(); val original = AuthoredValidationReceiptMetadata.snapshot
+        val changedFiles = JsonArray((original.getValue("files") as JsonArray).map { element ->
+            JsonObject((element as JsonObject) + ("sha256" to JsonPrimitive("a".repeat(64)))) })
+        for (manifest in listOf(original.getValue("manifestSha256"), JsonPrimitive(sha256(OracleJson.canonicalBytes(changedFiles))))) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to JsonObject(original + mapOf(
+                "files" to changedFiles, "manifestSha256" to manifest)))))
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertEquals("available", reportState(failureReport(f)))
+    }
+    @Test fun `failures before retained source capture or without graph context remain unattributed partial reports`() {
+        val f = apiFailureFixture()
+        for (value in listOf(withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to JsonNull))),
+                f.copy(binding = f.binding.copy(context = null)))) {
+            val report = failureReport(value)
+            assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+    }
+
+    @Test fun `failure detail rejects stale runtime configuration even when receipt and diagnostic hashes agree`() {
+        val f = apiFailureFixture()
+        val runtime = AuthoredValidationReceiptMetadata.runtime
+        val changed = JsonObject(runtime + ("sandboxConfigurationSha256" to JsonPrimitive("8".repeat(64))))
+        kotlin.test.assertNotEquals(runtime, changed)
+        kotlin.test.assertNotEquals(f.binding.runtimeSha256, sha256(OracleJson.canonicalBytes(changed)))
+        val bad = withPrimary(f, JsonObject(f.primary + ("runtimeConfiguration" to changed)))
+        assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+        val report = failureReport(bad)
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        assertFalse(report.toString().contains("PRIVATE"))
+        assertEquals("available", reportState(failureReport(f)))
+    }
+
+    @Test fun `failure detail requires canonical runtime shape profile tools and mounts after coherent digest rebinding`() {
+        val f = apiFailureFixture(); val runtime = AuthoredValidationReceiptMetadata.runtime
+        val configuration = runtime.getValue("runtime") as JsonObject
+        fun configured(fields: Map<String, kotlinx.serialization.json.JsonElement>) =
+            JsonObject(runtime + ("runtime" to JsonObject(configuration + fields)))
+        fun rebound(value: JsonObject): Fixture {
+            val digest = sha256(OracleJson.canonicalBytes(value))
+            val changed = withPrimary(f, JsonObject(f.primary + mapOf(
+                "runtimeConfiguration" to value, "runtimeSha256" to JsonPrimitive(digest))))
+            return changed.withRecord(changed.record.copy(runtimeSha256 = digest)).let {
+                it.copy(binding = it.binding.copy(runtimeSha256 = digest)) }
+        }
+        val variants = listOf(JsonObject(runtime + ("extra" to JsonPrimitive(true))),
+            configured(mapOf("profileId" to JsonPrimitive("PRIVATE-other-profile"))),
+            configured(mapOf("schemaVersion" to JsonPrimitive("1"))),
+            configured(mapOf("tools" to JsonObject(emptyMap()))),
+            configured(mapOf("sourceTmpfs" to JsonPrimitive("PRIVATE-relative"))),
+            configured(mapOf("sourceTmpfs" to JsonPrimitive("/PRIVATE-source/../PRIVATE-source"))),
+            configured(mapOf("outputTmpfs" to configuration.getValue("sourceTmpfs"))))
+        for (value in variants) {
+            val bad = rebound(value)
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            assertFalse(report.toString().contains("PRIVATE"))
+        }
+        val valid = rebound(configured(mapOf("sandboxConfigurationFile" to JsonPrimitive("/PRIVATE-runtime/other-config"))))
+        assertEquals("available", reportState(failureReport(valid)))
+    }
+
+    @Test fun `producer empty source snapshot keeps early failures partial without source attributed labels`() {
+        val f = apiFailureFixture()
+        val empty = withPrimary(f, JsonObject(f.primary + mapOf(
+            "sourceSnapshot" to JsonObject(emptyMap()), "buildOutputLink" to JsonObject(emptyMap()))))
+        for (reason in GeneratedCValidationFailureReason.entries) {
+            val value = apiFailureVariant(empty, reason, GeneratedCValidationFailurePhase.SOURCE_PREPARATION)
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(value).state)
+            val report = failureReport(value)
+            assertEquals("partial", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+            assertFalse(report.toString().contains("PRIVATE"))
+        }
+    }
+
+    @Test fun `nonempty malformed snapshot lookalikes never become the producer unavailable sentinel`() {
+        val f = apiFailureFixture(); val snapshot = AuthoredValidationReceiptMetadata.snapshot
+        val emptyFiles = JsonArray(emptyList())
+        val variants = listOf(JsonObject(mapOf("extra" to JsonPrimitive(true))),
+            JsonObject(mapOf("files" to emptyFiles)), JsonArray(emptyList()),
+            JsonObject(snapshot + mapOf("files" to emptyFiles,
+                "manifestSha256" to JsonPrimitive(sha256(OracleJson.canonicalBytes(emptyFiles))))))
+        for (value in variants) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to value)))
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        assertEquals("available", reportState(failureReport(f)))
+    }
+
+    @Test fun `source bound failure details require the exact selected behavior budget evidence`() {
+        val f = apiFailureFixture(); val context = requireNotNull(f.binding.context)
+        val original = GeneratedCValidationBudgetPolicy.DEFAULT.admit(context.budget)
+        val otherBudget = context.budget.copy(maximumBehaviorStdoutBytes = context.budget.maximumBehaviorStdoutBytes - 1)
+        val other = GeneratedCValidationBudgetPolicy.DEFAULT.admit(otherBudget)
+        kotlin.test.assertNotEquals(original, other)
+        for (value in listOf(JsonObject(emptyMap()), JsonObject(original + ("extra" to JsonPrimitive(true))), other)) {
+            val bad = withPrimary(f, JsonObject(f.primary + ("behaviorBudgetEvidence" to value)))
+            assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+            val report = failureReport(bad)
+            assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+            assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        }
+        val changedContext = f.copy(binding = f.binding.copy(context = context.copy(budget = otherBudget)))
+        val coherent = withPrimary(changedContext, JsonObject(changedContext.primary + ("behaviorBudgetEvidence" to other)))
+        assertEquals("available", reportState(failureReport(coherent)))
+    }
+
+    @Test fun `failure source quota commitment follows its bound runtime source mount after coherent relocation`() {
+        val f = apiFailureFixture(); val snapshot = AuthoredValidationReceiptMetadata.snapshot
+        val quota = snapshot.getValue("quota") as JsonObject
+        val movedPath = "/PRIVATE-other-source"
+        val movedQuota = JsonObject(quota + ("mountPathSha256" to JsonPrimitive(sha256(movedPath.toByteArray(Charsets.UTF_8)))))
+        kotlin.test.assertNotEquals(quota, movedQuota)
+        val movedSnapshot = JsonObject(snapshot + ("quota" to movedQuota))
+        val bad = withPrimary(f, JsonObject(f.primary + ("sourceSnapshot" to movedSnapshot)))
+        assertEquals(RepairEvidenceArtifactState.AVAILABLE, view(bad).state)
+        val report = failureReport(bad)
+        assertEquals("invalid", reportState(report)); assertEquals(JsonNull, report.getValue("validationFailure"))
+        assertEquals(JsonNull, report.getValue("summary")); assertEquals(JsonNull, report.getValue("validationCases"))
+        val runtime = AuthoredValidationReceiptMetadata.runtime
+        val configuration = runtime.getValue("runtime") as JsonObject
+        val movedRuntime = JsonObject(runtime + ("runtime" to JsonObject(configuration + ("sourceTmpfs" to JsonPrimitive(movedPath)))))
+        val digest = sha256(OracleJson.canonicalBytes(movedRuntime))
+        val coherent = withPrimary(f, JsonObject(f.primary + mapOf("sourceSnapshot" to movedSnapshot,
+            "runtimeConfiguration" to movedRuntime, "runtimeSha256" to JsonPrimitive(digest)))).let { changed ->
+            changed.withRecord(changed.record.copy(runtimeSha256 = digest)).let {
+                it.copy(binding = it.binding.copy(runtimeSha256 = digest)) }
+        }
+        assertEquals("available", reportState(failureReport(coherent)))
+    }
+
 }

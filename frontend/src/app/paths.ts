@@ -146,19 +146,32 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
 }
 
 export interface SourceSelection { jobId: string; runId: string; revisionId: string }
+export interface SourceSnapshotPin { sourceSha256: string; metadataVersion: string }
+
+function sourceSnapshotQuery(pin: SourceSnapshotPin): string {
+  if (!/^[a-f0-9]{64}$/.test(pin.sourceSha256) || !/^[a-f0-9]{64}$/.test(pin.metadataVersion)) return invalidUrl();
+  return `sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
+}
 
 function sourceRevisionPath(basePath: string, selected: SourceSelection): string {
   return `${runPath(basePath, selected.jobId, selected.runId)}/revisions/${identifier(selected.revisionId)}`;
 }
 
 /** Source links contain opaque identities only. Display labels never enter these routes. */
-export function sourceDirectoryPath(basePath: string, selected: SourceSelection, directoryId = 'root', cursor?: string): string {
+export function sourceDirectoryPath(basePath: string, selected: SourceSelection, directoryId = 'root', cursor?: string, pin?: SourceSnapshotPin): string {
   const path = `${sourceRevisionPath(basePath, selected)}/sources/${identifier(directoryId)}`;
-  return cursor === undefined ? path : `${path}?cursor=${identifier(cursor)}`;
+  const query = [cursor === undefined ? '' : `cursor=${identifier(cursor)}`, pin === undefined ? '' : sourceSnapshotQuery(pin)].filter(Boolean).join('&');
+  return query === '' ? path : `${path}?${query}`;
 }
 
-export function sourceFilePath(basePath: string, selected: SourceSelection, fileId: string): string {
-  return `${sourceRevisionPath(basePath, selected)}/source-files/${identifier(fileId)}`;
+export function sourceFilePath(basePath: string, selected: SourceSelection, fileId: string, pin?: SourceSnapshotPin): string {
+  const path = `${sourceRevisionPath(basePath, selected)}/source-files/${identifier(fileId)}`;
+  return pin === undefined ? path : `${path}?${sourceSnapshotQuery(pin)}`;
+}
+
+export function sourceDownloadRoute(selected: SourceSelection, fileId: string, metadataVersion: string): string {
+  if (!/^[a-f0-9]{64}$/.test(metadataVersion)) return invalidUrl();
+  return `${sourceReadRoute(selected, 'download', fileId)}?metadataVersion=${metadataVersion}`;
 }
 
 /** Relative API route for the existing bounded transport or an explicit native download link. */

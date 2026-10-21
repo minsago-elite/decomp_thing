@@ -266,6 +266,7 @@ internal data class RepairRecordedValidationDiagnostic internal constructor(
     val diagnosticBytes: Int,
     val failureKind: RepairValidationFailureKind,
     val cleanupVerified: Boolean,
+    val context: RepairRecordedValidationContext? = null,
 )
 
 internal data class RepairRecordedValidationObservedArtifact internal constructor(
@@ -273,6 +274,9 @@ internal data class RepairRecordedValidationObservedArtifact internal constructo
     val sha256: String,
     val bytes: Long,
 )
+
+/** Bound graph configuration used only to check retained validation metadata. */
+internal data class RepairRecordedValidationContext(val profileId: String, val budget: RepairResourceBudget)
 
 /** The canonical run checked the invocation relation; private report paths are withheld. */
 internal data class RepairRecordedValidationObservation internal constructor(
@@ -282,6 +286,8 @@ internal data class RepairRecordedValidationObservation internal constructor(
     val outcome: RepairValidationObservedOutcome,
     val primary: RepairRecordedValidationObservedArtifact,
     val diff: RepairRecordedValidationObservedArtifact?,
+    val context: RepairRecordedValidationContext? = null,
+    val expectedObservationsSha256: String? = null,
 ) {
     val comparisonPolicy: String get() = "exact-bytes-v1"
 }

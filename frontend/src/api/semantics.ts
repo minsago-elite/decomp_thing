@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk } from './generated';
+import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -6,6 +6,158 @@ import type { ApiResource } from '../app/paths';
 const requireValue = (condition: boolean): void => {
   if (!condition) throw new ApiClientError('invalid_response');
 };
+
+function checkValidationHistory(value: ValidationHistory): void {
+  if (value.state !== 'recorded') {
+    requireValue([value.graphSha256, value.corpusSha256, value.page, value.totalPages,
+      value.previousPage, value.nextPage].every(field => field === null) && value.items.length === 0);
+    return;
+  }
+  if (value.page === null || value.totalPages === null) throw new ApiClientError('invalid_response');
+  requireValue(value.page <= value.totalPages && value.graphSha256 !== null && value.corpusSha256 !== null);
+  requireValue(value.previousPage === (value.page > 1 ? value.page - 1 : null));
+  requireValue(value.nextPage === (value.page < value.totalPages ? value.page + 1 : null));
+  requireValue(new Set(value.items.map(item => `${item.ownerKind}:${item.ownerId}`)).size === value.items.length);
+  value.items.forEach(item => {
+    requireValue(item.canInspect === (item.hasReceipt && !item.identityWithheld));
+    if (item.ownerKind === 'run-failure') requireValue(item.hasReceipt && item.normalOutcome === null && item.failureKind != null);
+    else requireValue(item.failureKind == null && item.hasReceipt === (item.normalOutcome !== null));
+    const refs = [item.candidateId, item.sourceSha256, item.corpusSha256];
+    requireValue(refs.every(field => item.canInspect ? field !== null : field === null));
+    // The selected receipt may precede growth of the current retained corpus.
+  });
+}
+
+function checkValidationFailure(value: ValidationFailure): void {
+  const total = BigInt(value.inputCount), completed = BigInt(value.reportedCompletedPairs);
+  requireValue(completed <= total && value.reportedCleanupVerified === (value.classification !== 'cleanup-unverified'));
+  requireValue(value.classification === (value.reason === 'timeout' ? 'resource-exhausted' : value.reason));
+  const casePhase = ['before-case', 'original-operation', 'rebuilt-operation'].includes(value.phase);
+  requireValue(casePhase === (value.inputOrdinal !== null));
+  if (value.inputOrdinal !== null) {
+    const ordinal = BigInt(value.inputOrdinal);
+    requireValue(ordinal >= 1n && ordinal <= total && completed + 1n === ordinal);
+  }
+  if (['source-preparation', 'build', 'build-finalization', 'capture-rebuilt'].includes(value.phase)) requireValue(completed === 0n);
+}
+
+function checkValidationPreview(value: ValidationBytePreview | null, bytes: string | null): void {
+  if (value === null || bytes === null) throw new ApiClientError('invalid_response');
+  const total = BigInt(bytes), prefix = total > 128n ? 128 : Number(total);
+  requireValue(value.totalBytes === bytes && value.prefixBytes === prefix && value.truncated === (total > BigInt(prefix)));
+  const tokens = value.hex === '' ? [] : value.hex.split(/[ \n]/u);
+  requireValue(tokens.length === prefix && tokens.every(token => /^[0-9a-f]{2}$/u.test(token)));
+  requireValue(value.hex === tokens.map((token, index) => `${index === 0 ? '' : index % 16 === 0 ? '\n' : ' '}${token}`).join(''));
+  requireValue((value.text === null) === (value.textBytes === null));
+  if (value.textBytes !== null) requireValue(value.textBytes <= prefix &&
+    (value.truncated ? prefix - value.textBytes <= 3 : value.textBytes === prefix));
+  let expectedText: string | null = null, expectedBytes: number | null = null;
+  try {
+    // Streaming leaves only an incomplete suffix undecoded; malformed UTF-8 still throws.
+    const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+      .decode(Uint8Array.from(tokens, token => Number.parseInt(token, 16)), { stream: value.truncated });
+    expectedBytes = new TextEncoder().encode(decoded).length;
+    expectedText = Array.from(decoded, character => {
+      if (character === '\\') return '\\\\';
+      if (character === '\r') return '\\r';
+      if (character === '\n') return '\\n\n';
+      if (character === '\t') return '\\t';
+      const code = character.codePointAt(0)!;
+      return code <= 31 || (code >= 127 && code <= 159) || /[\p{Cf}\p{Zl}\p{Zp}]/u.test(character)
+        ? `${code > 65535 ? '\\U' : '\\u'}${code.toString(16).padStart(code > 65535 ? 8 : 4, '0')}` : character;
+    }).join('');
+  } catch { /* Malformed bytes have no text representation. */ }
+  requireValue(value.text === expectedText && value.textBytes === expectedBytes);
+}
+
+function checkValidationCases(value: ValidationCases, summary: ValidationSummary): void {
+  const total = BigInt(value.totalInputs), start = BigInt(value.page - 1) * 20n;
+  const pages = total === 0n ? 1n : (total + 19n) / 20n;
+  requireValue(BigInt(value.totalPages) === pages && value.page <= value.totalPages);
+  const remaining = total > start ? total - start : 0n;
+  requireValue(value.items.length === Number(remaining > 20n ? 20n : remaining));
+  requireValue(value.previousPage === (value.page > 1 ? value.page - 1 : null));
+  requireValue(value.nextPage === (value.page < value.totalPages ? value.page + 1 : null));
+  requireValue(new Set(value.items.map(item => item.caseId)).size === value.items.length);
+  requireValue(value.sourceSha256 === summary.sourceSha256);
+  const behavior = value.normalOutcome === 'behavior-checked';
+  let matched: bigint | null = null;
+  if (behavior) {
+    if (value.matchedInputs === null) throw new ApiClientError('invalid_response');
+    matched = BigInt(value.matchedInputs);
+    requireValue(total > 0n && matched <= total && summary.casesCompared === value.totalInputs);
+    requireValue(summary.result === (matched === total ? 'passed' : 'failed'));
+  } else requireValue(value.matchedInputs === null && summary.casesCompared === '0' &&
+    summary.result === (value.normalOutcome === 'compile-failed' ? 'failed' : 'unknown'));
+  let pageMatches = 0n;
+  value.items.forEach((item, index) => {
+    requireValue(BigInt(item.ordinal) === start + BigInt(index) + 1n);
+    const flags = [item.exitCodeMatches, item.stdoutMatches, item.stderrMatches];
+    const bytes = [item.originalStdoutBytes, item.rebuiltStdoutBytes, item.originalStderrBytes, item.rebuiltStderrBytes];
+    const previews = [item.originalStdoutPreview, item.rebuiltStdoutPreview, item.originalStderrPreview, item.rebuiltStderrPreview];
+    if (!behavior) {
+      requireValue(item.outcome === (value.normalOutcome === 'compile-failed' ? 'compile-failed' : 'compile-only') &&
+        [...flags, ...bytes, ...previews].every(field => field === null));
+      return;
+    }
+    requireValue(flags.every(flag => flag !== null));
+    previews.forEach((preview, position) => { checkValidationPreview(preview, bytes[position] ?? null); });
+    for (const [flag, first, second] of [[item.stdoutMatches, item.originalStdoutPreview, item.rebuiltStdoutPreview],
+      [item.stderrMatches, item.originalStderrPreview, item.rebuiltStderrPreview]] as const) {
+      if (first === null || second === null) throw new ApiClientError('invalid_response');
+      const samePrefix = first.totalBytes === second.totalBytes && first.hex === second.hex;
+      if (flag) requireValue(samePrefix && first.text === second.text && first.textBytes === second.textBytes);
+      if (!first.truncated && !second.truncated) requireValue(flag === samePrefix);
+    }
+    const same = flags.every(flag => flag === true);
+    requireValue(item.outcome === (same ? 'matched' : 'mismatch'));
+    if (same) pageMatches++;
+  });
+  if (matched !== null) requireValue(pageMatches <= matched && matched <= pageMatches + total - BigInt(value.items.length));
+  let indexedMismatchPages: number[] | null = null;
+  if (value.comparisonIndex != null) {
+    requireValue(behavior && total <= 10000n);
+    const size = Number(total), hex = value.comparisonIndex.mismatchBitmapHex;
+    requireValue(hex.length === 2 * Math.ceil(size / 8));
+    const mismatch = (ordinal: number) => (parseInt(hex.slice((ordinal >>> 3) * 2, (ordinal >>> 3) * 2 + 2), 16)
+      & (1 << (ordinal & 7))) !== 0;
+    let differences = 0;
+    const pages = new Set<number>();
+    for (let ordinal = 0; ordinal < size; ordinal++) if (mismatch(ordinal)) {
+      differences++; pages.add(Math.floor(ordinal / 20) + 1);
+    }
+    for (let ordinal = size; ordinal < Math.ceil(size / 8) * 8; ordinal++) requireValue(!mismatch(ordinal));
+    requireValue(BigInt(differences) === total - (matched ?? total));
+    value.items.forEach(item => requireValue(mismatch(Number(item.ordinal) - 1) === (item.outcome === 'mismatch')));
+    indexedMismatchPages = [...pages];
+  }
+  const navigation = [value.firstMismatchPage, value.previousMismatchPage, value.nextMismatchPage];
+  if (navigation.every(page => page === undefined)) return; // Older v1 producers did not report mismatch navigation.
+  requireValue(navigation.every(page => page !== undefined));
+  if (indexedMismatchPages !== null) {
+    const expected = [indexedMismatchPages[0] ?? null,
+      indexedMismatchPages.filter(page => page < value.page).at(-1) ?? null,
+      indexedMismatchPages.find(page => page > value.page) ?? null];
+    requireValue(navigation.every((page, index) => page === expected[index]));
+  }
+  if (matched === null || matched === total) {
+    requireValue(navigation.every(page => page === null));
+    return;
+  }
+  const first = value.firstMismatchPage, previous = value.previousMismatchPage, next = value.nextMismatchPage;
+  if (first == null) throw new ApiClientError('invalid_response');
+  const knownPages = new Set(navigation.filter((page): page is number => page != null));
+  requireValue([...knownPages].every(page => page >= 1 && page <= value.totalPages && page >= first));
+  requireValue(previous == null ? first >= value.page : previous < value.page && first < value.page);
+  requireValue(next == null || next > value.page);
+  if (first > value.page) requireValue(next === first);
+  const pageMismatches = BigInt(value.items.length) - pageMatches;
+  if (pageMismatches > 0n) requireValue(first <= value.page);
+  if (first === value.page) requireValue(pageMismatches > 0n);
+  const outside = total - matched - pageMismatches;
+  requireValue(BigInt([...knownPages].filter(page => page !== value.page).length) <= outside);
+  if (outside > 0n) requireValue(previous != null || next != null);
+}
 
 function checkRun(run: Run): void {
   // Match the durable store, including terminal attempts cancelled before start.
@@ -90,6 +242,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
   }
   switch (document.kind) {
+    case 'validationHistory':
+      checkValidationHistory(document.data);
+      break;
     case 'error': {
       const { code, recovery, retryable, retryAfterMs } = document.error;
       requireValue((code === 'EVENT_GAP') === (recovery !== undefined));
@@ -177,7 +332,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'report': {
-      const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion } = document.data;
+      const { sourceArtifact, binding, reportType, summary, acceptance, state, adapterVersion, producerSchemaVersion, validationCases } = document.data;
       if (sourceArtifact) requireValue(sourceArtifact.binding.jobId === binding.jobId
         && sourceArtifact.binding.runId === binding.runId && sourceArtifact.binding.revisionId === binding.revisionId);
       if (sourceArtifact) checkHref(sourceArtifact.contentHref, {
@@ -195,6 +350,14 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {
         throw new ApiClientError('unsupported_contract');
       }
+      if (reportType === 'revision-validation' && state === 'partial') {
+        requireValue(summary === null && validationCases == null && document.data.validationFailure == null);
+      }
+      if (validationCases) {
+        if (!summary || !('result' in summary)) throw new ApiClientError('invalid_response');
+        checkValidationCases(validationCases, summary);
+      }
+      if (document.data.validationFailure) checkValidationFailure(document.data.validationFailure);
       break;
     }
     case 'artifact':
