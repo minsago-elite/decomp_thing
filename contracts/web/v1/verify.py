@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import codecs
+import unicodedata
 from pathlib import Path
 import sys
 
@@ -16,6 +18,146 @@ import fastjsonschema
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def check_validation_preview(value: dict | None, byte_count: str | None) -> None:
+    if value is None or byte_count is None:
+        raise ValueError("compared validation output requires byte counts and previews")
+    total = int(byte_count)
+    prefix = min(total, 128)
+    if value["totalBytes"] != byte_count or value["prefixBytes"] != prefix or value["truncated"] != (total > prefix):
+        raise ValueError("validation preview byte counts or truncation disagree")
+    tokens = value["hex"].split() if value["hex"] else []
+    canonical = "".join(("" if index == 0 else "\n" if index % 16 == 0 else " ") + token
+                        for index, token in enumerate(tokens))
+    if len(tokens) != prefix or any(not re.fullmatch(r"[0-9a-f]{2}", token) for token in tokens) or value["hex"] != canonical:
+        raise ValueError("validation hexadecimal preview is not an exact canonical prefix")
+    text_bytes = value["textBytes"]
+    if (value["text"] is None) != (text_bytes is None):
+        raise ValueError("validation preview text and consumed byte count disagree")
+    if text_bytes is not None and (text_bytes > prefix or
+            (prefix - text_bytes > 3 if value["truncated"] else text_bytes != prefix)):
+        raise ValueError("validation UTF-8 preview has an invalid consumed byte count")
+    expected_text = expected_bytes = None
+    try:
+        decoded = codecs.getincrementaldecoder("utf-8")("strict").decode(
+            bytes.fromhex("".join(tokens)), final=not value["truncated"])
+        expected_bytes = len(decoded.encode("utf-8"))
+        def escape(character: str) -> str:
+            special = {"\\": "\\\\", "\r": "\\r", "\n": "\\n\n", "\t": "\\t"}
+            if character in special:
+                return special[character]
+            code = ord(character)
+            if code <= 31 or 127 <= code <= 159 or unicodedata.category(character) in {"Cf", "Zl", "Zp"}:
+                return ("\\U" + format(code, "08x")) if code > 65535 else ("\\u" + format(code, "04x"))
+            return character
+        expected_text = "".join(map(escape, decoded))
+    except UnicodeDecodeError:
+        pass
+    if value["text"] != expected_text or text_bytes != expected_bytes:
+        raise ValueError("validation text preview does not represent its hexadecimal prefix")
+
+
+def check_validation_cases(data: dict) -> None:
+    if data["reportType"] == "revision-validation" and data["state"] == "partial" and any(
+            data.get(field) is not None for field in ("summary", "validationCases", "validationFailure")):
+        raise ValueError("partial selected validation reports cannot infer results or case detail")
+    value = data.get("validationCases")
+    if value is None:
+        return
+    summary = data["summary"]
+    total = int(value["totalInputs"])
+    start = (value["page"] - 1) * 20
+    pages = max(1, (total + 19) // 20)
+    if value["totalPages"] != pages or value["page"] > pages or len(value["items"]) != min(20, max(0, total - start)):
+        raise ValueError("validation case page count or window disagrees with its population")
+    if value["previousPage"] != (value["page"] - 1 if value["page"] > 1 else None) or \
+            value["nextPage"] != (value["page"] + 1 if value["page"] < pages else None):
+        raise ValueError("validation case navigation leaves its captured window")
+    if len({item["caseId"] for item in value["items"]}) != len(value["items"]) or value["sourceSha256"] != summary["sourceSha256"]:
+        raise ValueError("validation case identity or source binding disagrees")
+    behavior = value["normalOutcome"] == "behavior-checked"
+    matched = int(value["matchedInputs"]) if value["matchedInputs"] is not None else None
+    if behavior:
+        if total == 0 or matched is None or matched > total or summary["casesCompared"] != value["totalInputs"] or \
+                summary["result"] != ("passed" if matched == total else "failed"):
+            raise ValueError("validation behavior counts or full comparison result disagree")
+    elif matched is not None or summary["casesCompared"] != "0" or \
+            summary["result"] != ("failed" if value["normalOutcome"] == "compile-failed" else "unknown"):
+        raise ValueError("unobserved compile-only cases cannot become behavior success")
+    page_matches = 0
+    for index, item in enumerate(value["items"]):
+        if int(item["ordinal"]) != start + index + 1:
+            raise ValueError("validation case ordinals leave their captured page")
+        flags = [item[key] for key in ("exitCodeMatches", "stdoutMatches", "stderrMatches")]
+        counts = [item[key] for key in ("originalStdoutBytes", "rebuiltStdoutBytes", "originalStderrBytes", "rebuiltStderrBytes")]
+        previews = [item[key] for key in ("originalStdoutPreview", "rebuiltStdoutPreview", "originalStderrPreview", "rebuiltStderrPreview")]
+        if not behavior:
+            expected = "compile-failed" if value["normalOutcome"] == "compile-failed" else "compile-only"
+            if item["outcome"] != expected or any(field is not None for field in flags + counts + previews):
+                raise ValueError("compile-only validation must preserve absent case observations")
+            continue
+        if any(flag is None for flag in flags):
+            raise ValueError("compared validation cases require every comparison flag")
+        for preview, count in zip(previews, counts):
+            check_validation_preview(preview, count)
+        for flag, first, second in [(item["stdoutMatches"], previews[0], previews[1]),
+                                    (item["stderrMatches"], previews[2], previews[3])]:
+            same_prefix = first["totalBytes"] == second["totalBytes"] and first["hex"] == second["hex"]
+            if flag and (not same_prefix or first["text"] != second["text"] or first["textBytes"] != second["textBytes"]):
+                raise ValueError("equal validation streams have different prefixes")
+            if not first["truncated"] and not second["truncated"] and flag != same_prefix:
+                raise ValueError("complete validation previews contradict their comparison flag")
+        same = all(flags)
+        if item["outcome"] != ("matched" if same else "mismatch"):
+            raise ValueError("validation case outcome contradicts its comparison flags")
+        page_matches += int(same)
+    if matched is not None and not page_matches <= matched <= page_matches + total - len(value["items"]):
+        raise ValueError("validation case page contradicts the full matched count")
+    indexed_pages = None
+    comparison = value.get("comparisonIndex")
+    if comparison is not None:
+        if not behavior or total > 10000:
+            raise ValueError("complete mismatch indexes require a supported behavior population")
+        bitmap = bytes.fromhex(comparison["mismatchBitmapHex"])
+        if len(bitmap) != (total + 7) // 8:
+            raise ValueError("mismatch bitmap length differs from the complete population")
+        def mismatch(ordinal: int) -> bool:
+            return bool(bitmap[ordinal // 8] & (1 << (ordinal % 8)))
+        differences = [ordinal for ordinal in range(total) if mismatch(ordinal)]
+        if any(mismatch(ordinal) for ordinal in range(total, len(bitmap) * 8)) or len(differences) != total - matched:
+            raise ValueError("mismatch bitmap padding or complete count disagrees")
+        if any(mismatch(int(item["ordinal"]) - 1) != (item["outcome"] == "mismatch") for item in value["items"]):
+            raise ValueError("mismatch bitmap contradicts the observed page")
+        indexed_pages = sorted({ordinal // 20 + 1 for ordinal in differences})
+    names = ("firstMismatchPage", "previousMismatchPage", "nextMismatchPage")
+    if not any(name in value for name in names):
+        return  # Older v1 producers omitted mismatch navigation entirely.
+    if not all(name in value for name in names):
+        raise ValueError("mismatch navigation must be reported as a complete group")
+    first, previous, following = (value[name] for name in names)
+    if indexed_pages is not None and (first, previous, following) != (
+            indexed_pages[0] if indexed_pages else None,
+            next((page for page in reversed(indexed_pages) if page < value["page"]), None),
+            next((page for page in indexed_pages if page > value["page"]), None)):
+        raise ValueError("mismatch page navigation contradicts the complete bitmap")
+    if matched is None or matched == total:
+        if any(value[name] is not None for name in names):
+            raise ValueError("uncompared or fully matching cases cannot have mismatch navigation")
+        return
+    if first is None:
+        raise ValueError("mismatched observations require a first mismatch page")
+    known = {value[name] for name in names if value[name] is not None}
+    if any(page < first or page < 1 or page > pages for page in known) or \
+            ((first < value["page"]) if previous is None else not (first < value["page"] and previous < value["page"])) or \
+            (following is not None and following <= value["page"]) or (first > value["page"] and following != first):
+        raise ValueError("mismatch navigation leaves or contradicts the selected window")
+    page_mismatches = len(value["items"]) - page_matches
+    if (page_mismatches > 0 and first > value["page"]) or (first == value["page"] and page_mismatches == 0):
+        raise ValueError("first mismatch page contradicts the observed page")
+    outside = total - matched - page_mismatches
+    if len(known - {value["page"]}) > outside or (outside > 0 and previous is None and following is None):
+        raise ValueError("mismatch navigation contradicts the number of unshown differences")
 
 # #604's outcome index is deliberately narrower than the full fixture manifest.
 # These expectations cannot be changed merely by relabeling a fixture in JSON.
@@ -168,7 +310,29 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind == "error":
+    if kind == "validationHistory":
+        if data["state"] != "recorded":
+            if any(data[key] is not None for key in ("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage")) or data["items"]:
+                raise ValueError("unrecorded validation history cannot invent a population or snapshot")
+            return
+        page, total = data["page"], data["totalPages"]
+        if page is None or total is None or page > total or data["graphSha256"] is None or data["corpusSha256"] is None:
+            raise ValueError("validation history requires its recorded graph and page")
+        if data["previousPage"] != (page - 1 if page > 1 else None) or data["nextPage"] != (page + 1 if page < total else None):
+            raise ValueError("validation history navigation disagrees with its page")
+        if len({(item["ownerKind"], item["ownerId"]) for item in data["items"]}) != len(data["items"]):
+            raise ValueError("validation history repeats an owner")
+        for item in data["items"]:
+            if item["canInspect"] != (item["hasReceipt"] and not item["identityWithheld"]):
+                raise ValueError("validation inspection requires a recorded receipt and disclosed identity")
+            if item["ownerKind"] == "run-failure":
+                if not item["hasReceipt"] or item["normalOutcome"] is not None or item.get("failureKind") is None:
+                    raise ValueError("failed operation discovery requires its own failure binding")
+            elif item.get("failureKind") is not None or item["hasReceipt"] != (item["normalOutcome"] is not None):
+                raise ValueError("normal operation discovery cannot borrow a failure binding")
+            if any((item[key] is not None) != item["canInspect"] for key in ("candidateId", "sourceSha256", "corpusSha256")):
+                raise ValueError("validation owner commitments must follow inspection availability")
+    elif kind == "error":
         error = document["error"]
         recovery = error.get("recovery")
         if (error["code"] == "EVENT_GAP") != (recovery is not None):
@@ -249,6 +413,24 @@ def check_semantics(document: dict) -> None:
         if data["acceptance"] == "accepted":
             if summary is None or summary.get("result") != "passed":
                 raise ValueError("accepted report requires a passed validation summary")
+        check_validation_cases(data)
+        failure = data.get("validationFailure")
+        if failure is not None:
+            total, completed = int(failure["inputCount"]), int(failure["reportedCompletedPairs"])
+            if completed > total or failure["reportedCleanupVerified"] != (failure["classification"] != "cleanup-unverified"):
+                raise ValueError("failed operation count or reported cleanup contradicts its classification")
+            expected = "resource-exhausted" if failure["reason"] == "timeout" else failure["reason"]
+            if failure["classification"] != expected:
+                raise ValueError("failed operation reason contradicts its classification")
+            case_phase = failure["phase"] in ("before-case", "original-operation", "rebuilt-operation")
+            if case_phase != (failure["inputOrdinal"] is not None):
+                raise ValueError("failed operation position must identify an enclosing case phase")
+            if failure["inputOrdinal"] is not None:
+                ordinal = int(failure["inputOrdinal"])
+                if not 1 <= ordinal <= total or completed + 1 != ordinal:
+                    raise ValueError("failed operation position contradicts its reported completed prefix")
+            if failure["phase"] in ("source-preparation", "build", "build-finalization", "capture-rebuilt") and completed != 0:
+                raise ValueError("pre-comparison operation cannot claim completed pairs")
     elif kind == "snapshot":
         check_run(data["run"])
         if (data["throughCursor"] is None) != (data["throughSequence"] is None):
@@ -343,6 +525,128 @@ def check_run_lifecycle_controls(validate) -> int:
     return checked
 
 
+def check_validation_display_controls(validate) -> int:
+    """Authored wire controls only: byte/text binding and absence of partial results."""
+    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    cases = [
+        ([65], None, "A", 1), ([0xef, 0xbb, 0xbf, 65], None, "\\ufeffA", 4),
+        ([92, 13, 10, 9, 0, 0xe2, 0x80, 0xae], None, '\\\\\\r\\n\n\\t\\u0000\\u202e', 8),
+        ([0xff], None, None, None), ([0xc3, 0x28], None, None, None), ([0xe2], None, None, None),
+        ([65] * 127 + [0xe2], "130", "A" * 127, 127),
+    ]
+    checked = 0
+    def check(document, valid):
+        nonlocal checked
+        try:
+            validate(document)
+            check_semantics(document)
+        except (fastjsonschema.JsonSchemaException, ValueError):
+            if valid:
+                raise ValueError("valid validation display metadata was rejected")
+        else:
+            if not valid:
+                raise ValueError("fabricated validation display metadata was accepted")
+        checked += 1
+    for octets, total, text, consumed in cases:
+        document = json.loads(json.dumps(original))
+        item = document["data"]["validationCases"]["items"][0]
+        count = total or str(len(octets))
+        hexadecimal = "".join(("" if i == 0 else "\n" if i % 16 == 0 else " ") + format(byte, "02x")
+                              for i, byte in enumerate(octets))
+        preview = {"totalBytes": count, "prefixBytes": len(octets), "hex": hexadecimal,
+                   "text": text, "textBytes": consumed, "truncated": int(count) > len(octets)}
+        item.update(originalStdoutBytes=count, rebuiltStdoutBytes=count,
+                    originalStdoutPreview=preview, rebuiltStdoutPreview=preview)
+        check(document, True)
+        item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {
+            **preview, "text": "fabricated", "textBytes": len(octets)}
+        check(document, False)
+        if text is not None:
+            item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {**preview, "text": None, "textBytes": None}
+            check(document, False)
+    document = json.loads(json.dumps(original))
+    document["data"].update(state="partial", validationCases=None, validationFailure=None)
+    check(document, False)
+    document["data"]["summary"] = None
+    check(document, True)
+    return checked
+
+
+def check_validation_mismatch_controls(validate) -> int:
+    """Authored multi-page receipt metadata; no execution, HTTP or browser instance."""
+    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    checked = 0
+    def check(document, valid):
+        nonlocal checked
+        try:
+            validate(document)
+            check_semantics(document)
+        except (fastjsonschema.JsonSchemaException, ValueError):
+            if valid:
+                raise ValueError("valid mismatch page metadata was rejected")
+        else:
+            if not valid:
+                raise ValueError("contradictory mismatch page metadata was accepted")
+        checked += 1
+    def page(number):
+        document = json.loads(json.dumps(original))
+        detail = document["data"]["validationCases"]
+        document["data"]["summary"].update(result="failed", casesCompared="61")
+        template = detail["items"][0]
+        items = []
+        for ordinal in range((number - 1) * 20 + 1, min(number * 20, 61) + 1):
+            item = json.loads(json.dumps(template))
+            item.update(caseId=f"case_{ordinal}", ordinal=str(ordinal))
+            if ordinal in (22, 61):
+                item.update(outcome="mismatch", stdoutMatches=False)
+                item["rebuiltStdoutPreview"]["hex"] = "00 fe 0a"
+            items.append(item)
+        detail.update(page=number, totalPages=4, totalInputs="61", matchedInputs="59", items=items,
+                      previousPage=number - 1 if number > 1 else None,
+                      nextPage=number + 1 if number < 4 else None,
+                      firstMismatchPage=2, previousMismatchPage=2 if number > 2 else None,
+                      nextMismatchPage=2 if number < 2 else 4 if number < 4 else None)
+        return document
+    for number in range(1, 5):
+        check(page(number), True)
+        indexed = page(number)
+        indexed["data"]["validationCases"]["comparisonIndex"] = {
+            "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": "0000200000000010"}
+        check(indexed, True)
+    for bitmap in ("", "0", "GG", "000020000000001000", "0000000000000030",
+                   "0000000000000000", "0100000000000010"):
+        document = page(1)
+        document["data"]["validationCases"]["comparisonIndex"] = {
+            "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": bitmap}
+        check(document, False)
+    document = page(2)
+    document["data"]["validationCases"].update(nextMismatchPage=3, comparisonIndex={
+        "referenceObservationsSha256": "c" * 64, "mismatchBitmapHex": "0000200000000010"})
+    check(document, False)
+    for fields in ({"firstMismatchPage": None}, {"firstMismatchPage": 1}, {"firstMismatchPage": 5},
+                   {"previousMismatchPage": 1}, {"nextMismatchPage": 1}, {"nextMismatchPage": 3},
+                   {"nextMismatchPage": None}, {"previousMismatchPage": 0}, {"nextMismatchPage": 2.5}):
+        document = page(1)
+        document["data"]["validationCases"].update(fields)
+        check(document, False)
+    document = page(1)
+    del document["data"]["validationCases"]["firstMismatchPage"]
+    check(document, False)
+    for field in ("previousMismatchPage", "nextMismatchPage"):
+        del document["data"]["validationCases"][field]
+    check(document, True)
+    document = page(3)
+    document["data"]["validationCases"].update(matchedInputs="60", firstMismatchPage=1,
+                                                previousMismatchPage=2, nextMismatchPage=4)
+    check(document, False)
+    document = json.loads(json.dumps(original))
+    document["data"]["validationCases"].update(firstMismatchPage=None, previousMismatchPage=None, nextMismatchPage=None)
+    check(document, True)
+    document["data"]["validationCases"]["firstMismatchPage"] = 1
+    check(document, False)
+    return checked
+
+
 def main() -> int:
     manifest = json.loads((ROOT / "fixtures.json").read_text())
     schema = json.loads((ROOT / manifest["schema"]).read_text())
@@ -378,11 +682,21 @@ def main() -> int:
         lifecycle_controls = check_run_lifecycle_controls(validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
         failures.append(f"run lifecycle controls: {error}")
+    try:
+        validation_display_controls = check_validation_display_controls(validate)
+    except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
+        failures.append(f"validation display controls: {error}")
+    try:
+        mismatch_controls = check_validation_mismatch_controls(validate)
+    except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
+        failures.append(f"validation mismatch controls: {error}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(f"v1 design contracts: {accepted} valid fixtures accepted; {rejected} invalid fixtures rejected; {len(OUTCOME_EXPECTATIONS)} web outcomes verified")
     print(f"run lifecycle metadata: {lifecycle_controls} envelope controls verified")
+    print(f"validation display metadata: {validation_display_controls} authored envelope controls verified")
+    print(f"validation mismatch navigation: {mismatch_controls} authored envelope controls verified")
     return 0
 
 

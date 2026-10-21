@@ -78,5 +78,6 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
         put("acceptance", "not-evaluated"); put("acceptanceArtifactId", JsonNull)
         put("limitations", JsonArray(listOf(JsonPrimitive(limitation))))
         put("summary", summary ?: JsonNull)
+        put("validationCases", JsonNull); put("validationFailure", JsonNull)
     }
 }

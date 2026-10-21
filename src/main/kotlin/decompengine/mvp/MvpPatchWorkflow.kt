@@ -439,7 +439,7 @@ class MvpPatchWorkflow(
                 execution = executionEvidence,
                 issue = AcpExecutionOutcomeIssue(code, message),
             )
-            throw MvpPatchException(message)
+            throw MvpPatchException("$message [$code]")
         }
         val result = when (val outcome = staged.receipt.outcome) {
             is AgentExecutionOutcome.Returned -> outcome.result

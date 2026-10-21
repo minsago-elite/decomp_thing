@@ -1,0 +1,41 @@
+{
+  "apiVersion": 1,
+  "kind": "report",
+  "requestId": "request_recorded_cases",
+  "data": {
+    "reportId": "validation_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_selected",
+      "revisionId": "revision_00000001_eeeeeeeeeeeeeeee"
+    },
+    "reportType": "revision-validation",
+    "adapterVersion": 1,
+    "producerSchemaVersion": 2,
+    "state": "available",
+    "authority": "observations",
+    "sourceArtifact": null,
+    "acceptance": "not-evaluated",
+    "acceptanceArtifactId": null,
+    "limitations": [
+      "Authored wire data only; not acceptance, containment or native execution qualification."
+    ],
+    "summary": null,
+    "validationCases": null,
+    "validationFailure": {
+      "authority": "producer-diagnostic",
+      "ownerKind": "run-failure",
+      "ownerId": "run_00000001",
+      "graphSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "corpusSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "classification": "resource-exhausted",
+      "reason": "timeout",
+      "phase": "rebuilt-operation",
+      "inputCount": "3",
+      "inputOrdinal": "0",
+      "reportedCompletedPairs": "1",
+      "reportedCleanupVerified": true
+    }
+  }
+}

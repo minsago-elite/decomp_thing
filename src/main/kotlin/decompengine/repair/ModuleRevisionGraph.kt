@@ -5456,7 +5456,9 @@ private fun recordedHistoryCapture(
                 artifact(value.path), value.sha256, value.bytes)
             RepairRecordedValidationObservation(observation.invocation.commitmentSha256(),
                 identities.revision(observation.invocation.candidateRevisionId), observation.proof, observation.outcome,
-                observedArtifact(observation.primary), observation.diff?.let(::observedArtifact))
+                observedArtifact(observation.primary), observation.diff?.let(::observedArtifact),
+                RepairRecordedValidationContext(state.profileId, state.budget),
+                state.runs.single { it.id == runId }.expectedObservationsSha256)
         }
     fun failureKind(value: String?) = when (value) {
         "compile" -> RepairRecordedFailureKind.COMPILE
@@ -5507,7 +5509,8 @@ private fun recordedHistoryCapture(
                     binding.invocation.profileSha256, binding.invocation.indexSha256, binding.invocation.regressionCorpusSha256,
                     binding.runtimeSha256, artifact(binding.receiptPath), binding.receiptSha256, binding.receiptBytes,
                     artifact(binding.diagnosticPath), binding.diagnosticSha256, binding.diagnosticBytes,
-                    binding.failureKind, binding.cleanupVerified)
+                    binding.failureKind, binding.cleanupVerified,
+                    RepairRecordedValidationContext(state.profileId, state.budget))
             }, normalObservation(it.id, it.baselineId))
     }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),

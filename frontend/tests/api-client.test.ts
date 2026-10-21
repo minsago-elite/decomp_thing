@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../src/api/client';
 import { decodeContract } from '../src/api/decode';
+import type { RevisionFile } from '../src/api/generated';
 
 const fixture = (name: string) => readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8');
 const response = (name = 'session', status = 200, headers: Record<string, string> = {}) => new Response(fixture(name), {
@@ -11,6 +12,20 @@ const response = (name = 'session', status = 200, headers: Record<string, string
 afterEach(() => { vi.useRealTimers(); });
 
 describe('bounded v1 fetch client', () => {
+  it('pins an explicit source digest HEAD to metadata before accepting its commitment headers', async () => {
+    const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
+    metadata.binding.jobId = 'a'.repeat(32);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200, headers: {
+      'Content-Type': 'application/octet-stream', 'Content-Length': metadata.item.sizeBytes, 'X-Content-Type-Options': 'nosniff',
+      'X-Request-ID': 'request_source_head_1', 'X-Decomp-Content-Verification': 'committed-digest',
+      'X-Decomp-File-ID': metadata.item.fileId, 'X-Decomp-Source-SHA256': metadata.sourceSha256,
+      'X-Decomp-Metadata-Version': metadata.metadataVersion, 'X-Decomp-Content-SHA256': metadata.item.sha256,
+    } }));
+    const result = await createApiClient({ basePath: '/nested', fetch: fetcher }).checkSourceFileDigest(metadata);
+    expect(result.basis).toBe('committed-digest'); expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toContain(`/content?metadataVersion=${metadata.metadataVersion}`);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'HEAD', cache: 'no-store', credentials: 'same-origin' });
+  });
   it('uses a deployment prefix, negotiated JSON and correlated response identity', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response());
     const result = await createApiClient({ basePath: '/workbench/', fetch: fetcher }).get('session', '/session');

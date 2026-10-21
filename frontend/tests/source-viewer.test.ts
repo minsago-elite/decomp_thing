@@ -2,11 +2,20 @@
 import { expect, it } from 'vitest';
 import type { RevisionFile, SourceChunk } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
-import { sourceFilePolicy } from '../src/sources/navigation';
+import { sourceFilePolicy, sourceSnapshotSelection } from '../src/sources/navigation';
 import { bindSourceChunk, sourceChunkMaximum, sourceChunkRoute, sourcePosition, sourcePositionPath, sourceWindow, visibleSourceText } from '../src/sources/viewer';
 
 // Synthetic DTO/string projections only. No DOM, browser, worker, fetch or clipboard is started.
 const selected = { jobId: 'a'.repeat(32), runId: 'run_1', revisionId: 'revision_1', fileId: 'file_0_' + 'b'.repeat(64) };
+
+it('retains source snapshot pins on line and range navigation without opening a range for the pin alone', () => {
+  const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) };
+  const path = sourcePositionPath('/nested', selected, { offset: '8', line: '2' }, pin);
+  const query = sourceSnapshotSelection(new URL(path, 'https://source.invalid').search);
+  expect(query.pin).toEqual(pin); expect(sourcePosition(query.search)).toEqual({ offset: '8', line: '2' });
+  expect(sourcePosition(sourceSnapshotSelection(`?sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`).search))
+    .toEqual({ offset: '0', line: null });
+});
 function observed(text = 'int main() { return 0; }\r\n'): { metadata: RevisionFile; chunk: SourceChunk } {
   const size = String(new TextEncoder().encode(text).length);
   const metadata: RevisionFile = { binding: { jobId: selected.jobId, runId: selected.runId, revisionId: selected.revisionId },

@@ -41,6 +41,7 @@ internal class WebApiController(
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
+    private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock)
@@ -50,7 +51,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -189,11 +190,11 @@ internal class WebApiController(
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
                     } else {
-                        requireNoWebApiQuery(exchange)
+                        val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                         }
-                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD)
+                        val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD, metadataVersion)
                         val bytes = content.download()
                         val name = java.net.URLEncoder.encode(content.downloadName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
                         webApiHeaders(exchange, UUID.randomUUID().toString())
@@ -231,6 +232,23 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "sourceCatalog",
                         sourceCatalogPages.page(session.sessionId, parts[1], parts[3], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/validation-history")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "validationHistory", revisionValidationReports.history(
+                        parts[1], parts[3], exchange.requestURI.rawQuery, jobs::readValidationHistory))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/revision-validation")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    val report = if (query?.split('&')?.any { it.substringBefore('=') == "historyFailureRun" } == true)
+                        revisionValidationReports.failure(parts[1], parts[3], query, jobs::readRecordedValidationFailureReport)
+                    else revisionValidationReports.read(parts[1], parts[3], query)
+                    sendWebApiResponse(exchange, 200, "report", report)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

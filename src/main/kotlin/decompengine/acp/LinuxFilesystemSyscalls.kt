@@ -732,6 +732,7 @@ internal object LinuxFilesystemSyscalls {
         openReadableFrom(authorized).use { readable ->
             Memory(BUFFER_BYTES.toLong()).use { buffer ->
                 var total = 0L
+                var copyBuffer: ByteArray? = null
                 while (true) {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
@@ -745,7 +746,14 @@ internal object LinuxFilesystemSyscalls {
                     total = Math.addExact(total, count)
                     if (total > maximumBytes) throw LinuxResourceLimitException()
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.WRITE) {
-                        output.write(buffer.getByteArray(0, count.toInt()))
+                        val length = count.toInt()
+                        val previous = copyBuffer
+                        // Preserve small-file allocation size; a later larger short read grows once
+                        // to the fixed read bound. No payload array is allocated for EOF/refusal.
+                        val bytes = if (previous != null && previous.size >= length) previous
+                            else ByteArray(if (previous == null) length else BUFFER_BYTES).also { copyBuffer = it }
+                        buffer.read(0, bytes, 0, length)
+                        output.write(bytes, 0, length)
                     }
                     statistics?.written(count)
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }

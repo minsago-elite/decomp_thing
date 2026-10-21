@@ -593,7 +593,8 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             RepairEvidenceArtifactState.CORRUPT -> RepairRecordedReceiptCheck.CORRUPT
             else -> RepairRecordedReceiptCheck.UNAVAILABLE
         })
-    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null, evidenceRun: String? = null): String {
+    fun link(label: String, historyPage: Int, casePage: Int, evidenceAttempt: String? = null, evidenceRun: String? = null,
+        validationPage: Int = 1): String {
         val parameters = buildList {
             view.runId?.let { add("runId=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
             add("historyPage=$historyPage")
@@ -601,9 +602,72 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             add("historyGraph=${snapshot.graphSha256}")
             evidenceAttempt?.let { add("historyEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
             evidenceRun?.let { add("historyRunEvidence=" + URLEncoder.encode(it, StandardCharsets.UTF_8)) }
+            if (validationPage != 1) add("historyValidationPage=$validationPage")
         }.joinToString("&")
         val target = "/jobs/${job.id}?$parameters"
         return "<a href=\"${target.escapeHtml()}\">$label</a>"
+    }
+    fun normalCases(cases: RecordedRepairValidationCasePage?, owner: RepairRecordedIdentity, isRun: Boolean): String {
+        fun caseLink(label: String, target: Int) = link(label, page.selection.pageNumber, page.selection.casePageNumber,
+            evidenceAttempt = owner.value.takeUnless { isRun }, evidenceRun = owner.value.takeIf { isRun }, validationPage = target)
+        if (cases == null || cases.state == RecordedRepairValidationCaseState.UNAVAILABLE)
+            return "<p>Case comparisons are unavailable; no completed case outcomes are inferred.</p>"
+        if (cases.state == RecordedRepairValidationCaseState.CORRUPT)
+            return "<p>Case comparison evidence is corrupt or inconsistent.</p>"
+        if (cases.state == RecordedRepairValidationCaseState.OUT_OF_RANGE)
+            return "<p>Recorded validation case page is out of range. ${caseLink("Show first validation case page", 1)}</p>"
+        fun preview(label: String, value: RecordedRepairValidationPreview?): String {
+            if (value == null) return ""
+            if (value.totalBytes == 0L) return "<p>$label: empty output (0 bytes).</p>"
+            val bound = if (value.truncated) "Showing first ${value.prefixBytes} of ${value.totalBytes} bytes; preview truncated."
+                else "Showing all ${value.totalBytes} bytes; preview complete."
+            val text = value.text?.let { "<p>Escaped UTF-8 prefix (${value.textBytes} bytes).</p><pre>${it.escapeHtml()}</pre>" }
+                ?: "<p>This prefix is not valid UTF-8; use the exact hexadecimal bytes below.</p>"
+            val suffix = if (value.textBytes != null && value.textBytes < value.prefixBytes)
+                "<p>An incomplete UTF-8 character at the preview boundary is shown only in hexadecimal.</p>" else ""
+            return "<details><summary>$label byte preview</summary><p>$bound</p>$text$suffix" +
+                "<p>Exact byte prefix (hexadecimal).</p><pre>${value.hex.escapeHtml()}</pre></details>"
+        }
+        val counts = cases.matchedCount?.let { "Recorded byte comparisons: $it matched; ${cases.inputCount - it} mismatched. " }.orEmpty()
+        val rows = cases.cases.joinToString("") { value ->
+            val outcome = when (value.outcome) {
+                RecordedRepairValidationCaseOutcome.MATCHED -> "Matched"
+                RecordedRepairValidationCaseOutcome.MISMATCH -> "Mismatch"
+                RecordedRepairValidationCaseOutcome.COMPILE_FAILED -> "Not compared: compilation failed"
+                RecordedRepairValidationCaseOutcome.COMPILE_ONLY -> "Not compared: compile-only validation"
+            }
+            fun equal(flag: Boolean?) = when (flag) { true -> "Same"; false -> "Different"; null -> "Not compared" }
+            fun stream(flag: Boolean?, first: Long?, second: Long?, original: RecordedRepairValidationPreview?,
+                rebuilt: RecordedRepairValidationPreview?): String = equal(flag) +
+                (if (first == null || second == null) "" else "<br>Original: $first B; rebuilt: $second B") +
+                preview("Original", original) + preview("Rebuilt", rebuilt)
+            "<tr><th scope=\"row\">${value.ordinal}. <code>${value.identity.value.escapeHtml()}</code></th>" +
+                "<td>$outcome</td><td>${equal(value.exitCodeMatches)}</td>" +
+                "<td>${stream(value.stdoutMatches, value.originalStdoutBytes, value.rebuiltStdoutBytes,
+                    value.originalStdoutPreview, value.rebuiltStdoutPreview)}</td>" +
+                "<td>${stream(value.stderrMatches, value.originalStderrBytes, value.rebuiltStderrBytes,
+                    value.originalStderrPreview, value.rebuiltStderrPreview)}</td></tr>"
+        }
+        val table = if (rows.isEmpty()) "<p>No input cases are recorded.</p>" else
+            "<div class=\"table-wrap\" role=\"region\" aria-label=\"Recorded validation case comparisons\" tabindex=\"0\">" +
+                "<table><caption>Recorded exact-byte comparisons</caption><thead><tr><th scope=\"col\">Case</th>" +
+                "<th scope=\"col\">Comparison</th><th scope=\"col\">Exit code</th><th scope=\"col\">Standard output</th>" +
+                "<th scope=\"col\">Standard error</th></tr></thead><tbody>$rows</tbody></table></div>"
+        val navigation = buildList {
+            if (cases.pageNumber > 1) add(caseLink("Previous validation cases", cases.pageNumber - 1))
+            if (cases.pageNumber < cases.totalPages) add(caseLink("More validation cases", cases.pageNumber + 1))
+        }.joinToString(" · ")
+        val mismatchNavigation = buildList {
+            cases.firstMismatchPage?.takeIf { it != cases.pageNumber }?.let { add(caseLink("First page with a mismatch", it)) }
+            cases.previousMismatchPage?.let { add(caseLink("Previous page with a mismatch", it)) }
+            cases.nextMismatchPage?.let { add(caseLink("Next page with a mismatch", it)) }
+        }.joinToString(" · ")
+        return "<p>$counts Validation case page ${cases.pageNumber} of ${cases.totalPages} (at most 20 cases). " +
+            "Comparisons describe retained bytes; missing observations are not skipped or successful executions.</p>" +
+            "<p>Comparison uses every retained byte without normalization. Previews show at most 128 bytes per stream; " +
+            "text escapes backslashes, line endings, tabs and control characters. Previews do not change the full-byte comparison.</p>$table" +
+            (if (navigation.isEmpty()) "" else "<nav aria-label=\"Recorded validation case pages\">$navigation</nav>") +
+            (if (mismatchNavigation.isEmpty()) "" else "<nav aria-label=\"Validation mismatch pages\">$mismatchNavigation</nav>")
     }
     fun normalEvidence(binding: RepairRecordedValidationObservation?, owner: RepairRecordedIdentity,
         isRun: Boolean = false, offerRunLink: Boolean = false): String {
@@ -635,7 +699,12 @@ internal fun renderRecordedRepairHistory(job: Job, view: RecordedRepairHistoryVi
             "<br>Comparison policy: exact bytes (v1)." +
             "<br>Source snapshot: <code>${binding.proof.sourceRevisionSha256.escapeHtml()}</code> · " +
             "<code>${binding.candidate.value.escapeHtml()}</code>" +
-            "<br><a href=\"${artifactHref(job, target)}\">Open retained primary validation receipt</a>$derived</p>"
+            "<br><a href=\"${artifactHref(job, target)}\">Open retained primary validation receipt</a>$derived</p>" +
+            if (binding.candidate.rawIdentityWithheld || owner.rawIdentityWithheld ||
+                binding.diff != null && (detail.diffState != RepairEvidenceArtifactState.AVAILABLE ||
+                    view.targets[binding.diff.artifact] == null))
+                "<p>Required recorded diff or identity evidence is unavailable; case comparisons are withheld.</p>"
+            else normalCases(detail.casePage, owner, isRun)
     }
     val visible = page.attempts
     val items = visible.joinToString("") { attempt ->

@@ -21,6 +21,7 @@ export const sourceCopy = {
     'not-classified': 'The manifest does not classify implementation acceptance for this file.',
   },
   metadataNotice: 'These metadata are recorded input commitments. Metadata alone does not verify file bytes or establish accepted reconstruction.',
+  pinnedSnapshot: 'This view is pinned to the source and metadata commitments observed for the selected validation. If they change, return to the validation evidence and read a new snapshot link.',
   moduleGeneration: 'Recorded module generation',
   moduleGenerationNotice: 'These are reported generation values, not verified execution or accepted reconstruction.',
   moduleUnavailable: 'Module generation metadata are unavailable for this file.',

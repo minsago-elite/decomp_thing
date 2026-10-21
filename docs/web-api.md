@@ -157,6 +157,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/events?transport=poll` | `200 events` | Same retention/cursor semantics, bounded page; #174 |
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
+| `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
@@ -776,7 +777,7 @@ for hex. Both representations keep the response below 1 MiB and expose the compl
 byte range and continuation explicitly. Shared consumers reject inconsistent byte
 lengths, completeness, continuations and line metadata, including malformed surrogates.
 
-The `content` route accepts no query and returns the complete verified bytes as a
+The `content` route accepts an optional canonical `metadataVersion` commitment and returns the complete verified bytes as a
 no-store, nosniff `application/octet-stream` attachment. The ASCII fallback filename
 and encoded UTF-8 basename cannot insert header syntax; the response also carries a
 sandbox/default-deny CSP. HEAD verifies the same captured file and returns its length
@@ -985,3 +986,265 @@ Successful changes and no-ops use the durable receipts described in [pin audit/r
 The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. The authenticated attempt page now provides explicit read/pin/unpin controls with fresh-read reconciliation. Audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.
 
 Private bootstrap now includes an optional `runtime.progressRetention` sample with enabled configuration, sample time, completed attempt checks, expired journals, failed checks and the last diagnostic code. Runtime displays this process-local sample from the last session check without launching another probe. The SPA `terminalEventRetentionMs` value is 86400000: the threshold for timed expiry, not a guarantee against earlier size/count eviction or a maximum scan delay. See [production retention](web-progress-adapter.md#spa-production-retention-and-sampled-status).
+
+
+### Recorded repair validation case comparisons
+
+The embedded repair-history view can inspect the selected canonical normal-validation
+receipt using the existing checked artifact listing and request-wide byte allowance.
+The source/corpus/proof bindings are checked before case projection. A closed ordered
+sequence of one build scope and one reference/candidate pair per corpus input supplies
+exact exit-code, standard-output and standard-error comparisons. Canonical base64 is
+validated and compared without allocating another complete decoded output payload.
+Before deriving outcomes, the selected case reader reuses the canonical pure sandbox
+binding verifier. It recomputes the ordered field digest, rejects empty or duplicate
+inventories, checks the contained-launch flags, and binds the nonempty command,
+executable runtime manifests and single writable authority to each scope's records.
+Self-consistent receipt hashes cannot replace those checks. These are retained-record
+consistency checks and confer no execution or acceptance authority.
+Matching ordinary nonzero exits remain matching comparisons; folded signal-like exits
+cannot establish a runtime failure or crash cause.
+
+Case identities use the same opaque corpus-bound identity as retained repair cases.
+The table includes at most twenty rows and finite byte counts. Each compared output
+stream has a preview of at most its first 128 bytes. Hexadecimal preserves every
+retained prefix byte; escaped UTF-8 text is also shown when that prefix is valid.
+An incomplete UTF-8 character at a truncated boundary stays in hexadecimal only;
+malformed bytes are never replaced to manufacture a text preview. Backslashes,
+line endings, tabs and control characters are escaped in text. Every preview states
+its observed size, displayed byte count and whether it is complete or truncated.
+Empty observed output stays distinct from unobserved case output. Comparison still
+uses the entire retained byte sequence without normalization, so equal previews
+cannot conceal a mismatch outside the prefix. Separate
+`historyValidationPage` navigation retains the selected graph, report run and evidence
+owner; pages beyond the captured count show an explicit out-of-range state and a
+graph-bound return link. History and retained-case-reference pagination stay separate.
+
+Empty scope evidence is unavailable. Missing, foreign, duplicated, misordered or
+inconsistent scopes withhold case comparisons. Compile failure and compile-only
+validation leave case pairs unobserved; neither becomes a skipped or successful run.
+Fatal diagnostic phase/position identifies an enclosing producer operation and does
+not prove that a child process started or completed. The normal case table does not
+infer those fatal outcomes.
+
+This is read-only presentation of retained evidence. It does not add execution or
+acceptance authority. The versioned normal-operation report and case pages described
+below do not complete fatal-case outcome production or source links
+to the validated snapshot. Native actor attribution,
+physical resource bounds, positive authentication and decompilation effectiveness
+require their own evidence.
+
+### Selected recorded validation reports and case pages
+
+The private `GET`/`HEAD R/reports/revision-validation` route projects the existing v1
+`report` contract from one selected recorded normal validation operation. Supply
+`historyGraph=<64 lowercase hex digits>` and exactly one of
+`historyEvidence=<attempt reference>` or `historyRunEvidence=<repair-run reference>`.
+The latter selects that repair run's recorded baseline validation, not its latest
+workflow outcome. Optional `historyPage` selects the same fixed20-owner history
+window used by recorded inspection. Optional canonical `historyValidationPage` selects
+one20-case comparison window independently of the history-owner window. Duplicate,
+foreign, noncanonical and missing selection parameters are refused before capture.
+Case-reference pagination does not apply to this endpoint.
+
+The controller applies the existing session, method and JSON negotiation boundary.
+Graph/owner selection precedes report inventory or payload work. Only the selected
+normal primary and required derived diff are resolved through the existing checked
+report inventory and descriptor-backed reader. Their captures share the existing
+64 MiB recorded-evidence allowance; failed reads consume their reservation. One
+capture/projection is admitted at a time. Both the captured graph digest and selected
+durable attempt version are rechecked after reading; changes return an explicit409.
+The common response writer retains the1 MiB JSON ceiling and private no-store headers.
+These are application admission/byte bounds, not physical RSS or latency qualification.
+
+`state` distinguishes unavailable bytes (`unknown`), unavailable required scopes or
+diffs (`partial`), unsupported declared producer versions (`unsupported`) and corrupt
+or inconsistent evidence (`invalid`). Their summary is null. A normal receipt
+is not inferred from an owner alone: no normal receipt remains `unknown` with a null
+producer version. A `partial` normal report identifies the supported producer schema.
+A checked normal receipt can be `available`: compile failure reports `failed`, compile-only reports `unknown`,
+and complete behavior comparisons report `passed` or `failed` from all retained paired
+bytes. Exact completed-pair counts are decimal strings; the source digest and candidate
+reference come from that operation's graph-bound proof. A report ID binds the selected
+job, durable run, graph, evidence-owner kind/reference and primary digest. It cannot
+silently name a later report or edited source. Out-of-range comparison windows return
+an explicit400 after checking the captured scope population.
+
+An available normal report includes optional v1 `validationCases`. Older reports
+without this extension remain readable; an unavailable, incomplete, unsupported or
+invalid report carries null case detail. Every page identifies its graph, owner kind
+and reference, source and corpus digests, exact comparison policy, global input/match
+counts, window/continuation numbers and stable case identities. At most20 rows retain
+four128-byte output prefixes each. Exact byte counts remain decimal strings. Each
+preview carries canonical hex, strict escaped UTF-8 when available, consumed/prefix
+byte counts and a truncation flag. Identical truncated prefixes can still belong to
+different full outputs. Compile-failed and compile-only rows retain null comparison,
+byte-count and preview fields; they are not skipped or successful behavior executions.
+
+The shared Python wire checks and SPA decoder enforce population/window/ordinal
+consistency, source association, bounded preview geometry and canonical hex, exact
+empty/unobserved distinctions, full-summary/page consistency and comparison flags.
+When both prefixes cover complete streams their equality must match the recorded
+comparison flag; truncated prefixes cannot decide full equality. These metadata
+checks do not independently authenticate the receipt or certify native execution.
+
+Every response has observation authority and `acceptance: "not-evaluated"`.
+No accepted artifact, raw command, host path, credential, source-artifact download URL
+or unverified fatal-case result is manufactured. A source commitment is not a navigable
+validated-source snapshot. Fatal outcome production, bounded mismatch-centered diff
+windows, validated-source navigation,
+complete export and new physical HTTP/browser qualification remain required by their
+original owners. Twenty-one API controls use authored DTOs and callbacks only; three
+shared wire fixtures and three pure decoder controls cover the new protocol boundaries.
+The original41 case-control bodies and actual execution fixtures are unchanged.
+The new source awaits its own ordinary Actions and review.
+
+### Validation history discovery and SPA selection
+
+The private `GET`/`HEAD R/validation-history` response uses the closed v1
+`validationHistory` envelope. An initial read needs no query. `historyGraph` pins a
+continuation to the captured graph; canonical `historyPage` selects a fixed window
+of at most 20 finalized attempts, 20 repair-run baselines, 20 recorded failed
+operations from those repair runs, and one pending attempt on the
+latest page. These are operation families within the selected durable run, not
+additional jobs or runs to execute. All other selection parameters are refused.
+
+The producer reads existing history metadata with graph and durable-attempt version
+checks around the capture. It does not read a selected receipt or source body.
+`hasReceipt` records metadata presence only. `canInspect` additionally requires
+disclosed owner and candidate identities; withheld references cannot select evidence.
+Each inspectable owner carries the source and corpus commitments of its own recorded
+operation. An older receipt corpus can differ from the history's current corpus.
+Absent and unavailable history remain distinct states with null graph, population
+and navigation fields. Discovery and receipt projection share one admission slot.
+
+The attempt SPA provides explicit history reads, operation selection and case-page
+navigation. Each response must match the requested job, durable run, graph, owner,
+candidate, source and selected receipt corpus. Case continuations also retain the
+report identity. Obsolete reads are aborted on selection/context changes or unmount;
+failed, denied and unverified reads clear the displayed evidence. There are no
+automatic reads or retries in this panel. Output prefixes render as escaped text,
+with exact byte-count strings, explicit truncation and absent/binary/empty distinctions.
+
+Eight new metadata controls use DTOs and callbacks. Two shared discovery fixtures,
+two decoder controls, eight in-memory fetch/JSDOM controls and one existing-session
+route control cover this addition. These are authored component and protocol controls;
+they do not establish physical browser/HTTP, authentication, native cleanup or ACP
+decompilation effectiveness. The original acceptance scopes remain open until their
+required evidence is available. This source still needs its own Actions and review.
+
+### Selected failed-operation diagnostics
+
+`R/reports/revision-validation?historyGraph=<digest>&historyFailureRun=<run>`
+explicitly selects a repair run's recorded failure diagnostic. This selector cannot
+be combined with an attempt or baseline selector. History discovery uses the distinct
+`run-failure` owner kind and a finite `failureKind`; its candidate/source/corpus can
+differ from that same run's baseline. Only the first diagnostic page is supported;
+no case-page continuation or case comparison result is invented for a fatal receipt.
+
+Normal and failed-operation capture share the existing checked inventory/target
+resolver, descriptor-backed reader, 64 MiB request allowance, graph and durable-version
+brackets, and single admission slot. The selected receipt and its required diagnostic
+are separately byte/hash checked against the invocation-owned binding. Their source,
+corpus, runtime, classification, candidate and invocation association must agree.
+The disclosed input population is rederived against the selected historical corpus.
+Missing primary bytes remain `unknown`; missing required diagnostics are `partial`;
+unsupported declared versions and inconsistent evidence remain distinct refusals.
+
+An available report carries optional closed `validationFailure` with
+`authority: "producer-diagnostic"`, graph/owner/source/corpus bindings, finite reason
+and enclosing phase, exact decimal input/count strings, optional one-based input
+position and explicitly producer-reported cleanup. The report summary and
+`validationCases` are null, and repair acceptance remains unevaluated. Timeout,
+resource exhaustion, cancellation, unverified cleanup and other validation failures
+retain their separate producer labels. A before-case or original/rebuilt operation
+phase requires a position matching the reported completed prefix. Earlier phases
+cannot claim completed case pairs. No raw exception, command, path or peer text is
+returned.
+
+These diagnostics identify an enclosing producer operation. They do not prove which
+child process started or failed, actual process absence, independent cleanup, or
+successful case comparisons. Per-case fatal outcome production, partial comparison
+inspection, skipped/unsupported case evidence, bounded difference windows, source
+navigation and complete export remain required in the original full scopes.
+
+The SPA offers an explicit failure action, verifies the selected bindings and clears
+unverified evidence. Eighteen added DTO/callback methods, four shared wire fixtures,
+two decoder controls and four mocked-fetch/JSDOM controls cover this extension.
+They do not add actual execution contexts or physical qualification. Own Actions,
+generated drift verification and automatic review are still required.
+
+### Validation source snapshot links
+
+A checked normal case report or failed-operation diagnostic offers an explicit
+source-resolution action. Repair-graph revision references and durable workflow
+candidate references have separate namespaces. The action reads the selected
+workflow run and its retained result candidate's root source metadata, then requires
+its recomputed input-source commitment to equal the selected validation's source
+SHA-256. It offers a source link only after that match. Missing retained candidates,
+nonterminal runs, unavailable metadata and mismatched job/run/revision/source values
+leave the source link unavailable. The reader does not substitute a different
+workflow run or infer source from a display label.
+
+A matched link carries the exact observed `sourceSha256` and `metadataVersion` in
+the application URL. Directory pages, breadcrumbs, file links, refreshes and line/
+range navigation preserve this pair. Both first-page and continued directory/file
+responses must match it; changed observations clear the displayed source metadata.
+Incomplete, repeated, malformed and foreign query fields are refused before reads.
+A pin by itself does not request source text or enable the preview control. Actual
+bootstrap source-chunk advertising remains zero.
+
+Metadata requests retain their existing API selectors and authorization. Explicit
+source downloads and digest HEAD observations carry the captured `metadataVersion`
+to the content endpoint. That optional query accepts one lowercase 64-digit digest;
+other/repeated parameters are rejected. The existing checked capture compares the
+metadata commitment before invoking any source-body callback. Legacy content reads
+without the optional commitment remain supported. File identity, source SHA-256,
+manifest roles, byte limits and digest/identity rechecks remain required.
+
+The link identifies retained workflow source with the validation's exact source
+commitment. It does not establish accepted reconstruction, independent file-content
+verification, compiler/behavior equivalence or physical HTTP/browser qualification.
+Historical repair revisions without corresponding retained workflow source remain
+unavailable and still require the original full historical-source/retention scope.
+Complete diagnostic locations, export and all other case/report families remain open.
+
+Three added backend methods use authored metadata/bytes/callbacks only. Thirteen new
+frontend controls cover pin parsing, route/range propagation, exact digest HEAD,
+source resolution and in-memory session navigation without new actual execution
+contexts. The original controller/native fixtures and source-chunk limits are
+unchanged. This source awaits its own Actions and review.
+
+### Retained validation receipt consistency
+
+A normal selected validation result additionally checks the retained source inventory against the graph-bound source commitment and resource budget, and the canonical runtime configuration against its recorded digest, registered tool roles, normalized mounts and profile. Behavior comparisons recompute the original executable/input/exit/stdout/stderr observation digest across all cases and bind it to the selected durable repair run. Missing graph or reference metadata leaves the report partial; contradictory metadata is invalid. These checks also run when a caller selects a later case page.
+
+Failed-operation reports recompute the retained source manifest and revision before attributing a diagnostic to the selected source. A failure before source capture, or a missing bound profile, leaves the report partial with no source-attributed failure detail. Such a report still provides neither per-case failure outcomes nor cleanup qualification.
+
+Server-rendered history withholds case rows and output previews when required diff evidence or owner/candidate identity is unavailable or corrupt. Both the SPA decoder and Python wire verifier independently derive escaped text from the exact hexadecimal preview, including strict UTF-8, incomplete suffixes, BOM and control/format escaping. Partial selected validation reports cannot carry a result summary or case detail.
+
+### Save a selected validation observation
+
+The recorded-validation consumer offers an explicit JSON download only for an available observation bound to its selected job/run/revision, graph, owner, source and corpus. A normal export contains the currently inspected case page, including exact string counts, comparison flags and bounded previews. A failure export contains only the selected enclosing producer diagnostic, with no inferred case rows. The versioned export identifies its limited scope and preserves report identity; it is not a complete receipt, a full multi-page export, source content or an acceptance decision.
+
+Export uses the already-read observation, rechecks the shared closed wire projection and presentation semantics, strips additive private fields, and imposes a 192 KiB UTF-8 limit before producing a JSON data download. It makes no additional request or execution admission. Loading another page, refreshing, a denied read or a changed attempt removes the prior download with its prior observation. This does not qualify actual browser/download behavior, full validation export or physical D0 resource limits.
+
+### Navigate directly to recorded mismatch pages
+
+Available normal case detail now reports optional nullable `firstMismatchPage`, `previousMismatchPage` and `nextMismatchPage`. The producer computes these across every input pair in the same fully checked receipt before exposing a page, retaining only three page numbers. Multiple differences on one page yield one destination; all-match, compile-only and compile-failed observations report nulls. Corrupt or missing required evidence still withholds all case detail and navigation. Ordinary page membership, counts, exact-byte comparisons, previews and source/corpus bindings are unchanged.
+
+The SPA and server-rendered history offer explicit first/previous/next mismatch-page actions through the existing selected-evidence route. Actions retain the graph, owner and report identity, keep at most twenty surrounding cases on each page, and never execute validation. Both wire consumers reject incomplete navigation groups, invalid directions/windows and contradictions with reported or visible differences. Older v1 producers may omit the entire group and retain ordinary paging; missing metadata never means no differences. Selected-observation JSON exports preserve recognized navigation metadata. This is bounded inspection of normal comparisons, not classification of unseen fatal child outcomes or physical HTTP/browser/resource qualification.
+
+Available behavior comparisons with at most 10,000 inputs also carry an optional nullable `comparisonIndex`. Its `referenceObservationsSha256` is the checked durable digest of the original binary, ordered input identities and complete reference exit/stdout/stderr observations. `mismatchBitmapHex` encodes one bit per input ordinal, least significant bit first within each byte, as canonical lowercase hexadecimal. Bit one means mismatch; zero means matched. The byte length is exactly `ceil(totalInputs / 8)` and unused high bits must be zero. The producer records these bits during the existing complete receipt scan and exposes them only after all source, sandbox, budget, output and reference checks succeed. The maximum additional bitmap is 1,250 bytes / 2,500 hexadecimal characters; no additional receipt read or validation run is needed.
+
+Both consumers check bitmap bounds, padding, complete mismatch counts, each visible case and any reported mismatch-page destinations. Compile-only/failed, incomplete, corrupt and out-of-range observations cannot supply a comparison index. Populations above 10,000 and older adapters without the extension remain inspectable through ordinary case pages, with cross-attempt comparison unavailable rather than inferred. An index preserves the existing `exact-bytes-v1` policy and observation-only authority; it does not establish repair acceptance, independent execution/containment or equivalence.
+
+The SPA can retain one explicitly selected observation as a comparison baseline and compare it to another already-read observation. Compatibility requires the same job, run, captured graph, retained corpus, input count, exact-byte policy and complete reference-observation digest. Different source revisions are expected; a different corpus, normalization policy or reference behavior yields an incompatible message, never new/resolved regression claims. Re-selecting the same owner is not a second observation. The complete indexed population is classified into new, persistent and resolved mismatches plus inputs matched in both observations. Case ordinals are meaningful only within that exact ordered corpus.
+
+Comparison windows show at most twenty positions per category, with local paging and explicit links to the selected observation's ordinary case pages for stable IDs/previews. Pinning and comparison paging issue no requests. Swapping the two sides uses the existing read-only selected-evidence route with the original history page, graph, owner and report identity. A new history refresh, denied/invalid read or job/run/transport binding change removes the saved baseline; compatible history pagination can retain it. The download can contain the recognized full-corpus index alongside the selected case details, with an explicit limitation that unselected details/full outputs are absent. Authored DTO/JSDOM controls are separate from physical HTTP/browser/large-resource qualification.
+
+Normal case inspection also applies the canonical retained-input shape and budget contract to the receipt itself. IDs must be unique, sorted, nonblank and NUL-free; arguments must be NUL-free. The complete input count, argument count and combined UTF-8 ID/argument plus decoded-stdin bytes must fit the selected graph budget, including inputs outside the visible page. The archive verifier and normal reader share this pure metadata check. Receipt and corpus hashes alone do not admit out-of-policy inputs. A violation withholds every comparison, summary and compact index; it does not execute a case or alter the separate enclosing-failure projection.
+
+Normal case inspection shares the archive verifier's exact executable metadata policy: the closed field set, recorded binary digest, reference/candidate role, immutable mode 320, positive integer byte length and runtime manifest digest must agree before any case detail is exposed. Failed-operation details with retained source and graph context also validate the complete runtime configuration against its recorded digest, canonical shape, registered tool roles, normalized mounts and selected profile. Copying the bound runtime digest into an inconsistent receipt does not admit a producer diagnostic. These checks read retained metadata and do not launch a process or read executable bytes.
+
+For failed operations, the producer's exact empty source-snapshot object means source capture did not complete. It is treated as unavailable, like a legacy null snapshot, and yields a partial report without source-attributed failure labels. Nonempty malformed snapshots remain invalid. Before exposing details for retained source, the reader also requires the exact graph/host behavior-budget evidence and checks that the source quota's mount commitment equals the runtime's normalized source mount. Coherently bound metadata preserves the existing finite enclosing-operation diagnostic; it does not establish case comparisons or cleanup.

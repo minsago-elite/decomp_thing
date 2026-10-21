@@ -836,7 +836,7 @@ class UploadServer(
         val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
             repairEvidenceArtifactStates(jobId, reports, history, it)
         } }
-        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page)
+        val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
         exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
@@ -851,7 +851,7 @@ class UploadServer(
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
     private fun recordedRepairEvidenceView(jobId: String, context: WebReportContext,
         recorded: decompengine.repair.RepairHistoryReadResult, artifacts: List<WebArtifactSummary>?,
-        page: decompengine.repair.RepairRecordedHistoryPage?): RecordedRepairHistoryView {
+        page: decompengine.repair.RepairRecordedHistoryPage?, validationCasePageNumber: Int = 1): RecordedRepairHistoryView {
         val snapshot = recorded.snapshot?.takeIf { recorded.status == decompengine.repair.RepairHistoryReadStatus.RECORDED }
             ?: return RecordedRepairHistoryView(recorded, runId = context.runId)
         val selected = requireNotNull(page)
@@ -884,7 +884,7 @@ class UploadServer(
         val observations = normalBindings.associate { (owner, binding) ->
             val primary = targets[binding.primary.artifact]?.let { readOnce(it, binding.primary.bytes).getOrNull() }
             val diff = binding.diff?.let { artifact -> targets[artifact.artifact]?.let { readOnce(it, artifact.bytes).getOrNull() } }
-            owner to checkedRecordedRepairValidationObservation(binding, primary, diff)
+            owner to checkedRecordedRepairValidationObservation(binding, primary, diff, validationCasePageNumber)
         }
         val observedArtifactStates = buildMap {
             normalBindings.forEach { (owner, binding) ->
@@ -931,7 +931,8 @@ class UploadServer(
                 run.identity to checkedRecordedRepairValidationDiagnostic(binding, primary, diagnostic)
             }
         }.toMap()
-        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId, diagnostics, observations)
+        return RecordedRepairHistoryView(recorded, targets, evidence, receipts, selected, context.runId, diagnostics, observations,
+            validationCasePageNumber)
     }
 
     private data class RepairReceiptExpectation(

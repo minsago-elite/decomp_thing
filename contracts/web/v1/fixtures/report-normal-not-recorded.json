@@ -1,0 +1,26 @@
+{
+  "apiVersion": 1,
+  "kind": "report",
+  "requestId": "request_recorded_absent",
+  "data": {
+    "reportId": "validation_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_selected",
+      "revisionId": null
+    },
+    "reportType": "revision-validation",
+    "adapterVersion": 1,
+    "producerSchemaVersion": null,
+    "state": "unknown",
+    "authority": "observations",
+    "sourceArtifact": null,
+    "acceptance": "not-evaluated",
+    "acceptanceArtifactId": null,
+    "limitations": [
+      "No normal validation receipt is recorded for this owner. Fatal case outcomes are not inferred.",
+      "Integrity checks do not qualify independent containment, physical resource bounds, authentication or ACP decompilation effectiveness."
+    ],
+    "summary": null
+  }
+}

@@ -2,6 +2,7 @@ import type { RevisionFile, SourceChunk } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 import { checkSourceChunk } from '../api/semantics';
 import { sourceFilePath, sourceReadRoute } from '../app/paths';
+import type { SourceSnapshotPin } from '../app/paths';
 import { SOURCE_FILE_LIMIT } from './navigation';
 import type { FileSelection } from './navigation';
 
@@ -19,10 +20,11 @@ export function sourcePosition(search: string): SourcePosition {
   return { offset: match[1]!, line: match[2] ?? null };
 }
 
-export function sourcePositionPath(basePath: string, selected: FileSelection, position: SourcePosition): string {
+export function sourcePositionPath(basePath: string, selected: FileSelection, position: SourcePosition, pin?: SourceSnapshotPin): string {
   const query = `?byte=${position.offset}${position.line === null ? '' : `&line=${position.line}`}`;
   sourcePosition(query);
-  return sourceFilePath(basePath, selected, selected.fileId) + query;
+  const path = sourceFilePath(basePath, selected, selected.fileId, pin);
+  return path + (pin === undefined ? query : `&${query.slice(1)}`);
 }
 
 export function sourceChunkMaximum(reported: string): number {
