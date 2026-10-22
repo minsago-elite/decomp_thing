@@ -75,7 +75,7 @@ it('restores signed snapshot pages through next previous back and forward withou
   await screen.findByRole('link', { name: 'snapshot-1.elf' });
   expect(location.search).toBe('?status=failed&cursor=Page_First');
   expect(transport.get).toHaveBeenCalledTimes(readsBeforePrevious);
-  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
+  expect(window.document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
   expect(screen.getByText('Showing a previously loaded page from this snapshot. Refresh jobs to read the current library.')).toBeTruthy();
   expect(transport.get.mock.calls.map(([, path]) => new URL(path, 'http://example.invalid').searchParams.get('cursor')))
     .toEqual([null, 'Page_Second', 'Page_Second']);
