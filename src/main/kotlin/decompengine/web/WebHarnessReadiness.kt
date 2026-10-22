@@ -1,7 +1,6 @@
 package decompengine.web
 
 import decompengine.acp.AcpHarnessFactory
-import decompengine.acp.AcpHarnessKind
 import decompengine.acp.AcpHarnessSelection
 import decompengine.analysis.BundledGhidra
 import decompengine.validation.BwrapCapability
@@ -198,8 +197,7 @@ internal class WebHarnessReadinessProjector(
             }
             val selection = try {
                 val configured = AcpHarnessFactory.fromEnvironment(environment)
-                // The legacy adapter defers its environment validation to harness creation.
-                if (configured.kind == AcpHarnessKind.LEGACY_OPENAI) configured.createHarness()
+                configured.validateConfiguration()
                 configured
             } catch (_: Exception) {
                 return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")

@@ -1,8 +1,11 @@
 package decompengine.web
 
+import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpHarnessSelection
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class WebPassiveHarnessReadinessTest {
@@ -113,5 +116,48 @@ class WebPassiveHarnessReadinessTest {
             now = 99
             assertEquals("unknown", projector.current().state)
         } finally { projector.close() }
+    }
+
+    @Test
+    fun `legacy configuration inspection uses the same argument grammar without an adapter`() {
+        val environment = mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "authored-key", "MODEL" to "authored-model")
+        for (effort in listOf(null, "", " high ", "none", "minimal", "low", "medium", "high", "xhigh")) {
+            val settings = if (effort == null) environment else environment + ("REASONING_EFFORT" to effort)
+            AcpHarnessFactory.fromEnvironment(settings).validateConfiguration()
+        }
+        val invalid = listOf(environment - "API_KEY", environment + ("API_KEY" to " "),
+            environment - "MODEL", environment + ("MODEL" to " "),
+            environment + ("BASE_URL" to "relative"), environment + ("BASE_URL" to "ftp://example.invalid"),
+            environment + ("BASE_URL" to "["), environment + ("REASONING_EFFORT" to "unsupported"))
+        for (settings in invalid) {
+            assertFailsWith<IllegalArgumentException> { AcpHarnessFactory.fromEnvironment(settings).validateConfiguration() }
+        }
+    }
+
+    @Test
+    fun `selection configuration inspection never calls its adapter provider`() {
+        val selected = AcpHarnessFactory.fromEnvironment(mapOf("ACP_HARNESS" to "legacy-openai"))
+        var validations = 0
+        var constructions = 0
+        val selection = AcpHarnessSelection(selected.kind, selected.configuration, selected.provenance,
+            configurationValidation = { validations++ },
+        ) { constructions++; error("adapter construction must remain explicit") }
+        repeat(2) { selection.validateConfiguration() }
+        assertEquals(2, validations)
+        assertEquals(0, constructions)
+    }
+
+    @Test
+    fun `legacy configuration inspection uses the frozen selected settings`() {
+        val environment = mutableMapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "authored-key", "MODEL" to "authored-model")
+        val valid = AcpHarnessFactory.fromEnvironment(environment)
+        environment.clear()
+        valid.validateConfiguration()
+        environment.putAll(mapOf("ACP_HARNESS" to "legacy-openai"))
+        val invalid = AcpHarnessFactory.fromEnvironment(environment)
+        environment.putAll(mapOf("BASE_URL" to "https://example.invalid/v1", "API_KEY" to "authored-key", "MODEL" to "authored-model"))
+        assertFailsWith<IllegalArgumentException> { invalid.validateConfiguration() }
     }
 }
