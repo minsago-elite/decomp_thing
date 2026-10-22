@@ -1,5 +1,5 @@
 import { receiptCopy as copy } from '../copy/receipts';
-import { receiptAge } from '../copy/attempt';
+import { receiptAge } from '../copy/receiptAge';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { message } from './messages';
