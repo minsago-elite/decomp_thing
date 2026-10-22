@@ -10,7 +10,6 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -97,8 +96,11 @@ class WebAdmissionBoundsTest {
             Thread.sleep(1_500)
             val results = (1..3).map { get(port, 3_000) }
             for (result in results) {
-                assertTrue(result.status == null || result.status == 429, "unexpected status ${result.status}")
-                assertNotNull(result.failure ?: "answered", "bounded outcome")
+                assertTrue(
+                    result.status == 429 ||
+                        (result.status == null && result.failure != null && result.failure != "timeout"),
+                    "expected 429 or a closed connection; status=${result.status}, failure=${result.failure}",
+                )
             }
             assertTrue(results.any { it.failure != null }, "with every tier taken, at least one request is refused by closing the connection: ${results.map { it.status ?: it.failure }}")
             closePinned()
