@@ -168,4 +168,69 @@ class WebSessionRealRoutesTest {
             assertEquals(200, stream(third, "?after=${oldestCursor(third)}&limit=1").first)
         } finally { server.stop() }
     }
+
+    @Test
+    fun `every readable route shape refuses unauthenticated and logged-out requests and no authenticated GET changes storage`() {
+        val store = JobStore(root)
+        val job = store.createFromUpload("inert.elf", elfFixture())
+        val run = WorkflowAttemptStore.open(root).use { owner ->
+            val original = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+            owner.create(job.id, original.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+        }
+        val reports = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/${run.runId}"))
+        AgentProgressJournal(reports, "reconstruct").use { it.phase(decompengine.agent.AgentWorkflowPhase.PLANNING) }
+        Files.writeString(reports.resolve("exploration.json"), "{\"fixture\":\"inert\"}")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("unexpected analysis") },
+            JobReconstructor { _, _ -> error("unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/w/")
+        server.start()
+        try {
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val api = "/w/api/v1"
+            val r = "$api/jobs/${job.id}/runs/${run.runId}"
+            val revision = "$r/revisions/rev_1"
+            // One path per accepted GET resource shape in WebApiController's route allowlist; unknown ids are deliberate.
+            val readable = listOf(
+                "$api/bootstrap", "$api/jobs", "$api/recovery", "$api/agent/preflight", "$api/uploads/${"a".repeat(32)}",
+                "$api/jobs/${job.id}", "$api/jobs/${job.id}/runs", r, "$r/snapshot", "$r/events", "$r/progress-pin",
+                "$r/reports/exploration", "$r/reports/revision-validation", "$r/validation-history", "$r/source-catalog",
+                "$revision/sources", "$revision/source-directories/dir_1", "$revision/source-files/file_1",
+                "$revision/source-files/file_1/chunk", "$revision/source-files/file_1/content",
+                "$api/jobs/${job.id}/artifacts/artifact_1/content",
+            )
+            fun get(path: String, cookie: String?, method: String = "GET"): HttpResponse<String> {
+                val builder = HttpRequest.newBuilder(URI(origin + path)).timeout(Duration.ofSeconds(5)).header("Accept", "application/json")
+                if (cookie != null) builder.header("Cookie", cookie)
+                return http.send(builder.method(method, HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString())
+            }
+            fun session(): Pair<String, String> {
+                val response = http.send(HttpRequest.newBuilder(URI("$origin$api/session")).timeout(Duration.ofSeconds(5))
+                    .header("Origin", origin).header("Content-Type", "application/json").header("Accept", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"token\":\"${server.issueBrowserBootstrap().token}\"}")).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(200, response.statusCode())
+                val csrf = Json.parseToJsonElement(response.body()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
+                return response.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';') to csrf
+            }
+            // HEAD is admitted only by the two content routes; elsewhere the method policy answers 405 before any data is read.
+            val headAllowed = setOf("$api/jobs/${job.id}/artifacts/artifact_1/content", "$revision/source-files/file_1/content")
+            fun assertRefused(path: String, cookie: String?, context: String) {
+                assertEquals(401, get(path, cookie).statusCode(), "GET $path $context")
+                val head = get(path, cookie, "HEAD").statusCode()
+                if (path in headAllowed) assertEquals(401, head, "HEAD $path $context") else assertTrue(head == 401 || head == 405, "HEAD $path $context ($head)")
+            }
+            // No session at all.
+            for (path in readable) assertRefused(path, null, "without a session")
+            val (cookie, csrf) = session()
+            val before = storageDigest()
+            val statuses = readable.associateWith { path -> get(path, cookie).statusCode() }
+            for (path in readable) get(path, cookie, "HEAD")
+            assertEquals(before, storageDigest(), "an authenticated GET/HEAD changed stored state: $statuses")
+            assertTrue(statuses.values.none { it == 401 }, "an authenticated read was treated as unauthenticated: $statuses")
+            // Logged out: the same cookie reaches none of them.
+            val logout = http.send(HttpRequest.newBuilder(URI("$origin$api/session")).timeout(Duration.ofSeconds(5)).header("Origin", origin)
+                .header("Cookie", cookie).header("X-CSRF-Token", csrf).header("Accept", "application/json").header("Content-Type", "application/json")
+                .method("DELETE", HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(204, logout.statusCode())
+            for (path in readable) assertRefused(path, cookie, "after logout")
+        } finally { server.stop() }
+    }
 }
