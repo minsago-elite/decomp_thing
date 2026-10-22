@@ -199,3 +199,67 @@ it('keeps the current first-page entry bound when a live snapshot is accepted', 
     ]);
   } finally { view?.unmount(); visibility.mockRestore(); vi.useRealTimers(); }
 });
+
+it('keeps the displayed snapshot URL through slow failed and abandoned page reads until acceptance', async () => {
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await auth.initialize({ kind: 'absent' });
+  const first = page([job(1)], 'Page_First', null, 'Page_Second', 1);
+  const second = page([job(2)], 'Page_Second', 'Page_First', null, 2);
+  const push = vi.spyOn(history, 'pushState');
+  const pending: { resolve: (value: { data: Jobs }) => void; reject: (reason: unknown) => void }[] = [];
+  let accepted = false;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'job') return Promise.resolve({ data: job(1) });
+    if (kind !== 'jobs') return Promise.reject(new Error('Unexpected inert route read'));
+    const cursor = new URL(path, 'http://example.invalid').searchParams.get('cursor');
+    if (cursor !== 'Page_Second') return Promise.resolve(first);
+    if (accepted) return Promise.resolve(second);
+    return new Promise<{ data: Jobs }>((resolve, reject) => { pending.push({ resolve, reject }); });
+  });
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'snapshot-1.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    expect(screen.getByRole('link', { name: 'snapshot-1.elf' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('link', { name: 'Upload' }));
+    await screen.findByRole('heading', { name: 'Upload a binary' });
+    await act(() => { pending[0]!.resolve(second); });
+    expect(location.pathname).toBe('/nested/upload');
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-1.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    expect(screen.queryByRole('link', { name: 'snapshot-2.elf' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(() => { pending[1]!.reject(new ApiClientError('http_error', { status: 503 })); });
+    await screen.findByRole('alert');
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    fireEvent.click(screen.getByRole('link', { name: 'snapshot-1.elf' }));
+    await screen.findByRole('heading', { name: 'snapshot-1.elf' });
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-1.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    const pushes = push.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(pending).toHaveLength(3));
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    expect(push).toHaveBeenCalledTimes(pushes);
+    accepted = true;
+    await act(() => { pending[2]!.resolve(second); });
+    await screen.findByRole('link', { name: 'snapshot-2.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    expect(push).toHaveBeenCalledTimes(pushes + 1);
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-1.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_First');
+    await act(() => { history.forward(); });
+    await screen.findByRole('link', { name: 'snapshot-2.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+  } finally { push.mockRestore(); auth.dispose(); }
+});

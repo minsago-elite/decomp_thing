@@ -354,3 +354,15 @@ This preserves the existing packaged scale journey's retained-first-page/no-new-
 that assertion is unchanged. The strengthened inert history method also checks that returning
 to the first page performs no read, preserves its exact snapshot URI, shows the retained-data
 notice, and still permits explicit Refresh and changed-filter recovery.
+
+### Accept a page before committing its history entry
+
+Next/Previous requests keep the displayed page's signed cursor in the URL while
+its rows remain visible. A bounded pending transition binds the current client,
+normalized filters, exact originating query and server-issued target cursor.
+Only an accepted matching response pushes the target URI and replaces the rows.
+Slow and failed reads leave the old rows and their original return URI together;
+leaving the route aborts the read and cannot pin a late target response.
+Explicit selection changes retire the pending transition. No token is minted,
+no retry is automatic, and the original request/path/client/query fences and
+snapshot/live/cache resource limits remain in force.

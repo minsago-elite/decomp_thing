@@ -62,14 +62,27 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const activeBinding = useRef<typeof binding | null>(binding);
   activeBinding.current = binding;
   const entryPin = useRef<{ query: string; client: typeof client; cursor: string } | null>(null);
+  const pageTransition = useRef<{
+    query: string; client: typeof client; fromCursor: string; fromSearch: string; targetCursor: string;
+  } | null>(null);
   const pinReceivedPage = useCallback((page: Jobs['page']): boolean => {
     if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return false;
     const current = currentFilters(), query = filterSearch(selection.filters), previous = entryPin.current;
-    const expected = selection.cursor ?? (previous !== null && previous.client === client && previous.query === query ? previous.cursor : null);
+    const transition = pageTransition.current;
+    const moving = transition !== null && transition.client === client && transition.query === query &&
+      transition.targetCursor === selection.cursor && transition.fromSearch === location.search;
+    if (transition !== null && !moving) return false;
+    const expected = moving ? transition.fromCursor : selection.cursor ??
+      (previous !== null && previous.client === client && previous.query === query ? previous.cursor : null);
     if (!current.valid || current.invalidCursor || filterSearch(current.filters) !== query || current.cursor !== expected) return false;
     if (snapshotPagination(page)) {
       const search = jobPageSearch(selection.filters, page.currentCursor);
-      history.replaceState(null, '', `${dashboardPath.current}?${search}`);
+      if (moving) {
+        if (page.currentCursor !== transition.targetCursor) return false;
+        const next = `${dashboardPath.current}?${search}`;
+        if (`${location.pathname}${location.search}` !== next) history.pushState(null, '', next);
+      } else history.replaceState(null, '', `${dashboardPath.current}?${search}`);
+      pageTransition.current = null;
       entryPin.current = { query, client, cursor: page.currentCursor };
     } else {
       // A fresh read from an older v1 peer has no signed history capability.
@@ -92,10 +105,12 @@ export function Dashboard({ basePath }: { basePath: string }) {
     } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
       setError(withApiFailureReference(copy.thisPageSnapshotExpiredRefreshJobsToStartANew, failure));
     } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
+    pageTransition.current = null;
   }, []);
   useEffect(() => {
     const restore = () => {
       activeBinding.current = null;
+      pageTransition.current = null;
       if (location.pathname !== dashboardPath.current) return;
       entryPin.current = null;
       const restored = currentFilters(); setSelection(restored); setDraft(restored.filters);
@@ -148,6 +163,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
       if (selection.cursor && failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
+        pageTransition.current = null;
         entryPin.current = null;
         const search = jobPageSearch(selection.filters, null);
         history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
@@ -231,6 +247,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       const followsFirst = !selection.cursor && (!current.cursor ||
         (previous !== null && previous.client === client && previous.query === filterSearch(selection.filters) && previous.cursor === current.cursor));
       activeBinding.current = null;
+      pageTransition.current = null;
       if (current.valid && !current.invalidCursor && followsFirst && filterSearch(current.filters) === search) {
         const retained = jobPageSearch(checked, current.cursor);
         history.replaceState(null, '', `${location.pathname}${retained ? `?${retained}` : ''}`);
@@ -246,9 +263,12 @@ export function Dashboard({ basePath }: { basePath: string }) {
     }
   }
   function goToPage(nextCursor: string) {
-    const search = jobPageSearch(selection.filters, nextCursor), next = `${location.pathname}?${search}`;
+    if (pageTransition.current !== null || location.pathname !== dashboardPath.current || !data || !snapshotPagination(data.page)) return;
+    const current = currentFilters(), query = filterSearch(selection.filters);
+    if (!current.valid || current.invalidCursor || filterSearch(current.filters) !== query || current.cursor !== data.page.currentCursor ||
+      (nextCursor !== data.page.nextCursor && nextCursor !== data.page.previousCursor)) return;
+    pageTransition.current = { query, client, fromCursor: data.page.currentCursor, fromSearch: location.search, targetCursor: nextCursor };
     activeBinding.current = null;
-    if (`${location.pathname}${location.search}` !== next) history.pushState(null, '', next);
     moveFocus.current = true;
     setSelection({ ...selection, cursor: nextCursor, invalidCursor: false });
     setPageNotice(''); setError(''); setValidationError(null);
@@ -256,6 +276,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }
   function reload() {
     activeBinding.current = null;
+    pageTransition.current = null;
     if (selection.cursor) {
       entryPin.current = null;
       const search = jobPageSearch(selection.filters, null);
