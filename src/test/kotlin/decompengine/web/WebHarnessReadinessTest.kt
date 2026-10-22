@@ -32,6 +32,25 @@ class WebHarnessReadinessTest {
     }
 
     @Test
+    fun `a configured harness is ready only when the sandbox helper is executable`() {
+        val environment = mapOf(
+            "ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
+            "API_KEY" to "legacy-key", "MODEL" to "legacy-model",
+        )
+        val directory = java.nio.file.Files.createTempDirectory(java.nio.file.Path.of("build"), "readiness")
+        try {
+            val helper = directory.resolve("bwrap")
+            val missing = WebHarnessReadinessProjector.probeEnvironment(environment, helper)
+            assertEquals("SANDBOX_HELPER_MISSING", missing.reasonCode)
+            assertFalse(missing.toString().contains("legacy-key"))
+            java.nio.file.Files.createFile(helper).toFile().setExecutable(true)
+            val ready = WebHarnessReadinessProjector.probeEnvironment(environment, helper)
+            assertEquals("supported", ready.state)
+            assertNull(ready.reasonCode)
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `a hung probe is bounded by the deadline and reported as a timeout`() {
         val release = CountDownLatch(1)
         val projector = WebHarnessReadinessProjector(probe = { release.await(); WebHarnessReadiness("supported", null, "") }, timeoutMillis = 100)

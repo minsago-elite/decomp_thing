@@ -47,7 +47,13 @@ internal class WebHarnessReadinessProjector(
     }
 
     companion object {
-        fun probeEnvironment(environment: Map<String, String> = System.getenv()): WebHarnessReadiness {
+        /** Same fixed location the doctor requires before any analyzed binary is executed. */
+        private val BUBBLEWRAP: java.nio.file.Path = java.nio.file.Path.of("/usr/bin/bwrap")
+
+        fun probeEnvironment(
+            environment: Map<String, String> = System.getenv(),
+            bubblewrap: java.nio.file.Path = BUBBLEWRAP,
+        ): WebHarnessReadiness {
             val selected = environment["ACP_HARNESS"]
             if (selected != null && selected != "acp" && selected != "legacy-openai") {
                 return WebHarnessReadiness("unsupported", "HARNESS_UNSUPPORTED", "The configured harness selection is not supported.")
@@ -55,12 +61,15 @@ internal class WebHarnessReadinessProjector(
             if ((selected == null || selected == "acp") && environment["ACP_CONFIG_FILE"].isNullOrBlank()) {
                 return WebHarnessReadiness("unavailable", "HARNESS_NOT_CONFIGURED", "No agent harness is configured.")
             }
-            return try {
+            try {
                 AcpHarnessFactory.fromEnvironment(environment)
-                WebHarnessReadiness("supported", null, "An agent harness is configured.")
             } catch (_: Exception) {
-                WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")
+                return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")
             }
+            if (!java.nio.file.Files.isExecutable(bubblewrap)) {
+                return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helper required to run analyzed binaries is not installed.")
+            }
+            return WebHarnessReadiness("supported", null, "An agent harness and sandbox helper are available.")
         }
     }
 }
