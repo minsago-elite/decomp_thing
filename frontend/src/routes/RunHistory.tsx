@@ -13,11 +13,18 @@ import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata
 
 function History({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession }) {
   const location = useLocation();
-  const cursor = location.query.cursor;
-  const validQuery = Object.keys(location.query).every(key => key === 'cursor') &&
+  // The router's query object cannot preserve duplicate fields. Validate the full
+  // bounded search before choosing any opaque server cursor.
+  const address = new URL(location.url || window.location.href, window.location.origin);
+  const search = address.search, pathname = address.pathname;
+  const params = new URLSearchParams(search), values = params.getAll('cursor');
+  const cursor = values.length === 1 ? values[0] : undefined;
+  const validQuery = search.length <= 512 && values.length <= 1 &&
+    [...params.keys()].every(key => key === 'cursor') &&
     (cursor === undefined || /^[A-Za-z0-9_-]{1,128}$/.test(cursor));
   const { client } = usePrivateTransport(basePath);
-  const binding = useMemo(() => ({ client, basePath, jobId, cursor, validQuery, session }), [client, basePath, jobId, cursor, validQuery, session]);
+  const binding = useMemo(() => ({ client, basePath, jobId, pathname, search, cursor, validQuery, session }),
+    [client, basePath, jobId, pathname, search, cursor, validQuery, session]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: Runs | null; loading: boolean; error: string; retryable: boolean }>(
     { binding, data: null, loading: true, error: '', retryable: false });
   const { data, loading, error, retryable } = stored.binding === binding ? stored
@@ -28,6 +35,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
   const path = `${jobPath(basePath, jobId)}/runs`;
   useEffect(() => {
     const controller = new AbortController();
+    const current = () => !controller.signal.aborted && window.location.pathname === binding.pathname && window.location.search === binding.search;
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null,
       loading: true, error: '', retryable: false }));
     if (!validQuery) {
@@ -37,14 +45,14 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     const query = new URLSearchParams({ limit: '50' });
     if (cursor) query.set('cursor', cursor);
     void client.get('runs', `/jobs/${jobId}/runs?${query}`, { signal: controller.signal }).then(response => {
-      if (controller.signal.aborted) return;
+      if (!current()) return;
       if (response.data.jobId !== jobId || response.data.items.some(run => run.jobId !== jobId)) {
         throw new ApiClientError('invalid_response');
       }
       setStored({ binding, data: response.data, loading: false, error: '', retryable: false });
       if (moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
     }).catch((failure: unknown) => {
-      if (controller.signal.aborted) return;
+      if (!current()) return;
       const expired = failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '');
       const kind = metadataFailureKind(failure);
       const message = expired ? copy.attemptHistoryChangedOrThisPageExpiredRefreshHistoryTo : {
