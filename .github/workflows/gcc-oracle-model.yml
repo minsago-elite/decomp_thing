@@ -82,7 +82,7 @@ jobs:
           sha256sum "$RUNNER_TEMP/gcc-cc1-engine/artifacts/gcc-cc1.stripped"
           grep -F "$(sha256sum "$RUNNER_TEMP/gcc-cc1-engine/artifacts/gcc-cc1.stripped" | cut -d' ' -f1)" oracle/gcc/16.2.0/cc1-oracle-manifest.json >/dev/null
       - name: Stage the bundled Ghidra distribution
-        run: ./gradlew --no-daemon installDist -x verifyFrontendToolchain -x frontendInstall -x frontendBuild
+        run: ./gradlew --no-daemon installDist
       - name: Run Ghidra auto-analysis with the selected analyzers (diagnostic-only)
         env:
           DISABLE: ${{ matrix.variant.disable }}
