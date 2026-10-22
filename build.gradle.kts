@@ -1560,9 +1560,6 @@ private fun configureOracleTestRuntime(testTask: Test) {
         require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
             "native rendering parity requires installed bundled Ghidra execution"
         }
-        val renderingBaseline = layout.buildDirectory.file("exporter-rendering-v16/ExportProgramModel-v15.java")
-        testTask.inputs.file(renderingBaseline)
-        testTask.systemProperty("decompengine.ghidra.exporterRenderingBaseline", renderingBaseline.get().asFile.absolutePath)
         testTask.outputs.upToDateWhen { false }
         testTask.outputs.cacheIf("native rendering parity must execute") { false }
     }

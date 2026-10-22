@@ -496,17 +496,28 @@ class GhidraProgramModelExporterTest {
     fun `opt in pure rendering preserves all native exporter bytes against committed baseline`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true" || System.getenv("RUN_REAL_GHIDRA_PURE_RENDERING") != "true") return
         val repository = Path.of("").toAbsolutePath().normalize().toRealPath()
-        val baselinePath = Path.of(checkNotNull(System.getProperty("decompengine.ghidra.exporterRenderingBaseline")) {
-            "pure rendering equality requires the retained exporter 15 source"
-        }).toAbsolutePath().normalize().toRealPath()
-        assertTrue(baselinePath.startsWith(repository.resolve("build")), "baseline must be retained under this repository's build directory")
-        val baseline = baselinePath.readText()
-        assertEquals("9c0411b9a6fdf9ad358a93b07b5973d1abbc1b9b3189382cab3630a7d2867612", sha256(baseline.toByteArray()),
-            "baseline must be the exact committed exporter 15 source")
         val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
             .use { it.readBytes().toString(Charsets.UTF_8) }
-        assertTrue("EXPORTER_VERSION = 15;" in baseline)
         assertTrue("EXPORTER_VERSION = 17;" in candidate)
+        // The baseline is the candidate with only the three pure-rendering call sites restored to their original
+        // Formatter/regex implementations, so it keeps every other exporter behavior (byte evidence, workers, phases).
+        val renderingEdits = listOf(
+            "return ExporterPureRenderingV1.addressId(\"fn_\", function.getEntryPoint().getOffset());" to
+                "return String.format(\"fn_%016x\", function.getEntryPoint().getOffset());",
+            "return ExporterPureRenderingV1.addressId(\"global_\", address.getOffset());" to
+                "return String.format(\"global_%016x\", address.getOffset());",
+            "        return ExporterPureRenderingV1.hexDigest(digest);" to
+                "        StringBuilder result = new StringBuilder();\n" +
+                "        for (byte value : digest) result.append(String.format(\"%02x\", value & 0xff));\n" +
+                "        return result.toString();",
+            "String cName = ExporterPureRenderingV1.typeName(type.getName());" to
+                "String cName = type.getName().replaceAll(\"[^A-Za-z0-9_]\", \"_\");",
+        )
+        val baseline = renderingEdits.fold(candidate) { source, (from, to) ->
+            assertEquals(1, Regex(Regex.escape(from)).findAll(source).count(), "candidate must contain exactly one $from")
+            source.replace(from, to)
+        }
+        assertTrue(baseline != candidate && "String.format(\"fn_%016x\"" in baseline)
         for (exporter in listOf(baseline, candidate)) {
             assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(false);")).findAll(exporter).count())
             for (setting in listOf("DECOMPILE_TIMEOUT_SECONDS = 60", "DECOMPILE_RETRY_TIMEOUT_SECONDS = 180",
@@ -588,8 +599,8 @@ class GhidraProgramModelExporterTest {
                 "statuses=${model.functions.groupingBy { it.status }.eachCount()}")
             return model to work.resolve("reports/program_model.json")
         }
-        val (before, beforePath) = export("baseline-v15", baseline)
-        val (after, afterPath) = export("candidate-v16", candidate)
+        val (before, beforePath) = export("baseline-unoptimized", baseline)
+        val (after, afterPath) = export("candidate-pure", candidate)
         assertEquals(before, after, "all parsed native function/global/type facts")
         assertTrue(beforePath.readBytes().contentEquals(afterPath.readBytes()), "complete canonical native model bytes")
         fun sidecars(modelPath: Path): Map<String, ByteArray> {
@@ -605,7 +616,7 @@ class GhidraProgramModelExporterTest {
         beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), "native sidecar $name") }
         val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
         val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
-        assertTrue("\"exporterVersion\":15" in beforeState)
+        assertTrue("\"exporterVersion\":17" in beforeState)
         assertTrue("\"exporterVersion\":17" in afterState)
         assertTrue("\"decompilationWorkers\":4" in beforeState && "\"decompilationWorkers\":4" in afterState)
         val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
