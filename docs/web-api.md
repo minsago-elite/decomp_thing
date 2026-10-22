@@ -329,6 +329,18 @@ Retry/resume create a distinct run referencing the previous attempt and preserve
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
 
+### Admission and overload
+
+The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
+every worker and queue slot taken is answered immediately, without routing, session lookup or storage access, with
+`429` and the fixed error code `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`,
+`Cache-Control: no-store`, `Connection: close`), in the same error envelope as every other denial. The 30-second guidance
+matches the longest ordinary request deadline, after which a slow request releases its worker. A small responder
+pool (two threads, no queue) produces these answers, so overload never buffers more than the main queue holds. If
+that responder pool is also busy, the connection is closed without a response; clients should treat a reset
+connection like `SERVER_BUSY`. Each admitted request's exchange is closed at a 30-second deadline (120 seconds for
+multipart uploads); the release of a worker pinned by a slow client at that deadline is not yet covered by a test.
+
 ## Bootstrap and capability truth
 
 Bootstrap contains API/UI/application versions, `basePath`, readiness, sanitized runtime versions,
