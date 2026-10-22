@@ -446,3 +446,27 @@ that target, not an initial restoration failure. Keep the displayed origin URI
 and rows, report the error, and perform no automatic fresh read. The existing
 initial saved-cursor recovery still clears rows and allows one bounded fallback.
 Retained metadata does not extend the server cursor's lifetime or grant access.
+
+
+## Bounded saved Activity windows
+
+On the named attempt Activity route, **Open this paused activity window** explicitly
+opens `?after={opaqueCursor}&through={opaqueCursor}`. The first cursor is exclusive,
+the last is inclusive; both are server-issued journal positions. An optional
+`event={opaqueCursor}` selects an observation inside that verified window. Ordinary
+live delivery does not write history. Task substring input and retained output do
+not enter this URL. The legacy combined overview keeps its existing live controls.
+
+Restoration reads one current snapshot and at most four bounded polling pages,
+with at most 200 observations in total. It validates every returned attempt,
+cursor, sequence and continuation, presents only observations through the requested
+end, and labels the snapshot as current rather than historical. It never connects
+a stream, starts execution, automatically retries or replaces an unavailable
+window with fresh activity. Malformed, incomplete, duplicate or unsupported saved
+selection fields make no Activity request. A gap, missing selected event, mismatched
+response or exhausted read bound preserves the URL and shows recovery. Retry is
+explicit. New route/client bindings abort and reject obsolete responses.
+
+This is an event-window foundation. Log ranges, task/session/revision evidence
+destinations, complete workspace addressing and physical scroll/focus/selection
+qualification remain with their existing open acceptance criteria.

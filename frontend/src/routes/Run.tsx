@@ -95,7 +95,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       </>}
       {view !== 'evidence' && <>
         <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
       </>}
       {view !== 'activity' && <>
         <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
