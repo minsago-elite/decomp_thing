@@ -93,12 +93,12 @@ it('uses accepted bootstrap time across late runtime mounts without another sess
     await session.initialize({ kind: 'absent' });
     elapsed = 40_000;
     const view = render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
-    const at = screen.getByLabelText('Runtime report').querySelector('time')?.dateTime;
+    const at = screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
     expect(at).toBe(new Date(epoch).toISOString());
     expect(screen.getByLabelText('Runtime report').textContent).toContain('about 40 seconds ago');
     view.unmount(); elapsed = 60_000;
     const later = render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
-    expect(screen.getByLabelText('Runtime report').querySelector('time')?.dateTime).toBe(at);
+    expect(screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(at);
     expect(screen.getByLabelText('Runtime report').textContent).toContain('about 1 minute ago');
     expect(gateway.bootstrap).toHaveBeenCalledOnce();
     expect(gateway.exchange).not.toHaveBeenCalled(); expect(gateway.logout).not.toHaveBeenCalled();

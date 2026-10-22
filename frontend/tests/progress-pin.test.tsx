@@ -101,16 +101,16 @@ it('keeps the prior policy receipt through a replay and publishes time only with
   try {
     const view = mount(); fireEvent.click(screen.getByRole('button', { name: 'Read progress pin' }));
     await screen.findByRole('button', { name: 'Pin progress history' });
-    const at = screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime;
+    const at = screen.getByLabelText('Progress pin policy').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
     elapsed = 20_000; fireEvent.click(screen.getByRole('button', { name: 'Pin progress history' }));
     await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
-    expect(screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime).toBe(at);
+    expect(screen.getByLabelText('Progress pin policy').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(at);
     expect(screen.queryByText('Progress history is pinned.')).toBeNull();
     expect(transport.put).toHaveBeenCalledOnce();
     expect(transport.put.mock.calls[0]?.[4].ifMatch).toBe('"version_1"');
     elapsed = 40_000; finish(policy(false, 'version_3'));
     await screen.findByText(/Current policy verified/);
-    expect(screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime).toBe(new Date(epoch + elapsed).toISOString());
+    expect(screen.getByLabelText('Progress pin policy').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(new Date(epoch + elapsed).toISOString());
     expect(transport.put).toHaveBeenCalledOnce(); expect(transport.get).toHaveBeenCalledTimes(2);
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
     fireEvent(document, new Event('visibilitychange'));

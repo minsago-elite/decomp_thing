@@ -9,7 +9,7 @@ import { useReceiptAge } from './useReceiptAge';
 function ReceiptText({ receipt, visible }: { receipt: ReceiptTime; visible: boolean }) {
   const age = receiptAge(useReceiptAge(receipt, visible, true));
   return <>{message(copy.received, {
-    time: <time dateTime={receipt.at} title={receipt.at}>{formatExactTimestamp(receipt.at)}</time>, age,
+    time: <span data-received-at={receipt.at} title={receipt.at}>{formatExactTimestamp(receipt.at)}</span>, age,
   })}</>;
 }
 

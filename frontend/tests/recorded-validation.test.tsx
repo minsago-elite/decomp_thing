@@ -705,24 +705,24 @@ it('retains history and baseline receipt times while selecting and paging anothe
   vi.stubGlobal('fetch', fetcher);
   try {
     const view = mount(); await discoverComparisons();
-    const historyAt = screen.getByLabelText('Validation history').querySelector('time')?.dateTime;
+    const historyAt = screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
     elapsed = 20_000; await inspectComparison('before');
-    const beforeAt = screen.getByLabelText('Selected validation report').querySelector('time')?.dateTime;
+    const beforeAt = screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
     expect(beforeAt).not.toBe(historyAt);
     elapsed = 40_000; pinComparison();
-    expect(screen.getByLabelText('Comparison baseline').querySelector('time')?.dateTime).toBe(beforeAt);
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
     elapsed = 60_000; await inspectComparison('after');
-    const selectedAt = screen.getByLabelText('Selected validation report').querySelector('time')?.dateTime;
+    const selectedAt = screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
     expect(selectedAt).not.toBe(beforeAt);
-    expect(screen.getByLabelText('Comparison baseline').querySelector('time')?.dateTime).toBe(beforeAt);
-    expect(screen.getByLabelText('Validation history').querySelector('time')?.dateTime).toBe(historyAt);
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
+    expect(screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(historyAt);
     expect(fetcher).toHaveBeenCalledTimes(3);
     elapsed = 80_000;
     fireEvent.click(screen.getByRole('button', { name: 'Next validation cases' }));
     await screen.findByText('Case page 2 / 4');
-    expect(screen.getByLabelText('Selected validation report').querySelector('time')?.dateTime).not.toBe(selectedAt);
-    expect(screen.getByLabelText('Comparison baseline').querySelector('time')?.dateTime).toBe(beforeAt);
-    expect(screen.getByLabelText('Validation history').querySelector('time')?.dateTime).toBe(historyAt);
+    expect(screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).not.toBe(selectedAt);
+    expect(screen.getByLabelText('Comparison baseline').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(beforeAt);
+    expect(screen.getByLabelText('Validation history').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(historyAt);
     expect(fetcher).toHaveBeenCalledTimes(4);
     view.unmount();
   } finally { vi.restoreAllMocks(); }
@@ -746,7 +746,7 @@ it('publishes a source-resolution receipt only after both source commitments mat
     elapsed = 30_000;
     await act(async () => { finishDirectory(response(sourceDirectoryFixture())); await Promise.resolve(); });
     await screen.findByLabelText('Source link resolution');
-    expect(screen.getByLabelText('Source link resolution').querySelector('time')?.dateTime).toBe(new Date(epoch + elapsed).toISOString());
+    expect(screen.getByLabelText('Source link resolution').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(new Date(epoch + elapsed).toISOString());
     expect(fetcher).toHaveBeenCalledTimes(2);
     view.unmount();
   } finally { vi.restoreAllMocks(); }

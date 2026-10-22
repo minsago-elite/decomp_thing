@@ -18,7 +18,7 @@ it('ages one accepted snapshot without changing focus selection URL or a live re
   const view = render(<><input aria-label="Local case filter" value="retained-case" /><MetadataReceipt kind="validationReport" receipt={snapshot.receipt} /></>);
   const input = screen.getByRole<HTMLInputElement>('textbox');
   input.focus(); input.setSelectionRange(2, 6);
-  const time = screen.getByLabelText('Selected validation report').querySelector('time');
+  const time = screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]');
   const url = location.href;
   useWallClock = true;
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
@@ -26,8 +26,8 @@ it('ages one accepted snapshot without changing focus selection URL or a live re
   expect(document.activeElement).toBe(input);
   expect([input.selectionStart, input.selectionEnd]).toEqual([2, 6]);
   expect(location.href).toBe(url);
-  expect(screen.getByLabelText('Selected validation report').querySelector('time')).toBe(time);
-  expect(time?.dateTime).toBe(snapshot.receipt.at);
+  expect(screen.getByLabelText('Selected validation report').querySelector<HTMLElement>('[data-received-at]')).toBe(time);
+  expect(time?.getAttribute('data-received-at')).toBe(snapshot.receipt.at);
   expect(document.querySelector('[role="status"], [aria-live]')).toBeNull();
   expect(snapshot.value.selected).toBe('retained-case');
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
@@ -37,9 +37,11 @@ it('keeps missing receipt time unknown without inventing a mount timestamp or cl
   const view = render(<MetadataReceipt kind="runtime" receipt={undefined} />);
   expect(screen.getByLabelText('Runtime report').textContent).toContain('Receipt time was not recorded');
   expect(document.querySelector('time')).toBeNull();
+  expect(document.querySelector<HTMLElement>('[data-received-at]')).toBeNull();
   expect(vi.getTimerCount()).toBe(0);
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(document.querySelector('time')).toBeNull();
+  expect(document.querySelector<HTMLElement>('[data-received-at]')).toBeNull();
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -58,7 +60,7 @@ it('stops a hidden clock and resets all receipt coordinates after suspended deli
   view.rerender(<MetadataReceipt kind="file" receipt={fresh.receipt} />);
   await act(async () => { await Promise.resolve(); });
   expect(screen.getByLabelText('Source file metadata').textContent).toContain('less than 10 seconds ago');
-  expect(document.querySelector('time')?.dateTime).toBe(fresh.receipt.at);
+  expect(document.querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(fresh.receipt.at);
   expect(vi.getTimerCount()).toBe(1);
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
@@ -70,7 +72,7 @@ it('reconciles a retained receipt suspended before its first mounted sample', as
   const view = render(<MetadataReceipt kind="runtime" receipt={retained.receipt} />);
   await act(async () => { await Promise.resolve(); });
   expect(screen.getByLabelText('Runtime report').textContent).toContain('about 1 hour ago');
-  expect(screen.getByLabelText('Runtime report').querySelector('time')?.dateTime).toBe(retained.receipt.at);
+  expect(screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(retained.receipt.at);
   expect(document.querySelector('[role="status"], [aria-live]')).toBeNull();
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
@@ -85,8 +87,28 @@ it('reconciles a cached receipt after an unmounted interval longer than a displa
   const returned = render(<MetadataReceipt kind="library" receipt={retained.receipt} />);
   await act(async () => { await Promise.resolve(); });
   expect(screen.getByLabelText('Displayed job library').textContent).toContain('about 1 hour ago');
-  expect(screen.getByLabelText('Displayed job library').querySelector('time')?.dateTime).toBe(retained.receipt.at);
+  expect(screen.getByLabelText('Displayed job library').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(retained.receipt.at);
   expect(retained.value).toBe('cached original page');
   expect(vi.getTimerCount()).toBe(1);
   returned.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+
+it('keeps persisted server timestamps separate from local receipt coordinates', async () => {
+  const receipt = receive('job snapshot').receipt;
+  const createdAt = '2026-09-05T00:00:00.123456789Z';
+  const view = render(<><dl><dt>Created</dt><dd><time dateTime={createdAt} title={createdAt}>2026-09-05 00:00:00.123456789 UTC</time></dd></dl>
+    <MetadataReceipt kind="job" receipt={receipt} /></>);
+  await act(async () => { await Promise.resolve(); });
+  const persisted = [...view.container.querySelectorAll('time')];
+  expect(persisted).toHaveLength(1);
+  expect(persisted[0]?.dateTime).toBe(createdAt);
+  expect(persisted[0]?.title).toBe(createdAt);
+  const coordinate = screen.getByLabelText('Job metadata').querySelector<HTMLElement>('[data-received-at]');
+  expect(coordinate?.getAttribute('data-received-at')).toBe(receipt.at);
+  expect(coordinate?.title).toBe(receipt.at);
+  expect(coordinate?.textContent).toBe('1970-01-01 00:00:00.000 UTC');
+  expect(screen.getByLabelText('Job metadata').textContent).toContain('less than 10 seconds ago');
+  expect(document.querySelector('[role="status"], [aria-live]')).toBeNull();
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
