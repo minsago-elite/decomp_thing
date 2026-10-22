@@ -21,6 +21,7 @@ internal class WebApiController(
     streamResources: WebStreamResources,
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
+    private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -31,6 +32,7 @@ internal class WebApiController(
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
     private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
+    private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -52,7 +54,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -131,6 +133,7 @@ internal class WebApiController(
                         }
                     } finally { exchange.close() }
                 }
+                resource == "agent/preflight" -> agentPreflights.handle(exchange)
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -385,7 +388,7 @@ internal class WebApiController(
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
     private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current()
+        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)
