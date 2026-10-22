@@ -107,6 +107,7 @@ it('keeps the selected attempt, revision and snapshot pin when history moves bet
 
 it('restores the named attempt view and exact run identity through direct entry and back and forward', async () => {
   const auth = await session();
+  const focus = vi.spyOn(HTMLElement.prototype, 'focus');
   transport.get.mockImplementation((kind, path) => {
     if (kind !== 'run' || path !== `/jobs/${sampleRun.jobId}/runs/${sampleRun.runId}`) {
       return Promise.reject(new Error('Unexpected read in the inert route control'));
@@ -123,6 +124,7 @@ it('restores the named attempt view and exact run identity through direct entry 
     expect(screen.getByRole('link', { name: 'Activity' }).getAttribute('aria-current')).toBe('page');
     expect(screen.getByText(sampleRun.resultRevisionId!)).toBeTruthy();
     expect(document.title).toContain('Attempt activity');
+    await waitFor(() => expect(focus).toHaveBeenLastCalledWith({ preventScroll: false }));
     fireEvent.click(screen.getByRole('link', { name: 'Evidence' }));
     await screen.findByRole('heading', { name: 'Attempt evidence' });
     await screen.findByText(`Validation panel ${sampleRun.runId}`);
@@ -131,22 +133,26 @@ it('restores the named attempt view and exact run identity through direct entry 
     expect(location.pathname).toBe(selected('evidence'));
     expect(screen.getByRole('link', { name: 'Evidence' }).getAttribute('aria-current')).toBe('page');
     expect(screen.getByText(sampleRun.runId)).toBeTruthy();
+    await waitFor(() => expect(focus).toHaveBeenLastCalledWith({ preventScroll: false }));
     await act(() => { history.back(); });
     await screen.findByRole('heading', { name: 'Attempt activity' });
     await screen.findByText(`Activity panel ${sampleRun.runId}`);
     expect(location.pathname).toBe(selected('activity'));
+    await waitFor(() => expect(focus).toHaveBeenLastCalledWith({ preventScroll: true }));
     expect(screen.queryByText(`Validation panel ${sampleRun.runId}`)).toBeNull();
     await act(() => { history.forward(); });
     await screen.findByRole('heading', { name: 'Attempt evidence' });
     await screen.findByText(`Validation panel ${sampleRun.runId}`);
     expect(location.pathname).toBe(selected('evidence'));
+    await waitFor(() => expect(focus).toHaveBeenLastCalledWith({ preventScroll: true }));
     fireEvent.click(screen.getByRole('link', { name: 'Overview' }));
     await screen.findByRole('heading', { name: 'Workflow attempt' });
     await screen.findByText(`Activity panel ${sampleRun.runId}`);
     expect(screen.getByText(`Validation panel ${sampleRun.runId}`)).toBeTruthy();
     expect(location.pathname).toBe(selected('overview'));
+    await waitFor(() => expect(focus).toHaveBeenLastCalledWith({ preventScroll: false }));
     expect(transport.get.mock.calls.every(([kind, path]) => kind === 'run' && path === `/jobs/${sampleRun.jobId}/runs/${sampleRun.runId}`)).toBe(true);
     expect(() => runViewPath('/nested', sampleRun.jobId, '../foreign', 'activity')).toThrow();
     expect(() => runViewPath('/nested', sampleRun.jobId, sampleRun.runId, 'foreign' as 'activity')).toThrow();
-  } finally { auth.dispose(); }
+  } finally { focus.mockRestore(); auth.dispose(); }
 });

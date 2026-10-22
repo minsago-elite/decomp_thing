@@ -54,6 +54,16 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const navigationToggle = useRef<HTMLButtonElement>(null);
   const pendingNavigationFocus = useRef<'toggle' | 'link' | null>(null);
   const focusedPath = useRef<string | null>(null);
+  // A history traversal keeps the viewport restored by the browser. Route focus
+  // still announces its heading, without scrolling that heading into view again.
+  const historyFocusPath = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const traversed = () => {
+      historyFocusPath.current = window.location.pathname.replace(/\/+$/g, '') || '/';
+    };
+    window.addEventListener('popstate', traversed, true);
+    return () => window.removeEventListener('popstate', traversed, true);
+  }, []);
   const [loading, setLoading] = useState(false);
   const [narrowNavigation, setNarrowNavigation] = useState(() => window.matchMedia?.('(width < 48rem)').matches ?? false);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -78,11 +88,16 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
     const currentPath = window.location.pathname.replace(/\/+$/g, '') || '/';
     const routePath = location.path.replace(/\/+$/g, '') || '/';
-    if (path !== routePath || path !== currentPath || focusedPath.current === path) return;
+    if (path !== routePath || path !== currentPath) return;
+    if (focusedPath.current === path) {
+      historyFocusPath.current = null;
+      return;
+    }
     const heading = main.current?.querySelector('h1');
     if (!heading) return; // A lazy route will call viewReady after its heading commits.
     if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
-    heading.focus({ preventScroll: recovery.snapshot() !== 'ready' });
+    heading.focus({ preventScroll: historyFocusPath.current === path || recovery.snapshot() !== 'ready' });
+    historyFocusPath.current = null;
     focusedPath.current = path;
   }
 

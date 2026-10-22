@@ -413,3 +413,18 @@ characters, duplicates/unknown fields are rejected, and all identities/digests/p
 No route change starts validation, execution, admission, source preview or a mutation. Physical
 scroll/focus restoration, remaining workspace routes and the full packaged journey still need
 their original qualification; inert component controls do not close that scope.
+
+### History traversal and heading focus
+
+When Back or Forward changes the route, the shell still focuses its heading for
+the route announcement, with `preventScroll` so that focus does not scroll over
+the browser's own restored viewport. A new link navigation keeps the existing
+heading scroll behavior. Query-only navigation keeps its existing focus policy;
+the shell does not replace browser scroll restoration or persist private data.
+The capture-phase history listener is removed with the shell, retains only one
+pathname, and cannot start a request or authorize a workflow.
+
+The inert named-view history control checks the focus options for direct entry,
+new links, Back and Forward. It does not measure a browser viewport or establish
+restoration of the previous focused control, text selection, lazy content height,
+or the full cross-resource scroll/selection acceptance.
