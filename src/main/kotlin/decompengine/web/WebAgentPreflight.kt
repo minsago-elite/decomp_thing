@@ -32,18 +32,21 @@ internal class WebAgentPreflight(private val inspect: (AgentCancellation) -> Uni
     private val lock = Any()
     private var current = WebAgentPreflightSnapshot("idle", null, null)
     private var closed = false
+    private var worker: Thread? = null
     private val cancelled = AtomicBoolean(false)
 
     fun snapshot(): WebAgentPreflightSnapshot = synchronized(lock) { current }
 
     fun start(): Start = synchronized(lock) {
-        if (closed) return Start.Closed
+        if (closed || cancelled.get()) return Start.Closed
         if (current.status == "inspecting") return Start.Busy(current)
         val id = UUID.randomUUID().toString().replace("-", "")
         val running = WebAgentPreflightSnapshot("inspecting", id, null)
         current = running
         try {
-            Thread({ run(id) }, "decomp-web-agent-preflight").apply { isDaemon = true }.start()
+            val started = Thread({ run(id) }, "decomp-web-agent-preflight").apply { isDaemon = true }
+            worker = started
+            started.start()
         } catch (_: Throwable) {
             current = WebAgentPreflightSnapshot("failed", id, REASON_FAILED)
         }
@@ -59,12 +62,28 @@ internal class WebAgentPreflight(private val inspect: (AgentCancellation) -> Uni
         } catch (_: Throwable) {
             WebAgentPreflightSnapshot("failed", id, REASON_FAILED)
         }
-        synchronized(lock) { if (current.inspectionId == id) current = outcome }
+        synchronized(lock) {
+            if (current.inspectionId == id) current = if (cancelled.get())
+                WebAgentPreflightSnapshot("cancelled", id, null) else outcome
+        }
+    }
+
+    /** Publish cancellation without waiting; close retains the provider-owned cleanup lifetime. */
+    fun requestStop() {
+        cancelled.set(true)
+        synchronized(lock) { closed = true }
     }
 
     override fun close() {
-        synchronized(lock) { closed = true }
-        cancelled.set(true)
+        requestStop()
+        val running = synchronized(lock) { worker }
+        check(running !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+        var interrupted = Thread.currentThread().isInterrupted
+        // Cancellation can require provider cleanup. Do not invent a shorter web shutdown budget.
+        while (running?.isAlive == true) {
+            try { running.join() } catch (_: InterruptedException) { interrupted = true }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     companion object { const val REASON_FAILED = "AGENT_PREFLIGHT_FAILED" }

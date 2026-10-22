@@ -278,7 +278,13 @@ class UploadServer(
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
-    private val agentPreflight = WebAgentPreflight { cancellation -> authenticationInspector(cancellation) }
+    private val agentPreflight = WebAgentPreflight { cancellation ->
+        check(withActiveRequest {
+            authenticationInspector(decompengine.agent.AgentCancellation {
+                stopRequested.get() || cancellation.isCancellationRequested()
+            })
+        }) { "Server is stopping" }
+    }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
     private val requestExecutor = ThreadPoolExecutor(
@@ -376,6 +382,7 @@ class UploadServer(
         jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
+        agentPreflight.requestStop()
         jobs.beginShutdown()
     }
 
