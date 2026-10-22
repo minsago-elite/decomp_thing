@@ -1153,7 +1153,7 @@ class GccProductionFullExportQualificationTest {
             assertEquals(result.requiredText("exportAssessmentReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("exportAssessmentReceiptSha256"))
             assertEquals(result.requiredText("outputTreeSha256"), binding.requiredText("outputTreeSha256"))
 
-            val structural = GccDriverStructuralInputsV1.load(profilePath.parent, engine)
+            val structural = GccDriverStructuralInputsV1.load(profilePath.parent, engine, profilePath.fileName.toString() == "compiler-engines-exporter17-parallel.json")
             assertEquals(structural.profileId, binding.requiredText("profileId"))
             assertEquals(structural.version, binding.requiredText("profileVersion"))
             assertEquals(structural.sourceRevision, binding.requiredText("sourceRevision"))
