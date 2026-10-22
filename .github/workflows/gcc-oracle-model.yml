@@ -10,7 +10,7 @@ on:
       operation:
         description: Manual GCC evidence capture
         type: choice
-        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export, cc1-analysis-throughput]
+        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export, cc1-native-calls, cc1-analysis-throughput]
         default: driver-dwarf-interfaces
 
 concurrency:
@@ -35,6 +35,15 @@ jobs:
       contents: read
     with:
       capture-mode: cc1-full-export
+
+  cc1-native-calls:
+    # Manual #1494 collection: contained cc1 native-call observations through the installed gcc-engine-native-calls CLI.
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cc1-native-calls'
+    uses: ./.github/workflows/gcc-cc1-full-export.yml
+    permissions:
+      contents: read
+    with:
+      capture-mode: cc1-native-calls
 
   cc1-analysis-throughput:
     # Diagnostic-only #1444 measurement: Ghidra auto-analysis wall time and recovered-function census per analyzer

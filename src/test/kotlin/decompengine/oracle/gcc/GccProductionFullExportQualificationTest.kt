@@ -1291,6 +1291,157 @@ class GccProductionFullExportQualificationTest {
     }
 
     @Test
+    fun `live cc1 native call observations retain profile-bound capture evidence`() {
+        assumeTrue(
+            System.getenv("DECOMP_REQUIRE_GCC_NATIVE_CALLS") == "true",
+            "real GCC native-call collection is opt-in",
+        )
+        require(System.getenv("DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT") != "true" &&
+            System.getenv("DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS") != "true") {
+            "native-call collection must run alone"
+        }
+        require((System.getenv("DECOMP_GCC_CLI_FULL_EXPORT_ENGINE") ?: "cc1") == "cc1") { "native calls are cc1 only" }
+        val profilePath = configured("DECOMP_GCC_CLI_PROFILE")
+        require(profilePath.fileName.toString() == "compiler-engines-exporter17.json") {
+            "native calls require the serial exporter17 profile"
+        }
+        val installation = configured("DECOMP_GCC_CLI_INSTALLATION")
+        val archive = configured("DECOMP_GCC_CLI_ARCHIVE")
+        val binary = configured("DECOMP_GCC_CLI_EXPORT_BINARY", "DECOMP_GCC_CLI_CC1_BINARY")
+        val scratch = configured("DECOMP_GCC_CLI_EXPORT_SCRATCH", "DECOMP_GCC_CLI_CC1_FRESH_SCRATCH")
+        val evidenceRoot = configured("DECOMP_GCC_CLI_EVIDENCE_ROOT")
+        assertTrue(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(evidenceRoot))
+        assertTrue(isEmptyDirectory(scratch), "GCC native-call scratch must begin empty")
+        assertTrue(isEmptyDirectory(evidenceRoot), "GCC native-call evidence root must begin empty")
+        for (input in listOf(installation, profilePath, archive, binary, evidenceRoot)) {
+            assertFalse(input.startsWith(scratch) || scratch.startsWith(input), "inputs/evidence must be outside scratch")
+        }
+
+        val output = privateDirectory(evidenceRoot.resolve("cli-output"))
+        val launcherEvidence = privateDirectory(evidenceRoot.resolve("launcher"))
+        val arguments = listOf(
+            "cc1", binary.toString(),
+            "--profile", profilePath.toString(),
+            "--ghidra-archive", archive.toString(),
+            "--output", output.toString(),
+            "--scratch", scratch.toString(),
+        )
+        withFailedCommandStdout(scratch, evidenceRoot) {
+            assertEquals(
+                0,
+                invokeInstalledGccCli(
+                    arguments,
+                    launcherEvidence,
+                    timeoutSeconds = 2100,
+                    installation = installation,
+                    command = "gcc-engine-native-calls",
+                ),
+                "installed GCC native-call CLI failed; inspect retained launcher evidence",
+            )
+            val launcherSummary = verifyInstalledCliEvidence(
+                launcherEvidence, arguments, installation, expectedExit = 0, command = "gcc-engine-native-calls",
+            )
+
+            val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
+            val result = OracleJson.parseCanonical(resultBytes).jsonObject
+            assertEquals("gcc-bundled-cli-native-call-result-v1", result.requiredText("provider"))
+            assertEquals(1L, result.getValue("schemaVersion").jsonPrimitive.long)
+            assertFalse(result.getValue("complete").jsonPrimitive.boolean)
+            assertFalse(result.getValue("scored").jsonPrimitive.boolean)
+            assertFalse(result.getValue("releaseEligible").jsonPrimitive.boolean)
+
+            val operationId = result.requiredText("operationId")
+            assertTrue(operationId.matches(Regex("[a-f0-9]{64}")))
+            val journal = Path.of(result.requiredText("journal"))
+            assertEquals(".gcc-bundled-operation-$operationId", journal.fileName.toString())
+            val intentBytes = readStable(journal.resolve("intent.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(intentBytes), result.requiredText("requestSha256"))
+            val executionBytes = readStable(journal.resolve("execution.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(executionBytes), result.requiredText("executionReceiptSha256"))
+            val assessmentBytes = readStable(journal.resolve("export-assessment.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(assessmentBytes), result.requiredText("nativeAssessmentReceiptSha256"))
+            val runtime = OracleJson.parseCanonical(intentBytes).jsonObject.getValue("bundledRuntime").jsonObject
+            assertEquals("bundled-ghidra-java-api-runtime-v8", runtime.requiredText("provider"))
+
+            val modelPath = Path.of(result.requiredText("programModel"))
+            assertTrue(modelPath.startsWith(scratch) && modelPath.toRealPath() == modelPath)
+            val modelBytes = result.getValue("programModelBytes").jsonPrimitive.long
+            val modelSha256 = result.requiredText("programModelSha256")
+            val functionCount = result.getValue("functionCount").jsonPrimitive.long
+            assertTrue(modelBytes > 0L && modelBytes <= MAXIMUM_MODEL_BYTES)
+            assertTrue(functionCount > 0L)
+
+            val bindingPath = Path.of(result.requiredText("nativeBinding"))
+            assertEquals(output.resolve("native-call-observation-binding.json"), bindingPath)
+            val bindingBytes = readStable(bindingPath, MAXIMUM_BINDING_BYTES)
+            assertEquals(OracleArtifacts.sha256(bindingBytes), result.requiredText("nativeBindingSha256"))
+            val binding = OracleJson.parseCanonical(bindingBytes).jsonObject
+            assertEquals("gcc-bundled-native-call-observation-binding-v1", binding.requiredText("provider"))
+            assertEquals(result.requiredText("outputTreeSha256"), binding.requiredText("outputTreeSha256"))
+            val boundModel = binding.getValue("programModel").jsonObject
+            assertEquals(modelSha256, boundModel.requiredText("sha256"))
+            assertEquals(modelBytes, boundModel.getValue("bytes").jsonPrimitive.long)
+            assertEquals(OracleArtifacts.sha256(Files.readAllBytes(profilePath)), binding.requiredText("compilerEngineProfileSha256"))
+
+            val manifestPath = Path.of(result.requiredText("outputTreeManifest"))
+            assertEquals(output, manifestPath.parent)
+            val manifestBytes = readStable(manifestPath, MAXIMUM_TREE_MANIFEST_BYTES)
+            assertEquals(OracleArtifacts.sha256(manifestBytes), result.requiredText("outputTreeManifestSha256"))
+            val treeManifest = OracleJson.parseCanonical(manifestBytes, TREE_MANIFEST_LIMITS).jsonObject
+            assertEquals(result.requiredText("outputTreeSha256"), treeManifest.requiredText("outputTreeSha256"))
+
+            val observationsPath = Path.of(result.requiredText("nativeObservations"))
+            val nativeManifestPath = Path.of(result.requiredText("nativeManifest"))
+            assertTrue(observationsPath.startsWith(scratch) && nativeManifestPath.startsWith(scratch))
+            val nativeManifestBytes = readStable(nativeManifestPath, MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(nativeManifestBytes), result.requiredText("nativeManifestSha256"))
+
+            val captured = privateDirectory(evidenceRoot.resolve("captured"))
+            copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
+            val observationsBytes = result.getValue("nativeObservationsBytes").jsonPrimitive.long
+            copyStable(observationsPath, captured.resolve("native-calls.json"), MAXIMUM_MODEL_BYTES,
+                observationsBytes, result.requiredText("nativeObservationsSha256"))
+            val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
+            publish(captured.resolve("result.json"), resultBytes)
+            publish(captured.resolve("native-call-observation-binding.json"), bindingBytes)
+            publish(captured.resolve("native-calls-manifest.json"), nativeManifestBytes)
+            publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
+            publish(captured.resolve("intent.json"), intentBytes)
+            publish(captured.resolve("execution.json"), executionBytes)
+            publish(captured.resolve("export-assessment.json"), assessmentBytes)
+            publish(captured.resolve("launcher-summary.json"), OracleJson.canonicalBytes(launcherSummary))
+            val wallNanos = result.getValue("operationWallTime").jsonObject.getValue("elapsedNanos").jsonPrimitive.long
+            val summary = JsonObject(mapOf(
+                "provider" to JsonPrimitive("gcc-live-native-call-capture-v1"),
+                "engine" to JsonPrimitive("cc1"),
+                "operationId" to JsonPrimitive(operationId),
+                "requestSha256" to JsonPrimitive(result.requiredText("requestSha256")),
+                "programModelSha256" to JsonPrimitive(modelSha256),
+                "programModelBytes" to JsonPrimitive(modelBytes),
+                "functionCount" to JsonPrimitive(functionCount),
+                "outputTreeSha256" to JsonPrimitive(result.requiredText("outputTreeSha256")),
+                "nativeObservationsSha256" to JsonPrimitive(result.requiredText("nativeObservationsSha256")),
+                "nativeObservationsBytes" to JsonPrimitive(observationsBytes),
+                "nativeBindingSha256" to JsonPrimitive(result.requiredText("nativeBindingSha256")),
+                "nativeSiteCount" to binding.getValue("nativeSiteCount"),
+                "coverage" to binding.getValue("coverage"),
+                "operationWallNanos" to JsonPrimitive(wallNanos),
+                "referenceWallBudgetSeconds" to JsonPrimitive(1_800),
+                "referenceBudgetPassed" to JsonPrimitive(wallNanos <= 1_800_000_000_000L),
+                "diagnosticStdoutBytes" to JsonPrimitive(diagnosticStdout.first),
+                "diagnosticStdoutSha256" to JsonPrimitive(diagnosticStdout.second),
+                "complete" to JsonPrimitive(false),
+                "scored" to JsonPrimitive(false),
+                "releaseEligible" to JsonPrimitive(false),
+                "limitation" to JsonPrimitive("live contained native-call collection only; deterministic regeneration remains to be verified independently"),
+            ))
+            publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
+            println("Retained unscored live cc1 native-call evidence at $captured ($observationsBytes observation bytes)")
+        }
+    }
+
+    @Test
     fun `failure diagnostics are retained only when the output tree commits their bytes`(@TempDir root: Path) {
         val modelPath = root.resolve("program_model.json")
         val source = privateDirectory(root.resolve("program_model.json.export"))

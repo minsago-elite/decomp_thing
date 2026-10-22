@@ -2,12 +2,12 @@
 set -euo pipefail
 
 if (($# > 1)); then
-  echo 'usage: scripts/ci-qualify-gcc-cc1-full-export.sh [qualification|cc1-runtime-diagnostics]' >&2
+  echo 'usage: scripts/ci-qualify-gcc-cc1-full-export.sh [qualification|cc1-runtime-diagnostics|cc1-native-calls]' >&2
   exit 64
 fi
 mode="${1:-qualification}"
 case "$mode" in
-  qualification|cc1-runtime-diagnostics) ;;
+  qualification|cc1-runtime-diagnostics|cc1-native-calls) ;;
   *) echo 'unknown full-export capture mode' >&2; exit 64 ;;
 esac
 
@@ -16,8 +16,8 @@ case "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" in
   cc1|driver) ;;
   *) echo 'full-export qualification requires cc1 or driver' >&2; exit 64 ;;
 esac
-if [[ "$mode" == cc1-runtime-diagnostics && "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" != cc1 ]]; then
-  echo 'runtime diagnostics require cc1' >&2
+if [[ "$mode" != qualification && "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" != cc1 ]]; then
+  echo "$mode requires cc1" >&2
   exit 64
 fi
 export DECOMP_GCC_CLI_EXPORT_BINARY="${DECOMP_GCC_CLI_EXPORT_BINARY:-${DECOMP_GCC_CLI_CC1_BINARY:-}}"
@@ -32,12 +32,14 @@ for name in DECOMP_GCC_CLI_INSTALLATION DECOMP_GCC_CLI_PROFILE DECOMP_GCC_CLI_AR
 done
 
 project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+unset DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS DECOMP_REQUIRE_GCC_NATIVE_CALLS
 if [[ "$mode" == cc1-runtime-diagnostics ]]; then
-  unset DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT
   export DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS=true
   selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live cc1 runtime diagnostics retain bounded logs and available operation evidence'
+elif [[ "$mode" == cc1-native-calls ]]; then
+  export DECOMP_REQUIRE_GCC_NATIVE_CALLS=true
+  selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live cc1 native call observations retain profile-bound capture evidence'
 else
-  unset DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS
   export DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT=true
   selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live selected GCC full export retains its profile-bound model and receipt evidence'
 fi
