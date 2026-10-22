@@ -118,6 +118,16 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
     }
   }, [narrowNavigation]);
 
+  const runPathname = location.path;
+  const runNavigation = {
+    search: new URL(location.url, window.location.origin).search,
+    currentSearch: () => window.location.pathname === runPathname ? window.location.search : null,
+    navigate: (search: string, expectedSearch: string) => {
+      if (window.location.pathname === runPathname && window.location.search === expectedSearch)
+        location.route(`${runPathname}${search}`);
+    },
+  };
+
   function viewReady(url: string) {
     setLoading(false);
     focusRouteHeading(url);
@@ -174,9 +184,9 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
-              <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
-              <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />
-              <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} navigation={runNavigation} view="activity" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} navigation={runNavigation} view="evidence" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} navigation={runNavigation} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />
             </Router>

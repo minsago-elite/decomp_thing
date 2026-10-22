@@ -12,10 +12,13 @@ import { Activity } from '../jobs/Activity';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
-function Details({ jobId, runId, basePath, session, view }: { jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView }) {
+function Details({ jobId, runId, basePath, session, view, navigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
+}) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: RunData | null; error: string; loading: boolean }>(
@@ -95,7 +98,7 @@ function Details({ jobId, runId, basePath, session, view }: { jobId: string; run
       </>}
       {view !== 'activity' && <>
         <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} />
       </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
         : <p>{sourceCopy.noRevision}</p>}
@@ -103,7 +106,9 @@ function Details({ jobId, runId, basePath, session, view }: { jobId: string; run
   </>;
 }
 
-export default function Run({ jobId, runId, basePath, session, view = 'overview' }: { jobId: string; runId: string; basePath: string; session: BrowserSession | null; view?: RunView }) {
+export default function Run({ jobId, runId, basePath, session, view = 'overview', navigation }: {
+  jobId: string; runId: string; basePath: string; session: BrowserSession | null; view?: RunView; navigation?: ValidationNavigation;
+}) {
   const state = useSession(session);
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   return <section aria-labelledby="attempt-title">
@@ -116,7 +121,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
       </nav>
-      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} />
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} navigation={navigation} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
 import { withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
@@ -7,56 +7,98 @@ import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 import { validationPageDownload } from './recordedValidationExport';
 import { compareValidationSnapshots, validationComparisonSnapshot } from './recordedValidationComparison';
 import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
+import { validationLocation, validationLocationOwner, validationObservationLocation, validationSearch } from './validationNavigation';
+import type { ValidationLocation, ValidationNavigation } from './validationNavigation';
 
-export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+function requestedValidation(search: string) {
+  try { const location = validationLocation(search); return { location, key: validationSearch(location), invalid: false }; }
+  catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
+}
+
+export function RecordedValidationEvidence({ jobId, runId, basePath, navigation }: {
+  jobId: string; runId: string; basePath: string; navigation?: ValidationNavigation;
+}) {
   const { client } = usePrivateTransport(basePath);
-  const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null }), [client, jobId, runId]);
-  type View = { binding: typeof binding; history: ValidationHistory | null; selected: ValidationOwner | null;
+  const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null,
+    requestSearch: null as string | null }), [client, jobId, runId]);
+  const activeBinding = useRef(binding); activeBinding.current = binding;
+  const liveNavigation = useRef(navigation); liveNavigation.current = navigation;
+  const installed = useRef<{ binding: typeof binding; key: string } | null>(null);
+  const requested = useMemo(() => requestedValidation(navigation?.search ?? ''), [navigation?.search]);
+  const [comparisonPage, setComparisonPage] = useState(1);
+  type View = { binding: typeof binding; locationKey: string; history: ValidationHistory | null; selected: ValidationOwner | null;
     report: Report | null; loading: boolean; error: string };
   const [stored, setStored] = useState<View | null>(null);
-  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner };
+  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner; page: number };
   const [savedBaseline, setSavedBaseline] = useState<Baseline | null>(null);
   const baseline = savedBaseline?.binding === binding ? savedBaseline : null;
-  const view = stored?.binding === binding ? stored : null;
+  const view = stored?.binding === binding && (!navigation || stored.locationKey === requested.key) ? stored : null;
   useEffect(() => () => { binding.active?.abort(); }, [binding]);
   const root = `/jobs/${jobId}/runs/${runId}`;
 
+  function atRequestedLocation(): boolean {
+    if (activeBinding.current !== binding) return false;
+    const nav = liveNavigation.current;
+    if (!nav) return true;
+    const search = nav.currentSearch();
+    return search !== null && requestedValidation(search).key === requested.key &&
+      (!requested.invalid || search === nav.search);
+  }
+  function current(controller: AbortController): boolean {
+    const nav = liveNavigation.current;
+    const search = nav?.currentSearch();
+    return activeBinding.current === binding && binding.active === controller && !controller.signal.aborted &&
+      (nav ? search !== null && search !== undefined && requestedValidation(search).key === binding.requestSearch : binding.requestSearch === null);
+  }
   function begin(history: ValidationHistory | null = null, selected: ValidationOwner | null = null) {
     binding.active?.abort();
     const controller = new AbortController(); binding.active = controller;
-    setStored({ binding, history, selected, report: null, loading: true, error: '' });
+    binding.requestSearch = liveNavigation.current ? requested.key : null;
+    setStored({ binding, locationKey: requested.key, history, selected, report: null, loading: true, error: '' });
     return controller;
   }
-  function failed(controller: AbortController, failure: unknown) {
-    if (!controller.signal.aborted) {
-      setSavedBaseline(null);
-      setStored({ binding, history: null, selected: null, report: null, loading: false,
-        error: withApiFailureReference(copy.failed, failure) });
+  function failed(controller: AbortController, failure: unknown, restoring = false) {
+    if (current(controller)) {
+      setSavedBaseline(null); setComparisonPage(1);
+      setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
+        error: withApiFailureReference(restoring ? copy.savedSelectionUnavailable : copy.failed, failure) });
     }
   }
-  async function readHistory(page?: number, graph?: string) {
-    if (page === undefined) setSavedBaseline(null);
-    const controller = begin();
-    try {
-      const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
-      const { data } = await client.get('validationHistory', `${root}/validation-history${query}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+  function publish(history: ValidationHistory, owner: ValidationOwner | null, report: Report | null, saved: Baseline | null, window = 1): string | null {
+    const nav = liveNavigation.current;
+    if (!nav) return '';
+    const actualSearch = nav.currentSearch();
+    if (activeBinding.current !== binding || actualSearch === null || requestedValidation(actualSearch).key !== requested.key ||
+      (requested.invalid && actualSearch !== nav.search)) return null;
+    let location: ValidationLocation | null = null;
+    if (history.graphSha256 !== null && history.page !== null) {
+      location = { graphSha256: history.graphSha256, historyPage: history.page,
+        selected: owner && report ? validationObservationLocation(history, owner, report) : null,
+        baseline: saved ? { historyPage: saved.history.page!, ownerKind: saved.snapshot.ownerKind,
+          ownerId: saved.snapshot.ownerId, candidateId: saved.snapshot.candidateId,
+          sourceSha256: saved.snapshot.sourceSha256, corpusSha256: saved.snapshot.corpusSha256,
+          reportId: saved.snapshot.reportId, casePage: saved.page } : null, comparisonPage: window };
+    }
+    const search = validationSearch(location);
+    installed.current = { binding, key: search }; binding.requestSearch = search;
+    if (search !== requested.key) nav.navigate(search, actualSearch);
+    return search;
+  }
+  async function loadHistory(controller: AbortController, page?: number, graph?: string) {
+    const query = page === undefined ? '' : `?historyGraph=${graph}&historyPage=${page}`;
+    const { data } = await client.get('validationHistory', `${root}/validation-history${query}`, { signal: controller.signal });
+    if (!current(controller)) throw new Error('obsolete validation history');
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== null ||
         data.authority !== 'recorded-metadata' || (page !== undefined && (data.page !== page || data.graphSha256 !== graph)))
         throw new Error('validation history binding');
-      setStored({ binding, history: data, selected: null, report: null, loading: false, error: '' });
-    } catch (failure: unknown) { failed(controller, failure); }
+    return data;
   }
-  async function readCases(history: ValidationHistory, owner: ValidationOwner, page = 1, reportId?: string) {
-    if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
-    if (baseline && baseline.snapshot.graphSha256 !== history.graphSha256) setSavedBaseline(null);
-    const controller = begin(history, owner);
-    try {
-      const failureOwner = owner.ownerKind === 'run-failure';
-      const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
-      const query = `historyGraph=${history.graphSha256}&historyPage=${history.page}&${ownerKey}=${owner.ownerId}&historyValidationPage=${page}`;
-      const { data } = await client.get('report', `${root}/reports/revision-validation?${query}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
+  async function loadReport(controller: AbortController, history: ValidationHistory, owner: ValidationOwner, page: number, reportId?: string) {
+    const failureOwner = owner.ownerKind === 'run-failure';
+    const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
+    const query = `historyGraph=${history.graphSha256}&historyPage=${history.page}&${ownerKey}=${owner.ownerId}&historyValidationPage=${page}`;
+    const { data } = await client.get('report', `${root}/reports/revision-validation?${query}`, { signal: controller.signal });
+    if (!current(controller)) throw new Error('obsolete validation report');
       const cases = data.validationCases;
       const failure = data.validationFailure;
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== owner.candidateId ||
@@ -71,9 +113,88 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         (cases && (cases.graphSha256 !== history.graphSha256 || cases.ownerKind !== owner.ownerKind || cases.ownerId !== owner.ownerId ||
           cases.sourceSha256 !== owner.sourceSha256 || cases.corpusSha256 !== owner.corpusSha256 ||
           cases.normalOutcome !== owner.normalOutcome || cases.page !== page))) throw new Error('validation receipt binding');
-      setStored({ binding, history, selected: owner, report: data, loading: false, error: '' });
+    return data;
+  }
+  async function readHistory(page?: number, graph?: string) {
+    if (!atRequestedLocation()) return;
+    const saved = page === undefined ? null : baseline;
+    if (page === undefined) setSavedBaseline(null);
+    setComparisonPage(1);
+    const controller = begin();
+    try {
+      const data = await loadHistory(controller, page, graph);
+      if (!current(controller)) return;
+      const retained = saved?.snapshot.graphSha256 === data.graphSha256 ? saved : null;
+      const locationKey = publish(data, null, null, retained);
+      if (locationKey === null) return;
+      setSavedBaseline(retained);
+      setStored({ binding, locationKey, history: data, selected: null, report: null, loading: false, error: '' });
     } catch (failure: unknown) { failed(controller, failure); }
   }
+  async function readCases(history: ValidationHistory, owner: ValidationOwner, page = 1, reportId?: string, nextBaseline = baseline) {
+    if (!atRequestedLocation()) return;
+    if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
+    const retained = nextBaseline?.snapshot.graphSha256 === history.graphSha256 ? nextBaseline : null;
+    if (!retained) setSavedBaseline(null);
+    const controller = begin(history, owner);
+    try {
+      const data = await loadReport(controller, history, owner, page, reportId);
+      if (!current(controller)) return;
+      const window = data.reportId === view?.report?.reportId && retained?.snapshot.reportId === baseline?.snapshot.reportId ? comparisonPage : 1;
+      const locationKey = publish(history, owner, data, retained, window);
+      if (locationKey === null) return;
+      setSavedBaseline(retained); setComparisonPage(window);
+      setStored({ binding, locationKey, history, selected: owner, report: data, loading: false, error: '' });
+    } catch (failure: unknown) { failed(controller, failure); }
+  }
+  useEffect(() => {
+    if (!navigation || (installed.current?.binding === binding && installed.current.key === requested.key)) return;
+    if (!atRequestedLocation()) return;
+    installed.current = { binding, key: requested.key };
+    binding.active?.abort(); setSavedBaseline(null); setComparisonPage(1);
+    if (requested.invalid) {
+      setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false, error: copy.savedSelectionInvalid });
+      return;
+    }
+    const location = requested.location;
+    if (!location) { setStored(null); return; }
+    const graphSha256 = location.graphSha256;
+    const controller = begin();
+    void (async () => {
+      const histories = new Map<number, ValidationHistory>();
+      async function historyAt(page: number) {
+        const cached = histories.get(page);
+        if (cached) return cached;
+        const data = await loadHistory(controller, page, graphSha256);
+        histories.set(page, data); return data;
+      }
+      const history = await historyAt(location.historyPage);
+      const owner = location.selected ? validationLocationOwner(history, location.selected) : null;
+      const report = location.selected && owner ? await loadReport(controller, history, owner, location.selected.casePage, location.selected.reportId) : null;
+      let saved: Baseline | null = null;
+      if (location.baseline) {
+        const selected = location.baseline, baselineHistory = await historyAt(selected.historyPage);
+        const baselineOwner = validationLocationOwner(baselineHistory, selected);
+        const same = location.selected && selected.historyPage === location.selected.historyPage &&
+          selected.ownerKind === location.selected.ownerKind && selected.ownerId === location.selected.ownerId &&
+          selected.reportId === location.selected.reportId && selected.casePage === location.selected.casePage;
+        const baselineReport = same && report ? report : await loadReport(controller, baselineHistory, baselineOwner, selected.casePage, selected.reportId);
+        const snapshot = validationComparisonSnapshot(baselineReport, { jobId, runId, graphSha256: location.graphSha256, owner: baselineOwner });
+        if (!snapshot) throw new Error('saved baseline unavailable');
+        saved = { binding, snapshot, history: baselineHistory, owner: baselineOwner, page: selected.casePage };
+      }
+      if (location.comparisonPage > 1) {
+        const snapshot = owner && report ? validationComparisonSnapshot(report, { jobId, runId, graphSha256: location.graphSha256, owner }) : null;
+        const result = snapshot && saved ? compareValidationSnapshots(saved.snapshot, snapshot) : null;
+        if (!result || result.state !== 'available' || location.comparisonPage > Math.max(1,
+          Math.ceil(Math.max(result.newMismatches.length, result.persistentMismatches.length, result.resolvedMismatches.length) / 20))) throw new Error('saved comparison page unavailable');
+      }
+      if (!current(controller)) return;
+      setSavedBaseline(saved); setComparisonPage(location.comparisonPage);
+      setStored({ binding, locationKey: requested.key, history, selected: owner, report, loading: false, error: '' });
+    })().catch((failure: unknown) => { failed(controller, failure, true); });
+    return () => controller.abort();
+  }, [binding, navigation !== undefined, requested.key]);
   const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
   const download = useMemo(() => report && history && selected
     ? validationPageDownload(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
@@ -144,20 +265,41 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         <section aria-labelledby="validation-comparison-title">
           <h3 id="validation-comparison-title">{copy.comparisonTitle}</h3><p>{copy.comparisonScope}</p>
           {comparisonSnapshot ? <button type="button" disabled={loading} onClick={() => {
-            if (history && selected) setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
+            if (history && selected) {
+              const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page };
+              const locationKey = publish(history, selected, report, saved);
+              if (locationKey === null) return;
+              setSavedBaseline(saved); setComparisonPage(1);
+              setStored(previous => previous ? { ...previous, locationKey } : previous);
+            }
           }}>{copy.setComparisonBaseline}</button> : <p>{copy.comparisonUnavailable}</p>}
           {baseline && <>
             <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{baseline.snapshot.ownerKind}: {baseline.snapshot.ownerId}</code></dd>
               <dt>{copy.candidate}</dt><dd><code>{baseline.snapshot.candidateId}</code></dd>
               <dt>{copy.source}</dt><dd><code>{baseline.snapshot.sourceSha256}</code></dd></dl>
-            <button type="button" onClick={() => { setSavedBaseline(null); }}>{copy.clearComparisonBaseline}</button>
+            <button type="button" onClick={() => {
+              if (history && selected) {
+                const locationKey = publish(history, selected, report, null);
+                if (locationKey === null) return;
+                setSavedBaseline(null); setComparisonPage(1);
+                setStored(previous => previous ? { ...previous, locationKey } : previous);
+              }
+            }}>{copy.clearComparisonBaseline}</button>
             {comparisonSnapshot && <MismatchComparison key={`${baseline.snapshot.reportId}:${comparisonSnapshot.reportId}`}
-              first={baseline.snapshot} second={comparisonSnapshot} onInspectPage={page => {
+              first={baseline.snapshot} second={comparisonSnapshot} page={comparisonPage} onPageChange={page => {
+                if (history && selected) {
+                  const locationKey = publish(history, selected, report, baseline, page);
+                  if (locationKey === null) return;
+                  setComparisonPage(page); setStored(previous => previous ? { ...previous, locationKey } : previous);
+                }
+              }} onInspectPage={page => {
                 if (history && selected) void readCases(history, selected, page, report.reportId);
               }} onSwap={() => {
+                if (!atRequestedLocation()) return;
                 if (history && selected) {
-                  setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
-                  void readCases(baseline.history, baseline.owner, 1, baseline.snapshot.reportId);
+                  const saved = { binding, snapshot: comparisonSnapshot, history, owner: selected, page: cases.page };
+                  setSavedBaseline(saved); setComparisonPage(1);
+                  void readCases(baseline.history, baseline.owner, baseline.page, baseline.snapshot.reportId, saved);
                 }
               }} />}
           </>}
@@ -205,9 +347,9 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
   </section>;
 }
 
-function MismatchComparison({ first, second, onInspectPage, onSwap }: { first: ValidationComparisonSnapshot;
-  second: ValidationComparisonSnapshot; onInspectPage: (page: number) => void; onSwap: () => void }) {
-  const [page, setPage] = useState(1);
+function MismatchComparison({ first, second, page, onPageChange, onInspectPage, onSwap }: { first: ValidationComparisonSnapshot;
+  second: ValidationComparisonSnapshot; page: number; onPageChange: (page: number) => void;
+  onInspectPage: (page: number) => void; onSwap: () => void }) {
   const result = useMemo(() => compareValidationSnapshots(first, second), [first, second]);
   if (result.state !== 'available') return <p>{result.state === 'same-observation' ? copy.selectComparisonTarget : copy.comparisonIncompatible}</p>;
   const groups = [[copy.newMismatch, result.newMismatches], [copy.persistentMismatch, result.persistentMismatches],
@@ -229,8 +371,8 @@ function MismatchComparison({ first, second, onInspectPage, onSwap }: { first: V
     </div>
     {groups.every(([, ordinals]) => ordinals.length === 0) && <p>{copy.noComparisonDifferences}</p>}
     <nav aria-label={copy.comparisonNavigation}>
-      <button type="button" disabled={page === 1} onClick={() => { setPage(page - 1); }}>{copy.previousComparison}</button>
-      <button type="button" disabled={page === pages} onClick={() => { setPage(page + 1); }}>{copy.nextComparison}</button>
+      <button type="button" disabled={page === 1} onClick={() => { onPageChange(page - 1); }}>{copy.previousComparison}</button>
+      <button type="button" disabled={page === pages} onClick={() => { onPageChange(page + 1); }}>{copy.nextComparison}</button>
     </nav>
     <button type="button" onClick={onSwap}>{copy.swapComparison}</button>
   </>;

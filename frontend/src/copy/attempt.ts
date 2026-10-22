@@ -3,6 +3,8 @@
 import { textMessage } from '../shared/messages';
 
 export const recordedValidationCopy = {
+  savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
+  savedSelectionUnavailable: 'This exact saved validation selection could not be restored. No different observation was substituted. Read validation evidence to select a current observation.',
   exportPage: 'Download this validation page JSON', exportFailure: 'Download this failure diagnostic JSON',
   exportScope: 'The download contains this selected observation only, including its snapshot commitments and bounded previews. Other pages, full output bytes and source files are not included. Saving it does not run validation.',
   exportUnavailable: 'This observation cannot be exported within the supported format and 192 KiB limit.',

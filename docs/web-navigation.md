@@ -380,3 +380,36 @@ cannot start another Refresh. An older response without snapshot pagination
 commits its cursor-free limitation only after acceptance and retires the same
 transition. Invalid/expired cursor cleanup still clears rows before its one
 bounded fallback read. This does not establish physical viewport restoration.
+
+
+## Saved validation observations and comparisons
+
+On an attempt overview or Evidence route, validation navigation records the exact graph digest,
+history page, selected owner kind/ID, candidate revision, source/corpus digests, report ID and
+case page. A comparison baseline records its own history/case pages and commitments within that
+same graph; the bounded comparison window is URL state too. These are metadata identities,
+never authentication, prompts, source bytes, output previews or a claim of acceptance.
+
+Explicit history/observation selection, case/history paging, saving/clearing/swapping a baseline
+and comparison-window paging push history only when the canonical selection changes. Direct
+entry and Back/Forward restore read-only metadata from that exact graph and verify every owner,
+report and source association. At most two history pages and two selected reports are read;
+matching history pages and identical selected/baseline receipts are reused within restoration.
+Comparison-window changes use the already loaded bounded comparison index and issue no reads.
+An empty selection does not discover validation evidence automatically.
+
+Malformed or partial query state causes no validation request. Missing owners, changed graphs,
+reports, revisions, source/corpus identities or unavailable comparison windows show a recovery
+notice without substituting current data. Explicit Read validation evidence selects a fresh
+history. Obsolete reads are aborted and fenced by resource, client, active request and URI; no
+late response can rewrite another route or Back/Forward selection. The prior in-memory-only
+component interface remains available for embedding, without a router dependency.
+
+The current implementation uses validationGraph/validationPage and complete validationKind,
+validationOwner, validationRevision, validationSource, validationCorpus, validationReport and
+validationCasePage query groups. Baselines use the corresponding baseline group and baselinePage;
+comparisonPage identifies the complete-corpus comparison window. Query text is bounded to4096
+characters, duplicates/unknown fields are rejected, and all identities/digests/pages are checked.
+No route change starts validation, execution, admission, source preview or a mutation. Physical
+scroll/focus restoration, remaining workspace routes and the full packaged journey still need
+their original qualification; inert component controls do not close that scope.
