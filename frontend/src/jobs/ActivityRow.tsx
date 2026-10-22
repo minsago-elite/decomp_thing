@@ -65,6 +65,9 @@ export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: st
           </>}
         </details>
       </details>
+    </> : event.type === 'run.state' ? <>
+      <p>{displayMessage(copy.recordedRunState, { state: event.payload.state })}</p>
+      <p>{displayMessage(copy.recordedRunAcceptance, { acceptance: event.payload.acceptance })}</p>
     </> : <p>{displayMessage(copy.otherObservation, { type: event.type })}</p>}
   </li>;
 }
