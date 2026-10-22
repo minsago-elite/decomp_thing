@@ -44,7 +44,7 @@ build/install/llm_bin_patch/bin/llm_bin_patch web --ui spa
 | `--port` | `8000` | TCP port. |
 | `--data-dir` | `.decomp_engine/jobs` | Where uploaded jobs are stored (see [Your data](#your-data)). |
 | `--ui` | `legacy` | `legacy` or `spa`. |
-| `--base-path` | `/` | Serve under a prefix such as `/workbench/`. |
+| `--base-path` | `/` | Serve under a prefix such as `/workbench/`. **Only with `--ui spa`**: the legacy workbench refuses to start with `--base-path is supported by --ui spa`. |
 
 On start the launcher prints two lines:
 
@@ -64,7 +64,9 @@ Open the second URL in your browser. The legacy workbench prints the same pair, 
 - Using the link a second time fails with `BOOTSTRAP_REQUIRED: Open a newly issued local browser link.` Opening it
   after the five minutes have passed fails with a different code, `BOOTSTRAP_EXPIRED: The local browser link expired.
   Issue a new link.` Either way, restart the launcher for a new link; it prints a fresh one on every start.
-- Without a session, the API answers `401 SESSION_REQUIRED: Open a local browser link to start a session.` The public
+- A session that has expired (idle or absolute) is answered with `401 SESSION_EXPIRED: The browser session expired. Open a
+  new local browser link.` (read from the code; the 30-minute idle expiry was not waited out). Without any session,
+  the API answers `401 SESSION_REQUIRED: Open a local browser link to start a session.` The public
   pages (`/`, `/runtime`) still load so the interface can explain itself.
 - **Sign out** ends the session explicitly. Nothing is started or changed by creating a session, navigating or
   refreshing.
@@ -124,8 +126,12 @@ Uploaded jobs are stored under `--data-dir`, one directory per job named by its 
 ```
 
 - Keep the data directory **outside** the installed distribution; the application files are immutable.
-- **Run one server per data directory.** The preview did not refuse to start a second server on the same directory
-  during testing, so avoid it.
+- **Run one server per data directory.** Ownership is enforced with a lock file (`.web-owner.lock`). If the directory
+  already exists, a second server is refused at start-up with `Job store already has a live web server owner` (checked in
+  both interfaces). If the directory does **not** exist yet, a server starts without creating it or taking the lock, so
+  a second server can also start; the lock is taken when storage is first initialised (by the first upload), and by the
+  code a competing server is refused at that point. That last step is read from the code, not exercised. To avoid the
+  window, create the directory first.
 - The server reports a terminal-event retention limit of **24 hours** (`terminalEventRetentionMs`: 86,400,000). A
   pinned attempt keeps its stored progress history; unpinning allows retention cleanup. **Not verified:** how long job directories themselves are kept;
   the preview offers no delete.
@@ -158,7 +164,8 @@ harness (see the README).
 | `Cannot bind web server to 127.0.0.1:8000. Check --host or choose an unused --port.` | The port is busy. Pick another with `--port`. |
 | `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was already used (or does not match). Restart the launcher and open the new link. |
 | `BOOTSTRAP_EXPIRED` / "The local browser link expired. Issue a new link." | More than five minutes passed before the link was opened. Restart the launcher and open the new link. |
-| `SESSION_REQUIRED` / "Open a local browser link to start a session." | You are not signed in, or the session ended. Open the launcher's link. |
+| `SESSION_REQUIRED` / "Open a local browser link to start a session." | You are not signed in. Open the launcher's link. |
+| `SESSION_EXPIRED` / "The browser session expired. Open a new local browser link." | Your session ended (30 minutes idle, or eight hours in total). Restart the launcher and open the new link. |
 | "The local session expired or is unavailable. Reconnect the session to read this job." | Your session ended (30 minutes idle, or eight hours in total). Restart the launcher for a new link. |
 | "This job is unavailable. It may have been removed." | The job id does not exist (or was removed from the data directory). The page keeps a **Return to jobs** link. |
 | "This interface cannot read the server's response format. Refresh the page before trying to read this job again." | The page and the server are different builds. Refresh the page; if it persists, restart the launcher. |
