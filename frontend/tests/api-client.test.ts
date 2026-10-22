@@ -12,6 +12,58 @@ const response = (name = 'session', status = 200, headers: Record<string, string
 afterEach(() => { vi.useRealTimers(); });
 
 describe('bounded v1 fetch client', () => {
+  it('submits explicit preflight with CSRF and no fabricated resource or replay guards', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('agent-preflight-inspecting', 202,
+      { 'X-Request-ID': 'request_preflight_fixture' }));
+    const client = createApiClient({ basePath: '/workbench/', fetch: fetcher });
+    const data = { action: 'inspect' } as const;
+    const path = '/agent/preflight';
+    const csrfToken = 'a'.repeat(43);
+    await expect(client.post('agentPreflight', path, 'agentPreflightRequest', data)).rejects.toMatchObject({ code: 'invalid_request' });
+    for (const settings of [{ csrfToken, ifMatch: '"made_up_version"' }, { csrfToken, idempotencyKey: 'invented_preflight_key' }, { csrfToken, uploadId: 'a'.repeat(32) }]) {
+      await expect(client.post('agentPreflight', path, 'agentPreflightRequest', data, settings)).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    await expect(client.post('agentPreflight', '/session', 'agentPreflightRequest', data, { csrfToken })).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(client.post('session', path, 'agentPreflightRequest', data, { csrfToken })).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(client.put('agentPreflight', path, 'agentPreflightRequest', data,
+      { csrfToken, ifMatch: '"made_up_version"', idempotencyKey: 'invented_preflight_key' })).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).not.toHaveBeenCalled();
+    await expect(client.post('agentPreflight', path, 'agentPreflightRequest', data, { csrfToken })).resolves.toMatchObject({ data: { status: 'inspecting' } });
+    expect(fetcher).toHaveBeenCalledOnce();
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(url).toBe('/workbench/api/v1/agent/preflight');
+    expect(init).toMatchObject({ method: 'POST', body: '{"action":"inspect"}', credentials: 'same-origin', mode: 'same-origin' });
+    const headers = new Headers(init?.headers);
+    expect(headers.get('X-CSRF-Token')).toBe(csrfToken);
+    expect(headers.has('If-Match')).toBe(false); expect(headers.has('Idempotency-Key')).toBe(false);
+  });
+  it('does not replay an ambiguous explicit preflight POST', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(Error('private transport diagnostic'));
+    const client = createApiClient({ basePath: '/', fetch: fetcher });
+    await expect(client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' },
+      { csrfToken: 'a'.repeat(43) })).rejects.toMatchObject({ code: 'network_error' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('submits an agent preflight with CSRF only and refuses versioned or mismatched forms', async () => {
+    const csrf = 'c'.repeat(32);
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(response('agent-preflight-idle', 202, { 'X-Request-ID': 'request_preflight_idle' })));
+    const client = createApiClient({ basePath: '/nested', fetch: fetcher });
+    await expect(client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf }))
+      .resolves.toHaveProperty('kind', 'agentPreflight');
+    const sent = fetcher.mock.calls[0]?.[1]; const headers = new Headers(sent?.headers);
+    expect(sent?.method).toBe('POST'); expect(headers.get('X-CSRF-Token')).toBe(csrf);
+    expect(headers.has('If-Match')).toBe(false); expect(headers.has('Idempotency-Key')).toBe(false);
+    expect(fetcher.mock.calls[0]?.[0]).toContain('/nested/api/v1/agent/preflight');
+    const refused = [
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }),
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf, ifMatch: '"version_1"' }),
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf, idempotencyKey: 'k'.repeat(16) }),
+      client.post('agentPreflight', '/jobs/example/runs', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf }),
+      client.post('run', '/agent/preflight', 'workflowCancelRequest', { action: 'cancel' }, { csrfToken: csrf, ifMatch: '"version_1"', idempotencyKey: 'k'.repeat(16) }),
+    ];
+    for (const attempt of refused) await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it('pins an explicit source digest HEAD to metadata before accepting its commitment headers', async () => {
     const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
     metadata.binding.jobId = 'a'.repeat(32);
