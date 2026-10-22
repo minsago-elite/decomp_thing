@@ -465,6 +465,31 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        },
+        "currentCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previousCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
         }
       },
       "required": [

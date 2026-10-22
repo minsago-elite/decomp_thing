@@ -312,3 +312,24 @@ to use the revision recorded by that attempt; it never advances to the latest jo
 These routes implement the currently available attempt views. The full workspace Structure,
 Revisions, Artifacts and Git routes, URL-bound continuation/comparison state and physical
 scroll/selection restoration still require their original implementation and qualification.
+
+
+## Job snapshot page history
+
+Current job-page responses supply opaque signed `currentCursor` and `previousCursor` values and
+an explicit `pageNumber`. The browser never parses an offset from a cursor or manufactures a
+return token. Moving between pages pushes the returned cursor into the applied-filter URL.
+Before leaving the current first page, its existing history entry is replaced with its server
+cursor, so Back can request the same retained snapshot instead of scanning a changed library.
+Job links also pin that first entry before ordinary client navigation.
+
+Pinned pages are read-only snapshots and do not run live refreshes. Explicit Refresh returns to
+the current first page. Invalid saved cursor syntax is removed with a visible explanation before
+a read. A server-rejected or expired saved cursor replaces only that entry's cursor, preserves its
+filters and permits one fresh first-page read; another failure requires explicit recovery. The
+server's original session/query binding, two-minute expiry, eight-snapshot and 32 MiB retained
+bounds still apply, including to empty and single-page snapshots. Older v1 page responses keep
+bounded page-local navigation and explicitly report that saved page history is unavailable.
+
+The component controls use inert metadata transports. They do not qualify physical browser
+scroll restoration, all workspace tabs or the complete packaged navigation journey.
