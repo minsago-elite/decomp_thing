@@ -9,6 +9,9 @@ import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters } from './query';
 import type { JobFilters } from './query';
 import { JobSummary } from './JobSummary';
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
 
 function currentFilters() {
@@ -23,7 +26,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const [data, setData] = useState<Jobs | null>(null);
+  const [observation, setData] = useState<Received<Jobs> | null>(null);
+  const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(null);
@@ -45,7 +49,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, [error]);
   const { client } = usePrivateTransport(basePath);
   // Only one extra bounded page is retained; continuation pages stay server-backed.
-  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
+  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Received<Jobs> } | null>(null);
   const cursor = cursors[pageIndex] ?? null;
   const failRead = useCallback((failure: unknown) => {
     setPhase('error');
@@ -86,8 +90,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
     if (cursor) params.set('cursor', cursor);
     void client.get('jobs', `/jobs?${params}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
-      if (!cursor) firstPage.current = { selection, refresh, client, data: response.data };
-      setData(response.data); setDisplayedPageIndex(pageIndex); setPhase('ready');
+      const received = receive(response.data);
+      if (!cursor) firstPage.current = { selection, refresh, client, data: received };
+      setData(received); setDisplayedPageIndex(pageIndex); setPhase('ready');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
@@ -126,8 +131,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
           setLiveDeferred(true);
           return;
         }
-        firstPage.current = { selection, refresh, client, data: response.data };
-        setLiveDeferred(false); setData(response.data);
+        const received = receive(response.data);
+        firstPage.current = { selection, refresh, client, data: received };
+        setLiveDeferred(false); setData(received);
       } catch (failure: unknown) {
         if (!disposed && !controller.signal.aborted) { stopped = true; failRead(failure); }
       } finally {
@@ -212,6 +218,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     <p role="status">{phase === 'loading' && selection.valid
       ? loadingStatus
       : phase === 'ready' && data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
+    {data && <MetadataReceipt kind="library" receipt={observation?.receipt} />}
     {phase === 'ready' && retainedEmpty && <p>{filtered ? copy.noJobsMatchTheseFilters : copy.noUploadedJobsYet}</p>}
     {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>

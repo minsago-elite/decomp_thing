@@ -1,48 +1,13 @@
 import { activityReceiptAgeCopy as copy, receiptAge } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from './metadataFormat';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useReceiptAge } from '../shared/useReceiptAge';
+import type { ReceiptTime } from '../shared/receiptTime';
 
-export interface ActivityReceiptTime { at: string; monotonicMs: number; wallClockMs: number }
+export type ActivityReceiptTime = ReceiptTime;
 
 /** Elapsed receipt age uses this tab's monotonic clock and reconciles time spent suspended. */
 export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityReceiptTime; visible: boolean }) {
-  const [, refresh] = useState(0);
-  const clock = useRef({ receiptAt: receipt.at, receiptMs: receipt.monotonicMs, receiptWallMs: receipt.wallClockMs,
-    offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null as boolean | null });
-  // A suspended or precision-reduced clock can give distinct receipts the same monotonic value.
-  if (clock.current.receiptMs !== receipt.monotonicMs || clock.current.receiptWallMs !== receipt.wallClockMs
-    || clock.current.receiptAt !== receipt.at) {
-    clock.current = { receiptAt: receipt.at, receiptMs: receipt.monotonicMs, receiptWallMs: receipt.wallClockMs,
-      offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null };
-  }
-  useEffect(() => {
-    const state = clock.current;
-    const sample = () => {
-      const nowMonoMs = performance.now();
-      const nowWallMs = Date.now();
-      if (state.wasVisible !== null) {
-        const wallElapsedMs = nowWallMs - state.lastWallMs;
-        const monotonicElapsedMs = nowMonoMs - state.lastMonoMs;
-        // A suspended browser can stop performance.now(). The sample timer bounds the amount of
-        // active monotonic time between samples; a shorter interval with a large wall-clock gap
-        // means the browser was suspended during this sampling window. A full active interval
-        // remains ordinary wall-clock correction and must not age the receipt permanently.
-        if (wallElapsedMs > monotonicElapsedMs + 1000 && monotonicElapsedMs < 10000) {
-          state.offsetMs += wallElapsedMs - monotonicElapsedMs;
-        }
-      }
-      state.lastMonoMs = nowMonoMs;
-      state.lastWallMs = nowWallMs;
-      state.wasVisible = visible;
-      refresh(value => value + 1);
-    };
-    sample();
-    if (!visible) return;
-    const timer = setInterval(sample, 10000);
-    return () => clearInterval(timer);
-  }, [receipt.at, receipt.monotonicMs, receipt.wallClockMs, visible]);
-  const seconds = Math.max(0, Math.floor((performance.now() - receipt.monotonicMs + clock.current.offsetMs) / 1000));
-  const age = receiptAge(seconds);
+  const age = receiptAge(useReceiptAge(receipt, visible));
   return <>{displayMessage(copy.received, { time: <time dateTime={receipt.at} title={receipt.at}>{formatExactTimestamp(receipt.at)}</time>, age })}</>;
 }

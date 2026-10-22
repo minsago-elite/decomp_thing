@@ -9,6 +9,9 @@ import type { Runs } from '../api/generated';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
 function History({ jobId, basePath, session }: { jobId: string; basePath: string; session: BrowserSession }) {
@@ -18,10 +21,11 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     (cursor === undefined || /^[A-Za-z0-9_-]{1,128}$/.test(cursor));
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, cursor, validQuery, session }), [client, basePath, jobId, cursor, validQuery, session]);
-  const [stored, setStored] = useState<{ binding: typeof binding; data: Runs | null; loading: boolean; error: string; retryable: boolean }>(
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<Runs> | null; loading: boolean; error: string; retryable: boolean }>(
     { binding, data: null, loading: true, error: '', retryable: false });
-  const { data, loading, error, retryable } = stored.binding === binding ? stored
+  const { data: observation, loading, error, retryable } = stored.binding === binding ? stored
     : { data: null, loading: true, error: '', retryable: false };
+  const data = observation?.value;
   const [refresh, setRefresh] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
@@ -41,7 +45,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       if (response.data.jobId !== jobId || response.data.items.some(run => run.jobId !== jobId)) {
         throw new ApiClientError('invalid_response');
       }
-      setStored({ binding, data: response.data, loading: false, error: '', retryable: false });
+      setStored({ binding, data: receive(response.data), loading: false, error: '', retryable: false });
       if (moveFocus.current) { moveFocus.current = false; heading.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
@@ -71,6 +75,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     }}>{copy.retryHistoryPage}</button>}
     <h2 ref={heading} tabIndex={-1}>{copy.recordedAttempts}</h2>
     <p role="status">{loading ? data ? copy.refreshingAttemptHistory : copy.loadingAttemptHistory : data ? displayMessage(copy.pageCount, { count: data.items.length }) : ''}</p>
+    {data && <MetadataReceipt kind="history" receipt={observation?.receipt} />}
     {data?.items.length === 0 && <p>{copy.noDurableAttemptsAreRecordedForThisJobLegacyActivity}</p>}
     {data && <ul aria-label={copy.recordedAttempts}>{data.items.map(run => <li key={run.runId}>
       <a href={runPath(basePath, jobId, run.runId)}>{run.workflow}: {run.runId}</a>

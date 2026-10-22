@@ -89,3 +89,33 @@ it('aborts on offline or unmount and ignores late responses', async () => {
   const next = transport.get.mock.calls[1]?.[2].signal as AbortSignal;
   view.unmount(); expect(next.aborted).toBe(true);
 });
+
+
+it('keeps the prior policy receipt through a replay and publishes time only with its guarded GET', async () => {
+  const epoch = Date.parse('2026-09-05T00:00:00Z'); let elapsed = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsed);
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+  let finish!: (value: unknown) => void;
+  transport.get.mockResolvedValueOnce(policy()).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  transport.put.mockResolvedValueOnce(policy(true, 'replayed_version'));
+  try {
+    const view = mount(); fireEvent.click(screen.getByRole('button', { name: 'Read progress pin' }));
+    await screen.findByRole('button', { name: 'Pin progress history' });
+    const at = screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime;
+    elapsed = 20_000; fireEvent.click(screen.getByRole('button', { name: 'Pin progress history' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime).toBe(at);
+    expect(screen.queryByText('Progress history is pinned.')).toBeNull();
+    expect(transport.put).toHaveBeenCalledOnce();
+    expect(transport.put.mock.calls[0]?.[4].ifMatch).toBe('"version_1"');
+    elapsed = 40_000; finish(policy(false, 'version_3'));
+    await screen.findByText(/Current policy verified/);
+    expect(screen.getByLabelText('Progress pin policy').querySelector('time')?.dateTime).toBe(new Date(epoch + elapsed).toISOString());
+    expect(transport.put).toHaveBeenCalledOnce(); expect(transport.get).toHaveBeenCalledTimes(2);
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(screen.queryByLabelText('Progress pin policy')).toBeNull());
+    expect(transport.put).toHaveBeenCalledOnce(); expect(transport.get).toHaveBeenCalledTimes(2);
+    view.unmount();
+  } finally { vi.restoreAllMocks(); }
+});
