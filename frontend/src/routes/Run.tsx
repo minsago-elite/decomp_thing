@@ -98,7 +98,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       </>}
       {view !== 'activity' && <>
         <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} navigation={navigation} />
+        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
       </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
         : <p>{sourceCopy.noRevision}</p>}
@@ -121,7 +121,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
       </nav>
-      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} navigation={navigation} />
+      {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
     </> : <p role="alert">{copy.theRequestedJobOrAttemptIdentityIsInvalid}</p>}
   </section>;
