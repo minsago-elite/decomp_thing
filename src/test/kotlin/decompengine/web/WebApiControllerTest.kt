@@ -57,6 +57,11 @@ class WebApiControllerTest {
                 .single { it.getValue("id").jsonPrimitive.content == "workflows" }
             assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
             assertTrue(capability.getValue("workflows").jsonArray.isEmpty())
+            val harness = first.getValue("capabilities").jsonArray.map { it.jsonObject }
+                .single { it.getValue("id").jsonPrimitive.content == "harness" }
+            assertTrue(harness.getValue("state").jsonPrimitive.content in setOf("supported", "unavailable", "unsupported"))
+            assertTrue(harness.getValue("workflows").jsonArray.isEmpty())
+            assertFalse(harness.toString().contains(root.toString()))
             val limits = first.getValue("limits").jsonObject
             assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)
             assertEquals("30000", limits.getValue("requestDeadlineMs").jsonPrimitive.content)

@@ -278,7 +278,8 @@ class UploadServer(
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources, harnessReadiness = harnessReadiness) }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources, harnessReadiness = harnessReadiness,
+        agentInspectionStatus = ::authenticationInspectionStatus) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -528,6 +529,10 @@ class UploadServer(
             admission.second, requestDiagnosticOutput)
         else exchange.sendJson(admission.first, admission.second)
     }
+
+    /** Only the fixed status word of the last inspection is exposed to readiness. */
+    private fun authenticationInspectionStatus(): String? =
+        Regex("\"status\":\"([a-z]+)\"").find(authenticationInspectionResult.get())?.groupValues?.get(1)
 
     private fun authenticationInspectionSnapshot(result: String? = null): String = synchronized(authenticationInspectionLock) {
         // Every payload here is an internally serialized object; identity is an application-generated UUID.

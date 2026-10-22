@@ -21,6 +21,7 @@ internal class WebApiController(
     streamResources: WebStreamResources,
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
+    private val agentInspectionStatus: () -> String? = { null },
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -385,7 +386,7 @@ internal class WebApiController(
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
     private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current()
+        val readiness = harnessReadiness.current().withAgentInspection(agentInspectionStatus())
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)

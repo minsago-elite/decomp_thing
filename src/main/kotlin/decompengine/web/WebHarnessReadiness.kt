@@ -14,7 +14,19 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Public harness availability; [state] uses the contract's capability state vocabulary. */
-internal data class WebHarnessReadiness(val state: String, val reasonCode: String?, val message: String)
+internal data class WebHarnessReadiness(val state: String, val reasonCode: String?, val message: String) {
+    /**
+     * Folds the last explicit operator inspection into a configured harness. Bootstrap never starts the
+     * agent, so an absent, running or cancelled inspection leaves readiness unproven rather than assumed.
+     */
+    fun withAgentInspection(status: String?): WebHarnessReadiness = when {
+        state != "supported" -> this
+        status == "failed" -> WebHarnessReadiness("unavailable", "AGENT_PREFLIGHT_FAILED",
+            "The last operator inspection could not start the configured agent. Inspect the agent configuration and retry.")
+        status == "ready" -> copy(message = "An agent harness and sandbox helpers are available; the last operator inspection started the configured agent.")
+        else -> copy(message = "An agent harness and sandbox helpers are available. The agent has not been started by an operator inspection, so its readiness is unproven.")
+    }
+}
 
 /**
  * Projects harness configuration readiness for bootstrap without launching a workflow.

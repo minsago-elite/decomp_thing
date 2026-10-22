@@ -131,4 +131,23 @@ class WebHarnessReadinessTest {
         assertEquals("PROBE_FAILED", result.reasonCode)
         assertFalse(result.message.contains("abc"))
     }
+
+    @Test
+    fun `the last operator inspection can only demote or annotate a configured harness`() {
+        val supported = WebHarnessReadiness("supported", null, "base")
+        val failed = supported.withAgentInspection("failed")
+        assertEquals("unavailable", failed.state)
+        assertEquals("AGENT_PREFLIGHT_FAILED", failed.reasonCode)
+        for (status in listOf(null, "idle", "inspecting", "cancelled")) {
+            val result = supported.withAgentInspection(status)
+            assertEquals("supported", result.state)
+            assertTrue(result.message.contains("unproven"), "unstarted agent readiness must not be implied: $status")
+        }
+        val ready = supported.withAgentInspection("ready")
+        assertEquals("supported", ready.state)
+        assertTrue(ready.message.contains("last operator inspection"))
+        val missing = WebHarnessReadiness("unavailable", "GHIDRA_MISSING", "missing")
+        assertEquals(missing, missing.withAgentInspection("ready"))
+        assertEquals(missing, missing.withAgentInspection("failed"))
+    }
 }
