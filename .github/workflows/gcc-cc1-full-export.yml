@@ -25,7 +25,8 @@ jobs:
         target: ${{ fromJSON(inputs.capture-mode == 'cc1-runtime-diagnostics' && '["cc1"]' || contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
     env:
       DECOMP_GCC_CLI_FULL_EXPORT_ENGINE: ${{ matrix.target }}
-      DECOMP_GCC_CLI_CAPTURE_MODE: ${{ inputs.capture-mode || 'qualification' }}
+      # The dispatch-only 'cc1-full-export' route runs the script's existing qualification mode.
+      DECOMP_GCC_CLI_CAPTURE_MODE: ${{ inputs.capture-mode == 'cc1-full-export' && 'qualification' || inputs.capture-mode || 'qualification' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.target == 'driver' && 90 || 360 }}
     permissions:
