@@ -91,15 +91,52 @@ it('persists submitted filters in the URL and distinguishes no matches from an e
   transport.get.mockResolvedValue(page([]));
   render(<Dashboard basePath="" />);
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  const historyLength = history.length;
   fireEvent.input(screen.getByLabelText('Filename search'), { target: { value: 'my binary' } });
   fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'failed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   expect(await screen.findByText('No jobs match these filters.')).toBeTruthy();
   expect(location.search).toBe('?search=my+binary&status=failed');
+  expect(history.length).toBe(historyLength + 1);
   expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?search=my+binary&status=failed&limit=50');
   fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
   expect(location.search).toBe('');
+  expect(history.length).toBe(historyLength + 2);
+});
+
+it('makes each applied filter set a history step so back and forward restore the previous results', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValue(page([]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  const start = history.length;
+  fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'failed' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50'));
+  expect(history.length).toBe(start + 1);
+  // Explicit defaults and reordered parameters still describe the same applied filters.
+  history.replaceState(null, '', '/?limit=50&status=failed');
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  expect(history.length).toBe(start + 1);
+  expect(location.search).toBe('?status=failed');
+  fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'oldest' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&sort=oldest&limit=50'));
+  expect(location.search).toBe('?status=failed&sort=oldest');
+  expect(history.length).toBe(start + 2);
+  history.back();
+  await waitFor(() => expect(location.search).toBe('?status=failed'));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50'));
+  expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed');
+  expect(screen.getByLabelText('Sort by')).toHaveProperty('value', 'newest');
+  history.back();
+  await waitFor(() => expect(location.search).toBe(''));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?limit=50'));
+  expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', '');
+  history.forward();
+  await waitFor(() => expect(location.search).toBe('?status=failed'));
+  await waitFor(() => expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed'));
 });
 
 it('retains stale rows after failed refresh and clears private rows on denied access', async () => {
@@ -188,6 +225,16 @@ it('rejects invalid saved filters without fetching and has a visible reset', asy
   expect(transport.get).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  transport.get.mockRejectedValueOnce(new ApiClientError('timeout'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('The server may be unavailable');
+  history.back();
+  await waitFor(() => {
+    expect(location.search).toBe('?limit=10000');
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert').textContent).toContain('saved filters are invalid');
+  });
+  expect(transport.get).toHaveBeenCalledTimes(2);
 });
 
 it('validates URL filter keys and preserves literal filenames through one encoding', () => {
