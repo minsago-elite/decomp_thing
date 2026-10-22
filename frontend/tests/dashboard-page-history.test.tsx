@@ -35,7 +35,8 @@ it('restores signed snapshot pages through next previous back and forward withou
     expect(decodeContract(JSON.stringify(document), { mode })).toEqual(document);
     for (const fields of [{ currentCursor: undefined }, { previousCursor: undefined }, { pageNumber: undefined },
       { currentCursor: null }, { pageNumber: 0 }, { pageNumber: 2 }, { previousCursor: 'Page_Other' },
-      { nextCursor: 'Page_First' }, { pageNumber: 2, previousCursor: 'Page_First' }]) {
+      { nextCursor: 'Page_First' }, { pageNumber: 2, previousCursor: 'Page_First' },
+      { pageNumber: 2, previousCursor: 'Page_Other', nextCursor: 'Page_Other' }]) {
       expect(() => decodeContract(JSON.stringify({ ...document, data: { ...first.data,
         page: { ...first.data.page, ...fields } } }), { mode })).toThrow(ApiClientError);
     }

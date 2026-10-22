@@ -318,6 +318,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         requireValue((page.pageNumber === 1) === (page.previousCursor === null));
         requireValue(page.nextCursor === null || page.nextCursor !== page.currentCursor);
         requireValue(page.previousCursor === null || page.previousCursor !== page.currentCursor);
+        requireValue(page.previousCursor === null || page.previousCursor !== page.nextCursor);
         requireValue(page.pageNumber === 1 || items.length > 0);
       }
       break;
