@@ -38,15 +38,16 @@ class WebAgentPreflightTest {
         root.toFile().deleteRecursively()
     }
 
-    private inner class Harness {
-        val service = WebJobService(JobStore(root), JobAnalyzer { _, _ -> error("unused") }, JobReconstructor { _, _ -> error("unused") })
+    private inner class Harness(readiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(), storage: Path = root) {
+        val service = WebJobService(JobStore(storage), JobAnalyzer { _, _ -> error("unused") }, JobReconstructor { _, _ -> error("unused") })
             .also { it.initializeExistingStorage(); closeables += it }
         val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin, basePath = "/w/"))
         val preflight = WebAgentPreflight { calls.incrementAndGet(); behavior() }.also { closeables += it }
         val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/w/"), service,
-            WebJobMutationBoundary(access, service), WebStreamResources().also { closeables += it }, agentPreflight = preflight)
+            WebJobMutationBoundary(access, service), WebStreamResources().also { closeables += it }, harnessReadiness = readiness.also { closeables += AutoCloseable { it.close() } },
+            agentPreflight = preflight)
         val http: HttpClient = HttpClient.newHttpClient()
         val cookie: String
         val csrf: String
@@ -156,6 +157,53 @@ class WebAgentPreflightTest {
             assertEquals("AGENT_PREFLIGHT_FAILED", after.getValue("reasonCode").jsonPrimitive.content)
         } else assertEquals(before, after)
         assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun `public bootstrap and preflight responses never contain configured paths, hosts, keys or models`() {
+        val sentinels = listOf("sentinel-key-9f31", "sentinel-host-9f31.invalid", "sentinel-model-9f31", "/sentinel-dir-9f31/acp.json")
+        val helper = Files.createFile(root.resolve("sentinel-helper"))
+        helper.toFile().setExecutable(true)
+        val environments = listOf(
+            // Unreadable ACP configuration: the path and key must not be echoed.
+            mapOf("ACP_CONFIG_FILE" to sentinels[3], "API_KEY" to sentinels[0]),
+            // A valid legacy selection: support is reported without its endpoint, key or model.
+            mapOf("ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://${sentinels[1]}/v1",
+                "API_KEY" to sentinels[0], "MODEL" to sentinels[2]),
+            // An unsupported selection echoes neither the selection text nor other settings.
+            mapOf("ACP_HARNESS" to "direct-${sentinels[2]}", "API_KEY" to sentinels[0]),
+        )
+        // Expected (state, reason) before any inspection, then after one failed explicit inspection.
+        val expected = listOf(
+            "unavailable" to "HARNESS_CONFIGURATION_INVALID" to ("unavailable" to "HARNESS_CONFIGURATION_INVALID"),
+            ("supported" to null) to ("unavailable" to "AGENT_PREFLIGHT_FAILED"),
+            "unsupported" to "HARNESS_UNSUPPORTED" to ("unsupported" to "HARNESS_UNSUPPORTED"),
+        )
+        for ((index, environment) in environments.withIndex()) {
+            val readiness = WebHarnessReadinessProjector(probe = {
+                WebHarnessReadinessProjector.probeEnvironment(environment, helper, helper, { true }, { true })
+            })
+            val h = Harness(readiness, Files.createDirectory(root.resolve("storage-$index")))
+            behavior = { throw IllegalStateException(environment.values.joinToString(" ")) }
+            fun assertCapability(expectedPair: Pair<String, String?>, label: String) {
+                val capability = h.harnessCapability()
+                assertEquals(expectedPair.first, capability.getValue("state").jsonPrimitive.content, "$label state for $environment")
+                val reason = capability.getValue("reasonCode").let { if (it is kotlinx.serialization.json.JsonNull) null else it.jsonPrimitive.content }
+                assertEquals(expectedPair.second, reason, "$label reason for $environment")
+            }
+            val bootstrap = h.send("/w/api/v1/bootstrap", "GET", null, mapOf("Cookie" to h.cookie))
+            assertEquals(200, bootstrap.statusCode())
+            assertCapability(expected[index].first, "before inspection")
+            val started = h.post()
+            assertEquals(202, started.statusCode())
+            h.awaitStatus("failed")
+            assertCapability(expected[index].second, "after inspection")
+            val bodies = listOf(bootstrap.body(), started.body(), h.get().body(), h.harnessCapability().toString(),
+                h.send("/w/api/v1/bootstrap", "GET", null, mapOf("Cookie" to h.cookie)).body())
+            for (body in bodies) for (sentinel in sentinels + root.toString() + "ACP_CONFIG_FILE") {
+                assertFalse(body.contains(sentinel), "public response disclosed $sentinel for $environment")
+            }
+        }
     }
 
     @Test
