@@ -8,10 +8,11 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /** Public harness availability; [state] uses the contract's capability state vocabulary. */
 internal data class WebHarnessReadiness(val state: String, val reasonCode: String?, val message: String) {
@@ -26,6 +27,20 @@ internal data class WebHarnessReadiness(val state: String, val reasonCode: Strin
         status == "ready" -> copy(message = "An agent harness and sandbox helpers are available; the last operator inspection started the configured agent.")
         else -> copy(message = "An agent harness and sandbox helpers are available. The agent has not been started by an operator inspection, so its readiness is unproven.")
     }
+}
+
+/** Atomically expires queued work or retains an admitted callback until its final exit. */
+internal class WebHarnessProbeAdmission {
+    private enum class State { QUEUED, RUNNING, FINISHED }
+    private val state = AtomicReference(State.QUEUED)
+
+    fun <T : Any> tryRun(probe: () -> T): T? {
+        if (!state.compareAndSet(State.QUEUED, State.RUNNING)) return null
+        return try { probe() } finally { state.set(State.FINISHED) }
+    }
+
+    fun abandon() { state.compareAndSet(State.QUEUED, State.FINISHED) }
+    val isRunning: Boolean get() = state.get() == State.RUNNING
 }
 
 /**
@@ -47,7 +62,7 @@ internal class WebHarnessReadinessProjector(
     private var closed = false
     private var cached: WebHarnessReadiness? = null
     private var cachedAt = 0L
-    private var abandoned: AtomicBoolean? = null
+    private var abandoned: WebHarnessProbeAdmission? = null
 
     @Synchronized
     fun current(): WebHarnessReadiness {
@@ -61,24 +76,31 @@ internal class WebHarnessReadinessProjector(
 
     private fun refresh(): WebHarnessReadiness {
         if (closed) return FAILED
-        if (abandoned?.get() == true) return TIMED_OUT
+        if (abandoned?.isRunning == true) return TIMED_OUT
         abandoned = null
-        val running = AtomicBoolean(false)
-        val future = executor.submit(Callable {
-            running.set(true)
-            try { probe() } finally { running.set(false) }
-        })
+        val admission = WebHarnessProbeAdmission()
+        val future = executor.submit(Callable { admission.tryRun(probe) ?: TIMED_OUT })
         return try {
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
-            future.cancel(true)
-            executor.shutdownNow()
-            executor = newExecutor()
-            abandoned = running
+            abandonProbe(admission, future)
             TIMED_OUT
+        } catch (_: InterruptedException) {
+            abandonProbe(admission, future)
+            Thread.currentThread().interrupt()
+            FAILED
         } catch (_: Exception) {
             FAILED
         }
+    }
+
+    private fun abandonProbe(admission: WebHarnessProbeAdmission, future: Future<*>) {
+        // Expire before cancelling: FutureTask may already have passed its own state check.
+        admission.abandon()
+        future.cancel(true)
+        executor.shutdownNow()
+        executor = newExecutor()
+        abandoned = admission
     }
 
     @Synchronized
