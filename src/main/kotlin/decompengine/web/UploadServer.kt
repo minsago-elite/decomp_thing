@@ -285,7 +285,11 @@ class UploadServer(
             authenticationInspector(decompengine.agent.AgentCancellation {
                 stopRequested.get() || cancellation.isCancellationRequested()
             })
-            if (!stopRequested.get() && !cancellation.isCancellationRequested()) harnessReadiness.inspect()
+            val selectedConfiguration =
+                (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
+            if (selectedConfiguration != null && !stopRequested.get() && !cancellation.isCancellationRequested()) {
+                harnessReadiness.inspect()
+            }
         }) { "Server is stopping" }
     }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
