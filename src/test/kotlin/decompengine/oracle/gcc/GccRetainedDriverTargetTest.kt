@@ -39,7 +39,7 @@ class GccRetainedDriverTargetTest {
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1", artifacts, budgets(), true, runtime(root, 5)))
             assertFails { retained.bindInvocation("cc1", artifacts, budgets(), true, runtime(root, 6)) }
             assertFails { retained.bindInvocation("cc1", artifacts, budgets(), true, runtime(root, 7)) }
-            assertEquals(9_000_000L, retained.exportWallClockMillis("cc1", true))
+            assertEquals(14_400_000L, retained.exportWallClockMillis("cc1", true))
         }
     }
 
@@ -175,20 +175,20 @@ class GccRetainedDriverTargetTest {
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("driver", artifacts, budgets(), true))
             assertFails { retained.bindInvocation("driver", artifacts, budgets(), false) }
             assertFails { retained.bindInvocation("driver", artifacts, budgets(1_800_001L), true) }
-            assertFails { retained.bindInvocation("driver", artifacts, budgets(9_000_000L), true) }
+            assertFails { retained.bindInvocation("driver", artifacts, budgets(14_400_000L), true) }
             assertFails { retained.bindInvocation("driver", artifacts,
                 budgets().copy(maximumResidentBytes = retained.suite.budgets.exportMaximumResidentBytes + 1), true) }
         }
         GccRetainedCompilerEngineProfile.open(path).use { retained ->
             assertEquals(1_800_000L, retained.exportWallClockMillis("cc1", false))
-            assertEquals(9_000_000L, retained.exportWallClockMillis("cc1", true))
+            assertEquals(14_400_000L, retained.exportWallClockMillis("cc1", true))
             assertEquals(1_800_000L, retained.exportWallClockMillis("lto1", false))
             assertFails { retained.exportWallClockMillis("lto1", true) }
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1",
-                invocationArtifacts(retained, "cc1"), budgets(9_000_000L), true, runtime(root, 5)))
+                invocationArtifacts(retained, "cc1"), budgets(14_400_000L), true, runtime(root, 5)))
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("lto1",
                 invocationArtifacts(retained, "lto1"), budgets(), false))
-            assertFails { retained.bindInvocation("cc1", invocationArtifacts(retained, "cc1"), budgets(9_000_001L), true, runtime(root, 5)) }
+            assertFails { retained.bindInvocation("cc1", invocationArtifacts(retained, "cc1"), budgets(14_400_001L), true, runtime(root, 5)) }
             assertFails { retained.bindInvocation("lto1", invocationArtifacts(retained, "lto1"), budgets(), true) }
         }
     }
@@ -255,9 +255,9 @@ class GccRetainedDriverTargetTest {
             assertEquals("gcc-retained-planner-profile-v1", ordinaryDocument.getValue("provider").jsonPrimitive.content)
             assertEquals(5, retained.invocationVersion("cc1", true))
             assertEquals(7, retained.invocationVersion("cc1", true, runtimeDiagnostics = true))
-            assertEquals(9_000_000L, retained.exportWallClockMillis("cc1", true, runtimeDiagnostics = true))
+            assertEquals(14_400_000L, retained.exportWallClockMillis("cc1", true, runtimeDiagnostics = true))
             assertEquals(1_800_000L, retained.exportWallClockMillis("cc1", false))
-            val bytes = retained.bindDiagnosticInvocation("cc1", artifacts, budgets(9_000_000L), true, runtime(root, 7))
+            val bytes = retained.bindDiagnosticInvocation("cc1", artifacts, budgets(14_400_000L), true, runtime(root, 7))
             val diagnostic = OracleJson.parseCanonical(bytes).jsonObject
             assertEquals(setOf("provider", "schemaVersion", "ordinaryProfileSha256", "ordinaryProfile", "diagnosticPolicy",
                 "engineId", "recoveryMode", "complete", "releaseEligible"), diagnostic.keys)
@@ -280,7 +280,7 @@ class GccRetainedDriverTargetTest {
             assertFails { retained.bindDiagnosticInvocation("lto1", invocationArtifacts(retained, "lto1"), budgets(), true, runtime(root, 7)) }
             assertFails { retained.invocationVersion("cc1", false, runtimeDiagnostics = true) }
             assertFails { retained.invocationVersion("lto1", true, runtimeDiagnostics = true) }
-            assertFails { retained.bindDiagnosticInvocation("cc1", artifacts, budgets(9_000_001L), true, runtime(root, 7)) }
+            assertFails { retained.bindDiagnosticInvocation("cc1", artifacts, budgets(14_400_001L), true, runtime(root, 7)) }
             assertFails { retained.bindDiagnosticInvocation("cc1", artifacts,
                 budgets().copy(maximumResidentBytes = 16L * 1024 * 1024 * 1024 + 1), true, runtime(root, 7)) }
             assertFails { retained.bindDiagnosticInvocation("cc1", artifacts.map {
@@ -290,7 +290,7 @@ class GccRetainedDriverTargetTest {
         }
         GccRetainedCompilerEngineProfile.open(path, "cc1").use { reopened ->
             assertContentEquals(binding, reopened.bindDiagnosticInvocation("cc1", invocationArtifacts(reopened, "cc1"),
-                budgets(9_000_000L), true, runtime(root, 7)))
+                budgets(14_400_000L), true, runtime(root, 7)))
             val bytes = Files.readAllBytes(path)
             Files.move(path, root.resolve("retired-compiler-engines.json"))
             Files.write(path, bytes)
@@ -650,7 +650,7 @@ class GccRetainedDriverTargetTest {
         const val O_WRONLY = 0x1
         const val O_NONBLOCK = 0x800
         const val EWOULDBLOCK = 11
-        const val PROFILE_SHA256 = "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab"
+        const val PROFILE_SHA256 = "097a45bdcce40908a7f8df6947701f21acc88b4210270913b8b6dd0d84209648"
         const val BUILD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         const val MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         const val FULL_SHA256 = "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"

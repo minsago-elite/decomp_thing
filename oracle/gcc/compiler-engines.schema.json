@@ -27,7 +27,7 @@
             "decompilerWorkerCount": {"const": 4},
             "maximumJavaHeapBytes": {"const": 2147483648},
             "maximumResidentBytes": {"const": 17179869184},
-            "wallClockSeconds": {"const": 9000}
+            "wallClockSeconds": {"const": 14400}
           }
         },
         "fullRecoveryCc1Throughput": {
@@ -105,7 +105,7 @@
       "required": ["exportWallClockSeconds", "fullRecoveryCc1ExportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
       "properties": {
         "exportWallClockSeconds": {"const": 1800},
-        "fullRecoveryCc1ExportWallClockSeconds": {"const": 9000},
+        "fullRecoveryCc1ExportWallClockSeconds": {"const": 14400},
         "exportMaximumResidentBytes": {"const": 17179869184},
         "plannerMaximumEntities": {"type": "integer", "minimum": 1},
         "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},

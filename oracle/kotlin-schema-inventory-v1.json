@@ -475,7 +475,7 @@
       "name": "gcc/compiler-engines",
       "path": "oracle/gcc/compiler-engines.schema.json",
       "registration": "shared-kotlin",
-      "schemaSha256": "25cc9119c5f9ea00994b8221765e468d2731842671d37a56b0fe555b131a27d5"
+      "schemaSha256": "ac61e7a9194f12da2661c0af0637702216f80439550f9b69600d9ecbf2fec330"
     },
     {
       "formatVersions": [

@@ -103,7 +103,7 @@ data class GccCompilerEngineDiagnosticPolicy(
             diagnosticPolicy == "jvm-mxbean-stdout-v1" && processorCount == 4 &&
             analysisThreadCount == 4 && decompilerWorkerCount == 4 &&
             maximumJavaHeapBytes == 2L * 1024 * 1024 * 1024 &&
-            maximumResidentBytes == 16L * 1024 * 1024 * 1024 && wallClockSeconds == 9_000L
+            maximumResidentBytes == 16L * 1024 * 1024 * 1024 && wallClockSeconds == 14_400L
         ) { "compiler-engine diagnostic policy is unsupported" }
     }
 
@@ -717,7 +717,7 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
-        private const val DRIVER_COMPILER_PROFILE_SHA256 = "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab"
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "097a45bdcce40908a7f8df6947701f21acc88b4210270913b8b6dd0d84209648"
         private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"

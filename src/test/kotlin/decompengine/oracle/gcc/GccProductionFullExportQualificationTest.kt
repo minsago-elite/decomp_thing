@@ -195,7 +195,7 @@ class GccProductionFullExportQualificationTest {
             "authority" to JsonPrimitive("diagnostic-only"), "engine" to JsonPrimitive("cc1"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
             "benchmarkAccepted" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-            "referenceWallBudgetSeconds" to JsonPrimitive(1800), "diagnosticWallBudgetSeconds" to JsonPrimitive(9000),
+            "referenceWallBudgetSeconds" to JsonPrimitive(1800), "diagnosticWallBudgetSeconds" to JsonPrimitive(14400),
             "launcherExitCode" to JsonPrimitive(exitCode),
             "originalFailureClass" to JsonPrimitive(originalFailure?.javaClass?.name),
             "operationId" to JsonPrimitive(operationId), "metadataBytes" to JsonPrimitive(metadataBytes),
@@ -229,7 +229,7 @@ class GccProductionFullExportQualificationTest {
         val runtime = requireNotNull(definition.bundledRuntime)
         require(runtime.invocationVersion == 7 && runtime.processorCount == 4 && runtime.decompilerWorkerCount == 4)
         require(definition.engineId == "cc1" && definition.runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)
-        require(definition.budgets == GccCompilerEngineContainmentBudgets(9_000_000, 16L * 1024 * 1024 * 1024, 128))
+        require(definition.budgets == GccCompilerEngineContainmentBudgets(14_400_000, 16L * 1024 * 1024 * 1024, 128))
         val directories = listOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal"))
             .associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
         val invocation = GccBundledCliInvocation(options, arguments, directories)
@@ -902,8 +902,8 @@ class GccProductionFullExportQualificationTest {
     fun `diagnostic execution rejects internally altered receipts despite recomputed outer links`(@TempDir root: Path) {
         val control = privateDirectory(root.resolve("control"))
         val request = KotlinContainedCommandRequest(control, "a".repeat(64), listOf("/usr/bin/java", "-version"),
-            mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"), 300, 9000, 65536, 65536)
-        val resources = KotlinSystemdCgroupCommandResources(9_000_000, 16L * 1024 * 1024 * 1024, 128, 1024 * 1024, 4)
+            mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"), 300, 14400, 65536, 65536)
+        val resources = KotlinSystemdCgroupCommandResources(14_400_000, 16L * 1024 * 1024 * 1024, 128, 1024 * 1024, 4)
         val roles = listOf("outer-bubblewrap", "namespace-init-bubblewrap", "supervisor-jvm")
         fun attachChecksum(fields: Map<String, JsonElement>) = JsonObject(fields + ("attachmentSha256" to
             JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields))))))
@@ -950,12 +950,12 @@ class GccProductionFullExportQualificationTest {
             "cgroup" to JsonObject(listOf("peakResidentBytes", "cpuNanos", "memoryMaxEvents", "memoryOomEvents", "memoryOomKillEvents")
                 .associateWith { JsonPrimitive(if (it == "peakResidentBytes") 1 else 0) }),
             "operationWallTime" to JsonObject(mapOf("provider" to JsonPrimitive("kotlin-contained-operation-wall-deadline-v1"),
-                "maximumWallMillis" to JsonPrimitive(9_000_000), "startedMonotonicNanos" to JsonPrimitive(1),
-                "elapsedNanos" to JsonPrimitive(1), "remainingNanos" to JsonPrimitive(8_999_999_999_999L))))
+                "maximumWallMillis" to JsonPrimitive(14_400_000), "startedMonotonicNanos" to JsonPrimitive(1),
+                "elapsedNanos" to JsonPrimitive(1), "remainingNanos" to JsonPrimitive(14_399_999_999_999L))))
         fun checksum(fields: Map<String, JsonElement>) = JsonObject(fields + ("executionSha256" to
             JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(fields))))))
         fun validate(record: JsonObject) = requireDiagnosticExecutionRecord(record, attachment, request, deployment,
-            control, resources, 9_000_000)
+            control, resources, 14_400_000)
         // These in-memory bytes exercise consistency only; no HMAC secret or execution authority exists.
         validate(checksum(unsigned))
         for ((name, value) in mapOf("provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v1"),

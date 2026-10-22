@@ -10,7 +10,7 @@
       "provider": "gcc-cc1-runtime-diagnostics-v1",
       "runtimeInvocationVersion": 7,
       "schemaVersion": 1,
-      "wallClockSeconds": 9000,
+      "wallClockSeconds": 14400,
       "workerOperation": "analyze-diagnostics-v1"
     },
     "exporter": {
@@ -39,7 +39,7 @@
   "budgets": {
     "exportMaximumResidentBytes": 17179869184,
     "exportWallClockSeconds": 1800,
-    "fullRecoveryCc1ExportWallClockSeconds": 9000,
+    "fullRecoveryCc1ExportWallClockSeconds": 14400,
     "plannerMaximumDependencyEdges": 8000000,
     "plannerMaximumEntities": 500000,
     "plannerMaximumWorkUnits": 200000000
