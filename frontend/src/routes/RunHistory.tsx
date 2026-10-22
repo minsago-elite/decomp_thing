@@ -17,7 +17,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
   // bounded search before choosing any opaque server cursor.
   const address = new URL(location.url || window.location.href, window.location.origin);
   const search = address.search, pathname = address.pathname;
-  const params = new URLSearchParams(search), values = params.getAll('cursor');
+  const params = new URLSearchParams(search.length <= 512 ? search : ''), values = params.getAll('cursor');
   const cursor = values.length === 1 ? values[0] : undefined;
   const validQuery = search.length <= 512 && values.length <= 1 &&
     [...params.keys()].every(key => key === 'cursor') &&
