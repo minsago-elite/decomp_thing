@@ -57,6 +57,7 @@ internal data class GccDriverStructuralBinaryV1(
 internal class GccDriverStructuralInputsV1 private constructor(
     val root: Path,
     val engineId: String,
+    val parallel: Boolean,
     val profileId: String,
     val version: String,
     val sourceRevision: String,
@@ -111,10 +112,10 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 "GCC exported function identity does not encode its loaded address"
             }
         }
-        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines-exporter17.json"), engineId).use { runtimeProfile ->
+        GccRetainedCompilerEngineProfile.open(root.resolve(profileFileName(parallel)), engineId).use { runtimeProfile ->
             runtimeProfile.requireCurrent()
             require(loadFullExportAuthority(root, runtimeProfile.suite.analysis.exporterSha256,
-                runtimeProfile.suite.analysis.ghidraArchive.sha256) == fullExportProfileSha256
+                runtimeProfile.suite.analysis.ghidraArchive.sha256, parallel) == fullExportProfileSha256
             ) { "GCC full-export authority changed after structural profile admission" }
             val intent = OracleJson.parseCanonical(operation.intentBytes) as JsonObject
             require(intent["plannerProfile"] == OracleJson.parseCanonical(runtimeProfile.policyBytes())) {
@@ -213,6 +214,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val PROFILE_VERSION = "16.2.0"
         private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
         private const val COMPILER_ENGINE_PROFILE_SHA256 = "f2d65184425a328df900b5fe47a8b09ea4d1bd36b258ca6cd7e25abaf9d7d4f4"
+        private const val PARALLEL_COMPILER_ENGINE_PROFILE_SHA256 = "8ff2b5642341055ab4ad11f92f928f43d16426f7f5ad64afabed26909a5128ad"
         private const val CC1_MANIFEST_SHA256 = "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
         private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         private const val CC1_BUILD_RECORD_SHA256 = "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
@@ -221,6 +223,19 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val TOOLCHAIN_REPRODUCTION_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
         private const val TARGET_ABI_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
         private const val FULL_EXPORT_PROFILE_SHA256 = "56451a51083fbc489559991c06a068f94acb43fd1a20b3cb7524e2ad931a6025"
+        private const val PARALLEL_FULL_EXPORT_PROFILE_SHA256 = "f855be48eb00cdb02979c96d9a7e566a29c82e62a17ca7dc01605b37142f485d"
+
+        private fun profileFileName(parallel: Boolean) =
+            if (parallel) "compiler-engines-exporter17-parallel.json" else "compiler-engines-exporter17.json"
+
+        private fun structuralFileName(parallel: Boolean) =
+            if (parallel) "structural-full-export-profile-exporter17-parallel.json" else "structural-full-export-profile-exporter17.json"
+
+        private fun pinnedEngineProfileSha256(parallel: Boolean) =
+            if (parallel) PARALLEL_COMPILER_ENGINE_PROFILE_SHA256 else COMPILER_ENGINE_PROFILE_SHA256
+
+        private fun pinnedStructuralSha256(parallel: Boolean) =
+            if (parallel) PARALLEL_FULL_EXPORT_PROFILE_SHA256 else FULL_EXPORT_PROFILE_SHA256
         private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
         private val JSON_LIMITS = StrictJsonLimits(
@@ -233,7 +248,8 @@ internal class GccDriverStructuralInputsV1 private constructor(
 
         fun load(root: Path): GccDriverStructuralInputsV1 = load(root, "cc1")
 
-        fun load(root: Path, engineId: String): GccDriverStructuralInputsV1 = translateProfileFailure {
+        fun load(root: Path, engineId: String, parallel: Boolean = false): GccDriverStructuralInputsV1 = translateProfileFailure {
+            require(!parallel || engineId == "cc1") { "GCC parallel structural profile exists only for cc1" }
             require(engineId in setOf("cc1", "driver")) {
                 "GCC structural full-export target must be cc1 or driver"
             }
@@ -247,11 +263,11 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) && root.fileName.toString() == PROFILE_VERSION) {
                 "GCC structural profile root is not the pinned version directory"
             }
-            val compilerEngineProfilePath = root.resolve("compiler-engines-exporter17.json")
+            val compilerEngineProfilePath = root.resolve(profileFileName(parallel))
             val compilerEngineProfileSha256 = readRaw(
                 compilerEngineProfilePath, MAXIMUM_CONTROL_BYTES, "GCC compiler-engine profile",
             )
-            requireDigest(compilerEngineProfileSha256, COMPILER_ENGINE_PROFILE_SHA256, "GCC compiler-engine profile")
+            requireDigest(compilerEngineProfileSha256, pinnedEngineProfileSha256(parallel), "GCC compiler-engine profile")
 
             val sourceLock = readJson(root.resolve("source-lock.json"), MAXIMUM_CONTROL_BYTES, "gcc/source-lock")
             requireDigest(sourceLock.sha256, SOURCE_LOCK_SHA256, "GCC source lock")
@@ -312,7 +328,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 engine to suite.analysis
             }
             val fullExportProfileSha256 = loadFullExportAuthority(
-                root, analysis.exporterSha256, analysis.ghidraArchive.sha256,
+                root, analysis.exporterSha256, analysis.ghidraArchive.sha256, parallel,
             )
             val manifest = readJson(
                 root.resolve(manifestName), MAXIMUM_MANIFEST_BYTES, "gcc/oracle-manifest",
@@ -386,6 +402,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             GccDriverStructuralInputsV1(
                 root = root,
                 engineId = engineId,
+                parallel = parallel,
                 profileId = profileId,
                 version = PROFILE_VERSION,
                 compilerEngineProfileSha256 = compilerEngineProfileSha256,
@@ -405,11 +422,11 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
 
         private fun loadFullExportAuthority(root: Path, exporterSha256: String,
-            ghidraArchiveSha256: String): String {
-            val bytes = OracleArtifacts.read(root.resolve("structural-full-export-profile-exporter17.json"),
+            ghidraArchiveSha256: String, parallel: Boolean): String {
+            val bytes = OracleArtifacts.read(root.resolve(structuralFileName(parallel)),
                 OracleArtifactLimits(MAXIMUM_CONTROL_BYTES)).bytes
             val digest = OracleArtifacts.sha256(bytes)
-            requireDigest(digest, FULL_EXPORT_PROFILE_SHA256, "GCC structural full-export profile")
+            requireDigest(digest, pinnedStructuralSha256(parallel), "GCC structural full-export profile")
             val authority = OracleJson.parseCanonical(bytes) as? JsonObject
                 ?: profileFail("GCC structural full-export profile is not an object")
             require(authority.keys == setOf("provider", "schemaVersion", "compilerEngineProfileSha256",
@@ -418,7 +435,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                     "gcc-driver-structural-full-export-profile-v1" &&
                 authority.longField("schemaVersion", "GCC structural full-export profile") == 1L &&
                 authority.stringField("compilerEngineProfileSha256", "GCC structural full-export profile") ==
-                    COMPILER_ENGINE_PROFILE_SHA256 &&
+                    pinnedEngineProfileSha256(parallel) &&
                 authority.stringField("exporterSha256", "GCC structural full-export profile") == exporterSha256 &&
                 authority.longField("exporterVersion", "GCC structural full-export profile") == 17L &&
                 authority.stringField("recoveryMode", "GCC structural full-export profile") == "full" &&

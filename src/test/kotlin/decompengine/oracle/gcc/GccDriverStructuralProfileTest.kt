@@ -62,6 +62,17 @@ class GccDriverStructuralProfileTest {
     }
 
     @Test
+    fun `explicit parallel cc1 variant pins its own profile and structural digests and is cc1 only`() {
+        val root = Path.of("oracle/gcc/16.2.0").toAbsolutePath().normalize()
+        val parallel = GccDriverStructuralInputsV1.load(root, "cc1", parallel = true)
+        assertEquals("8ff2b5642341055ab4ad11f92f928f43d16426f7f5ad64afabed26909a5128ad", parallel.compilerEngineProfileSha256)
+        assertTrue(parallel.parallel && !profile().parallel)
+        assertTrue(parallel.fullExportProfileSha256 != profile().fullExportProfileSha256)
+        assertEquals(profile().strippedBinary.sha256, parallel.strippedBinary.sha256)
+        assertFailsWith<GccDriverStructuralProfileException> { GccDriverStructuralInputsV1.load(root, "driver", parallel = true) }
+    }
+
+    @Test
     fun `driver selection authenticates its distinct manifest twins and executable layout`() {
         val driver = profile("driver")
         val cc1 = profile()

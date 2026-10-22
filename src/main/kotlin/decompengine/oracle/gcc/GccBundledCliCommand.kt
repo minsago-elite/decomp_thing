@@ -48,9 +48,10 @@ internal object GccBundledCliCommand {
                 owner.executeNativeCallObservations()
                 owner.publishNativeCallCliResult()
             } else if (options.fullRecoveryExport) {
-                GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId)
+                val parallelProfile = options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
+                GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
                 val fullExport = owner.executeFullExport()
-                val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId)
+                val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
                 owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
             } else {
                 if (options.resumeAfterCheckpoint == null) owner.execute()
