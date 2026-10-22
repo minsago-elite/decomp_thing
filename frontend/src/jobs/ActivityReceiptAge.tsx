@@ -8,9 +8,13 @@ export interface ActivityReceiptTime { at: string; monotonicMs: number; wallCloc
 /** Elapsed receipt age uses this tab's monotonic clock and reconciles time spent suspended. */
 export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityReceiptTime; visible: boolean }) {
   const [, refresh] = useState(0);
-  const clock = useRef({ receiptMs: receipt.monotonicMs, offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null as boolean | null });
-  if (clock.current.receiptMs !== receipt.monotonicMs) {
-    clock.current = { receiptMs: receipt.monotonicMs, offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null };
+  const clock = useRef({ receiptAt: receipt.at, receiptMs: receipt.monotonicMs, receiptWallMs: receipt.wallClockMs,
+    offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null as boolean | null });
+  // A suspended or precision-reduced clock can give distinct receipts the same monotonic value.
+  if (clock.current.receiptMs !== receipt.monotonicMs || clock.current.receiptWallMs !== receipt.wallClockMs
+    || clock.current.receiptAt !== receipt.at) {
+    clock.current = { receiptAt: receipt.at, receiptMs: receipt.monotonicMs, receiptWallMs: receipt.wallClockMs,
+      offsetMs: 0, lastMonoMs: receipt.monotonicMs, lastWallMs: receipt.wallClockMs, wasVisible: null };
   }
   useEffect(() => {
     const state = clock.current;
@@ -37,7 +41,7 @@ export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityRece
     if (!visible) return;
     const timer = setInterval(sample, 10000);
     return () => clearInterval(timer);
-  }, [receipt.monotonicMs, receipt.wallClockMs, visible]);
+  }, [receipt.at, receipt.monotonicMs, receipt.wallClockMs, visible]);
   const seconds = Math.max(0, Math.floor((performance.now() - receipt.monotonicMs + clock.current.offsetMs) / 1000));
   const age = receiptAge(seconds);
   return <>{displayMessage(copy.received, { time: <time dateTime={receipt.at} title={receipt.at}>{formatExactTimestamp(receipt.at)}</time>, age })}</>;
