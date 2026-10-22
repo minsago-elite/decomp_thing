@@ -167,7 +167,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
-      if (selection.cursor && failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
+      if (selection.cursor && pageTransition.current === null && failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
         pageTransition.current = null;
         entryPin.current = null;
         const search = jobPageSearch(selection.filters, null);

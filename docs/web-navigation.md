@@ -438,3 +438,11 @@ and publication are fenced by the complete current URI. A legacy embedding
 without a router still uses its supplied navigation port or explicit local reads.
 The original discovery/sign-out and restart/obsolete-response controls remain
 unchanged and must pass with this integration.
+
+### Failed continuation cursors retain the displayed origin
+
+An invalid/expired cursor for a pending Next/Previous transition is a failure of
+that target, not an initial restoration failure. Keep the displayed origin URI
+and rows, report the error, and perform no automatic fresh read. The existing
+initial saved-cursor recovery still clears rows and allows one bounded fallback.
+Retained metadata does not extend the server cursor's lifetime or grant access.

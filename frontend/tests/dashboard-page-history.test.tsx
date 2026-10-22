@@ -208,7 +208,7 @@ it('keeps the displayed snapshot URL through slow failed and abandoned page read
   await auth.initialize({ kind: 'absent' });
   const first = page([job(1)], 'Page_First', null, 'Page_Second', 1);
   const second = page([job(2)], 'Page_Second', 'Page_First', null, 2);
-  const refreshed = page([job(3)], 'Page_Fresh', null, null, 1);
+  const refreshed = page([job(3)], 'Page_Fresh', null, 'Page_Expired', 1);
   let refreshPending = false;
   const push = vi.spyOn(history, 'pushState');
   const pending: { resolve: (value: { data: Jobs }) => void; reject: (reason: unknown) => void }[] = [];
@@ -218,6 +218,9 @@ it('keeps the displayed snapshot URL through slow failed and abandoned page read
     if (kind !== 'jobs') return Promise.reject(new Error('Unexpected inert route read'));
     const cursor = new URL(path, 'http://example.invalid').searchParams.get('cursor');
     if (cursor === 'Page_Fresh') return Promise.resolve(refreshed);
+    if (cursor === 'Page_Expired') {
+      return new Promise<{ data: Jobs }>((resolve, reject) => { pending.push({ resolve, reject }); });
+    }
     if (cursor === null && refreshPending) {
       return new Promise<{ data: Jobs }>((resolve, reject) => { pending.push({ resolve, reject }); });
     }
@@ -305,5 +308,15 @@ it('keeps the displayed snapshot URL through slow failed and abandoned page read
     await act(() => { history.forward(); });
     await screen.findByRole('link', { name: 'snapshot-3.elf' });
     expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
+    const readsBeforeExpiry = transport.get.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(pending).toHaveLength(7));
+    expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
+    await act(() => { pending[6]!.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' })); });
+    await screen.findByRole('alert');
+    expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
+    expect(screen.getByRole('link', { name: 'snapshot-3.elf' })).toBeTruthy();
+    expect(transport.get).toHaveBeenCalledTimes(readsBeforeExpiry + 1);
+    expect(pending).toHaveLength(7);
   } finally { push.mockRestore(); auth.dispose(); }
 });
