@@ -6,7 +6,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { ResponseOf } from '../src/api/generated';
 import { RecordedValidationEvidence } from '../src/jobs/RecordedValidationEvidence';
-import { validationLocation, validationObservationLocation, validationSearch } from '../src/jobs/validationNavigation';
+import { validationLocation, validationObservationLocation, validationRouteLocation, validationRouteSearch, validationSearch } from '../src/jobs/validationNavigation';
 import type { ValidationLocation } from '../src/jobs/validationNavigation';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
@@ -84,6 +84,12 @@ it('round trips exact validation commitments and refuses malformed or partial sa
   const value = { ...saved('after', 2), baseline: selected('before'), comparisonPage: 2 };
   const encoded = validationSearch(value);
   expect(validationLocation(encoded)).toEqual(value);
+  expect(validationRouteLocation('?from=restart-check')).toBeNull();
+  const withContext = validationRouteSearch('?from=restart-check', encoded);
+  expect(new URLSearchParams(withContext).get('from')).toBe('restart-check');
+  expect(validationRouteLocation(withContext)).toEqual(value);
+  expect(() => validationRouteLocation(withContext + '&validationUnexpected=foreign')).toThrow();
+  expect(() => validationRouteLocation(withContext + '&comparisonUnexpected=foreign')).toThrow();
   expect(encoded).not.toMatch(/Preview|bitmap|prompt|token|credential/);
   for (const search of ['?validationGraph=bad&validationPage=1', encoded + '&validationOwner=duplicate',
     encoded.replace('validationPage=1', 'validationPage=01'), encoded.replace('&validationReport=validation_after', ''),

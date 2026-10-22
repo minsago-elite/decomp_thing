@@ -428,3 +428,13 @@ The inert named-view history control checks the focus options for direct entry,
 new links, Back and Forward. It does not measure a browser viewport or establish
 restoration of the previous focused control, text selection, lazy content height,
 or the full cross-resource scroll/selection acceptance.
+
+### Run-owned route query context
+
+The run component subscribes to the router's URL directly. Validation metadata
+owns the validation/baseline/comparison query namespace; unrelated existing run
+query context is preserved. Namespace keys remain strictly parsed, and requests
+and publication are fenced by the complete current URI. A legacy embedding
+without a router still uses its supplied navigation port or explicit local reads.
+The original discovery/sign-out and restart/obsolete-response controls remain
+unchanged and must pass with this integration.

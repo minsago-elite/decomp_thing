@@ -2,6 +2,7 @@ import type { Report, ValidationHistory, ValidationOwner } from '../api/generate
 
 export type ValidationNavigation = {
   search: string; currentSearch: () => string | null;
+  preserveRouteContext?: boolean;
   navigate: (search: string, expectedSearch: string) => void;
 };
 export type ValidationObservationLocation = {
@@ -91,4 +92,34 @@ export function validationLocationOwner(history: ValidationHistory, selection: V
   if (history.page !== selection.historyPage || !owner || !owner.canInspect || !owner.hasReceipt || owner.identityWithheld ||
     owner.candidateId !== selection.candidateId || owner.sourceSha256 !== selection.sourceSha256 || owner.corpusSha256 !== selection.corpusSha256) return invalid();
   return owner;
+}
+
+
+function routeQuery(search: string): URLSearchParams {
+  if (search === '' || search === '?') return new URLSearchParams();
+  if (search.length > 4096 || !search.startsWith('?') || /[^\x21-\x7e]|[#\\]/.test(search)) return invalid();
+  try { decodeURIComponent(search.replace(/\+/g, ' ')); } catch { return invalid(); }
+  return new URLSearchParams(search);
+}
+function ownsValidationQuery(key: string): boolean {
+  return key.startsWith('validation') || key.startsWith('baseline') || key.startsWith('comparison');
+}
+
+/** Other run query state stays outside this strict validation namespace. */
+export function validationRouteLocation(search: string): ValidationLocation | null {
+  const selected = new URLSearchParams();
+  for (const [key, value] of routeQuery(search)) if (ownsValidationQuery(key)) selected.append(key, value);
+  const encoded = selected.toString();
+  return validationLocation(encoded ? '?' + encoded : '');
+}
+
+/** Replace only validation metadata, keeping the complete route context fenced and bounded. */
+export function validationRouteSearch(current: string, next: string): string {
+  validationLocation(next);
+  const params = routeQuery(current);
+  for (const key of [...params.keys()]) if (ownsValidationQuery(key)) params.delete(key);
+  for (const [key, value] of new URLSearchParams(next)) params.append(key, value);
+  const encoded = params.toString(), search = encoded ? '?' + encoded : '';
+  validationRouteLocation(search);
+  return search;
 }

@@ -7,11 +7,14 @@ import { ValidationSourceSnapshot } from './ValidationSourceSnapshot';
 import { validationPageDownload } from './recordedValidationExport';
 import { compareValidationSnapshots, validationComparisonSnapshot } from './recordedValidationComparison';
 import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
-import { validationLocation, validationLocationOwner, validationObservationLocation, validationSearch } from './validationNavigation';
+import { validationLocation, validationLocationOwner, validationObservationLocation, validationRouteLocation, validationRouteSearch, validationSearch } from './validationNavigation';
 import type { ValidationLocation, ValidationNavigation } from './validationNavigation';
 
-function requestedValidation(search: string) {
-  try { const location = validationLocation(search); return { location, key: validationSearch(location), invalid: false }; }
+function requestedValidation(search: string, preserveRouteContext = false) {
+  try {
+    const location = preserveRouteContext ? validationRouteLocation(search) : validationLocation(search);
+    return { location, key: preserveRouteContext ? search : validationSearch(location), invalid: false };
+  }
   catch { return { location: null, key: 'invalid:' + search.slice(0, 4097), invalid: true }; }
 }
 
@@ -24,7 +27,8 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   const activeBinding = useRef(binding); activeBinding.current = binding;
   const liveNavigation = useRef(navigation); liveNavigation.current = navigation;
   const installed = useRef<{ binding: typeof binding; key: string } | null>(null);
-  const requested = useMemo(() => requestedValidation(navigation?.search ?? ''), [navigation?.search]);
+  const requested = useMemo(() => requestedValidation(navigation?.search ?? '', navigation?.preserveRouteContext),
+    [navigation?.search, navigation?.preserveRouteContext]);
   const [comparisonPage, setComparisonPage] = useState(1);
   type View = { binding: typeof binding; locationKey: string; history: ValidationHistory | null; selected: ValidationOwner | null;
     report: Report | null; loading: boolean; error: string };
@@ -41,14 +45,14 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     const nav = liveNavigation.current;
     if (!nav) return true;
     const search = nav.currentSearch();
-    return search !== null && requestedValidation(search).key === requested.key &&
+    return search !== null && requestedValidation(search, nav.preserveRouteContext).key === requested.key &&
       (!requested.invalid || search === nav.search);
   }
   function current(controller: AbortController): boolean {
     const nav = liveNavigation.current;
     const search = nav?.currentSearch();
     return activeBinding.current === binding && binding.active === controller && !controller.signal.aborted &&
-      (nav ? search !== null && search !== undefined && requestedValidation(search).key === binding.requestSearch : binding.requestSearch === null);
+      (nav ? search !== null && search !== undefined && requestedValidation(search, nav.preserveRouteContext).key === binding.requestSearch : binding.requestSearch === null);
   }
   function begin(history: ValidationHistory | null = null, selected: ValidationOwner | null = null) {
     binding.active?.abort();
@@ -68,7 +72,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     const nav = liveNavigation.current;
     if (!nav) return '';
     const actualSearch = nav.currentSearch();
-    if (activeBinding.current !== binding || actualSearch === null || requestedValidation(actualSearch).key !== requested.key ||
+    if (activeBinding.current !== binding || actualSearch === null || requestedValidation(actualSearch, nav.preserveRouteContext).key !== requested.key ||
       (requested.invalid && actualSearch !== nav.search)) return null;
     let location: ValidationLocation | null = null;
     if (history.graphSha256 !== null && history.page !== null) {
@@ -79,7 +83,8 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
           sourceSha256: saved.snapshot.sourceSha256, corpusSha256: saved.snapshot.corpusSha256,
           reportId: saved.snapshot.reportId, casePage: saved.page } : null, comparisonPage: window };
     }
-    const search = validationSearch(location);
+    const selectedSearch = validationSearch(location);
+    const search = nav.preserveRouteContext ? validationRouteSearch(actualSearch, selectedSearch) : selectedSearch;
     installed.current = { binding, key: search }; binding.requestSearch = search;
     if (search !== requested.key) nav.navigate(search, actualSearch);
     return search;

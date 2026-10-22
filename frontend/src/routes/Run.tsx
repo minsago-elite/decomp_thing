@@ -4,6 +4,7 @@ import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
@@ -106,10 +107,23 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   </>;
 }
 
-export default function Run({ jobId, runId, basePath, session, view = 'overview', navigation }: {
+export default function Run({ jobId, runId, basePath, session, view = 'overview', navigation: suppliedNavigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession | null; view?: RunView; navigation?: ValidationNavigation;
 }) {
   const state = useSession(session);
+  const route = useLocation();
+  const routedNavigation = useMemo<ValidationNavigation | undefined>(() => {
+    if (!route.url) return undefined; // The legacy embedding has no router provider.
+    const address = new URL(route.url, window.location.origin), pathname = address.pathname;
+    return { search: address.search, preserveRouteContext: true,
+      currentSearch: () => window.location.pathname === pathname ? window.location.search : null,
+      navigate: (search: string, expectedSearch: string) => {
+        if (window.location.pathname === pathname && window.location.search === expectedSearch)
+          route.route(`${pathname}${search}`);
+      },
+    };
+  }, [route.url, route.route]);
+  const navigation = suppliedNavigation ?? routedNavigation;
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   return <section aria-labelledby="attempt-title">
     <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>
