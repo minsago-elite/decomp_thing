@@ -173,26 +173,35 @@ class WebAgentPreflightTest {
             // An unsupported selection echoes neither the selection text nor other settings.
             mapOf("ACP_HARNESS" to "direct-${sentinels[2]}", "API_KEY" to sentinels[0]),
         )
+        // Expected (state, reason) before any inspection, then after one failed explicit inspection.
+        val expected = listOf(
+            "unavailable" to "HARNESS_CONFIGURATION_INVALID" to ("unavailable" to "HARNESS_CONFIGURATION_INVALID"),
+            ("supported" to null) to ("unavailable" to "AGENT_PREFLIGHT_FAILED"),
+            "unsupported" to "HARNESS_UNSUPPORTED" to ("unsupported" to "HARNESS_UNSUPPORTED"),
+        )
         for ((index, environment) in environments.withIndex()) {
             val readiness = WebHarnessReadinessProjector(probe = {
                 WebHarnessReadinessProjector.probeEnvironment(environment, helper, helper, { true }, { true })
             })
             val h = Harness(readiness, Files.createDirectory(root.resolve("storage-$index")))
             behavior = { throw IllegalStateException(environment.values.joinToString(" ")) }
+            fun assertCapability(expectedPair: Pair<String, String?>, label: String) {
+                val capability = h.harnessCapability()
+                assertEquals(expectedPair.first, capability.getValue("state").jsonPrimitive.content, "$label state for $environment")
+                val reason = capability.getValue("reasonCode").let { if (it is kotlinx.serialization.json.JsonNull) null else it.jsonPrimitive.content }
+                assertEquals(expectedPair.second, reason, "$label reason for $environment")
+            }
             val bootstrap = h.send("/w/api/v1/bootstrap", "GET", null, mapOf("Cookie" to h.cookie))
             assertEquals(200, bootstrap.statusCode())
-            assertEquals(202, h.post().statusCode())
+            assertCapability(expected[index].first, "before inspection")
+            val started = h.post()
+            assertEquals(202, started.statusCode())
             h.awaitStatus("failed")
-            val bodies = listOf(bootstrap.body(), h.get().body(), h.harnessCapability().toString(),
+            assertCapability(expected[index].second, "after inspection")
+            val bodies = listOf(bootstrap.body(), started.body(), h.get().body(), h.harnessCapability().toString(),
                 h.send("/w/api/v1/bootstrap", "GET", null, mapOf("Cookie" to h.cookie)).body())
             for (body in bodies) for (sentinel in sentinels + root.toString() + "ACP_CONFIG_FILE") {
                 assertFalse(body.contains(sentinel), "public response disclosed $sentinel for $environment")
-            }
-            val capability = h.harnessCapability()
-            val allowed = setOf("supported", "unavailable", "unsupported")
-            assertTrue(capability.getValue("state").jsonPrimitive.content in allowed)
-            capability["reasonCode"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let {
-                assertTrue(it.jsonPrimitive.content.matches(Regex("[A-Z_]+")), "reason must be a fixed code")
             }
         }
     }
