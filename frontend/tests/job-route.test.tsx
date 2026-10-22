@@ -47,12 +47,12 @@ it('cancels the previous job read on navigation and ignores its late response', 
     await waitFor(() => expect(pending.has(`/jobs/${second}`)).toBe(true));
     expect(pending.get(`/jobs/${first}`)!.signal.aborted).toBe(true);
     expect(pending.get(`/jobs/${second}`)!.signal.aborted).toBe(false);
-    // The obsolete request answers after the new selection and must not replace it.
-    await act(async () => { pending.get(`/jobs/${first}`)!.resolve({ data: { ...sample, displayFilename: 'stale-job.elf' } }); await Promise.resolve(); });
-    expect(screen.queryByText('stale-job.elf')).toBeNull();
+    // The current read answers first; the obsolete one answers late and must not replace it.
     await act(async () => { pending.get(`/jobs/${second}`)!.resolve({ data: { ...sample, jobId: second, displayFilename: 'current-job.elf' } }); await Promise.resolve(); });
     await screen.findByRole('heading', { name: 'current-job.elf' });
+    await act(async () => { pending.get(`/jobs/${first}`)!.resolve({ data: { ...sample, displayFilename: 'stale-job.elf' } }); await Promise.resolve(); });
     expect(screen.queryByText('stale-job.elf')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'current-job.elf' })).toBeTruthy();
   } finally { auth.dispose(); }
 });
 
@@ -135,19 +135,20 @@ it('cancels the previous attempt read on navigation and ignores its late respons
     await waitFor(() => expect(pending.has(secondPath)).toBe(true));
     expect(pending.get(firstPath)!.signal.aborted).toBe(true);
     expect(pending.get(secondPath)!.signal.aborted).toBe(false);
-    await act(async () => { pending.get(firstPath)!.resolve({ data: { ...sampleRun, runId: 'run_a' } }); await Promise.resolve(); });
-    expect(screen.queryByText('run_a')).toBeNull();
     await act(async () => { pending.get(secondPath)!.resolve({ data: { ...sampleRun, runId: 'run_b' } }); await Promise.resolve(); });
     await screen.findByText('run_b');
+    await act(async () => { pending.get(firstPath)!.resolve({ data: { ...sampleRun, runId: 'run_a' } }); await Promise.resolve(); });
     expect(screen.queryByText('run_a')).toBeNull();
+    expect(screen.getByText('run_b')).toBeTruthy();
   } finally { auth.dispose(); }
 });
 
+const privateCode = 'PRIVATE_SENTINEL_CODE';
 const sourceFailures: Array<[string, ApiClientError, string]> = [
-  ['missing', new ApiClientError('http_error', { status: 404 }), sourceCopy.noSnapshot],
-  ['denied', new ApiClientError('http_error', { status: 403 }), sourceCopy.denied],
-  ['expired', new ApiClientError('http_error', { status: 410 }), sourceCopy.expired],
-  ['unreadable', new ApiClientError('http_error', { status: 500 }), sourceCopy.unavailable],
+  ['missing', new ApiClientError('http_error', { status: 404, serverCode: privateCode }), sourceCopy.noSnapshot],
+  ['denied', new ApiClientError('http_error', { status: 403, serverCode: privateCode }), sourceCopy.denied],
+  ['expired', new ApiClientError('http_error', { status: 410, serverCode: privateCode }), sourceCopy.expired],
+  ['unreadable', new ApiClientError('http_error', { status: 500, serverCode: privateCode }), sourceCopy.unavailable],
 ];
 it.each(sourceFailures)('presents a %s source directory with fixed copy and a route back to the attempt', async (_name, failure, message) => {
   const auth = await session();
@@ -158,6 +159,8 @@ it.each(sourceFailures)('presents a %s source directory with fixed copy and a ro
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain(message);
     expect(alert.textContent).not.toContain('Web API request failed');
+    expect(alert.textContent).not.toContain(privateCode);
+    expect(alert.textContent).not.toContain(String(failure.status));
     expect(screen.getByRole('link', { name: sourceCopy.returnAttempt }).getAttribute('href')).toBe(`/nested/jobs/${sampleRun.jobId}/runs/${sampleRun.runId}`);
   } finally { auth.dispose(); }
 });
