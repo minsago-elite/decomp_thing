@@ -695,12 +695,12 @@ it('retains history and baseline receipt times while selecting and paging anothe
   const epoch = Date.parse('2026-09-05T00:00:00Z'); let elapsed = 0;
   vi.spyOn(Date, 'now').mockImplementation(() => epoch + elapsed);
   vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-  const fetcher = vi.fn<typeof fetch>().mockImplementation(async input => {
-    const url = new URL(String(input), 'http://localhost');
-    if (url.pathname.endsWith('/validation-history')) return response(comparisonHistory());
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(input => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost');
+    if (url.pathname.endsWith('/validation-history')) return Promise.resolve(response(comparisonHistory()));
     const id = url.searchParams.get('historyEvidence') === 'attempt_before' ? 'before' : 'after';
     const page = Number(url.searchParams.get('historyValidationPage') ?? '1');
-    return response(comparisonDocument(id, id === 'before' ? [1, 22] : [22, 61], page).document);
+    return Promise.resolve(response(comparisonDocument(id, id === 'before' ? [1, 22] : [22, 61], page).document));
   });
   vi.stubGlobal('fetch', fetcher);
   try {
@@ -744,7 +744,7 @@ it('publishes a source-resolution receipt only after both source commitments mat
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
     expect(screen.queryByLabelText('Source link resolution')).toBeNull();
     elapsed = 30_000;
-    await act(async () => { finishDirectory(response(sourceDirectoryFixture())); });
+    await act(async () => { finishDirectory(response(sourceDirectoryFixture())); await Promise.resolve(); });
     await screen.findByLabelText('Source link resolution');
     expect(screen.getByLabelText('Source link resolution').querySelector('time')?.dateTime).toBe(new Date(epoch + elapsed).toISOString());
     expect(fetcher).toHaveBeenCalledTimes(2);

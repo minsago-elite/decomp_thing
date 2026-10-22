@@ -5,9 +5,10 @@ import { receive } from '../src/shared/receiptTime';
 
 let monotonic = 0;
 let visible = true;
+let useWallClock = false;
 beforeEach(() => {
-  vi.useFakeTimers(); vi.setSystemTime(0); monotonic = 0; visible = true;
-  vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
+  vi.useFakeTimers(); vi.setSystemTime(0); monotonic = 0; visible = true; useWallClock = false;
+  vi.spyOn(performance, 'now').mockImplementation(() => useWallClock ? Date.now() : monotonic);
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visible ? 'visible' : 'hidden');
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
@@ -15,11 +16,11 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 it('ages one accepted snapshot without changing focus selection URL or a live region', async () => {
   const snapshot = receive({ selected: 'retained-case' });
   const view = render(<><input aria-label="Local case filter" value="retained-case" /><MetadataReceipt kind="validationReport" receipt={snapshot.receipt} /></>);
-  const input = screen.getByRole('textbox') as HTMLInputElement;
+  const input = screen.getByRole<HTMLInputElement>('textbox');
   input.focus(); input.setSelectionRange(2, 6);
   const time = screen.getByLabelText('Selected validation report').querySelector('time');
   const url = location.href;
-  vi.mocked(performance.now).mockImplementation(() => Date.now());
+  useWallClock = true;
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(screen.getByLabelText('Selected validation report').textContent).toContain('about 1 minute ago');
   expect(document.activeElement).toBe(input);
@@ -60,4 +61,32 @@ it('stops a hidden clock and resets all receipt coordinates after suspended deli
   expect(document.querySelector('time')?.dateTime).toBe(fresh.receipt.at);
   expect(vi.getTimerCount()).toBe(1);
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+
+it('reconciles a retained receipt suspended before its first mounted sample', async () => {
+  const retained = receive('accepted before suspension');
+  monotonic = 1000; vi.setSystemTime(3_601_000);
+  const view = render(<MetadataReceipt kind="runtime" receipt={retained.receipt} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByLabelText('Runtime report').textContent).toContain('about 1 hour ago');
+  expect(screen.getByLabelText('Runtime report').querySelector('time')?.dateTime).toBe(retained.receipt.at);
+  expect(document.querySelector('[role="status"], [aria-live]')).toBeNull();
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('reconciles a cached receipt after an unmounted interval longer than a display sample', async () => {
+  const retained = receive('cached original page');
+  const first = render(<MetadataReceipt kind="library" receipt={retained.receipt} />);
+  await act(async () => { await Promise.resolve(); });
+  first.unmount(); expect(vi.getTimerCount()).toBe(0);
+  // Two minutes of active time and one hour of suspended time pass off this view.
+  monotonic = 120_000; vi.setSystemTime(3_720_000);
+  const returned = render(<MetadataReceipt kind="library" receipt={retained.receipt} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByLabelText('Displayed job library').textContent).toContain('about 1 hour ago');
+  expect(screen.getByLabelText('Displayed job library').querySelector('time')?.dateTime).toBe(retained.receipt.at);
+  expect(retained.value).toBe('cached original page');
+  expect(vi.getTimerCount()).toBe(1);
+  returned.unmount(); expect(vi.getTimerCount()).toBe(0);
 });

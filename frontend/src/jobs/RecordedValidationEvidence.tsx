@@ -110,7 +110,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
             <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
               aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
-              onClick={() => { void readCases(historyObservation!, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
+              onClick={() => { void readCases(historyObservation, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
           </tr>)}</tbody></table>
         </div>
         {history.items.length === 0 && <p>{copy.noOwners}</p>}
@@ -163,7 +163,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             <button type="button" onClick={() => { setSavedBaseline(null); }}>{copy.clearComparisonBaseline}</button>
             {comparisonSnapshot && <MismatchComparison key={`${baseline.snapshot.reportId}:${comparisonSnapshot.reportId}`}
               first={baseline.snapshot} second={comparisonSnapshot} onInspectPage={page => {
-                if (history && selected) void readCases(historyObservation!, selected, page, report.reportId);
+                if (history && selected) void readCases(historyObservation, selected, page, report.reportId);
               }} onSwap={() => {
                 if (historyObservation && reportObservation && selected) {
                   setSavedBaseline({ binding, snapshot: comparisonSnapshot, history: historyObservation, receipt: reportObservation.receipt, owner: selected });
@@ -192,22 +192,22 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
           <p>{copy.mismatchScope}</p>
           {cases.firstMismatchPage === undefined ? <p>{copy.mismatchUnavailable}</p> : <nav aria-label={copy.mismatchNavigation}>
             <button type="button" disabled={loading || cases.firstMismatchPage == null || cases.firstMismatchPage === cases.page} onClick={() => {
-              if (history && selected && cases.firstMismatchPage != null) void readCases(historyObservation!, selected, cases.firstMismatchPage, report.reportId);
+              if (history && selected && cases.firstMismatchPage != null) void readCases(historyObservation, selected, cases.firstMismatchPage, report.reportId);
             }}>{copy.firstMismatch}</button>
             <button type="button" disabled={loading || cases.previousMismatchPage == null} onClick={() => {
-              if (history && selected && cases.previousMismatchPage != null) void readCases(historyObservation!, selected, cases.previousMismatchPage, report.reportId);
+              if (history && selected && cases.previousMismatchPage != null) void readCases(historyObservation, selected, cases.previousMismatchPage, report.reportId);
             }}>{copy.previousMismatch}</button>
             <button type="button" disabled={loading || cases.nextMismatchPage == null} onClick={() => {
-              if (history && selected && cases.nextMismatchPage != null) void readCases(historyObservation!, selected, cases.nextMismatchPage, report.reportId);
+              if (history && selected && cases.nextMismatchPage != null) void readCases(historyObservation, selected, cases.nextMismatchPage, report.reportId);
             }}>{copy.nextMismatch}</button>
           </nav>}
         </>}
         <nav aria-label={copy.caseNavigation}>
           <button type="button" disabled={loading || cases.previousPage === null} onClick={() => {
-            if (history && selected && cases.previousPage !== null) void readCases(historyObservation!, selected, cases.previousPage, report.reportId);
+            if (history && selected && cases.previousPage !== null) void readCases(historyObservation, selected, cases.previousPage, report.reportId);
           }}>{copy.previousCases}</button>
           <button type="button" disabled={loading || cases.nextPage === null} onClick={() => {
-            if (history && selected && cases.nextPage !== null) void readCases(historyObservation!, selected, cases.nextPage, report.reportId);
+            if (history && selected && cases.nextPage !== null) void readCases(historyObservation, selected, cases.nextPage, report.reportId);
           }}>{copy.nextCases}</button>
         </nav>
       </> : !failure && <p>{copy.noCases}</p>}
