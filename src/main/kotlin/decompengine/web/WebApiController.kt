@@ -20,6 +20,7 @@ internal class WebApiController(
     private val jobMutations: WebJobMutationBoundary,
     streamResources: WebStreamResources,
     clock: Clock = Clock.systemUTC(),
+    private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -347,7 +348,7 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
-        })))
+        }, harnessCapability())))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -380,6 +381,20 @@ internal class WebApiController(
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
             put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })
+    }
+
+    // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
+    private fun harnessCapability(): JsonObject {
+        val readiness = harnessReadiness.current()
+        return buildJsonObject {
+            put("id", "harness")
+            put("state", readiness.state)
+            put("reasonCode", readiness.reasonCode?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("message", readiness.message)
+            put("workflows", JsonArray(emptyList()))
+            put("agentContractVersion", JsonNull)
+            put("limits", JsonNull)
+        }
     }
 
     private fun singleUploadHeader(exchange: HttpExchange, name: String): String? {
