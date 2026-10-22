@@ -290,6 +290,12 @@ internal class FullTreeDwarfInlineStringValue(bytes: ByteArray) : FullTreeDwarfF
 
     val bytes: ByteArray
         get() = content.copyOf()
+
+    /** Reject before allocating a defensive payload copy; never exposes the retained backing array. */
+    internal fun copyBytesBounded(maximumBytes: Int): ByteArray {
+        require(maximumBytes >= 0 && content.size <= maximumBytes) { "DWARF payload byte bound" }
+        return content.copyOf()
+    }
 }
 internal data class FullTreeDwarfSectionStringValue(
     val section: String,
@@ -309,6 +315,12 @@ internal class FullTreeDwarfExpressionValue(
 
     val bytes: ByteArray
         get() = content.copyOf()
+
+    /** Reject before allocating a defensive payload copy; never exposes the retained backing array. */
+    internal fun copyBytesBounded(maximumBytes: Int): ByteArray {
+        require(maximumBytes >= 0 && content.size <= maximumBytes) { "DWARF payload byte bound" }
+        return content.copyOf()
+    }
 
     internal val size: Int
         get() = content.size
