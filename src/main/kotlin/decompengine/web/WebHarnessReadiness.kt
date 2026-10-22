@@ -111,7 +111,8 @@ internal class WebHarnessReadinessProjector(
     private fun withObservation(base: WebHarnessReadiness, now: Long): WebHarnessReadiness {
         if (base.state != "unknown" || base.reasonCode != "SANDBOX_HELPER_UNCHECKED") return base
         val observation = inspected ?: return base
-        if (base.observationKey == null || base.observationKey != observation.observationKey ||
+        if (base.configurationIdentity == null || base.configurationIdentity != observation.configurationIdentity ||
+            base.observationKey == null || base.observationKey != observation.observationKey ||
             now - inspectedAt >= ttlNanos) return base
         return observation
     }

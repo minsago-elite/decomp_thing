@@ -15,9 +15,9 @@ internal fun defaultWebAuthenticationInspector(
     val identity = AtomicReference<String?>()
     val select = selectHarness ?: {
         val selection = AcpHarnessFactory.fromEnvironment(System.getenv())
+        identity.set(selection.provenance.stableDescriptor)
         require(selection.kind == AcpHarnessKind.ACP) { "authentication inspection requires ACP" }
         val harness = selection.createHarness() as AcpAgentHarness
-        identity.set(selection.provenance.stableDescriptor)
         harness
     }
     return WebObservedAuthenticationInspector(select, identity::get)
