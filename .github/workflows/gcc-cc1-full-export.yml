@@ -17,12 +17,12 @@ concurrency:
 
 jobs:
   cc1-live-full-export:
-    if: (github.event_name == 'workflow_dispatch' && contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls"]'), inputs.capture-mode)) || (github.event_name == 'pull_request' && inputs.capture-mode == '' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export')))
-    name: ${{ matrix.target }} ${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime diagnostics' || inputs.capture-mode == 'cc1-native-calls' && 'native calls' || 'live full export' }}
+    if: (github.event_name == 'workflow_dispatch' && contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls","cc1-engine-cli"]'), inputs.capture-mode)) || (github.event_name == 'pull_request' && inputs.capture-mode == '' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export')))
+    name: ${{ matrix.target }} ${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime diagnostics' || inputs.capture-mode == 'cc1-native-calls' && 'native calls' || inputs.capture-mode == 'cc1-engine-cli' && 'engine CLI fresh/resume' || 'live full export' }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(contains(fromJSON('["cc1-runtime-diagnostics","cc1-native-calls"]'), inputs.capture-mode) && '["cc1"]' || contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
+        target: ${{ fromJSON(contains(fromJSON('["cc1-runtime-diagnostics","cc1-native-calls","cc1-engine-cli"]'), inputs.capture-mode) && '["cc1"]' || contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
     env:
       DECOMP_GCC_CLI_FULL_EXPORT_ENGINE: ${{ matrix.target }}
       # The dispatch-only 'cc1-full-export' route runs the script's existing qualification mode.
@@ -158,6 +158,9 @@ jobs:
         run: scripts/ci-prepare-acp-sandbox.sh
       - name: Prepare dedicated full-export scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
+      - name: Prepare the disjoint resume scratch for the engine CLI fresh/resume comparison
+        if: inputs.capture-mode == 'cc1-engine-cli'
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-resume
       - name: Install the application-bundled Ghidra runtime
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application
       - name: Verify the pinned Ghidra provenance archive and create evidence root
@@ -172,7 +175,7 @@ jobs:
           df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
           df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
       - name: Sample per-command CPU during the diagnostic (diagnostic-only, outside the evidence root)
-        if: contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls"]'), inputs.capture-mode)
+        if: contains(fromJSON('["cc1-runtime-diagnostics","cc1-full-export","cc1-native-calls","cc1-engine-cli"]'), inputs.capture-mode)
         run: |
           : >"$RUNNER_TEMP/process-cpu-samples.txt"
           nohup setsid bash scripts/ci-sample-process-cpu.sh "$RUNNER_TEMP/process-cpu-samples.txt" 30 >/dev/null 2>&1 &
@@ -182,7 +185,14 @@ jobs:
           # 'cc1-full-export' route uses the explicit parallel runtime-6 profile that reviewers approve.
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/${{ (inputs.capture-mode == 'cc1-full-export' || (inputs.capture-mode == '' && matrix.target == 'cc1')) && 'compiler-engines-exporter17-parallel.json' || 'compiler-engines-exporter17.json' }}
           DECOMP_GCC_CLI_EXPORT_BINARY: ${{ matrix.target == 'driver' && format('{0}/oracle/gcc/16.2.0/artifacts/gcc-driver.stripped', github.workspace) || format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}
-        run: scripts/ci-qualify-gcc-cc1-full-export.sh "$DECOMP_GCC_CLI_CAPTURE_MODE"
+          DECOMP_GCC_CLI_CC1_BINARY: ${{ format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}
+        run: |
+          if [[ "$DECOMP_GCC_CLI_CAPTURE_MODE" == cc1-engine-cli ]]; then
+            # #927: installed gcc-engine-plan fresh run, then a forced interruption and same-journal resume on a
+            # disjoint scratch mount; the test requires byte-identical model and planner outputs.
+            DECOMP_GCC_CLI_ENGINE=cc1 exec scripts/ci-qualify-gcc-engine-cli.sh
+          fi
+          exec scripts/ci-qualify-gcc-cc1-full-export.sh "$DECOMP_GCC_CLI_CAPTURE_MODE"
       - name: Record capacity after the live export
         if: always()
         run: |
@@ -196,7 +206,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gcc-${{ matrix.target }}-${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime-diagnostics' || inputs.capture-mode == 'cc1-native-calls' && 'native-calls' || 'live-full-export' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: gcc-${{ matrix.target }}-${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime-diagnostics' || inputs.capture-mode == 'cc1-native-calls' && 'native-calls' || inputs.capture-mode == 'cc1-engine-cli' && 'engine-cli' || 'live-full-export' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 30
           if-no-files-found: warn
           path: |
@@ -207,6 +217,9 @@ jobs:
       - name: Release dedicated full-export scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
+      - name: Release the engine CLI resume scratch
+        if: always() && inputs.capture-mode == 'cc1-engine-cli'
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-engine-cc1-resume
       - name: Release the root-owned application Ghidra runtime
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh --application
