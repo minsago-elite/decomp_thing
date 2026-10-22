@@ -6,6 +6,7 @@ import java.util.Set;
 public final class RunBundledExports extends GhidraScript {
     @Override
     protected void run() throws Exception {
+        BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
         Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class");
@@ -18,16 +19,21 @@ public final class RunBundledExports extends GhidraScript {
             if (count < 0 || count > 16 || count > arguments.length - index) {
                 throw new IllegalArgumentException("Invalid bundled exporter arguments");
             }
-            String[] exporterArguments = Arrays.copyOfRange(arguments, index, index + count);
-            if (name.equals("ExportNativeCallsV1.class")) {
-                // Nested runScript uses source-language providers, unlike HeadlessAnalyzer's
-                // compiled post-script loader. Invoke the pinned adjacent class directly.
-                ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
-            } else {
-                runScript(name, exporterArguments);
+            BundledGhidraWorker.diagnosticsExporter(name);
+            try {
+                String[] exporterArguments = Arrays.copyOfRange(arguments, index, index + count);
+                if (name.equals("ExportNativeCallsV1.class")) {
+                    // The nested source-script loader cannot load the pinned compiled collector.
+                    ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
+                } else {
+                    runScript(name, exporterArguments);
+                }
+            } finally {
+                BundledGhidraWorker.diagnosticsGuard();
             }
             index += count;
         }
         BundledGhidraWorker.exportsCompleted();
+        BundledGhidraWorker.diagnosticsFinalization();
     }
 }
