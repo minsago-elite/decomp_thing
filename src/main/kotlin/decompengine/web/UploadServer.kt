@@ -277,7 +277,8 @@ class UploadServer(
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources) }
+    private val harnessReadiness = WebHarnessReadinessProjector()
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources, harnessReadiness = harnessReadiness) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -411,6 +412,7 @@ class UploadServer(
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
+        harnessReadiness.close()
         access.close()
         jobs.close()
         var inspectionWaitInterrupted = false

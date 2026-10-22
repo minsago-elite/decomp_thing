@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.acp.AcpHarnessFactory
+import decompengine.acp.AcpHarnessKind
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -24,9 +25,8 @@ internal class WebHarnessReadinessProjector(
     private val ttlNanos: Long = TimeUnit.SECONDS.toNanos(10),
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor { task ->
-        Thread(task, "web-harness-readiness").apply { isDaemon = true }
-    }
+    private var executor: ExecutorService = newExecutor()
+    private var closed = false
     private var cached: WebHarnessReadiness? = null
     private var cachedAt = 0L
 
@@ -34,9 +34,16 @@ internal class WebHarnessReadinessProjector(
     fun current(): WebHarnessReadiness {
         val now = nanoTime()
         cached?.let { if (now - cachedAt < ttlNanos) return it }
+        if (closed) return WebHarnessReadiness("unavailable", "PROBE_FAILED", "Harness readiness could not be determined.")
+        val future = executor.submit(Callable(probe))
         val result = try {
-            executor.submit(Callable(probe)).get(timeoutMillis, TimeUnit.MILLISECONDS)
+            future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
+            // A probe that ignores interruption would hold the only worker forever; abandon it so a
+            // later refresh can recover once the configuration is repaired.
+            future.cancel(true)
+            executor.shutdownNow()
+            executor = newExecutor()
             WebHarnessReadiness("unavailable", "PROBE_TIMEOUT", "Harness readiness could not be determined in time.")
         } catch (_: Exception) {
             WebHarnessReadiness("unavailable", "PROBE_FAILED", "Harness readiness could not be determined.")
@@ -44,6 +51,16 @@ internal class WebHarnessReadinessProjector(
         cached = result
         cachedAt = now
         return result
+    }
+
+    @Synchronized
+    fun close() {
+        closed = true
+        executor.shutdownNow()
+    }
+
+    private fun newExecutor(): ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "web-harness-readiness").apply { isDaemon = true }
     }
 
     companion object {
@@ -62,7 +79,9 @@ internal class WebHarnessReadinessProjector(
                 return WebHarnessReadiness("unavailable", "HARNESS_NOT_CONFIGURED", "No agent harness is configured.")
             }
             try {
-                AcpHarnessFactory.fromEnvironment(environment)
+                val selection = AcpHarnessFactory.fromEnvironment(environment)
+                // The legacy adapter defers its environment validation to harness creation.
+                if (selection.kind == AcpHarnessKind.LEGACY_OPENAI) selection.createHarness()
             } catch (_: Exception) {
                 return WebHarnessReadiness("unavailable", "HARNESS_CONFIGURATION_INVALID", "The agent harness configuration is invalid.")
             }

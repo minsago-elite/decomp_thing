@@ -64,6 +64,31 @@ class WebHarnessReadinessTest {
     }
 
     @Test
+    fun `a legacy selection without its required settings is not reported as supported`() {
+        val result = WebHarnessReadinessProjector.probeEnvironment(mapOf("ACP_HARNESS" to "legacy-openai"))
+        assertEquals("HARNESS_CONFIGURATION_INVALID", result.reasonCode)
+    }
+
+    @Test
+    fun `readiness recovers after a probe that ignores interruption`() {
+        val calls = AtomicInteger()
+        var now = 0L
+        val projector = WebHarnessReadinessProjector(
+            probe = {
+                if (calls.incrementAndGet() == 1) { while (true) { try { Thread.sleep(60_000) } catch (_: InterruptedException) { /* ignore */ } } }
+                WebHarnessReadiness("supported", null, "ok")
+            },
+            timeoutMillis = 100, ttlNanos = 1_000, nanoTime = { now },
+        )
+        assertEquals("PROBE_TIMEOUT", projector.current().reasonCode)
+        now = 1_000
+        assertEquals("supported", projector.current().state)
+        projector.close()
+        now = 2_000
+        assertEquals("PROBE_FAILED", projector.current().reasonCode)
+    }
+
+    @Test
     fun `results are cached within the ttl and refreshed after it`() {
         val calls = AtomicInteger()
         var now = 0L
