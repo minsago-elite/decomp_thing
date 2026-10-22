@@ -383,9 +383,9 @@ internal class WebApiController(
         })
     }
 
-    // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
+    // Read an existing observation only; passive bootstrap never starts a diagnostic refresh.
     private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current()
+        val readiness = harnessReadiness.snapshot()
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)

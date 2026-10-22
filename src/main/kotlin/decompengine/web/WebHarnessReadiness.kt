@@ -17,11 +17,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal data class WebHarnessReadiness(val state: String, val reasonCode: String?, val message: String)
 
 /**
- * Projects harness configuration readiness for bootstrap without launching a workflow.
+ * Projects an observed harness configuration result without granting workflow authority.
  *
- * The probe runs on a dedicated daemon thread with a hard deadline and its result is cached for
- * [ttlNanos], so a slow or hung probe can never block a browser request for longer than
- * [timeoutMillis]. A probe that outlives its deadline is abandoned, and at most one abandoned probe
+ * [snapshot] is a passive, lock-free read: it never starts or waits for a probe. Missing or expired
+ * observations stay unverified. [current] performs an active refresh and must not be called by a
+ * passive HTTP read; it needs separately admitted diagnostic authority.
+ *
+ * An explicitly requested probe runs on a dedicated daemon thread and its result is cached for
+ * [ttlNanos]. Only the active refresh caller waits, with the existing [timeoutMillis] deadline.
+ * A probe that outlives its deadline is abandoned, and at most one abandoned probe
  * may keep running: no further probe starts until it ends. Reasons are fixed codes; exception text
  * and environment values are never copied into the projection.
  */
@@ -32,18 +36,28 @@ internal class WebHarnessReadinessProjector(
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
     private var executor: ExecutorService = newExecutor()
+    @Volatile
     private var closed = false
-    private var cached: WebHarnessReadiness? = null
-    private var cachedAt = 0L
+    private data class Observation(val result: WebHarnessReadiness, val atNanos: Long)
+    @Volatile
+    private var cached: Observation? = null
     private var abandoned: AtomicBoolean? = null
 
+    /** No environment/configuration read, adapter construction, executor submission or monitor. */
+    fun snapshot(): WebHarnessReadiness {
+        if (closed) return FAILED
+        val observation = cached ?: return UNVERIFIED
+        val age = nanoTime() - observation.atNanos
+        return if (age >= 0 && age < ttlNanos) observation.result else UNVERIFIED
+    }
+
+    /** Active diagnostic refresh; callers must supply authority separately from a metadata read. */
     @Synchronized
     fun current(): WebHarnessReadiness {
         val now = nanoTime()
-        cached?.let { if (now - cachedAt < ttlNanos) return it }
+        cached?.let { if (now - it.atNanos < ttlNanos) return it.result }
         val result = refresh()
-        cached = result
-        cachedAt = now
+        cached = Observation(result, now)
         return result
     }
 
@@ -80,6 +94,7 @@ internal class WebHarnessReadinessProjector(
     }
 
     companion object {
+        private val UNVERIFIED = WebHarnessReadiness("unavailable", "READINESS_UNVERIFIED", "Harness readiness has not been verified.")
         private val TIMED_OUT = WebHarnessReadiness("unavailable", "PROBE_TIMEOUT", "Harness readiness could not be determined in time.")
         private val FAILED = WebHarnessReadiness("unavailable", "PROBE_FAILED", "Harness readiness could not be determined.")
 
