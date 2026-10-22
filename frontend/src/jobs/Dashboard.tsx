@@ -106,6 +106,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, []);
   useEffect(() => {
     if (!selection.valid || !selection.invalidCursor) return;
+    entryPin.current = null;
     const search = jobPageSearch(selection.filters, null);
     history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
     setPageNotice(copy.savedPageUnavailable);
@@ -140,8 +141,9 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
-      if (activeBinding.current !== binding) return;
+      if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
       if (selection.cursor && failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
+        entryPin.current = null;
         const search = jobPageSearch(selection.filters, null);
         history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
         setPageNotice(copy.savedPageUnavailable);
@@ -227,7 +229,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (current.valid && !current.invalidCursor && followsFirst && filterSearch(current.filters) === search) {
         const retained = jobPageSearch(checked, current.cursor);
         history.replaceState(null, '', `${location.pathname}${retained ? `?${retained}` : ''}`);
-      } else history.pushState(null, '', next);
+      } else {
+        entryPin.current = null;
+        history.pushState(null, '', next);
+      }
       setSelection({ filters: checked, cursor: null, invalidCursor: false, valid: true }); setDraft(checked);
       setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); setPageNotice(''); moveFocus.current = true;
     } catch (failure) {
@@ -247,6 +252,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   function reload() {
     activeBinding.current = null;
     if (selection.cursor) {
+      entryPin.current = null;
       const search = jobPageSearch(selection.filters, null);
       history.pushState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
       setSelection({ ...selection, cursor: null, invalidCursor: false });
