@@ -71,10 +71,12 @@ class AcpTerminalFailureContextTest {
 
     @Test
     fun `withholds a throwing cause accessor and leaves the original refusal untouched`() {
+        var causeReads = 0
         val original = object : IOException("PRIVATE") {
-            override val cause: Throwable get() = throw AssertionError("PRIVATE-accessor")
+            override val cause: Throwable get() { causeReads++; throw AssertionError("PRIVATE-accessor") }
         }
         assertNull(captureTerminalLaunchFailure(AcpTerminalFailureSite.SANDBOX_LAUNCH, original))
+        assertEquals(0, causeReads)
         assertEquals("PRIVATE", original.message)
         assertTrue(original.suppressed.isEmpty())
     }

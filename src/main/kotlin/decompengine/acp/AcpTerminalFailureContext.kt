@@ -18,7 +18,17 @@ internal class AcpTerminalLaunchFailureContext private constructor(val text: Str
         private val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
             "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
 
-        fun capture(site: AcpTerminalFailureSite, failure: Throwable): AcpTerminalLaunchFailureContext {
+        private val causeTypes = setOf(Throwable::class.java, Exception::class.java, IOException::class.java,
+            IllegalStateException::class.java, InterruptedIOException::class.java, AccessDeniedException::class.java,
+            NoSuchFileException::class.java, FileSystemLoopException::class.java, LinuxSyscallException::class.java,
+            LinuxResourceLimitException::class.java, LinuxNamedRegularFileReplacedException::class.java,
+            AcpCleanupProofFailure::class.java)
+
+        private fun trustedCauseNode(failure: Throwable): Boolean = failure.javaClass in causeTypes ||
+            (failure is AcpMountEventWitness &&
+                failure.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+
+        fun capture(site: AcpTerminalFailureSite, failure: Throwable): AcpTerminalLaunchFailureContext? {
             val seen = ArrayList<Throwable>(8)
             val causes = ArrayList<String>(8)
             var current: Throwable? = failure
@@ -26,10 +36,12 @@ internal class AcpTerminalLaunchFailureContext private constructor(val text: Str
             while (current != null && seen.size < 8) {
                 val observed = current
                 if (seen.any { it === observed }) { state = "cycle"; current = null; break }
+                // Do not execute a virtual cause getter supplied by an unknown exception subclass.
+                if (!trustedCauseNode(observed)) return null
                 seen.add(observed)
                 causes.add(kind(observed))
-                // Only the bounded direct cause chain is inspected, never messages, stacks or suppression lists.
-                current = observed.cause
+                // Exact known classes use their inherited cause field. The closed witness is already a leaf.
+                current = if (observed is AcpMountEventWitness) null else observed.cause
             }
             if (current != null) state = "truncated"
             val text = "site=${site.name};chain=$state;causes=[${causes.joinToString(" -> ")}]"

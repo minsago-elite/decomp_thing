@@ -5,7 +5,9 @@ reservation/cleanup behavior and native checks. A launch refusal additionally re
 projection at its exact existing audit sequence. The public AcpTerminalAuditRecord/evidence shape is unchanged;
 the supplemental projection is not included in provider results or wire/archive authority.
 
-Capture visits at most eight direct causes. It never reads arbitrary messages, stacks or suppressed arrays,
+Capture visits at most eight direct causes through exact known exception classes. Unknown subclasses remain
+unavailable without invoking their cause getter; the closed native witness is a leaf. The authored accessor
+control asserts zero getter invocations. Capture never reads arbitrary messages, stacks or suppressed arrays,
 retains no Throwable, and recognizes only fixed categories/errno and already captured sealed mount-event
 witness/admission records with closed ASCII grammar and strict length limits. Construction/accessor failure
 leaves the projection unavailable without replacing the original refusal. The last eight projections are
