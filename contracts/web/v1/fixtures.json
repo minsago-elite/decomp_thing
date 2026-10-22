@@ -407,6 +407,50 @@
       "valid": false
     },
     {
+      "file": "fixtures/agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-idle.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-agent-preflight.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-status.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-request-action.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-ready.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-idle-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-without-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-reason-vocabulary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-ready-reason.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/bootstrap-retention.json",
       "valid": true
     },
@@ -688,6 +732,18 @@
     },
     {
       "file": "fixtures/invalid-validation-history-failure-borrow.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-inspecting.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-cancelled.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-identity.json",
       "valid": false
     }
   ]

@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "agentPreflight",
+  "requestId": "request_preflight_reason_bad",
+  "data": {
+    "status": "failed",
+    "inspectionId": "inspection_fixture",
+    "reasonCode": "SOME_OTHER_REASON"
+  }
+}

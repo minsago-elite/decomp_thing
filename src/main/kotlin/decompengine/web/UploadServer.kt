@@ -277,7 +277,16 @@ class UploadServer(
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources) }
+    private val harnessReadiness = WebHarnessReadinessProjector()
+    private val agentPreflight = WebAgentPreflight { cancellation ->
+        check(withActiveRequest {
+            authenticationInspector(decompengine.agent.AgentCancellation {
+                stopRequested.get() || cancellation.isCancellationRequested()
+            })
+        }) { "Server is stopping" }
+    }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -373,6 +382,7 @@ class UploadServer(
         jobs.signalShutdown()
         stopRequested.set(true)
         authenticationInspectionCancellation.set(true)
+        agentPreflight.requestStop()
         jobs.beginShutdown()
     }
 
@@ -411,6 +421,8 @@ class UploadServer(
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
+        harnessReadiness.close()
+        agentPreflight.close()
         access.close()
         jobs.close()
         var inspectionWaitInterrupted = false

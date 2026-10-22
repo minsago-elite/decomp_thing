@@ -53,7 +53,8 @@ class WebApiControllerTest {
             assertTrue(first.getValue("uiBuildId").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")))
             assertEquals("/workbench/", first.getValue("basePath").jsonPrimitive.content)
             assertEquals("degraded", first.getValue("readiness").jsonPrimitive.content)
-            val capability = first.getValue("capabilities").jsonArray.single().jsonObject
+            val capability = first.getValue("capabilities").jsonArray.map { it.jsonObject }
+                .single { it.getValue("id").jsonPrimitive.content == "workflows" }
             assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
             assertTrue(capability.getValue("workflows").jsonArray.isEmpty())
             val limits = first.getValue("limits").jsonObject

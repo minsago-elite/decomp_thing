@@ -111,6 +111,8 @@ export const activityReceiptAgeCopy = {
 } as const;
 
 export const activityRowCopy = {
+  recordedRunState: 'Recorded attempt state: {state}.',
+  recordedRunAcceptance: 'Recorded acceptance: {acceptance}.',
   "sequence": "Sequence {sequence}",
   "attempt": "Attempt {run}",
   "observed": "Observed {kind}{phase}",

@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "agentPreflight",
+  "requestId": "request_preflight_idle_bad",
+  "data": {
+    "status": "idle",
+    "inspectionId": "inspection_fixture",
+    "reasonCode": "AGENT_PREFLIGHT_FAILED"
+  }
+}
