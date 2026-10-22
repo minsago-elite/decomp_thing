@@ -47,6 +47,7 @@ export const displayPreferencesCopy = {
 export const sessionStatusCopy = {
   "reference": " Reference ID: {reference}.",
   "localSessionConnected": "Local session connected.",
+  "applicationInstanceChanged": "Application instance changed. It may have restarted or been replaced. Previously loaded private views were cleared.",
   "signOut": "Sign out",
   "checkSession": "Check session",
   "anotherTabReportedASessionChangePrivateDataWasCleared": "Another tab reported a session change. Private data was cleared. Check the session to reconnect.",

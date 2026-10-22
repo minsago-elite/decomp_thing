@@ -43,6 +43,7 @@ export function SessionStatus({ session }: { session: BrowserSession }) {
   if (state.status === 'authenticated') {
     return <aside class="session-notice notice" aria-label={copy.localSession}>
       <p>{copy.localSessionConnected}</p>
+      {state.serverChanged && <p role="status">{copy.applicationInstanceChanged}</p>}
       <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>
     </aside>;
   }

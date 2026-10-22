@@ -14,7 +14,7 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot }
+  | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot; serverChanged?: true }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
 
@@ -86,6 +86,8 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     } else {
       forget();
       const instanceId = bootstrap.serverInstanceId ?? null;
+      const serverChanged = previousInstanceId !== undefined && previousInstanceId !== null
+        && instanceId !== null && previousInstanceId !== instanceId;
       // Missing older-server metadata is unknown; never reuse instance-bound state on that basis.
       if (previousInstanceId !== undefined && (instanceId === null || previousInstanceId !== instanceId)) notifyInvalidated(false);
       previousInstanceId = instanceId;
@@ -98,7 +100,8 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
       // A new bootstrap generation replaces private views even when intermediate renders coalesce.
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime });
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime,
+        ...(serverChanged ? { serverChanged: true as const } : {}) });
       expiry = setTimeout(() => {
         forget();
         publish({ status: 'required', reason: 'expired' });
