@@ -6,6 +6,8 @@ import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
+import { runCopy } from '../src/copy/attempt';
+import { runHistoryCopy } from '../src/copy/history';
 import { jobCopy } from '../src/copy/job';
 import { createBrowserSession } from '../src/session/session';
 
@@ -92,5 +94,28 @@ it('rejects a malformed job identity without issuing a read', async () => {
     render(<App basePath="/nested" session={auth} />);
     await waitFor(() => expect(document.body.textContent).toMatch(/invalid|not found|unavailable/i));
     expect(transport.get).not.toHaveBeenCalled();
+  } finally { auth.dispose(); }
+});
+
+const runId = 'retained_run_1';
+const nestedFailures: Array<[string, ApiClientError, string, string]> = [
+  ['missing', new ApiClientError('http_error', { status: 404 }), runCopy.thisAttemptIsUnavailableForThisJob, runHistoryCopy.attemptHistoryIsUnavailableCheckTheJobAndLocalSession],
+  ['denied', new ApiClientError('http_error', { status: 403 }), runCopy.attemptAccessDenied, runHistoryCopy.attemptHistoryAccessDenied],
+  ['unsupported', new ApiClientError('unsupported_contract'), runCopy.incompatibleAttemptResponse, runHistoryCopy.incompatibleHistoryResponse],
+];
+it.each(nestedFailures)('gives the attempt and history routes a safe route back for a %s resource', async (_name, failure, attemptMessage, historyMessage) => {
+  const auth = await session();
+  transport.get.mockRejectedValue(failure);
+  try {
+    for (const [path, message, back, backName] of [
+      [`/nested/jobs/${first}/runs/${runId}`, attemptMessage, `/nested/jobs/${first}`, runCopy.returnToJobOverview],
+      [`/nested/jobs/${first}/runs`, historyMessage, `/nested/jobs/${first}`, runHistoryCopy.returnToJobOverview],
+    ] as const) {
+      history.replaceState(null, '', path);
+      const view = render(<App basePath="/nested" session={auth} />);
+      expect((await screen.findByRole('alert')).textContent).toContain(message);
+      expect(screen.getByRole('link', { name: backName }).getAttribute('href')).toBe(back);
+      view.unmount();
+    }
   } finally { auth.dispose(); }
 });
