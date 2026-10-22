@@ -10,7 +10,7 @@ on:
       operation:
         description: Manual GCC evidence capture
         type: choice
-        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export]
+        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export, cc1-analysis-throughput]
         default: driver-dwarf-interfaces
 
 concurrency:
@@ -35,6 +35,79 @@ jobs:
       contents: read
     with:
       capture-mode: cc1-full-export
+
+  cc1-analysis-throughput:
+    # Diagnostic-only #1444 measurement: Ghidra auto-analysis wall time and recovered-function census per analyzer
+    # selection on the verified cc1 binary. It produces no model, receipt or qualification evidence.
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cc1-analysis-throughput'
+    name: cc1 analysis ${{ matrix.variant.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - {name: baseline, disable: ''}
+          - {name: no-switch, disable: 'Decompiler Switch Analysis,Decompiler Switch Analysis - One Time'}
+          - {name: no-call-convention, disable: 'Call Convention ID'}
+          - {name: no-switch-no-call-convention, disable: 'Decompiler Switch Analysis,Decompiler Switch Analysis - One Time,Call Convention ID'}
+          - {name: lean, disable: 'Decompiler Switch Analysis,Decompiler Switch Analysis - One Time,Call Convention ID,Stack,x86 Constant Reference Analyzer'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Install the pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Restore the manifest-keyed cc1 artifact pair
+        id: cc1-artifact-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
+          key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-
+      - name: Require the cached cc1 pair
+        run: |
+          test -n "${{ steps.cc1-artifact-cache.outputs.cache-matched-key }}" || { echo 'no cached cc1 pair; run cc1-runtime-diagnostics once to populate it' >&2; exit 1; }
+          sha256sum "$RUNNER_TEMP/gcc-cc1-engine/artifacts/gcc-cc1.stripped"
+          grep -F "$(sha256sum "$RUNNER_TEMP/gcc-cc1-engine/artifacts/gcc-cc1.stripped" | cut -d' ' -f1)" oracle/gcc/16.2.0/cc1-oracle-manifest.json >/dev/null
+      - name: Stage the bundled Ghidra distribution
+        run: ./gradlew --no-daemon installDist -x verifyFrontendToolchain -x frontendInstall -x frontendBuild
+      - name: Run Ghidra auto-analysis with the selected analyzers (diagnostic-only)
+        env:
+          DISABLE: ${{ matrix.variant.disable }}
+        run: |
+          ghidra="$(echo "$PWD"/build/install/llm_bin_patch/libexec/ghidra/ghidra_*_PUBLIC)"
+          project="$RUNNER_TEMP/analysis-project"; mkdir -p "$project" build/analysis-experiment
+          start=$(date +%s)
+          JAVA_TOOL_OPTIONS="-Dcpu.core.override=4" "$ghidra/support/analyzeHeadless" "$project" experiment \
+            -import "$RUNNER_TEMP/gcc-cc1-engine/artifacts/gcc-cc1.stripped" \
+            -scriptPath "$PWD/scripts/ghidra-analysis-experiment" \
+            -preScript DisableAnalyzers.java ${DISABLE:+"$DISABLE"} \
+            -postScript FunctionCensus.java \
+            2>&1 | tee build/analysis-experiment/headless.log
+          end=$(date +%s)
+          {
+            echo "### ${{ matrix.variant.name }}"
+            echo "wall seconds: $((end - start))"
+            grep -E 'Total Time' build/analysis-experiment/headless.log || true
+            grep -E 'ANALYZER-EXPERIMENT' build/analysis-experiment/headless.log || true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cc1-analysis-${{ matrix.variant.name }}-${{ github.run_id }}
+          path: build/analysis-experiment/headless.log
 
   provenance-and-elf-verifier:
     if: github.event_name != 'workflow_dispatch'
