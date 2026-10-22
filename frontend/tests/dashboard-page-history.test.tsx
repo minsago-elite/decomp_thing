@@ -91,6 +91,7 @@ it('replaces an expired page entry with one filter-preserving first-page read an
     ? Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }))
     : Promise.resolve(page([job(3)], 'Page_Fresh', null, null, 1)));
   render(<Dashboard basePath="/nested" />);
+  expect(screen.getByText('Loading saved page…')).toBeTruthy();
   await screen.findByRole('link', { name: 'snapshot-3.elf' });
   expect(location.search).toBe('?status=failed');
   expect(history.length).toBe(length);

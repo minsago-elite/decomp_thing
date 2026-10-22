@@ -291,7 +291,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
         moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1));
       }}>{copy.previousPage}</button>
       <span aria-live="polite">{data && displayedPageIndex !== null ? displayMessage(copy.page, { page: snapshotPage?.pageNumber ?? displayedPageIndex + 1 })
-        : phase === 'loading' && selection.valid ? displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
+        : phase === 'loading' && selection.valid ? selection.cursor ? copy.loadingSavedPage : displayMessage(copy.loadingPage, { page: pageIndex + 1 }) : copy.noPageAvailable}</span>
       <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;
         if (snapshotPage) { goToPage(data.page.nextCursor); return; }

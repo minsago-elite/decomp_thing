@@ -1,6 +1,7 @@
 // View-scoped interface copy; protocol values and DOM identities stay in their components.
 
 export const dashboardCopy = {
+  loadingSavedPage: 'Loading saved page…',
   savedPageUnavailable: 'The saved job page cannot be restored. Reading the current first page with the same filters.',
   snapshotHistoryUnavailable: 'This response supports page-local navigation only. Saved page history is unavailable.',
   liveUpdatesPauseOnSnapshotPages: 'This is a saved page snapshot. Refresh jobs to read the current first page.',
