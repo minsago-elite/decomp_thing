@@ -302,6 +302,8 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
+  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
+  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
   "wallClockLimit": "{value} milliseconds",
   "idleLimit": "{value} milliseconds",
   "outputLimit": "{value} bytes",

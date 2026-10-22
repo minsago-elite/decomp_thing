@@ -5,12 +5,18 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job, Run, RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { App } from '../src/app/App';
+import { runViewPath } from '../src/app/paths';
 import { sourceCopy } from '../src/copy/sources';
 import { createBrowserSession } from '../src/session/session';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
+// Router selection uses inert leaf panels; these controls never open activity transports or evidence reads.
+vi.mock('../src/jobs/ProgressPin', () => ({ ProgressPin: () => null }));
+vi.mock('../src/jobs/Activity', () => ({ Activity: ({ runId }: { runId: string }) => <p>Activity panel {runId}</p> }));
+vi.mock('../src/jobs/ExplorationEvidence', () => ({ ExplorationEvidence: ({ runId }: { runId: string }) => <p>Exploration panel {runId}</p> }));
+vi.mock('../src/jobs/RecordedValidationEvidence', () => ({ RecordedValidationEvidence: ({ runId }: { runId: string }) => <p>Validation panel {runId}</p> }));
 const fixture = (name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}`), 'utf8')) as { data: never }).data;
 const sample = fixture('job-lossless.json') as Job;
 const sampleRun = fixture('run-completed-unaccepted.json') as Run;
@@ -95,5 +101,52 @@ it('keeps the selected attempt, revision and snapshot pin when history moves bet
     await act(() => { history.forward(); });
     await screen.findByRole('button', { name: sourceCopy.openPreview });
     expect(location.search).toBe(`?${query}`);
+  } finally { auth.dispose(); }
+});
+
+
+it('restores the named attempt view and exact run identity through direct entry and back and forward', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => {
+    if (kind !== 'run' || path !== `/jobs/${sampleRun.jobId}/runs/${sampleRun.runId}`) {
+      return Promise.reject(new Error('Unexpected read in the inert route control'));
+    }
+    return Promise.resolve({ data: sampleRun });
+  });
+  const selected = (view: 'overview' | 'activity' | 'evidence') => runViewPath('/nested', sampleRun.jobId, sampleRun.runId, view);
+  history.replaceState(null, '', selected('activity'));
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('heading', { name: 'Attempt activity' });
+    await screen.findByText(`Activity panel ${sampleRun.runId}`);
+    expect(screen.queryByText(`Validation panel ${sampleRun.runId}`)).toBeNull();
+    expect(screen.getByRole('link', { name: 'Activity' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByText(sampleRun.resultRevisionId!)).toBeTruthy();
+    expect(document.title).toContain('Attempt activity');
+    fireEvent.click(screen.getByRole('link', { name: 'Evidence' }));
+    await screen.findByRole('heading', { name: 'Attempt evidence' });
+    await screen.findByText(`Validation panel ${sampleRun.runId}`);
+    expect(screen.getByText(`Exploration panel ${sampleRun.runId}`)).toBeTruthy();
+    expect(screen.queryByText(`Activity panel ${sampleRun.runId}`)).toBeNull();
+    expect(location.pathname).toBe(selected('evidence'));
+    expect(screen.getByRole('link', { name: 'Evidence' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByText(sampleRun.runId)).toBeTruthy();
+    await act(() => { history.back(); });
+    await screen.findByRole('heading', { name: 'Attempt activity' });
+    await screen.findByText(`Activity panel ${sampleRun.runId}`);
+    expect(location.pathname).toBe(selected('activity'));
+    expect(screen.queryByText(`Validation panel ${sampleRun.runId}`)).toBeNull();
+    await act(() => { history.forward(); });
+    await screen.findByRole('heading', { name: 'Attempt evidence' });
+    await screen.findByText(`Validation panel ${sampleRun.runId}`);
+    expect(location.pathname).toBe(selected('evidence'));
+    fireEvent.click(screen.getByRole('link', { name: 'Overview' }));
+    await screen.findByRole('heading', { name: 'Workflow attempt' });
+    await screen.findByText(`Activity panel ${sampleRun.runId}`);
+    expect(screen.getByText(`Validation panel ${sampleRun.runId}`)).toBeTruthy();
+    expect(location.pathname).toBe(selected('overview'));
+    expect(transport.get.mock.calls.every(([kind, path]) => kind === 'run' && path === `/jobs/${sampleRun.jobId}/runs/${sampleRun.runId}`)).toBe(true);
+    expect(() => runViewPath('/nested', sampleRun.jobId, '../foreign', 'activity')).toThrow();
+    expect(() => runViewPath('/nested', sampleRun.jobId, sampleRun.runId, 'foreign' as 'activity')).toThrow();
   } finally { auth.dispose(); }
 });

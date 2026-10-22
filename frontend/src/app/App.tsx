@@ -63,11 +63,15 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const uploadPath = appPath(basePath, '/upload');
   const isJob = location.path.startsWith(`${basePath}/jobs/`) && location.path.slice(`${basePath}/jobs/`.length).indexOf('/') < 0;
   const isRun = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+$/.test(location.path);
+  const isRunActivity = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/activity$/.test(location.path);
+  const isRunEvidence = location.path.startsWith(`${basePath}/jobs/`) && /\/runs\/[^/]+\/evidence$/.test(location.path);
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const isSourceDirectory = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources/[^/]+$`).test(location.path);
   const isSourceFile = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+$`).test(location.path);
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
-    : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
+    : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
+      : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
+        : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
       : isSourceDirectory ? sourceCopy.title : isSourceFile ? sourceCopy.fileTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
@@ -170,6 +174,8 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId`} component={Run} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId`} component={Job} basePath={basePath} session={session} />
               <Route default component={NotFound} homePath={homePath} />

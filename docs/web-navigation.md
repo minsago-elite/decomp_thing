@@ -297,3 +297,18 @@ Accessibility acceptance cases for [#217](https://github.com/minsago-elite/decom
 The route/state inventory, wireframes, token calculations and desk walkthroughs are the D0 design
 deliverable. Runtime accessibility, packaged parity and actual workflow behavior require their owning
 implementation gates; publication of this specification does not satisfy those later gates.
+
+
+## Implemented named attempt views
+
+The existing attempt overview remains at `/jobs/{jobId}/runs/{runId}`. Named Activity and
+Evidence views use that exact attempt URL followed by `/activity` or `/evidence`. Each direct
+route retains the job and run identifiers and its own page heading, document title and current
+navigation link. Activity mounts the retained progress/activity panels; Evidence mounts the
+retained exploration and validation panels. The overview preserves its combined presentation.
+Navigation and browser Back/Forward only select read-only views. A result-source link continues
+to use the revision recorded by that attempt; it never advances to the latest job revision.
+
+These routes implement the currently available attempt views. The full workspace Structure,
+Revisions, Artifacts and Git routes, URL-bound continuation/comparison state and physical
+scroll/selection restoration still require their original implementation and qualification.
