@@ -112,7 +112,9 @@ it('retains the polled terminal transition and resumes after its cursor when an 
 const nextJob = 'b'.repeat(32);
 const nextRun: Run = { ...sourceSnapshot.run, jobId: nextJob, runId: 'run_route_b',
   limits: { ...sourceSnapshot.run.limits, wallClockMs: '42' } };
-const oldEvent = fixture<{ data: Events }>('events-observation-poll').data.items[0]!;
+const oldDecoded = decodeContract(JSON.stringify(fixture<{ data: Events }>('events-observation-poll').data.items[0]));
+if (oldDecoded.kind !== 'event' || oldDecoded.type !== 'workflow.observation') throw new Error('Invalid observation fixture');
+const oldEvent = oldDecoded;
 const nextEvent: WebEvent = { ...oldEvent, jobId: nextJob, runId: nextRun.runId, sequence: '101', cursor: 'cursor_route_b_101' };
 const nextSnapshot: Snapshot = { ...sourceSnapshot, run: nextRun,
   oldestCursor: 'cursor_route_b_100', throughCursor: nextEvent.cursor, throughSequence: nextEvent.sequence,
