@@ -81,13 +81,13 @@ internal class GccDriverStructuralInputsV1 private constructor(
     fun requireFullExportIntent(intentBytes: ByteArray): Unit = translateProfileFailure {
         val intent = OracleJson.parseCanonical(intentBytes) as? JsonObject
             ?: profileFail("GCC full-export intent is not a canonical object")
-        GccRetainedCompilerEngineProfile.open(root.resolve(profileFileName(parallel))).use { retained ->
+        GccRetainedCompilerEngineProfile.open(root.resolve(profileFileName(parallel)), engineId).use { retained ->
             retained.requireCurrent()
             require(loadFullExportAuthority(root, retained.suite.analysis.exporterSha256,
                 retained.suite.analysis.ghidraArchive.sha256, parallel) == fullExportProfileSha256
             ) { "GCC full-export authority changed after structural profile admission" }
             requireGccFullExportPlannerPolicy(intent, OracleJson.parseCanonical(retained.policyBytes()),
-                compilerEngineProfileSha256)
+                compilerEngineProfileSha256, engineId)
         }
     }
 
@@ -612,6 +612,7 @@ internal fun requireGccFullExportPlannerPolicy(
     intent: JsonObject,
     retainedPolicy: JsonElement,
     expectedProfileSha256: String,
+    expectedEngineId: String = "cc1",
 ) {
     require(expectedProfileSha256.matches(Regex("[a-f0-9]{64}"))) {
         "GCC structural compiler-engine profile digest is invalid"
@@ -621,8 +622,8 @@ internal fun requireGccFullExportPlannerPolicy(
     require(expected["profileSha256"] == JsonPrimitive(expectedProfileSha256)) {
         "GCC retained planner policy differs from the authenticated structural profile"
     }
-    require(intent["engineId"] == JsonPrimitive("cc1")) {
-        "GCC full-export intent differs from the authenticated cc1 structural input"
+    require(intent["engineId"] == JsonPrimitive(expectedEngineId)) {
+        "GCC full-export intent differs from the authenticated $expectedEngineId structural input"
     }
     require(intent["plannerProfile"] == expected) {
         "GCC full-export intent planner profile differs from the retained compiler-engine profile"
