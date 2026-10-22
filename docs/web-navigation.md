@@ -366,3 +366,17 @@ leaving the route aborts the read and cannot pin a late target response.
 Explicit selection changes retire the pending transition. No token is minted,
 no retry is automatic, and the original request/path/client/query fences and
 snapshot/live/cache resource limits remain in force.
+
+### Refresh retains the displayed page until fresh data is accepted
+
+Explicit Refresh uses the same bounded transition as Next/Previous, with an
+unknown target cursor because its request intentionally omits the old cursor.
+The old displayed snapshot URI stays in place during the fresh read and after
+an ordinary failure. A verified first-page response commits its server-issued
+cursor and rows together. Refresh increments the existing cache generation,
+so a cached first page cannot satisfy it; accepting fresh data keeps normal
+bounded live updates available. A stale route or existing pending transition
+cannot start another Refresh. An older response without snapshot pagination
+commits its cursor-free limitation only after acceptance and retires the same
+transition. Invalid/expired cursor cleanup still clears rows before its one
+bounded fallback read. This does not establish physical viewport restoration.

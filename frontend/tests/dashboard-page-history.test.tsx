@@ -208,13 +208,19 @@ it('keeps the displayed snapshot URL through slow failed and abandoned page read
   await auth.initialize({ kind: 'absent' });
   const first = page([job(1)], 'Page_First', null, 'Page_Second', 1);
   const second = page([job(2)], 'Page_Second', 'Page_First', null, 2);
+  const refreshed = page([job(3)], 'Page_Fresh', null, null, 1);
+  let refreshPending = false;
   const push = vi.spyOn(history, 'pushState');
   const pending: { resolve: (value: { data: Jobs }) => void; reject: (reason: unknown) => void }[] = [];
   let accepted = false;
   transport.get.mockImplementation((kind, path) => {
-    if (kind === 'job') return Promise.resolve({ data: job(1) });
+    if (kind === 'job') return Promise.resolve({ data: path.endsWith(`/${job(2).jobId}`) ? job(2) : job(1) });
     if (kind !== 'jobs') return Promise.reject(new Error('Unexpected inert route read'));
     const cursor = new URL(path, 'http://example.invalid').searchParams.get('cursor');
+    if (cursor === 'Page_Fresh') return Promise.resolve(refreshed);
+    if (cursor === null && refreshPending) {
+      return new Promise<{ data: Jobs }>((resolve, reject) => { pending.push({ resolve, reject }); });
+    }
     if (cursor !== 'Page_Second') return Promise.resolve(first);
     if (accepted) return Promise.resolve(second);
     return new Promise<{ data: Jobs }>((resolve, reject) => { pending.push({ resolve, reject }); });
@@ -261,5 +267,43 @@ it('keeps the displayed snapshot URL through slow failed and abandoned page read
     await act(() => { history.forward(); });
     await screen.findByRole('link', { name: 'snapshot-2.elf' });
     expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    refreshPending = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await waitFor(() => expect(pending).toHaveLength(4));
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    expect(screen.getByRole('link', { name: 'snapshot-2.elf' })).toBeTruthy();
+    await act(() => { pending[3]!.reject(new ApiClientError('http_error', { status: 503 })); });
+    await screen.findByRole('alert');
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    fireEvent.click(screen.getByRole('link', { name: 'snapshot-2.elf' }));
+    await screen.findByRole('heading', { name: 'snapshot-2.elf' });
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-2.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await waitFor(() => expect(pending).toHaveLength(5));
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
+    await screen.findByRole('heading', { name: 'Runtime status' });
+    await act(() => { pending[4]!.resolve(refreshed); });
+    expect(location.pathname).toBe('/nested/runtime');
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-2.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    const refreshPushes = push.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await waitFor(() => expect(pending).toHaveLength(6));
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    expect(push).toHaveBeenCalledTimes(refreshPushes);
+    await act(() => { pending[5]!.resolve(refreshed); });
+    await screen.findByRole('link', { name: 'snapshot-3.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
+    expect(push).toHaveBeenCalledTimes(refreshPushes + 1);
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-2.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Second');
+    await act(() => { history.forward(); });
+    await screen.findByRole('link', { name: 'snapshot-3.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
   } finally { push.mockRestore(); auth.dispose(); }
 });

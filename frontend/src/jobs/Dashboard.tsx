@@ -63,7 +63,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   activeBinding.current = binding;
   const entryPin = useRef<{ query: string; client: typeof client; cursor: string } | null>(null);
   const pageTransition = useRef<{
-    query: string; client: typeof client; fromCursor: string; fromSearch: string; targetCursor: string;
+    query: string; client: typeof client; fromCursor: string; fromSearch: string; targetCursor: string | null;
   } | null>(null);
   const pinReceivedPage = useCallback((page: Jobs['page']): boolean => {
     if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return false;
@@ -78,7 +78,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     if (snapshotPagination(page)) {
       const search = jobPageSearch(selection.filters, page.currentCursor);
       if (moving) {
-        if (page.currentCursor !== transition.targetCursor) return false;
+        if (transition.targetCursor !== null && page.currentCursor !== transition.targetCursor) return false;
         const next = `${dashboardPath.current}?${search}`;
         if (`${location.pathname}${location.search}` !== next) history.pushState(null, '', next);
       } else history.replaceState(null, '', `${dashboardPath.current}?${search}`);
@@ -86,7 +86,12 @@ export function Dashboard({ basePath }: { basePath: string }) {
       entryPin.current = { query, client, cursor: page.currentCursor };
     } else {
       // A fresh read from an older v1 peer has no signed history capability.
-      if (current.cursor) history.replaceState(null, '', `${dashboardPath.current}${query ? `?${query}` : ''}`);
+      if (current.cursor) {
+        const next = `${dashboardPath.current}${query ? `?${query}` : ''}`;
+        if (moving) history.pushState(null, '', next);
+        else history.replaceState(null, '', next);
+      }
+      pageTransition.current = null;
       entryPin.current = null;
     }
     return true;
@@ -275,9 +280,15 @@ export function Dashboard({ basePath }: { basePath: string }) {
     setCursors([null]); setPageIndex(0);
   }
   function reload() {
+    if (location.pathname !== dashboardPath.current || pageTransition.current !== null) return;
     activeBinding.current = null;
-    pageTransition.current = null;
-    if (selection.cursor) {
+    const current = currentFilters(), query = filterSearch(selection.filters);
+    if (data && snapshotPagination(data.page) && current.valid && !current.invalidCursor &&
+      filterSearch(current.filters) === query && current.cursor === data.page.currentCursor) {
+      // null requests a fresh first page; its new signed cursor is not known yet.
+      pageTransition.current = { query, client, fromCursor: data.page.currentCursor, fromSearch: location.search, targetCursor: null };
+      setSelection({ ...selection, cursor: null, invalidCursor: false });
+    } else if (selection.cursor) {
       entryPin.current = null;
       const search = jobPageSearch(selection.filters, null);
       history.pushState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
