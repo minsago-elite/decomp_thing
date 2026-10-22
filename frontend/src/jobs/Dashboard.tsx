@@ -2,7 +2,7 @@ import { formatJobStatus } from './metadataFormat';
 import { dashboardCopy as copy } from '../copy/workspace';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
@@ -44,6 +44,14 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const errorNotice = useRef<HTMLParagraphElement>(null);
+  // Transfer focus after the accepted page has committed, including cached pages
+  // whose rows are replaced synchronously without a loading render.
+  useLayoutEffect(() => {
+    if (phase === 'ready' && data && moveFocus.current && location.pathname === dashboardPath.current) {
+      moveFocus.current = false;
+      results.current?.focus();
+    }
+  }, [phase, data, displayedPageIndex]);
   useEffect(() => {
     if (validationError) form.current?.querySelector<HTMLElement>(`[name="${validationError.field}"]`)?.focus();
   }, [validationError]);
@@ -144,7 +152,6 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (!pinReceivedPage(cached.data.page)) return;
       if (retainedSnapshot) setPageNotice(copy.cachedFirstSnapshot);
       setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
-      if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
       return;
     }
     const controller = new AbortController();
@@ -163,7 +170,6 @@ export function Dashboard({ basePath }: { basePath: string }) {
       if (!pinReceivedPage(page)) return;
       if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: response.data };
       setData(response.data); setDisplayedPageIndex(pageIndex); setPhase('ready');
-      if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (activeBinding.current !== binding || location.pathname !== dashboardPath.current) return;
