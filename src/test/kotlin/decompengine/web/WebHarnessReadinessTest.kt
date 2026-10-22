@@ -32,19 +32,24 @@ class WebHarnessReadinessTest {
     }
 
     @Test
-    fun `a configured harness is ready only when the sandbox helper is executable`() {
+    fun `a configured harness is ready only when every sandbox prerequisite is available`() {
         val environment = mapOf(
             "ACP_HARNESS" to "legacy-openai", "BASE_URL" to "https://example.invalid/v1",
             "API_KEY" to "legacy-key", "MODEL" to "legacy-model",
         )
         val directory = java.nio.file.Files.createTempDirectory(java.nio.file.Path.of("build"), "readiness")
         try {
-            val helper = directory.resolve("bwrap")
-            val missing = WebHarnessReadinessProjector.probeEnvironment(environment, helper)
+            val bwrap = directory.resolve("bwrap")
+            val timeout = directory.resolve("timeout")
+            fun probe(json: Boolean) = WebHarnessReadinessProjector.probeEnvironment(environment, bwrap, timeout) { json }
+            val missing = probe(true)
             assertEquals("SANDBOX_HELPER_MISSING", missing.reasonCode)
             assertFalse(missing.toString().contains("legacy-key"))
-            java.nio.file.Files.createFile(helper).toFile().setExecutable(true)
-            val ready = WebHarnessReadinessProjector.probeEnvironment(environment, helper)
+            java.nio.file.Files.createFile(bwrap).toFile().setExecutable(true)
+            assertEquals("SANDBOX_HELPER_MISSING", probe(true).reasonCode)
+            java.nio.file.Files.createFile(timeout).toFile().setExecutable(true)
+            assertEquals("SANDBOX_HELPER_MISSING", probe(false).reasonCode)
+            val ready = probe(true)
             assertEquals("supported", ready.state)
             assertNull(ready.reasonCode)
         } finally { directory.toFile().deleteRecursively() }
@@ -70,21 +75,34 @@ class WebHarnessReadinessTest {
     }
 
     @Test
-    fun `readiness recovers after a probe that ignores interruption`() {
+    fun `an abandoned probe is not multiplied and readiness recovers once it ends`() {
         val calls = AtomicInteger()
+        val release = CountDownLatch(1)
         var now = 0L
         val projector = WebHarnessReadinessProjector(
             probe = {
-                if (calls.incrementAndGet() == 1) { while (true) { try { Thread.sleep(60_000) } catch (_: InterruptedException) { /* ignore */ } } }
+                if (calls.incrementAndGet() == 1) {
+                    while (release.count > 0) { try { release.await() } catch (_: InterruptedException) { /* ignore */ } }
+                }
                 WebHarnessReadiness("supported", null, "ok")
             },
             timeoutMillis = 100, ttlNanos = 1_000, nanoTime = { now },
         )
         assertEquals("PROBE_TIMEOUT", projector.current().reasonCode)
         now = 1_000
-        assertEquals("supported", projector.current().state)
+        assertEquals("PROBE_TIMEOUT", projector.current().reasonCode)
+        assertEquals(1, calls.get(), "no second probe may start while the abandoned one still runs")
+        release.countDown()
+        val deadline = System.nanoTime() + 5_000_000_000L
+        var state = ""
+        while (state != "supported" && System.nanoTime() < deadline) {
+            now += 1_000
+            state = projector.current().state
+            if (state != "supported") Thread.sleep(20)
+        }
+        assertEquals("supported", state)
         projector.close()
-        now = 2_000
+        now += 1_000
         assertEquals("PROBE_FAILED", projector.current().reasonCode)
     }
 
