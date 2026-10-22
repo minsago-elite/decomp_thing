@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.acp.AcpHarnessFactory
 import decompengine.acp.AcpHarnessKind
+import decompengine.analysis.BundledGhidra
 import decompengine.validation.BwrapCapability
 import java.nio.file.Files
 import java.nio.file.Path
@@ -106,6 +107,7 @@ internal class WebHarnessReadinessProjector(
             bubblewrap: Path = BUBBLEWRAP,
             timeoutHelper: Path = TIMEOUT,
             jsonStatusSupported: (Path) -> Boolean = BwrapCapability::jsonStatusSupported,
+            ghidraPresent: () -> Boolean = ::bundledGhidraPresent,
         ): WebHarnessReadiness {
             val selected = environment["ACP_HARNESS"]
             if (selected != null && selected != "acp" && selected != "legacy-openai") {
@@ -124,7 +126,17 @@ internal class WebHarnessReadinessProjector(
             if (!Files.isExecutable(bubblewrap) || !Files.isExecutable(timeoutHelper) || !jsonStatusSupported(bubblewrap)) {
                 return WebHarnessReadiness("unavailable", "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.")
             }
-            return WebHarnessReadiness("supported", null, "An agent harness and sandbox helpers are available.")
+            if (!ghidraPresent()) {
+                return WebHarnessReadiness("unavailable", "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.")
+            }
+            return WebHarnessReadiness("supported", null, "An agent harness, sandbox helpers and bundled Ghidra are available.")
+        }
+
+        // Presence only: the analysis run re-verifies the bundle, and launching it here would not be bounded.
+        private fun bundledGhidraPresent(): Boolean = try {
+            Files.isDirectory(BundledGhidra.locate().release)
+        } catch (_: Exception) {
+            false
         }
     }
 }

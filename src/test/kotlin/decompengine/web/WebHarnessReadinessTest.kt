@@ -41,7 +41,8 @@ class WebHarnessReadinessTest {
         try {
             val bwrap = directory.resolve("bwrap")
             val timeout = directory.resolve("timeout")
-            fun probe(json: Boolean) = WebHarnessReadinessProjector.probeEnvironment(environment, bwrap, timeout) { json }
+            fun probe(json: Boolean, ghidra: Boolean = true) =
+                WebHarnessReadinessProjector.probeEnvironment(environment, bwrap, timeout, { json }, { ghidra })
             val missing = probe(true)
             assertEquals("SANDBOX_HELPER_MISSING", missing.reasonCode)
             assertFalse(missing.toString().contains("legacy-key"))
@@ -49,6 +50,7 @@ class WebHarnessReadinessTest {
             assertEquals("SANDBOX_HELPER_MISSING", probe(true).reasonCode)
             java.nio.file.Files.createFile(timeout).toFile().setExecutable(true)
             assertEquals("SANDBOX_HELPER_MISSING", probe(false).reasonCode)
+            assertEquals("GHIDRA_MISSING", probe(true, ghidra = false).reasonCode)
             val ready = probe(true)
             assertEquals("supported", ready.state)
             assertNull(ready.reasonCode)
