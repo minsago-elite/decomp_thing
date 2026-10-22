@@ -19,6 +19,7 @@
     "src/test/kotlin/decompengine/oracle",
     "tests/oracle",
     ".github/workflows/gcc-oracle-model.yml",
+    ".github/workflows/llvm-reference-runtime-capture.yml",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
