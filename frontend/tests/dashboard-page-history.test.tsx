@@ -176,7 +176,7 @@ it('pins the first snapshot before opening a job so history returns to the same 
 it('keeps the current first-page entry bound when a live snapshot is accepted', async () => {
   vi.useFakeTimers();
   const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
-  let view: ReturnType<typeof render> | undefined;
+  let view: { unmount: () => void } | undefined;
   try {
     transport.get.mockResolvedValueOnce(page([job(1)], 'Live_First', null, null, 1))
       .mockResolvedValueOnce(page([{ ...job(1), displayFilename: 'snapshot-updated.elf' }], 'Live_Second', null, null, 1));
