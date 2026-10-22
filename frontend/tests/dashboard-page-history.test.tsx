@@ -14,6 +14,9 @@ import { createBrowserSession } from '../src/session/session';
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
 vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
+// Departure controls exercise the real shell while keeping destination leaves inert.
+vi.mock('../src/routes/UploadPage', () => ({ default: () => <h1>Upload a binary</h1> }));
+vi.mock('../src/routes/Runtime', () => ({ default: () => <h1>Runtime status</h1> }));
 const fixture = (name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: never }).data;
 const sample = fixture('job-lossless') as Job;
 const bootstrap = fixture('bootstrap') as Bootstrap;
@@ -73,7 +76,7 @@ it('restores signed snapshot pages through next previous back and forward withou
     .toEqual([null, 'Page_Second', 'Page_First', 'Page_Second', 'Page_First']);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   await screen.findByRole('link', { name: 'snapshot-3.elf' });
-  expect(location.search).toBe('?status=failed');
+  expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
   fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'completed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   await screen.findByRole('link', { name: 'snapshot-4.elf' });
@@ -93,7 +96,7 @@ it('replaces an expired page entry with one filter-preserving first-page read an
   render(<Dashboard basePath="/nested" />);
   expect(screen.getByText('Loading saved page…')).toBeTruthy();
   await screen.findByRole('link', { name: 'snapshot-3.elf' });
-  expect(location.search).toBe('?status=failed');
+  expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
   expect(history.length).toBe(length);
   expect(screen.getByText('The saved job page cannot be restored. Reading the current first page with the same filters.')).toBeTruthy();
   expect(transport.get.mock.calls.map(([, path]) => path)).toEqual([
@@ -112,12 +115,16 @@ it('pins the first snapshot before opening a job so history returns to the same 
   }, '/nested');
   await auth.initialize({ kind: 'absent' });
   const selected = job(1), first = page([selected], 'Page_First', null, null, 1);
-  let changed = false;
+  const fresh = page([job(3)], 'Page_Fresh', null, null, 1);
+  const newest = page([job(5)], 'Page_Newest', null, null, 1);
+  const final = page([job(7)], 'Page_Final', null, null, 1);
+  const snapshots = new Map([['Page_First', first], ['Page_Fresh', fresh], ['Page_Newest', newest], ['Page_Final', final]]);
+  let changed = false, latest = fresh;
   transport.get.mockImplementation((kind, path) => {
     if (kind === 'job') return Promise.resolve({ data: selected });
     if (kind !== 'jobs') return Promise.reject(new Error('Unexpected inert route read'));
     const cursor = new URL(path, 'http://example.invalid').searchParams.get('cursor');
-    return Promise.resolve(cursor === 'Page_First' || !changed ? first : page([job(3)], 'Page_Fresh', null, null, 1));
+    return Promise.resolve(cursor ? snapshots.get(cursor)! : changed ? latest : first);
   });
   try {
     render(<App basePath="/nested" session={auth} />);
@@ -132,5 +139,59 @@ it('pins the first snapshot before opening a job so history returns to the same 
     await act(() => { history.forward(); });
     await screen.findByRole('heading', { name: 'snapshot-1.elf' });
     await waitFor(() => expect(location.pathname).toBe(`/nested/jobs/${selected.jobId}`));
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-1.elf' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await screen.findByRole('link', { name: 'snapshot-3.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Fresh');
+    fireEvent.click(screen.getByRole('link', { name: 'Upload' }));
+    await screen.findByRole('heading', { name: 'Upload a binary' });
+    latest = newest;
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-3.elf' });
+    expect(screen.queryByRole('link', { name: 'snapshot-5.elf' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await screen.findByRole('link', { name: 'snapshot-5.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Newest');
+    fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
+    await screen.findByRole('heading', { name: 'Runtime status' });
+    latest = final;
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-5.elf' });
+    expect(screen.queryByRole('link', { name: 'snapshot-7.elf' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+    await screen.findByRole('link', { name: 'snapshot-7.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Final');
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'snapshot-5.elf' });
+    latest = page([job(9)], 'Page_AfterDeparture', null, null, 1);
+    await act(() => { history.forward(); });
+    await screen.findByRole('link', { name: 'snapshot-7.elf' });
+    expect(location.search).toBe('?status=failed&cursor=Page_Final');
+    expect(screen.queryByRole('link', { name: 'snapshot-9.elf' })).toBeNull();
   } finally { auth.dispose(); }
+});
+
+
+it('keeps the current first-page entry bound when a live snapshot is accepted', async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  let view: ReturnType<typeof render> | undefined;
+  try {
+    transport.get.mockResolvedValueOnce(page([job(1)], 'Live_First', null, null, 1))
+      .mockResolvedValueOnce(page([{ ...job(1), displayFilename: 'snapshot-updated.elf' }], 'Live_Second', null, null, 1));
+    view = render(<Dashboard basePath="/nested" />);
+    await act(async () => { await Promise.resolve(); });
+    const focused = screen.getByRole('link', { name: 'snapshot-1.elf' }); focused.focus();
+    expect(location.search).toBe('?status=failed&cursor=Live_First');
+    const length = history.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByRole('link', { name: 'snapshot-updated.elf' })).toBe(focused);
+    expect(document.activeElement).toBe(focused);
+    expect(location.search).toBe('?status=failed&cursor=Live_Second');
+    expect(history.length).toBe(length);
+    expect(transport.get.mock.calls.map(([, path]) => path)).toEqual([
+      '/jobs?status=failed&limit=50', '/jobs?status=failed&limit=50',
+    ]);
+  } finally { view?.unmount(); visibility.mockRestore(); vi.useRealTimers(); }
 });

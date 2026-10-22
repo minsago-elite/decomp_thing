@@ -319,9 +319,12 @@ scroll/selection restoration still require their original implementation and qua
 Current job-page responses supply opaque signed `currentCursor` and `previousCursor` values and
 an explicit `pageNumber`. The browser never parses an offset from a cursor or manufactures a
 return token. Moving between pages pushes the returned cursor into the applied-filter URL.
-Before leaving the current first page, its existing history entry is replaced with its server
-cursor, so Back can request the same retained snapshot instead of scanning a changed library.
-Job links also pin that first entry before ordinary client navigation.
+Whenever a page snapshot is accepted for display, its current history entry is replaced with
+that server cursor before the rows become ready. This includes accepted live snapshots, so
+Upload, Runtime, job links and browser Back departures all retain the displayed snapshot.
+Restoring an entry reads its signed snapshot; a newly opened first page can continue bounded
+live observations while replacing its own entry, without adding history or adopting its URL
+cursor as a new read request. Binding and pathname checks fence obsolete responses.
 
 Pinned pages are read-only snapshots and do not run live refreshes. Explicit Refresh returns to
 the current first page. Invalid saved cursor syntax is removed with a visible explanation before
