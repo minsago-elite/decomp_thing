@@ -169,8 +169,11 @@ class WebSessionRealRoutesTest {
         } finally { server.stop() }
     }
 
+    /** One accepted GET resource shape: its negotiated media type, HEAD admission and the outcome of an authenticated read. */
+    private class Shape(val path: String, val accept: String = "application/json", val head: Boolean = false, val status: Int, val code: String? = null)
+
     @Test
-    fun `every readable route shape refuses unauthenticated and logged-out requests and no authenticated GET changes storage`() {
+    fun `every readable route shape refuses unauthenticated and logged-out requests, reaches its own handler, and no authenticated GET changes storage`() {
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
         val run = WorkflowAttemptStore.open(root).use { owner ->
@@ -188,20 +191,39 @@ class WebSessionRealRoutesTest {
             val api = "/w/api/v1"
             val r = "$api/jobs/${job.id}/runs/${run.runId}"
             val revision = "$r/revisions/rev_1"
-            // One path per accepted GET resource shape in WebApiController's route allowlist; unknown ids are deliberate.
-            val readable = listOf(
-                "$api/bootstrap", "$api/jobs", "$api/recovery", "$api/agent/preflight", "$api/uploads/${"a".repeat(32)}",
-                "$api/jobs/${job.id}", "$api/jobs/${job.id}/runs", r, "$r/snapshot", "$r/events", "$r/progress-pin",
-                "$r/reports/exploration", "$r/reports/revision-validation", "$r/validation-history", "$r/source-catalog",
-                "$revision/sources", "$revision/source-directories/dir_1", "$revision/source-files/file_1",
-                "$revision/source-files/file_1/chunk", "$revision/source-files/file_1/content",
-                "$api/jobs/${job.id}/artifacts/artifact_1/content",
+            val bytes = "application/octet-stream"
+            // One row per accepted GET resource shape in WebApiController's route allowlist, with the outcome of its own
+            // handler for these fixtures (unknown revision/file/artifact ids are deliberate).
+            val shapes = listOf(
+                Shape("$api/bootstrap", status = 200),
+                Shape("$api/jobs", status = 200),
+                Shape("$api/recovery", head = true, status = 200),
+                Shape("$api/agent/preflight", status = 200),
+                Shape("$api/uploads/${"a".repeat(32)}", status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}", status = 200),
+                Shape("$api/jobs/${job.id}/runs", status = 200),
+                Shape(r, status = 200),
+                Shape("$r/snapshot", status = 200),
+                Shape("$r/events", status = 200),
+                Shape("$r/progress-pin", status = 200),
+                Shape("$r/reports/exploration", status = 200),
+                Shape("$r/reports/revision-validation", head = true, status = 400, code = "VALIDATION_FAILED"),
+                Shape("$r/validation-history", head = true, status = 200),
+                Shape("$r/source-catalog", status = 503, code = "SOURCE_CATALOG_UNAVAILABLE"),
+                Shape("$revision/sources", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-directories/dir_1", head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
+                Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
+                Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
+                Shape("$revision/source-files/file_1/content", accept = bytes, head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
             )
-            fun get(path: String, cookie: String?, method: String = "GET"): HttpResponse<String> {
-                val builder = HttpRequest.newBuilder(URI(origin + path)).timeout(Duration.ofSeconds(5)).header("Accept", "application/json")
+            fun get(shape: Shape, cookie: String?, method: String = "GET"): HttpResponse<String> {
+                val builder = HttpRequest.newBuilder(URI(origin + shape.path)).timeout(Duration.ofSeconds(5)).header("Accept", shape.accept)
                 if (cookie != null) builder.header("Cookie", cookie)
                 return http.send(builder.method(method, HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString())
             }
+            fun errorCode(response: HttpResponse<String>): String? =
+                Regex("\"code\":\"([A-Z_]+)\"").find(response.body())?.groupValues?.get(1)
             fun session(): Pair<String, String> {
                 val response = http.send(HttpRequest.newBuilder(URI("$origin$api/session")).timeout(Duration.ofSeconds(5))
                     .header("Origin", origin).header("Content-Type", "application/json").header("Accept", "application/json")
@@ -210,27 +232,35 @@ class WebSessionRealRoutesTest {
                 val csrf = Json.parseToJsonElement(response.body()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
                 return response.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';') to csrf
             }
-            // HEAD is admitted only by the two content routes; elsewhere the method policy answers 405 before any data is read.
-            val headAllowed = setOf("$api/jobs/${job.id}/artifacts/artifact_1/content", "$revision/source-files/file_1/content")
-            fun assertRefused(path: String, cookie: String?, context: String) {
-                assertEquals(401, get(path, cookie).statusCode(), "GET $path $context")
-                val head = get(path, cookie, "HEAD").statusCode()
-                if (path in headAllowed) assertEquals(401, head, "HEAD $path $context") else assertTrue(head == 401 || head == 405, "HEAD $path $context ($head)")
+            // GET is always 401 without a usable session. HEAD is 401 on routes that admit it; elsewhere the method policy answers 405.
+            fun assertRefused(cookie: String?, context: String) {
+                for (shape in shapes) {
+                    assertEquals(401, get(shape, cookie).statusCode(), "GET ${shape.path} $context")
+                    val head = get(shape, cookie, "HEAD").statusCode()
+                    if (shape.head) assertEquals(401, head, "HEAD ${shape.path} $context") else assertEquals(405, head, "HEAD ${shape.path} $context")
+                }
             }
-            // No session at all.
-            for (path in readable) assertRefused(path, null, "without a session")
+            assertRefused(null, "without a session")
             val (cookie, csrf) = session()
             val before = storageDigest()
-            val statuses = readable.associateWith { path -> get(path, cookie).statusCode() }
-            for (path in readable) get(path, cookie, "HEAD")
-            assertEquals(before, storageDigest(), "an authenticated GET/HEAD changed stored state: $statuses")
-            assertTrue(statuses.values.none { it == 401 }, "an authenticated read was treated as unauthenticated: $statuses")
+            // Each authenticated GET reaches its own handler: the expected status and error code, never the generic unknown-route error.
+            for (shape in shapes) {
+                val response = get(shape, cookie)
+                assertTrue(!response.body().contains("requested API route is unavailable"), "${shape.path} fell through to the unknown-route error")
+                assertEquals(shape.status, response.statusCode(), "GET ${shape.path}: ${response.body().take(200)}")
+                if (shape.code != null) assertEquals(shape.code, errorCode(response), "GET ${shape.path}")
+                if (shape.code == null) assertEquals(null, errorCode(response), "GET ${shape.path}")
+                val head = get(shape, cookie, "HEAD")
+                if (shape.head) assertTrue(head.statusCode() != 401 && head.statusCode() != 405, "HEAD ${shape.path} admitted routes answer (${head.statusCode()})")
+                else assertEquals(405, head.statusCode(), "HEAD ${shape.path}")
+            }
+            assertEquals(before, storageDigest(), "an authenticated GET/HEAD changed stored state")
             // Logged out: the same cookie reaches none of them.
             val logout = http.send(HttpRequest.newBuilder(URI("$origin$api/session")).timeout(Duration.ofSeconds(5)).header("Origin", origin)
                 .header("Cookie", cookie).header("X-CSRF-Token", csrf).header("Accept", "application/json").header("Content-Type", "application/json")
                 .method("DELETE", HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString())
             assertEquals(204, logout.statusCode())
-            for (path in readable) assertRefused(path, cookie, "after logout")
+            assertRefused(cookie, "after logout")
         } finally { server.stop() }
     }
 }
