@@ -58,9 +58,12 @@ Open the second URL in your browser. The legacy workbench prints the same pair, 
 ## Sessions
 
 - The printed link is a **single-use, five-minute** local session link. Opening it removes the token from the address
-  bar and starts a session; the session lasts **eight hours**. Its cookie is `HttpOnly; SameSite=Strict`.
-- Using the link a second time fails with `BOOTSTRAP_REQUIRED: Open a newly issued local browser link.` Restart the
-  launcher for a new link; it prints a fresh one on every start.
+  bar and starts a session. A session ends after **30 minutes of inactivity**, or **eight hours** after it started,
+  whichever comes first (the cookie's `Max-Age` is eight hours, which is the ceiling, not the usual lifetime). Its cookie
+  is `HttpOnly; SameSite=Strict`.
+- Using the link a second time fails with `BOOTSTRAP_REQUIRED: Open a newly issued local browser link.` Opening it
+  after the five minutes have passed fails with a different code, `BOOTSTRAP_EXPIRED: The local browser link expired.
+  Issue a new link.` Either way, restart the launcher for a new link; it prints a fresh one on every start.
 - Without a session, the API answers `401 SESSION_REQUIRED: Open a local browser link to start a session.` The public
   pages (`/`, `/runtime`) still load so the interface can explain itself.
 - **Sign out** ends the session explicitly. Nothing is started or changed by creating a session, navigating or
@@ -73,11 +76,14 @@ Verified against the running preview:
 - **Runtime status** (`/runtime`): what the server reports about workflow availability. The server currently reports a
   single `workflows` capability as `unavailable` with the message *"Workflow actions are unavailable in this preview."*
   and overall readiness as `degraded`. That is expected, not a fault.
-- **Upload a binary** (`/upload`): ELF files up to **32 MiB** (the server's reported `maxUploadBytes`, 33,554,432). The
-  page shows progress. A successful upload creates a job with status `uploaded`; **no analysis starts**. The server
+- **Upload a binary** (`/upload`): the server's reported `maxUploadBytes` is **32 MiB (33,554,432 bytes) for the whole
+  upload request**, including its multipart framing, so a file at or just under 32 MiB can be rejected with
+  `UPLOAD_TOO_LARGE`; keep files comfortably smaller. The page shows progress. A successful upload creates a job with status `uploaded`; **no analysis starts**. The server
   reads the ELF header and shows format, endianness, object type, machine, OS ABI and entry point.
-- **Retrying an interrupted upload is safe.** If the connection drops and the result is unconfirmed, the page retries
-  with the same idempotency key; the server returns the **same job** and does not create a duplicate.
+- **Retrying an interrupted upload is safe, and it is yours to start.** The page does **not** retry automatically. If the
+  connection drops or the result is unconfirmed, it keeps the upload's retry identity for the tab and asks you to choose
+  the original file again (same name and size) and retry. The server then returns the **same job** and does not create
+  a duplicate (verified at the API with a repeated idempotency key).
 - **Job library** (`/`): your uploaded jobs, newest first by default, 50 per page (up to 200). You can filter by
   filename, workflow state and a created-between range, and sort oldest or newest first. Applied filters become part of
   the address, so a filtered view can be bookmarked or shared.
@@ -85,8 +91,14 @@ Verified against the running preview:
   attempts.
 
 **Not available in the preview:** starting exploration, reconstruction, builds, validation or repair ("*… is unavailable
-in this preview*"), editing or deleting a job, downloading artifacts or browsing source (the server reports a source
-chunk limit of 0), and Git workflows. Use the legacy workbench for analysis workflows.
+in this preview*"), editing or deleting a job, and Git workflows. Use the legacy workbench for analysis workflows.
+
+**Recorded results.** The preview cannot create attempts, but it can show ones that already exist in the data directory
+(for example, produced earlier by the legacy workbench). The server and interface have routes for browsing a result
+revision's source directories and file metadata, downloading eligible archived source files ("Download complete
+recorded input") and downloading retained exploration and validation JSON. The server's reported source chunk limit of
+0 disables **inline source previews**, not these. **Not exercised in my test run**, which used only fresh uploads, so
+treat this paragraph as read from the code and tests, not observed.
 
 ## Complete, validated, accepted
 
@@ -144,9 +156,10 @@ harness (see the README).
 | You see | Meaning and what to do |
 |---|---|
 | `Cannot bind web server to 127.0.0.1:8000. Check --host or choose an unused --port.` | The port is busy. Pick another with `--port`. |
-| `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was used or expired. Restart the launcher and open the new link. |
+| `BOOTSTRAP_REQUIRED` / "Open a newly issued local browser link." | The link was already used (or does not match). Restart the launcher and open the new link. |
+| `BOOTSTRAP_EXPIRED` / "The local browser link expired. Issue a new link." | More than five minutes passed before the link was opened. Restart the launcher and open the new link. |
 | `SESSION_REQUIRED` / "Open a local browser link to start a session." | You are not signed in, or the session ended. Open the launcher's link. |
-| "The local session expired or is unavailable. Reconnect the session to read this job." | Your eight-hour session ended. Restart the launcher for a new link. |
+| "The local session expired or is unavailable. Reconnect the session to read this job." | Your session ended (30 minutes idle, or eight hours in total). Restart the launcher for a new link. |
 | "This job is unavailable. It may have been removed." | The job id does not exist (or was removed from the data directory). The page keeps a **Return to jobs** link. |
 | "This interface cannot read the server's response format. Refresh the page before trying to read this job again." | The page and the server are different builds. Refresh the page; if it persists, restart the launcher. |
 | "Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying." | A stored job directory is damaged or unreadable. The server will not show a partial list; check the data directory. |
