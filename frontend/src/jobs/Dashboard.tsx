@@ -155,7 +155,11 @@ export function Dashboard({ basePath }: { basePath: string }) {
     const search = filterSearch(filters);
     try {
       const checked = jobFilters(search);
-      history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
+      // A changed filter set is a navigable step, so Back and Forward restore the previous results; resubmitting
+      // the same filters replaces the entry instead of stacking identical ones.
+      const next = `${location.pathname}${search ? `?${search}` : ''}`;
+      if (next === `${location.pathname}${location.search}`) history.replaceState(null, '', next);
+      else history.pushState(null, '', next);
       setSelection({ filters: checked, valid: true }); setDraft(checked);
       setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); moveFocus.current = true;
     } catch (failure) {

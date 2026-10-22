@@ -102,6 +102,38 @@ it('persists submitted filters in the URL and distinguishes no matches from an e
   expect(location.search).toBe('');
 });
 
+it('makes each applied filter set a history step so back and forward restore the previous results', async () => {
+  history.replaceState(null, '', '/');
+  transport.get.mockResolvedValue(page([]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  const start = history.length;
+  fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'failed' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50'));
+  expect(history.length).toBe(start + 1);
+  // Resubmitting the same filters must not stack identical entries.
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  expect(history.length).toBe(start + 1);
+  fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'oldest' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&sort=oldest&limit=50'));
+  expect(location.search).toBe('?status=failed&sort=oldest');
+  expect(history.length).toBe(start + 2);
+  history.back();
+  await waitFor(() => expect(location.search).toBe('?status=failed'));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50'));
+  expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed');
+  expect(screen.getByLabelText('Sort by')).toHaveProperty('value', 'newest');
+  history.back();
+  await waitFor(() => expect(location.search).toBe(''));
+  await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?limit=50'));
+  expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', '');
+  history.forward();
+  await waitFor(() => expect(location.search).toBe('?status=failed'));
+  await waitFor(() => expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed'));
+});
+
 it('retains stale rows after failed refresh and clears private rows on denied access', async () => {
   transport.get.mockResolvedValueOnce(page([job(1)])).mockRejectedValueOnce(new ApiClientError('timeout'))
     .mockRejectedValueOnce(new ApiClientError('http_error', { status: 401 }));
