@@ -201,7 +201,11 @@ it('keeps the earlier receipt when a focused row defers a newer library response
   expect(screen.getByLabelText('Displayed job library').querySelector('time')?.dateTime).not.toBe(at);
   expect(screen.getByLabelText('Displayed job library').textContent).toContain('less than 10 seconds ago');
   expect(transport.get).toHaveBeenCalledTimes(3);
-  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+  view.unmount();
+  // Settle pending paint tasks; leaked intervals and later API reads must still fail.
+  await tick(120_000);
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it('ages a retained empty library after failure and removes its receipt after denial', async () => {
@@ -220,5 +224,9 @@ it('ages a retained empty library after failure and removes its receipt after de
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' })); await flush();
   expect(screen.queryByLabelText('Displayed job library')).toBeNull();
   expect(transport.get).toHaveBeenCalledTimes(3);
-  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+  view.unmount();
+  // Settle pending paint tasks; leaked intervals and later API reads must still fail.
+  await tick(120_000);
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(vi.getTimerCount()).toBe(0);
 });
