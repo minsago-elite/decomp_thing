@@ -91,15 +91,18 @@ it('persists submitted filters in the URL and distinguishes no matches from an e
   transport.get.mockResolvedValue(page([]));
   render(<Dashboard basePath="" />);
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  const historyLength = history.length;
   fireEvent.input(screen.getByLabelText('Filename search'), { target: { value: 'my binary' } });
   fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'failed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   expect(await screen.findByText('No jobs match these filters.')).toBeTruthy();
   expect(location.search).toBe('?search=my+binary&status=failed');
+  expect(history.length).toBe(historyLength + 1);
   expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?search=my+binary&status=failed&limit=50');
   fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
   expect(location.search).toBe('');
+  expect(history.length).toBe(historyLength + 2);
 });
 
 it('makes each applied filter set a history step so back and forward restore the previous results', async () => {

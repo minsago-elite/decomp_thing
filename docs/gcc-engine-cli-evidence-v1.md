@@ -4,6 +4,25 @@ This is a narrow source-contract record for issue #291, captured against source
 revision `bf2501568f39ab52b23492dfc37839bb81895587`. It records repository facts
 only; it is not a hosted execution receipt or a production qualification claim.
 
+## Full-export policy consistency before worker admission
+
+For a normal full-recovery export, the CLI authenticates its fixed structural input set and
+reopens the retained compiler-engine policy before creating the operation coordinator. The
+selected intent must name cc1, repeat the exact authenticated raw-profile digest and equal the
+whole retained policy, including referenced inputs and planner/layout settings. A different
+profile with similar artifacts or an unchanged digest alongside changed policy data is refused
+before worker execution. Final full-export receipt/model/profile revalidation remains unchanged.
+
+Five authored JSON-only controls cover exact copies, foreign profile identity, changed policy
+data, foreign/missing/malformed selections and unbound expected policy. They create no profile
+files, owner, native worker, host/controller context or credentialed request. They require their
+own Actions evidence; this source change does not claim a completed export or causal timing data.
+
+The checked serial profile, structural authority, resource ceilings and production target remain
+unchanged. A proposed parallel/exporter-generation profile still needs its own reviewed structural
+authority, deterministic fresh/resume and complete authenticated execution/scoring evidence. This
+early consistency check supplies no profile admission, retry, release or scoring capability.
+
 ## Planner capture checkpoint handoff
 
 The retained planner owner now passes its same-process admitted operation

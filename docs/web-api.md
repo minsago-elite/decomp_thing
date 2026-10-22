@@ -149,6 +149,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
+| `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
+| `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
@@ -326,6 +328,18 @@ state until workers report cleanup; a completion race returns the authoritative 
 Retry/resume create a distinct run referencing the previous attempt and preserve its evidence.
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
+
+### Admission and overload
+
+The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
+every worker and queue slot taken is answered immediately, without routing, session lookup or storage access, with
+`429` and the fixed error code `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`,
+`Cache-Control: no-store`, `Connection: close`), in the same error envelope as every other denial. The 30-second guidance
+matches the longest ordinary request deadline, after which a slow request releases its worker. A small responder
+pool (two threads, no queue) produces these answers, so overload never buffers more than the main queue holds. If
+that responder pool is also busy, the connection is closed without a response; clients should treat a reset
+connection like `SERVER_BUSY`. Each admitted request's exchange is closed at a 30-second deadline (120 seconds for
+multipart uploads); the release of a worker pinned by a slow client at that deadline is not yet covered by a test.
 
 ## Bootstrap and capability truth
 
@@ -961,6 +975,21 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+## Agent preflight and harness readiness
+
+`GET /api/v1/agent/preflight` returns `agentPreflight` with `status` (`idle`, `inspecting`, `ready`, `failed`, `cancelled`), an application-generated `inspectionId` and a fixed `reasonCode` (`AGENT_PREFLIGHT_FAILED` only). `POST` with the exact body `{"action":"inspect"}` starts one inspection and returns `202`; a second request while one runs returns `409 AGENT_PREFLIGHT_IN_PROGRESS`. The inspection runs the configured harness's `preflight(WEB)` (initialize negotiation, no session, no model prompt) and is cancelled when the server stops. Exception text, inventories and configuration are discarded and never appear in the response.
+
+The schema ties the detail fields to the status: `idle` has neither an inspection id nor a reason; `inspecting`, `ready` and `cancelled` have an id and no reason; `failed` has an id and exactly `AGENT_PREFLIGHT_FAILED`. The typed client submits the `POST` with the CSRF token only: this action has no resource version, so `If-Match` and `Idempotency-Key` are refused rather than given an undefined meaning. Server shutdown cancels a running inspection and waits for its provider cleanup before returning.
+
+The server rejects resource conditional headers and replay keys before inspection work. The typed
+exception is confined to POST, the exact route and request/response kinds; upload-only options are
+also refused. Other mutation guards remain unchanged. Each call performs one fetch. After ambiguous
+transport failure, read the current status and require a fresh explicit operator action; do not
+automatically replay the POST. Shutdown closes admission, publishes cancellation immediately and
+waits for the owned callback cleanup while preserving the shutdown caller's interrupt status.
+
+Passive bootstrap never starts the agent. Its `harness` capability reports configuration, sandbox-helper and bundled-Ghidra presence, and folds in only the fixed `status` of the last explicit inspection: `failed` demotes a configured harness to `unavailable`/`AGENT_PREFLIGHT_FAILED`; any other status leaves it `supported` with a message that agent readiness is unproven (or, for `ready`, that the last inspection started the agent). It does not establish that any job can start work.
 
 ## Implemented progress-pin policy endpoint
 

@@ -40,12 +40,14 @@ internal object GccBundledCliCommand {
             options.binary, options.profile, options.archive, options.output.resolve("inputs"), journal, options.scratch,
             options.diskPolicy, invocation, fullRecoveryExport = options.fullRecoveryExport,
             nativeCallObservations = options.nativeCallObservations)
+        if (options.fullRecoveryExport) {
+            GccDriverStructuralInputsV1.load(options.profile.parent).requireFullExportIntent(intent.canonicalBytes)
+        }
         return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use { owner ->
             if (options.nativeCallObservations) {
                 owner.executeNativeCallObservations()
                 owner.publishNativeCallCliResult()
             } else if (options.fullRecoveryExport) {
-                GccDriverStructuralInputsV1.load(options.profile.parent)
                 val fullExport = owner.executeFullExport()
                 val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent)
                 owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
