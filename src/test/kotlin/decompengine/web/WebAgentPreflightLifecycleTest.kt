@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** Callback/latch data only: no HTTP server, ACP harness, provider, process or host fixture. */
@@ -20,6 +21,17 @@ class WebAgentPreflightLifecycleTest {
     @Test
     fun `interrupted shutdown drains callback cleanup and restores caller interruption`() {
         exerciseClose(interruptedCaller = true)
+    }
+
+    @Test
+    fun `explicit inspection header policy rejects resource preconditions and keyed replay`() {
+        requireAgentPreflightMutationHeaders(emptySet())
+        requireAgentPreflightMutationHeaders(setOf("Origin", "Content-Type", "X-CSRF-Token"))
+        for (name in listOf("If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Idempotency-Key")) {
+            for (variant in listOf(name, name.lowercase(), name.uppercase())) {
+                assertFailsWith<WebAccessDenied> { requireAgentPreflightMutationHeaders(setOf("Origin", variant)) }
+            }
+        }
     }
 
     private fun exerciseClose(interruptedCaller: Boolean) {

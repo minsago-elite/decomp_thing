@@ -733,6 +733,18 @@
     {
       "file": "fixtures/invalid-validation-history-failure-borrow.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/agent-preflight-inspecting.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/agent-preflight-cancelled.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-identity.json",
+      "valid": false
     }
   ]
 }

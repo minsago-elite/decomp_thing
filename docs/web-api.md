@@ -970,6 +970,13 @@ cutover. Slow-socket qualification and timed retention remain outstanding under 
 
 The schema ties the detail fields to the status: `idle` has neither an inspection id nor a reason; `inspecting`, `ready` and `cancelled` have an id and no reason; `failed` has an id and exactly `AGENT_PREFLIGHT_FAILED`. The typed client submits the `POST` with the CSRF token only: this action has no resource version, so `If-Match` and `Idempotency-Key` are refused rather than given an undefined meaning. Server shutdown cancels a running inspection and waits for its provider cleanup before returning.
 
+The server rejects resource conditional headers and replay keys before inspection work. The typed
+exception is confined to POST, the exact route and request/response kinds; upload-only options are
+also refused. Other mutation guards remain unchanged. Each call performs one fetch. After ambiguous
+transport failure, read the current status and require a fresh explicit operator action; do not
+automatically replay the POST. Shutdown closes admission, publishes cancellation immediately and
+waits for the owned callback cleanup while preserving the shutdown caller's interrupt status.
+
 Passive bootstrap never starts the agent. Its `harness` capability reports configuration, sandbox-helper and bundled-Ghidra presence, and folds in only the fixed `status` of the last explicit inspection: `failed` demotes a configured harness to `unavailable`/`AGENT_PREFLIGHT_FAILED`; any other status leaves it `supported` with a message that agent readiness is unproven (or, for `ready`, that the last inspection started the agent). It does not establish that any job can start work.
 
 ## Implemented progress-pin policy endpoint

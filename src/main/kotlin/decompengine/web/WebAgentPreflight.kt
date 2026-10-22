@@ -89,6 +89,14 @@ internal class WebAgentPreflight(private val inspect: (AgentCancellation) -> Uni
     companion object { const val REASON_FAILED = "AGENT_PREFLIGHT_FAILED" }
 }
 
+/** This explicit inspection has no resource version or idempotent replay contract. */
+internal fun requireAgentPreflightMutationHeaders(names: Set<String>) {
+    val unsupported = setOf("if-match", "if-none-match", "if-modified-since", "if-unmodified-since", "idempotency-key")
+    if (names.any { it.lowercase(java.util.Locale.ROOT) in unsupported }) {
+        throw WebAccessDenied(400, "INVALID_HEADER", "Agent inspections do not accept resource preconditions or idempotency keys.")
+    }
+}
+
 /** `GET`/`POST /api/v1/agent/preflight`: read the last result, or explicitly start one inspection. */
 internal class WebAgentPreflightController(
     private val access: LocalWebAccess,
@@ -104,6 +112,7 @@ internal class WebAgentPreflightController(
             send(exchange, 200, preflight.snapshot())
             return
         }
+        requireAgentPreflightMutationHeaders(exchange.requestHeaders.keys)
         readRequest(exchange)
         when (val started = preflight.start()) {
             is WebAgentPreflight.Start.Started -> {

@@ -43,7 +43,7 @@ export function createApiClient(options: ClientOptions) {
     // The agent preflight is a single-flight server action with no resource version: session, Origin and
     // CSRF authorize it, and a caller-supplied If-Match or idempotency key would have undefined meaning.
     const unversioned = method === 'POST' && path === '/agent/preflight';
-    if (unversioned && (session || upload || settings.ifMatch !== undefined || settings.idempotencyKey !== undefined)) throw new ApiClientError('invalid_request');
+    if (unversioned && (session || upload || settings.ifMatch !== undefined || settings.idempotencyKey !== undefined || settings.uploadId !== undefined)) throw new ApiClientError('invalid_request');
     if (mutating) {
       if (!session && !upload && !unversioned && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
       if (!session && !unversioned && (!settings.idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey))) throw new ApiClientError('invalid_request');
@@ -155,10 +155,12 @@ export function createApiClient(options: ClientOptions) {
     },
     async post<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
       const session = requestKind === 'sessionStartRequest';
-      if ((requestKind === 'agentPreflightRequest') !== (path === '/agent/preflight')) throw new ApiClientError('invalid_request');
+      if ((requestKind === 'agentPreflightRequest') !== (path === '/agent/preflight')
+        || (requestKind === 'agentPreflightRequest' && kind !== 'agentPreflight')) throw new ApiClientError('invalid_request');
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
     },
     async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
+      if (requestKind === 'agentPreflightRequest') throw new ApiClientError('invalid_request');
       return await request(kind, path, 'PUT', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
