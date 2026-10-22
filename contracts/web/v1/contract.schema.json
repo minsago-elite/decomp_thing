@@ -4477,45 +4477,92 @@
       "additionalProperties": false
     },
     "agentPreflight": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "type": "string",
-          "enum": [
-            "idle",
-            "inspecting",
-            "ready",
-            "failed",
-            "cancelled"
-          ]
-        },
-        "inspectionId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "idle"
             },
-            {
+            "inspectionId": {
+              "type": "null"
+            },
+            "reasonCode": {
               "type": "null"
             }
-          ]
+          },
+          "required": [
+            "status",
+            "inspectionId",
+            "reasonCode"
+          ],
+          "additionalProperties": false
         },
-        "reasonCode": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "inspecting"
+            },
+            "inspectionId": {
               "$ref": "#/definitions/id"
             },
-            {
+            "reasonCode": {
               "type": "null"
             }
-          ]
+          },
+          "required": [
+            "status",
+            "inspectionId",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "cancelled"
+              ]
+            },
+            "inspectionId": {
+              "$ref": "#/definitions/id"
+            },
+            "reasonCode": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "status",
+            "inspectionId",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "inspectionId": {
+              "$ref": "#/definitions/id"
+            },
+            "reasonCode": {
+              "const": "AGENT_PREFLIGHT_FAILED"
+            }
+          },
+          "required": [
+            "status",
+            "inspectionId",
+            "reasonCode"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "status",
-        "inspectionId",
-        "reasonCode"
-      ],
-      "additionalProperties": false
+      ]
     },
     "agentPreflightRequest": {
       "type": "object",

@@ -12,6 +12,26 @@ const response = (name = 'session', status = 200, headers: Record<string, string
 afterEach(() => { vi.useRealTimers(); });
 
 describe('bounded v1 fetch client', () => {
+  it('submits an agent preflight with CSRF only and refuses versioned or mismatched forms', async () => {
+    const csrf = 'c'.repeat(32);
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(response('agent-preflight-idle', 202, { 'X-Request-ID': 'request_preflight_idle' })));
+    const client = createApiClient({ basePath: '/nested', fetch: fetcher });
+    await expect(client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf }))
+      .resolves.toHaveProperty('kind', 'agentPreflight');
+    const sent = fetcher.mock.calls[0]?.[1]; const headers = new Headers(sent?.headers);
+    expect(sent?.method).toBe('POST'); expect(headers.get('X-CSRF-Token')).toBe(csrf);
+    expect(headers.has('If-Match')).toBe(false); expect(headers.has('Idempotency-Key')).toBe(false);
+    expect(fetcher.mock.calls[0]?.[0]).toContain('/nested/api/v1/agent/preflight');
+    const refused = [
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }),
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf, ifMatch: '"version_1"' }),
+      client.post('agentPreflight', '/agent/preflight', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf, idempotencyKey: 'k'.repeat(16) }),
+      client.post('agentPreflight', '/jobs/example/runs', 'agentPreflightRequest', { action: 'inspect' }, { csrfToken: csrf }),
+      client.post('run', '/agent/preflight', 'workflowCancelRequest', { action: 'cancel' }, { csrfToken: csrf, ifMatch: '"version_1"', idempotencyKey: 'k'.repeat(16) }),
+    ];
+    for (const attempt of refused) await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it('pins an explicit source digest HEAD to metadata before accepting its commitment headers', async () => {
     const metadata = (JSON.parse(fixture('revision-file-root')) as { data: RevisionFile }).data;
     metadata.binding.jobId = 'a'.repeat(32);

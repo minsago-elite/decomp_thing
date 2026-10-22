@@ -968,6 +968,8 @@ cutover. Slow-socket qualification and timed retention remain outstanding under 
 
 `GET /api/v1/agent/preflight` returns `agentPreflight` with `status` (`idle`, `inspecting`, `ready`, `failed`, `cancelled`), an application-generated `inspectionId` and a fixed `reasonCode` (`AGENT_PREFLIGHT_FAILED` only). `POST` with the exact body `{"action":"inspect"}` starts one inspection and returns `202`; a second request while one runs returns `409 AGENT_PREFLIGHT_IN_PROGRESS`. The inspection runs the configured harness's `preflight(WEB)` (initialize negotiation, no session, no model prompt) and is cancelled when the server stops. Exception text, inventories and configuration are discarded and never appear in the response.
 
+The schema ties the detail fields to the status: `idle` has neither an inspection id nor a reason; `inspecting`, `ready` and `cancelled` have an id and no reason; `failed` has an id and exactly `AGENT_PREFLIGHT_FAILED`. The typed client submits the `POST` with the CSRF token only: this action has no resource version, so `If-Match` and `Idempotency-Key` are refused rather than given an undefined meaning. Server shutdown cancels a running inspection and waits for its provider cleanup before returning.
+
 Passive bootstrap never starts the agent. Its `harness` capability reports configuration, sandbox-helper and bundled-Ghidra presence, and folds in only the fixed `status` of the last explicit inspection: `failed` demotes a configured harness to `unavailable`/`AGENT_PREFLIGHT_FAILED`; any other status leaves it `supported` with a message that agent readiness is unproven (or, for `ready`, that the last inspection started the agent). It does not establish that any job can start work.
 
 ## Implemented progress-pin policy endpoint

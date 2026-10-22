@@ -431,6 +431,26 @@
       "valid": false
     },
     {
+      "file": "fixtures/agent-preflight-ready.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-idle-detail.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-failed-without-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-reason-vocabulary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-agent-preflight-ready-reason.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/bootstrap-retention.json",
       "valid": true
     },
