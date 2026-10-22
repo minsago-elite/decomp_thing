@@ -388,7 +388,7 @@ internal class WebApiController(
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
     private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)

@@ -278,11 +278,14 @@ class UploadServer(
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
-    private val agentPreflight = WebAgentPreflight { cancellation ->
+    private val agentPreflight = WebAgentPreflight(configurationIdentity = {
+        (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
+    }) { cancellation ->
         check(withActiveRequest {
             authenticationInspector(decompengine.agent.AgentCancellation {
                 stopRequested.get() || cancellation.isCancellationRequested()
             })
+            if (!stopRequested.get() && !cancellation.isCancellationRequested()) harnessReadiness.inspect()
         }) { "Server is stopping" }
     }
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
