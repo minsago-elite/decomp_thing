@@ -69,11 +69,14 @@ it('restores signed snapshot pages through next previous back and forward withou
   await act(() => { history.forward(); });
   await screen.findByRole('link', { name: 'snapshot-2.elf' });
   expect(location.search).toBe('?status=failed&cursor=Page_Second');
+  const readsBeforePrevious = transport.get.mock.calls.length;
   fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
   await screen.findByRole('link', { name: 'snapshot-1.elf' });
   expect(location.search).toBe('?status=failed&cursor=Page_First');
+  expect(transport.get).toHaveBeenCalledTimes(readsBeforePrevious);
+  expect(screen.getByText('Showing a previously loaded page from this snapshot. Refresh jobs to read the current library.')).toBeTruthy();
   expect(transport.get.mock.calls.map(([, path]) => new URL(path, 'http://example.invalid').searchParams.get('cursor')))
-    .toEqual([null, 'Page_Second', 'Page_First', 'Page_Second', 'Page_First']);
+    .toEqual([null, 'Page_Second', 'Page_Second']);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   await screen.findByRole('link', { name: 'snapshot-3.elf' });
   expect(location.search).toBe('?status=failed&cursor=Page_Fresh');

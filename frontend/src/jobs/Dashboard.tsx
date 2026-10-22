@@ -55,10 +55,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, [error]);
   const { client } = usePrivateTransport(basePath);
   // Only one extra bounded page is retained; continuation pages stay server-backed.
-  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
+  const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; basePath: string; data: Jobs } | null>(null);
   const cursor = selection.cursor ?? cursors[pageIndex] ?? null;
   const dashboardPath = useRef(location.pathname);
-  const binding = useMemo(() => ({ selection, refresh, client, pageIndex, cursor }), [selection, refresh, client, pageIndex, cursor]);
+  const binding = useMemo(() => ({ selection, refresh, client, basePath, pageIndex, cursor }), [selection, refresh, client, basePath, pageIndex, cursor]);
   const activeBinding = useRef<typeof binding | null>(binding);
   activeBinding.current = binding;
   const entryPin = useRef<{ query: string; client: typeof client; cursor: string } | null>(null);
@@ -115,10 +115,15 @@ export function Dashboard({ basePath }: { basePath: string }) {
   useEffect(() => {
     if (!selection.valid || selection.invalidCursor || location.pathname !== dashboardPath.current) return;
     const retained = firstPage.current;
-    if (retained && (retained.selection !== selection || retained.refresh !== refresh || retained.client !== client)) firstPage.current = null;
-    if (!cursor && firstPage.current) {
-      if (!pinReceivedPage(firstPage.current.data.page)) return;
-      setData(firstPage.current.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
+    if (retained && (retained.refresh !== refresh || retained.client !== client || retained.basePath !== basePath ||
+      filterSearch(retained.selection.filters) !== filterSearch(selection.filters))) firstPage.current = null;
+    const cached = firstPage.current;
+    const retainedSnapshot = cached !== null && cursor !== null && snapshotPagination(cached.data.page) &&
+      cached.data.page.pageNumber === 1 && cached.data.page.currentCursor === cursor;
+    if (cached && ((!cursor && cached.selection === selection) || retainedSnapshot)) {
+      if (!pinReceivedPage(cached.data.page)) return;
+      if (retainedSnapshot) setPageNotice(copy.cachedFirstSnapshot);
+      setData(cached.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
       return;
     }
@@ -136,7 +141,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
         throw new ApiClientError('invalid_response');
       }
       if (!pinReceivedPage(page)) return;
-      if (!cursor) firstPage.current = { selection, refresh, client, data: response.data };
+      if (!cursor) firstPage.current = { selection, refresh, client, basePath, data: response.data };
       setData(response.data); setDisplayedPageIndex(pageIndex); setPhase('ready');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
@@ -155,7 +160,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       failRead(failure);
     });
     return () => { controller.abort(); };
-  }, [selection, cursor, pageIndex, refresh, client, failRead, binding, pinReceivedPage]);
+  }, [selection, cursor, pageIndex, refresh, client, basePath, failRead, binding, pinReceivedPage]);
   useEffect(() => { setLiveDeferred(false); }, [selection, cursor, pageIndex, refresh, client]);
   useEffect(() => {
     // Continuations retain their immutable server snapshot. Only the visible first page
@@ -189,7 +194,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
         }
         if (snapshotPagination(response.data.page) && response.data.page.pageNumber !== 1) throw new ApiClientError('invalid_response');
         if (!pinReceivedPage(response.data.page)) { stopped = true; return; }
-        firstPage.current = { selection, refresh, client, data: response.data };
+        firstPage.current = { selection, refresh, client, basePath, data: response.data };
         setLiveDeferred(false); setData(response.data);
       } catch (failure: unknown) {
         if (!disposed && !controller.signal.aborted && activeBinding.current === binding) { stopped = true; failRead(failure); }
@@ -212,7 +217,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       request?.abort();
       document.removeEventListener('visibilitychange', visibility);
     };
-  }, [phase, selection, cursor, pageIndex, refresh, client, data, livePaused, failRead, binding, pinReceivedPage]);
+  }, [phase, selection, cursor, pageIndex, refresh, client, basePath, data, livePaused, failRead, binding, pinReceivedPage]);
 
   function apply(filters: JobFilters) {
     const search = filterSearch(filters);

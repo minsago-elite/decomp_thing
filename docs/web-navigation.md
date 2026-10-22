@@ -336,3 +336,21 @@ bounded page-local navigation and explicitly report that saved page history is u
 
 The component controls use inert metadata transports. They do not qualify physical browser
 scroll restoration, all workspace tabs or the complete packaged navigation journey.
+
+
+### Retained first snapshot page
+
+The existing single first-page cache also supports signed snapshot navigation. Reuse requires
+the exact returned first-page cursor, normalized filters, client, deployment prefix and explicit
+refresh generation. Returning to that first page does not read or rescan the collection; every
+other continuation remains server-backed. Only one extra bounded first page is retained, and
+the unchanged URI/request pin guard still runs before display. The page explicitly says it was
+previously loaded; cached metadata does not establish current server availability or extend the
+server cursor's lifetime. A reload with no client cache still validates its token at the server.
+Explicit Refresh always starts a fresh cursor-free read. Changed filter/client/base/refresh scope
+cannot reuse the old first page, and authorization failures retain their original cache clearing.
+
+This preserves the existing packaged scale journey's retained-first-page/no-new-read assertion;
+that assertion is unchanged. The strengthened inert history method also checks that returning
+to the first page performs no read, preserves its exact snapshot URI, shows the retained-data
+notice, and still permits explicit Refresh and changed-filter recovery.
