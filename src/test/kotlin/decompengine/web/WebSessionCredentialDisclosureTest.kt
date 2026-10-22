@@ -20,9 +20,9 @@ import kotlin.test.assertTrue
 
 /**
  * Real HTTP session lifecycle with captured server diagnostics. The only places a credential may
- * legitimately travel are the one-time bootstrap request body, the session cookie and the CSRF
- * token delivered to the authenticated client; no URL, diagnostic line or unrelated response may
- * carry any of them.
+ * legitimately travel are the one-time bootstrap request body, the session cookie (in Set-Cookie
+ * only) and the CSRF token delivered to its own authenticated session by the session exchange and
+ * authenticated bootstrap reads; no URL, diagnostic line or other response may carry any of them.
  */
 class WebSessionCredentialDisclosureTest {
     @TempDir lateinit var directory: Path
@@ -35,6 +35,8 @@ class WebSessionCredentialDisclosureTest {
         fun advance(duration: Duration) { elapsedNanos.addAndGet(duration.toNanos()) }
     }
 
+    private class Observed(val method: String, val path: String, val cookie: String?, val response: HttpResponse<String>)
+
     @Test
     fun `sign-in, denial, expiry, reauthentication and logout never put credentials in urls, diagnostics or other responses`() {
         val clock = TestClock()
@@ -43,7 +45,7 @@ class WebSessionCredentialDisclosureTest {
             webAccessClock = clock, requestDiagnosticOutput = { diagnostics += it })
         val client = HttpClient.newHttpClient()
         val requested = mutableListOf<String>()
-        val observed = mutableListOf<Pair<HttpResponse<String>, String?>>()
+        val observed = mutableListOf<Observed>()
         fun send(path: String, method: String = "GET", body: String? = null, headers: Map<String, String> = emptyMap(),
                  origin: String = server.browserOrigin): HttpResponse<String> {
             requested += path
@@ -51,7 +53,7 @@ class WebSessionCredentialDisclosureTest {
             headers.forEach { (k, v) -> builder.header(k, v) }
             if (method != "GET") builder.header("Origin", origin).header("Content-Type", "application/json")
                 .method(method, HttpRequest.BodyPublishers.ofString(body ?: "{}"))
-            return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also { observed += it to headers["Cookie"] }
+            return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also { observed += Observed(method, path, headers["Cookie"], it) }
         }
         fun exchange(token: String, origin: String = server.browserOrigin) = send("/nested/api/v1/session", "POST", "{\"token\":\"$token\"}", origin = origin)
         fun cookieOf(response: HttpResponse<String>) = response.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';')
@@ -66,44 +68,52 @@ class WebSessionCredentialDisclosureTest {
             val signedIn = exchange(first)
             assertEquals(200, signedIn.statusCode())
             val cookie = cookieOf(signedIn); val csrf = csrfOf(signedIn)
-            val cookieValue = cookie.substringAfter('=')
             assertTrue(signedIn.headers().firstValue("Set-Cookie").orElseThrow().contains("HttpOnly"))
             assertEquals(200, send("/nested/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)).statusCode())
             assertTrue(send("/nested/api/v1/bootstrap").statusCode() == 401)
+            // Rejected mutations that carry the real CSRF token: wrong origin with the cookie, and no cookie at all.
+            assertTrue(send("/nested/api/v1/session", "DELETE", headers = mapOf("Cookie" to cookie, "X-CSRF-Token" to csrf), origin = "http://evil.invalid").statusCode() in 400..499)
+            assertTrue(send("/nested/api/v1/session", "DELETE", headers = mapOf("X-CSRF-Token" to csrf)).statusCode() in 400..499)
+            assertTrue(send("/nested/api/v1/jobs", "POST", headers = mapOf("X-CSRF-Token" to csrf)).statusCode() in 400..499)
             // A replay of the consumed one-time token is refused.
             assertTrue(exchange(first).statusCode() in 400..499)
             clock.advance(Duration.ofHours(8))
-            val expired = send("/nested/api/v1/bootstrap", headers = mapOf("Cookie" to cookie))
+            val expired = send("/nested/api/v1/bootstrap", headers = mapOf("Cookie" to cookie, "X-CSRF-Token" to csrf))
             assertEquals(401, expired.statusCode())
             val fresh = server.issueBrowserBootstrap().token
             val reauthenticated = exchange(fresh)
             assertEquals(200, reauthenticated.statusCode())
             val newCookie = cookieOf(reauthenticated); val newCsrf = csrfOf(reauthenticated)
+            assertTrue(send("/nested/api/v1/session", "DELETE", headers = mapOf("Cookie" to newCookie, "X-CSRF-Token" to newCsrf), origin = "http://evil.invalid").statusCode() in 400..499)
             val logout = send("/nested/api/v1/session", "DELETE", headers = mapOf("Cookie" to newCookie, "X-CSRF-Token" to newCsrf))
             assertTrue(logout.statusCode() in 200..299, "logout status ${logout.statusCode()}")
-            assertEquals(401, send("/nested/api/v1/bootstrap", headers = mapOf("Cookie" to newCookie)).statusCode())
+            assertEquals(401, send("/nested/api/v1/bootstrap", headers = mapOf("Cookie" to newCookie, "X-CSRF-Token" to newCsrf)).statusCode())
 
             val bootstrapTokens = listOf(first, fresh, wrongToken)
-            val cookieValues = listOf(cookieValue, newCookie.substringAfter('='))
+            val cookieValues = listOf(cookie.substringAfter('='), newCookie.substringAfter('='))
             val csrfTokens = mapOf(cookie to csrf, newCookie to newCsrf)
             val credentials = bootstrapTokens + cookieValues + csrfTokens.values
             // No credential appears in any URL the client was asked to use, so none can enter history or server access logs.
             for (credential in credentials) for (url in requested) assertFalse(url.contains(credential), "credential in request URL $url")
-            // No credential appears in server diagnostics.
+            // No credential appears in server diagnostics, including those from rejected requests that carried the real CSRF token.
+            assertTrue(diagnostics.isNotEmpty() || observed.any { it.response.statusCode() >= 400 })
             for (credential in credentials) for (line in diagnostics) assertFalse(line.contains(credential), "credential in diagnostic: $line")
-            for ((response, usedCookie) in observed) {
-                val body = response.body()
+            for (item in observed) {
+                val body = item.response.body()
                 // One-time bootstrap tokens and cookie values are never echoed in a body.
-                for (secret in bootstrapTokens + cookieValues) assertFalse(body.contains(secret), "secret echoed in a response body")
-                // A CSRF token reaches only its own session: in the session body that created it or in that session's reads.
+                for (secret in bootstrapTokens + cookieValues) assertFalse(body.contains(secret), "secret echoed in a ${item.method} ${item.path} body")
+                // A CSRF token is delivered only by the successful session exchange that created it, or by a successful
+                // authenticated bootstrap read made with that session's cookie.
                 for ((owner, token) in csrfTokens) {
-                    val ownSession = usedCookie == owner || (response === signedIn && owner == cookie) || (response === reauthenticated && owner == newCookie)
-                    if (!ownSession) assertFalse(body.contains(token), "CSRF token disclosed to a request without its session")
+                    val creating = (item.response === signedIn && owner == cookie) || (item.response === reauthenticated && owner == newCookie)
+                    val ownRead = item.method == "GET" && item.path == "/nested/api/v1/bootstrap" && item.cookie == owner && item.response.statusCode() == 200
+                    if (!creating && !ownRead) assertFalse(body.contains(token), "CSRF token echoed in a ${item.method} ${item.path} (${item.response.statusCode()}) body")
                 }
-                // Only Set-Cookie may carry a cookie; no other header carries any credential.
-                for ((name, values) in response.headers().map()) {
-                    if (name.equals("Set-Cookie", true)) continue
-                    for (credential in credentials) assertFalse(values.any { it.contains(credential) }, "credential in response header $name")
+                for ((name, values) in item.response.headers().map()) {
+                    if (name.equals("Set-Cookie", true)) {
+                        // Set-Cookie may carry only a session cookie value, never a bootstrap or CSRF credential.
+                        for (secret in bootstrapTokens + csrfTokens.values) assertFalse(values.any { it.contains(secret) }, "non-cookie credential in Set-Cookie")
+                    } else for (credential in credentials) assertFalse(values.any { it.contains(credential) }, "credential in response header $name")
                 }
             }
         } finally { server.stop() }
