@@ -459,11 +459,32 @@ it('refuses an invalid saved history query without a request and recovers with o
     expect((await screen.findByRole('alert')).textContent).toContain('The saved history page is invalid');
     expect(transport.get).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Retry this page' })).toBeNull();
+    for (const query of ['?cursor=first&cursor=second', '?cursor=same&cursor=same',
+      '?cursor=first&%63ursor=second', '?cursor=', '?cursor=valid&extra=private',
+      '?cursor=bad%2Fcursor', '?' + '&'.repeat(513)]) {
+      await act(() => {
+        history.pushState(null, '', `/nested/jobs/${sample.jobId}/runs${query}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+      expect((await screen.findByRole('alert')).textContent).toContain('The saved history page is invalid');
+      expect(transport.get).not.toHaveBeenCalled();
+      expect(location.search).toBe(query);
+      expect(screen.queryByRole('link', { name: 'reconstruct: run_recovered' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Retry this page' })).toBeNull();
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Refresh history' }));
     expect(await screen.findByRole('link', { name: 'reconstruct: run_recovered' })).toBeTruthy();
     expect(location.search).toBe('');
     expect(transport.get).toHaveBeenCalledOnce();
     expect(transport.get.mock.calls[0]?.[1]).toBe(`/jobs/${sample.jobId}/runs?limit=50`);
+    await act(() => {
+      history.pushState(null, '', `/nested/jobs/${sample.jobId}/runs?%63ursor=cursor_page_2`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_recovered' })).toBeTruthy();
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    expect(transport.get.mock.calls[1]?.[1]).toBe(`/jobs/${sample.jobId}/runs?limit=50&cursor=cursor_page_2`);
+    expect(location.search).toBe('?%63ursor=cursor_page_2');
   } finally { auth.dispose(); }
 });
 

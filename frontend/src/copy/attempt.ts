@@ -3,6 +3,8 @@
 import { textMessage } from '../shared/messages';
 
 export const recordedValidationCopy = {
+  savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
+  savedSelectionUnavailable: 'This exact saved validation selection could not be restored. No different observation was substituted. Read validation evidence to select a current observation.',
   exportPage: 'Download this validation page JSON', exportFailure: 'Download this failure diagnostic JSON',
   exportScope: 'The download contains this selected observation only, including its snapshot commitments and bounded previews. Other pages, full output bytes and source files are not included. Saving it does not run validation.',
   exportUnavailable: 'This observation cannot be exported within the supported format and 192 KiB limit.',
@@ -111,6 +113,8 @@ export const activityReceiptAgeCopy = {
 } as const;
 
 export const activityRowCopy = {
+  "selectedObservation": "Selected observation",
+  "inspectObservation": "Inspect observation {sequence}",
   recordedRunState: 'Recorded attempt state: {state}.',
   recordedRunAcceptance: 'Recorded acceptance: {acceptance}.',
   "sequence": "Sequence {sequence}",
@@ -302,6 +306,8 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
+  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
+  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
   "wallClockLimit": "{value} milliseconds",
   "idleLimit": "{value} milliseconds",
   "outputLimit": "{value} bytes",
@@ -368,3 +374,22 @@ export function receiptAge(seconds: number): string {
   if (seconds < 86400) return textMessage(seconds < 7200 ? activityReceiptAgeCopy.hourAgo : activityReceiptAgeCopy.hoursAgo, { count: Math.floor(seconds / 3600) });
   return textMessage(seconds < 172800 ? activityReceiptAgeCopy.dayAgo : activityReceiptAgeCopy.daysAgo, { count: Math.floor(seconds / 86400) });
 }
+
+
+export const activityHistoryCopy = {
+  title: 'Saved activity window',
+  boundary: 'This read-only window contains at most 200 observations. It does not follow new events. A saved window may become unavailable when journal retention expires.',
+  save: 'Open this paused activity window',
+  invalid: 'The saved activity window is invalid or unsupported. Keep this address to inspect its selection, or explicitly open live activity.',
+  unavailable: 'The requested activity window could not be verified within its read limits. No other window was substituted.',
+  expired: 'The requested activity window is no longer retained. No fresh history was substituted.',
+  session: 'Reconnect the local session to read this activity window.',
+  denied: 'Access to this activity window was denied.',
+  loading: 'Reading the saved activity window…',
+  refreshing: 'Refreshing the saved activity window; previous observations may be stale…',
+  stale: 'Previously verified observations may be stale.',
+  retry: 'Retry saved activity window',
+  fresh: 'Open live activity explicitly',
+  snapshot: 'Current snapshot state: {state}; acceptance: {acceptance}. This snapshot is not the historical state of the selected events.',
+  observations: 'Saved activity observations',
+} as const;
