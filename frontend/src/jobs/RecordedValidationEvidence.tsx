@@ -58,6 +58,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     binding.active?.abort();
     const controller = new AbortController(); binding.active = controller;
     binding.requestSearch = liveNavigation.current ? requested.key : null;
+    if (liveNavigation.current) installed.current = { binding, key: requested.key };
     setStored({ binding, locationKey: requested.key, history, selected, report: null, loading: true, error: '' });
     return controller;
   }
