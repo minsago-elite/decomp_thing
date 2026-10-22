@@ -60,9 +60,15 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     return () => { live.current = false; active.current?.abort(); };
   }, []);
   useEffect(() => session.onInvalidated((remote) => {
-    active.current?.abort();
+    const previous = active.current;
+    active.current = null;
+    previous?.abort();
     if (!remote) {
       setProgress(null);
+      if (previous) {
+        setPhase('retry');
+        setFeedback({ message: copy.reconnectYourLocalSessionThenRetryThisFileItsRetry, kind: 'status' });
+      }
       return;
     }
     const next = recovery.read();
@@ -112,13 +118,13 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     pollTimer = setTimeout(() => { void poll(); }, 500);
     try {
       const result = await client.upload(attempt.file, { csrfToken, idempotencyKey: attempt.ticket.key, uploadId, signal: controller.signal });
-      if (!live.current || controller.signal.aborted) return;
+      if (!live.current || controller.signal.aborted || active.current !== controller) return;
       try { recovery.clear(); } catch { /* The confirmed job remains navigable; retained ticket can replay it safely. */ }
       setRejectedFileMessage(null);
       setFeedback({ message: copy.jobPublicationConfirmedOpeningTheJob, kind: 'status' });
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
-      if (!live.current) return;
+      if (!live.current || active.current !== controller) return;
       const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       const message = withApiFailureReference(failureMessage(error), error);
       if (invalidInput) setRejectedFileMessage(message);
