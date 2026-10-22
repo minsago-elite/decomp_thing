@@ -10,7 +10,7 @@ on:
       operation:
         description: Manual GCC evidence capture
         type: choice
-        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics]
+        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export]
         default: driver-dwarf-interfaces
 
 concurrency:
@@ -25,6 +25,16 @@ jobs:
       contents: read
     with:
       capture-mode: cc1-runtime-diagnostics
+
+  cc1-full-export:
+    # Manual qualification-mode full export (retains the profile-bound model and receipts), for branches that cannot
+    # form a mergeable labelled pull request.
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cc1-full-export'
+    uses: ./.github/workflows/gcc-cc1-full-export.yml
+    permissions:
+      contents: read
+    with:
+      capture-mode: cc1-full-export
 
   provenance-and-elf-verifier:
     if: github.event_name != 'workflow_dispatch'
