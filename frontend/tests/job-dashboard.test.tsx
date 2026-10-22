@@ -115,9 +115,11 @@ it('makes each applied filter set a history step so back and forward restore the
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50'));
   expect(history.length).toBe(start + 1);
-  // Resubmitting the same filters must not stack identical entries.
+  // Explicit defaults and reordered parameters still describe the same applied filters.
+  history.replaceState(null, '', '/?limit=50&status=failed');
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   expect(history.length).toBe(start + 1);
+  expect(location.search).toBe('?status=failed');
   fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'oldest' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   await waitFor(() => expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&sort=oldest&limit=50'));
@@ -223,6 +225,16 @@ it('rejects invalid saved filters without fetching and has a visible reset', asy
   expect(transport.get).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
+  transport.get.mockRejectedValueOnce(new ApiClientError('timeout'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('The server may be unavailable');
+  history.back();
+  await waitFor(() => {
+    expect(location.search).toBe('?limit=10000');
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert').textContent).toContain('saved filters are invalid');
+  });
+  expect(transport.get).toHaveBeenCalledTimes(2);
 });
 
 it('validates URL filter keys and preserves literal filenames through one encoding', () => {

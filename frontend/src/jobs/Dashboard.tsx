@@ -65,7 +65,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   useEffect(() => {
     const restore = () => {
       const restored = currentFilters(); setSelection(restored); setDraft(restored.filters);
-      setCursors([null]); setPageIndex(0); setData(null); setDisplayedPageIndex(null); setValidationError(null);
+      setCursors([null]); setPageIndex(0); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null);
     };
     window.addEventListener('popstate', restore);
     return () => { window.removeEventListener('popstate', restore); };
@@ -155,10 +155,11 @@ export function Dashboard({ basePath }: { basePath: string }) {
     const search = filterSearch(filters);
     try {
       const checked = jobFilters(search);
-      // A changed filter set is a navigable step, so Back and Forward restore the previous results; resubmitting
-      // the same filters replaces the entry instead of stacking identical ones.
+      // Compare normalized filters so explicit defaults, parameter order and equivalent URL encoding
+      // do not create another history entry for the same result set.
       const next = `${location.pathname}${search ? `?${search}` : ''}`;
-      if (next === `${location.pathname}${location.search}`) history.replaceState(null, '', next);
+      const current = currentFilters();
+      if (current.valid && filterSearch(current.filters) === search) history.replaceState(null, '', next);
       else history.pushState(null, '', next);
       setSelection({ filters: checked, valid: true }); setDraft(checked);
       setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); moveFocus.current = true;
