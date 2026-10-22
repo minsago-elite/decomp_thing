@@ -4475,6 +4475,59 @@
         "reportedCleanupVerified"
       ],
       "additionalProperties": false
+    },
+    "agentPreflight": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "inspecting",
+            "ready",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "inspectionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasonCode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "inspectionId",
+        "reasonCode"
+      ],
+      "additionalProperties": false
+    },
+    "agentPreflightRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "inspect"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -4996,6 +5049,50 @@
         },
         "data": {
           "$ref": "#/definitions/progressPinChange"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "agentPreflight"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/agentPreflight"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "agentPreflightRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/agentPreflightRequest"
         }
       },
       "required": [

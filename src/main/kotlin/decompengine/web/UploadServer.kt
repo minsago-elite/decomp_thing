@@ -278,7 +278,9 @@ class UploadServer(
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val harnessReadiness = WebHarnessReadinessProjector()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources, harnessReadiness = harnessReadiness) }
+    private val agentPreflight = WebAgentPreflight { cancellation -> authenticationInspector(cancellation) }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -413,6 +415,7 @@ class UploadServer(
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
         harnessReadiness.close()
+        agentPreflight.close()
         access.close()
         jobs.close()
         var inspectionWaitInterrupted = false
