@@ -8,6 +8,11 @@ import { ValidationSourceSnapshot } from '../src/jobs/ValidationSourceSnapshot';
 import { MAX_VALIDATION_EXPORT_BYTES, validationPageDownload } from '../src/jobs/recordedValidationExport';
 import { compareValidationSnapshots, validationComparisonSnapshot } from '../src/jobs/recordedValidationComparison';
 
+// Two tests here render several validation pages in sequence and take 4–6 s each on their own, so the 5 s default
+// fails them intermittently on a slower or busy host with no logic failure. One explicit budget for this file is
+// clearer than relaxing every suite or chasing individual tests.
+vi.setConfig({ testTimeout: 30_000 });
+
 // Authored wire DTOs and an in-memory fetch only; no server, browser session or validation process.
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const historyFixture = () => fixture<ResponseOf<'validationHistory'>>('validation-history');
