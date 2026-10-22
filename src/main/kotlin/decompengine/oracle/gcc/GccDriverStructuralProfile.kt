@@ -77,6 +77,20 @@ internal class GccDriverStructuralInputsV1 private constructor(
     val executableRanges: List<GccDriverStructuralExecutableRangeV1> =
         Collections.unmodifiableList(ArrayList(executableRanges))
 
+    /** Recheck the exact retained structural policy before a full-export coordinator can start. */
+    fun requireFullExportIntent(intentBytes: ByteArray): Unit = translateProfileFailure {
+        val intent = OracleJson.parseCanonical(intentBytes) as? JsonObject
+            ?: profileFail("GCC full-export intent is not a canonical object")
+        GccRetainedCompilerEngineProfile.open(root.resolve(profileFileName(parallel))).use { retained ->
+            retained.requireCurrent()
+            require(loadFullExportAuthority(root, retained.suite.analysis.exporterSha256,
+                retained.suite.analysis.ghidraArchive.sha256, parallel) == fullExportProfileSha256
+            ) { "GCC full-export authority changed after structural profile admission" }
+            requireGccFullExportPlannerPolicy(intent, OracleJson.parseCanonical(retained.policyBytes()),
+                compilerEngineProfileSha256)
+        }
+    }
+
     /**
      * Binds one descriptor-captured full export and its linked contained-operation receipts to the
      * authenticated selected input, target and runtime profile. This is provenance evidence only; it does
@@ -590,6 +604,28 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
 
         private fun profileFail(message: String): Nothing = throw GccDriverStructuralProfileException(message)
+    }
+}
+
+/** Early consistency only; it grants no execution, result, replay or scoring authority. */
+internal fun requireGccFullExportPlannerPolicy(
+    intent: JsonObject,
+    retainedPolicy: JsonElement,
+    expectedProfileSha256: String,
+) {
+    require(expectedProfileSha256.matches(Regex("[a-f0-9]{64}"))) {
+        "GCC structural compiler-engine profile digest is invalid"
+    }
+    val expected = retainedPolicy as? JsonObject
+        ?: throw IllegalArgumentException("GCC retained planner policy is not an object")
+    require(expected["profileSha256"] == JsonPrimitive(expectedProfileSha256)) {
+        "GCC retained planner policy differs from the authenticated structural profile"
+    }
+    require(intent["engineId"] == JsonPrimitive("cc1")) {
+        "GCC full-export intent differs from the authenticated cc1 structural input"
+    }
+    require(intent["plannerProfile"] == expected) {
+        "GCC full-export intent planner profile differs from the retained compiler-engine profile"
     }
 }
 

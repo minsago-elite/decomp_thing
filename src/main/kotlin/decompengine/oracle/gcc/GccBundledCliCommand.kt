@@ -41,6 +41,10 @@ internal object GccBundledCliCommand {
             options.binary, options.profile, options.archive, options.output.resolve("inputs"), journal, options.scratch,
             options.diskPolicy, invocation, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations)
+        val parallelProfile = options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
+        if (options.fullRecoveryExport) {
+            GccDriverStructuralInputsV1.load(options.profile.parent, "cc1", parallelProfile).requireFullExportIntent(intent.canonicalBytes)
+        }
         return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use { owner ->
             if (options.runtimeDiagnostics) {
                 owner.executeRuntimeDiagnostic()
@@ -48,8 +52,6 @@ internal object GccBundledCliCommand {
                 owner.executeNativeCallObservations()
                 owner.publishNativeCallCliResult()
             } else if (options.fullRecoveryExport) {
-                val parallelProfile = options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
-                GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
                 val fullExport = owner.executeFullExport()
                 val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
                 owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
