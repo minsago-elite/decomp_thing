@@ -8,20 +8,25 @@ import { validationPageDownload } from './recordedValidationExport';
 import { compareValidationSnapshots, validationComparisonSnapshot } from './recordedValidationComparison';
 import type { ValidationComparisonSnapshot } from './recordedValidationComparison';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+import type { ReceiptTime } from '../shared/receiptTime';
+
 export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, jobId, runId, active: null as AbortController | null }), [client, jobId, runId]);
-  type View = { binding: typeof binding; history: ValidationHistory | null; selected: ValidationOwner | null;
-    report: Report | null; loading: boolean; error: string };
+  type View = { binding: typeof binding; history: Received<ValidationHistory> | null; selected: ValidationOwner | null;
+    report: Received<Report> | null; loading: boolean; error: string };
   const [stored, setStored] = useState<View | null>(null);
-  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: ValidationHistory; owner: ValidationOwner };
+  type Baseline = { binding: typeof binding; snapshot: ValidationComparisonSnapshot; history: Received<ValidationHistory>; receipt: ReceiptTime; owner: ValidationOwner };
   const [savedBaseline, setSavedBaseline] = useState<Baseline | null>(null);
   const baseline = savedBaseline?.binding === binding ? savedBaseline : null;
   const view = stored?.binding === binding ? stored : null;
   useEffect(() => () => { binding.active?.abort(); }, [binding]);
   const root = `/jobs/${jobId}/runs/${runId}`;
 
-  function begin(history: ValidationHistory | null = null, selected: ValidationOwner | null = null) {
+  function begin(history: Received<ValidationHistory> | null = null, selected: ValidationOwner | null = null) {
     binding.active?.abort();
     const controller = new AbortController(); binding.active = controller;
     setStored({ binding, history, selected, report: null, loading: true, error: '' });
@@ -44,13 +49,14 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== null ||
         data.authority !== 'recorded-metadata' || (page !== undefined && (data.page !== page || data.graphSha256 !== graph)))
         throw new Error('validation history binding');
-      setStored({ binding, history: data, selected: null, report: null, loading: false, error: '' });
+      setStored({ binding, history: receive(data), selected: null, report: null, loading: false, error: '' });
     } catch (failure: unknown) { failed(controller, failure); }
   }
-  async function readCases(history: ValidationHistory, owner: ValidationOwner, page = 1, reportId?: string) {
+  async function readCases(historyObservation: Received<ValidationHistory>, owner: ValidationOwner, page = 1, reportId?: string) {
+    const history = historyObservation.value;
     if (!owner.canInspect || history.graphSha256 === null || history.page === null) return;
     if (baseline && baseline.snapshot.graphSha256 !== history.graphSha256) setSavedBaseline(null);
-    const controller = begin(history, owner);
+    const controller = begin(historyObservation, owner);
     try {
       const failureOwner = owner.ownerKind === 'run-failure';
       const ownerKey = owner.ownerKind === 'attempt' ? 'historyEvidence' : failureOwner ? 'historyFailureRun' : 'historyRunEvidence';
@@ -71,10 +77,11 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         (cases && (cases.graphSha256 !== history.graphSha256 || cases.ownerKind !== owner.ownerKind || cases.ownerId !== owner.ownerId ||
           cases.sourceSha256 !== owner.sourceSha256 || cases.corpusSha256 !== owner.corpusSha256 ||
           cases.normalOutcome !== owner.normalOutcome || cases.page !== page))) throw new Error('validation receipt binding');
-      setStored({ binding, history, selected: owner, report: data, loading: false, error: '' });
+      setStored({ binding, history: historyObservation, selected: owner, report: receive(data), loading: false, error: '' });
     } catch (failure: unknown) { failed(controller, failure); }
   }
-  const history = view?.history, report = view?.report, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
+  const historyObservation = view?.history, reportObservation = view?.report;
+  const history = historyObservation?.value, report = reportObservation?.value, cases = report?.validationCases, failure = report?.validationFailure, selected = view?.selected;
   const download = useMemo(() => report && history && selected
     ? validationPageDownload(report, { jobId, runId, graphSha256: history.graphSha256, owner: selected }) : null,
   [report, history, selected, jobId, runId]);
@@ -90,6 +97,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
     {loading && <p role="status">{copy.loading}</p>}
     {view?.error && <p role="alert">{view.error}</p>}
     {history && <>
+      <MetadataReceipt kind="validationHistory" receipt={historyObservation?.receipt} />
       <p>{copy.historyState}: {history.state}</p>
       <ul aria-label={copy.limitations}>{history.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {history.state === 'recorded' && <>
@@ -102,7 +110,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
             <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
               aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}
-              onClick={() => { void readCases(history, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
+              onClick={() => { void readCases(historyObservation, owner); }}>{owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}</button></td>
           </tr>)}</tbody></table>
         </div>
         {history.items.length === 0 && <p>{copy.noOwners}</p>}
@@ -117,6 +125,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
       </>}
     </>}
     {report && <>
+      <MetadataReceipt kind="validationReport" receipt={reportObservation?.receipt} />
       <p>{copy.reportState}: {report.state}</p>
       <p>{copy.acceptance}</p>
       {report.state === 'available' && (cases || failure) && <>
@@ -144,19 +153,20 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
         <section aria-labelledby="validation-comparison-title">
           <h3 id="validation-comparison-title">{copy.comparisonTitle}</h3><p>{copy.comparisonScope}</p>
           {comparisonSnapshot ? <button type="button" disabled={loading} onClick={() => {
-            if (history && selected) setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
+            if (historyObservation && reportObservation && selected) setSavedBaseline({ binding, snapshot: comparisonSnapshot, history: historyObservation, receipt: reportObservation.receipt, owner: selected });
           }}>{copy.setComparisonBaseline}</button> : <p>{copy.comparisonUnavailable}</p>}
           {baseline && <>
+            <MetadataReceipt kind="baseline" receipt={baseline.receipt} />
             <dl><dt>{copy.comparisonBaseline}</dt><dd><code>{baseline.snapshot.ownerKind}: {baseline.snapshot.ownerId}</code></dd>
               <dt>{copy.candidate}</dt><dd><code>{baseline.snapshot.candidateId}</code></dd>
               <dt>{copy.source}</dt><dd><code>{baseline.snapshot.sourceSha256}</code></dd></dl>
             <button type="button" onClick={() => { setSavedBaseline(null); }}>{copy.clearComparisonBaseline}</button>
             {comparisonSnapshot && <MismatchComparison key={`${baseline.snapshot.reportId}:${comparisonSnapshot.reportId}`}
               first={baseline.snapshot} second={comparisonSnapshot} onInspectPage={page => {
-                if (history && selected) void readCases(history, selected, page, report.reportId);
+                if (history && selected) void readCases(historyObservation, selected, page, report.reportId);
               }} onSwap={() => {
-                if (history && selected) {
-                  setSavedBaseline({ binding, snapshot: comparisonSnapshot, history, owner: selected });
+                if (historyObservation && reportObservation && selected) {
+                  setSavedBaseline({ binding, snapshot: comparisonSnapshot, history: historyObservation, receipt: reportObservation.receipt, owner: selected });
                   void readCases(baseline.history, baseline.owner, 1, baseline.snapshot.reportId);
                 }
               }} />}
@@ -182,22 +192,22 @@ export function RecordedValidationEvidence({ jobId, runId, basePath }: { jobId: 
           <p>{copy.mismatchScope}</p>
           {cases.firstMismatchPage === undefined ? <p>{copy.mismatchUnavailable}</p> : <nav aria-label={copy.mismatchNavigation}>
             <button type="button" disabled={loading || cases.firstMismatchPage == null || cases.firstMismatchPage === cases.page} onClick={() => {
-              if (history && selected && cases.firstMismatchPage != null) void readCases(history, selected, cases.firstMismatchPage, report.reportId);
+              if (history && selected && cases.firstMismatchPage != null) void readCases(historyObservation, selected, cases.firstMismatchPage, report.reportId);
             }}>{copy.firstMismatch}</button>
             <button type="button" disabled={loading || cases.previousMismatchPage == null} onClick={() => {
-              if (history && selected && cases.previousMismatchPage != null) void readCases(history, selected, cases.previousMismatchPage, report.reportId);
+              if (history && selected && cases.previousMismatchPage != null) void readCases(historyObservation, selected, cases.previousMismatchPage, report.reportId);
             }}>{copy.previousMismatch}</button>
             <button type="button" disabled={loading || cases.nextMismatchPage == null} onClick={() => {
-              if (history && selected && cases.nextMismatchPage != null) void readCases(history, selected, cases.nextMismatchPage, report.reportId);
+              if (history && selected && cases.nextMismatchPage != null) void readCases(historyObservation, selected, cases.nextMismatchPage, report.reportId);
             }}>{copy.nextMismatch}</button>
           </nav>}
         </>}
         <nav aria-label={copy.caseNavigation}>
           <button type="button" disabled={loading || cases.previousPage === null} onClick={() => {
-            if (history && selected && cases.previousPage !== null) void readCases(history, selected, cases.previousPage, report.reportId);
+            if (history && selected && cases.previousPage !== null) void readCases(historyObservation, selected, cases.previousPage, report.reportId);
           }}>{copy.previousCases}</button>
           <button type="button" disabled={loading || cases.nextPage === null} onClick={() => {
-            if (history && selected && cases.nextPage !== null) void readCases(history, selected, cases.nextPage, report.reportId);
+            if (history && selected && cases.nextPage !== null) void readCases(historyObservation, selected, cases.nextPage, report.reportId);
           }}>{copy.nextCases}</button>
         </nav>
       </> : !failure && <p>{copy.noCases}</p>}

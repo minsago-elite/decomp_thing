@@ -16,6 +16,10 @@ import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
     <dt>{copy.job}</dt><dd><code>{selected.jobId}</code></dd>
@@ -35,17 +39,18 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
   let cursor: string | undefined; let invalid = false;
   try { cursor = sourceCursor(search); } catch { invalid = true; }
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.directoryId, search, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
-  const [read, setRead] = useState<SourceReadState<RevisionDirectory>>({ key, state: 'loading' });
+  const [read, setRead] = useState<SourceReadState<Received<RevisionDirectory>>>({ key, state: 'loading' });
   useEffect(() => beginSourceRead(key, async signal => {
     if (invalid) throw new ApiClientError('invalid_request');
     const response = await client.get('revisionDirectory', directoryReadRoute(selected, cursor), { signal });
     if (signal.aborted) throw new ApiClientError('aborted');
     const page = bindDirectory(response.data, selected, pin ?? (cursor === undefined ? undefined : expected.current));
     expected.current = { metadataVersion: page.metadataVersion, sourceSha256: page.sourceSha256 };
-    return page;
+    return receive(page);
   }, setRead), [client, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid, key]);
   const current = currentSourceRead(read, key);
-  const data = current.state === 'ready' ? current.value : null;
+  const observation = current.state === 'ready' ? current.value : null;
+  const data = observation?.value;
   const loading = current.state === 'loading';
   useEffect(() => {
     if (current.state === 'ready' && moveFocus.current) {
@@ -65,6 +70,7 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>
+      <MetadataReceipt kind="directory" receipt={observation?.receipt} />
       <nav aria-label={copy.breadcrumbs}><ol class="breadcrumbs">
         {data.breadcrumbs.map((crumb, index) => <li key={crumb.directoryId}>
           {index === 1 && data.omittedAncestors > 0 && <span>{message(copy.omitted, { count: data.omittedAncestors })} </span>}
@@ -103,12 +109,13 @@ function File({ selected, basePath, runtime, search, pin }: { selected: FileSele
   const [refresh, setRefresh] = useState(0);
   const [previewOpened, setPreviewOpened] = useState(false);
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
-  const [read, setRead] = useState<SourceReadState<RevisionFile>>({ key, state: 'loading' });
-  useEffect(() => beginSourceRead(key, async signal => bindFile(
-    (await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal })).data, selected, pin ?? undefined), setRead),
+  const [read, setRead] = useState<SourceReadState<Received<RevisionFile>>>({ key, state: 'loading' });
+  useEffect(() => beginSourceRead(key, async signal => receive(bindFile(
+    (await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal })).data, selected, pin ?? undefined)), setRead),
   [client, selected.jobId, selected.runId, selected.revisionId, selected.fileId, key]);
   const current = currentSourceRead(read, key);
-  const data = current.state === 'ready' ? current.value : null;
+  const observation = current.state === 'ready' ? current.value : null;
+  const data = observation?.value;
   const loading = current.state === 'loading';
   const policy = data ? sourceFilePolicy(data.item, runtime.limits.maxSourceChunkBytes) : null;
   const previewNotice = { 'not-viewable': copy.notViewable, 'too-large': copy.tooLarge,
@@ -121,6 +128,7 @@ function File({ selected, basePath, runtime, search, pin }: { selected: FileSele
     {loading && <p role="status">{copy.readingFile}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && policy && <>
+      <MetadataReceipt kind="file" receipt={observation?.receipt} />
       <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, pin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>
