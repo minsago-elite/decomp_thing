@@ -161,7 +161,11 @@ export function Dashboard({ basePath }: { basePath: string }) {
     const search = filterSearch(filters);
     try {
       const checked = jobFilters(search);
-      history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
+      const url = `${location.pathname}${search ? `?${search}` : ''}`;
+      if (`${location.pathname}${location.search}` !== url) {
+        if (selection.valid) history.pushState(null, '', url);
+        else history.replaceState(null, '', url);
+      }
       setSelection({ filters: checked, valid: true }); setDraft(checked);
       setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); moveFocus.current = true;
     } catch (failure) {
