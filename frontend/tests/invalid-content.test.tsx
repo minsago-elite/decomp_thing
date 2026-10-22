@@ -33,6 +33,15 @@ afterEach(() => {
 async function settle() {
   await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(0); });
 }
+async function completeRead(index: number, code?: ApiErrorCode) {
+  const result = transport.get.mock.results[index];
+  if (result?.type !== 'return') throw new Error('Controlled metadata read was not started');
+  await act(async () => {
+    if (code) await expect(result.value).rejects.toMatchObject({ code });
+    else await result.value;
+  });
+  await settle();
+}
 function response(fault?: Fault): Response {
   const headers = { 'Content-Type': 'application/json', 'X-Request-ID': envelope.requestId };
   if (fault === 'oversized') return new Response(privateText, {
@@ -62,9 +71,12 @@ async function invalidRefresh(fault: Fault, code: ApiErrorCode) {
   const sample = envelope.data;
   history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
   const view = render(<App basePath="/nested" session={auth} />); await settle();
+  await completeRead(0);
   expect(screen.getByText('Workflow').nextElementSibling?.textContent).toBe(sample.workflow);
   expect(screen.getByRole('button', { name: 'Read validation evidence' })).toBeTruthy();
+  const originalImages = Array.from(view.container.querySelectorAll('img'));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' })); await settle();
+  await completeRead(1, code);
   const alert = screen.getByRole('alert');
   expect(alert.textContent?.trim()).not.toBe('');
   expect(alert.textContent?.length).toBeLessThanOrEqual(512);
@@ -73,8 +85,8 @@ async function invalidRefresh(fault: Fault, code: ApiErrorCode) {
   expect(screen.queryByRole('button', { name: 'Read validation evidence' })).toBeNull();
   expect(document.body.textContent).not.toContain('PRIVATE_CONTENT_RESPONSE');
   expect(document.body.textContent).not.toContain('/private/configuration');
-  expect(view.container.querySelector('img')).toBeNull();
-  await expect(transport.get.mock.results[1]!.value).rejects.toMatchObject({ code });
+  expect(view.container.querySelector('img[onerror]')).toBeNull();
+  expect(Array.from(view.container.querySelectorAll('img'))).toEqual(originalImages);
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(fetcher.mock.calls.map(call => call[1]?.method)).toEqual(['GET', 'GET']);
   expect(writes).not.toHaveBeenCalled();
