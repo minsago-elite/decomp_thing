@@ -1,0 +1,805 @@
+{
+  "schemaVersion": 2,
+  "issue": 706,
+  "id": "gcc-16-2-0-metadata-diagnostic-reference",
+  "status": "captured",
+  "scope": "real-driver-metadata-and-diagnostics",
+  "toolchain": {
+    "image": "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0",
+    "imageConfig": "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f",
+    "baseOf": "oracle/gcc/16.2.0/build-toolchain.Dockerfile",
+    "platform": "linux/amd64",
+    "version": "16.2.0",
+    "target": "x86_64-linux-gnu",
+    "driver": {
+      "path": "/usr/local/bin/gcc",
+      "sha256": "c1ff0a4fe7916ae6f4e18645a0e854077148b3ebb9d30b1e50e9672e8c5a1236"
+    },
+    "frontend": {
+      "role": "cc1",
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/cc1",
+      "sha256": "bc1bcbeccfaaf269c1a8c1bb74a0bc4d73bff56a0c6c6dbd4bb248d11f6232a0"
+    },
+    "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+    "includeSearch": "-nostdinc; only staged workspace include roots are searched",
+    "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges"
+  },
+  "capture": {
+    "tool": "scripts/capture-gcc-preprocessing-reference.py",
+    "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results"
+  },
+  "cases": [
+    {
+      "id": "version",
+      "categories": [
+        "version"
+      ],
+      "arguments": [
+        "--version"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 219,
+          "sha256": "9147f0fa8c2457dc4c3434931950224813b4d36638535120c0109202f2c499df",
+          "base64": "Z2NjIChHQ0MpIDE2LjIuMApDb3B5cmlnaHQgKEMpIDIwMjYgRnJlZSBTb2Z0d2FyZSBGb3VuZGF0aW9uLCBJbmMuClRoaXMgaXMgZnJlZSBzb2Z0d2FyZTsgc2VlIHRoZSBzb3VyY2UgZm9yIGNvcHlpbmcgY29uZGl0aW9ucy4gIFRoZXJlIGlzIE5PCndhcnJhbnR5OyBub3QgZXZlbiBmb3IgTUVSQ0hBTlRBQklMSVRZIG9yIEZJVE5FU1MgRk9SIEEgUEFSVElDVUxBUiBQVVJQT1NFLgoK",
+          "text": "gcc (GCC) 16.2.0\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dumpversion",
+      "categories": [
+        "version"
+      ],
+      "arguments": [
+        "-dumpversion"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 7,
+          "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea",
+          "base64": "MTYuMi4wCg==",
+          "text": "16.2.0\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dumpfullversion",
+      "categories": [
+        "version"
+      ],
+      "arguments": [
+        "-dumpfullversion"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 7,
+          "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea",
+          "base64": "MTYuMi4wCg==",
+          "text": "16.2.0\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dumpmachine",
+      "categories": [
+        "target"
+      ],
+      "arguments": [
+        "-dumpmachine"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 17,
+          "sha256": "08cababdf891ccbf96eb376f1e84f279f70302fb13d84e5f98637becdfc6d989",
+          "base64": "eDg2XzY0LWxpbnV4LWdudQo=",
+          "text": "x86_64-linux-gnu\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "verbose-configuration",
+      "categories": [
+        "version",
+        "target",
+        "configuration"
+      ],
+      "arguments": [
+        "-v"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 356,
+          "sha256": "9bbdf75fd1afb2cd5697d3909fd34a85a07ec5db46ec117bd20d082b5e53c29c",
+          "base64": "VXNpbmcgYnVpbHQtaW4gc3BlY3MuCkNPTExFQ1RfR0NDPWdjYwpDT0xMRUNUX0xUT19XUkFQUEVSPS91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvbHRvLXdyYXBwZXIKVGFyZ2V0OiB4ODZfNjQtbGludXgtZ251CkNvbmZpZ3VyZWQgd2l0aDogL3Vzci9zcmMvZ2NjL2NvbmZpZ3VyZSAtLWJ1aWxkPXg4Nl82NC1saW51eC1nbnUgLS1kaXNhYmxlLW11bHRpbGliIC0tZW5hYmxlLWxhbmd1YWdlcz1jLGMrKyxmb3J0cmFuLGdvClRocmVhZCBtb2RlbDogcG9zaXgKU3VwcG9ydGVkIExUTyBjb21wcmVzc2lvbiBhbGdvcml0aG1zOiB6bGliIHpzdGQKZ2NjIHZlcnNpb24gMTYuMi4wIChHQ0MpIAo=",
+          "text": "Using built-in specs.\nCOLLECT_GCC=gcc\nCOLLECT_LTO_WRAPPER=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper\nTarget: x86_64-linux-gnu\nConfigured with: /usr/src/gcc/configure --build=x86_64-linux-gnu --disable-multilib --enable-languages=c,c++,fortran,go\nThread model: posix\nSupported LTO compression algorithms: zlib zstd\ngcc version 16.2.0 (GCC) \n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "print-search-dirs",
+      "categories": [
+        "search-directory"
+      ],
+      "arguments": [
+        "-print-search-dirs"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 1394,
+          "sha256": "ff82d0c3b8ec5c4783ba68763b9eb7fe006144ac64bc49bf58fd24e2e44c36c1",
+          "base64": "aW5zdGFsbDogL3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLwpwcm9ncmFtczogPS91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvYmluL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4vLi4veDg2XzY0LWxpbnV4LWdudS9iaW4veDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvYmluLwpsaWJyYXJpZXM6ID0vdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC8uLi8uLi8uLi8uLi94ODZfNjQtbGludXgtZ251L2xpYi94ODZfNjQtbGludXgtZ251LzE2LjIuMC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvbGliL3g4Nl82NC1saW51eC1nbnUvOi91c3IvbG9jYWwvbGliL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC8uLi8uLi8uLi8uLi94ODZfNjQtbGludXgtZ251L2xpYi8uLi9saWI2NC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4veDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL2xpYjY0LzovbGliL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovbGliL3g4Nl82NC1saW51eC1nbnUvOi9saWIvLi4vbGliNjQvOi91c3IvbGliL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xpYi94ODZfNjQtbGludXgtZ251LzovdXNyL2xpYi8uLi9saWI2NC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvbGliLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4vOi9saWIvOi91c3IvbGliLwo=",
+          "text": "install: /usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/\nprograms: =/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/libexec/gcc/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/\nlibraries: =/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/../lib64/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../lib64/:/lib/x86_64-linux-gnu/16.2.0/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/16.2.0/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../:/lib/:/usr/lib/\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "print-prog-name-cc1",
+      "categories": [
+        "search-directory"
+      ],
+      "arguments": [
+        "-print-prog-name=cc1"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 51,
+          "sha256": "9269227a054ff4e77d0e1af8c15689d200632622d7dd6a427181d41132aba538",
+          "base64": "L3Vzci9sb2NhbC9saWJleGVjL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC9jYzEK",
+          "text": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/cc1\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "print-libgcc-file-name",
+      "categories": [
+        "search-directory"
+      ],
+      "arguments": [
+        "-print-libgcc-file-name"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 52,
+          "sha256": "d389abf172258542313f020b4dd4688b502e2d7a1c51f13dc6649eb5d22d6344",
+          "base64": "L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wL2xpYmdjYy5hCg==",
+          "text": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/libgcc.a\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "help",
+      "categories": [
+        "help"
+      ],
+      "arguments": [
+        "--help"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 4076,
+          "sha256": "9901dc5e67d8e20ebdbd97bde30ed7c4769dd98a46bd4ffbbb6f2f2a5f0fb52c",
+          "base64": "VXNhZ2U6IGdjYyBbb3B0aW9uc10gZmlsZS4uLgpPcHRpb25zOgogIC1wYXNzLWV4aXQtY29kZXMgICAgICAgICBFeGl0IHdpdGggaGlnaGVzdCBlcnJvciBjb2RlIGZyb20gYSBwaGFzZS4KICAtLWhlbHAgICAgICAgICAgICAgICAgICAgRGlzcGxheSB0aGlzIGluZm9ybWF0aW9uLgogIC0tdGFyZ2V0LWhlbHAgICAgICAgICAgICBEaXNwbGF5IHRhcmdldCBzcGVjaWZpYyBjb21tYW5kIGxpbmUgb3B0aW9ucyAoaW5jbHVkaW5nIGFzc2VtYmxlciBhbmQgbGlua2VyIG9wdGlvbnMpLgogIC0taGVscD17Y29tbW9ufG9wdGltaXplcnN8cGFyYW1zfHRhcmdldHx3YXJuaW5nc3xbXl17am9pbmVkfHNlcGFyYXRlfHVuZG9jdW1lbnRlZH19WywuLi5dLgogICAgICAgICAgICAgICAgICAgICAgICAgICBEaXNwbGF5IHNwZWNpZmljIHR5cGVzIG9mIGNvbW1hbmQgbGluZSBvcHRpb25zLgogIChVc2UgJy12IC0taGVscCcgdG8gZGlzcGxheSBjb21tYW5kIGxpbmUgb3B0aW9ucyBvZiBzdWItcHJvY2Vzc2VzKS4KICAtLXZlcnNpb24gICAgICAgICAgICAgICAgRGlzcGxheSBjb21waWxlciB2ZXJzaW9uIGluZm9ybWF0aW9uLgogIC1kdW1wc3BlY3MgICAgICAgICAgICAgICBEaXNwbGF5IGFsbCBvZiB0aGUgYnVpbHQgaW4gc3BlYyBzdHJpbmdzLgogIC1kdW1wdmVyc2lvbiAgICAgICAgICAgICBEaXNwbGF5IHRoZSB2ZXJzaW9uIG9mIHRoZSBjb21waWxlci4KICAtZHVtcG1hY2hpbmUgICAgICAgICAgICAgRGlzcGxheSB0aGUgY29tcGlsZXIncyB0YXJnZXQgcHJvY2Vzc29yLgogIC1mb2ZmbG9hZD08dGFyZ2V0cz4gICAgICBTcGVjaWZ5IG9mZmxvYWRpbmcgdGFyZ2V0cy4KICAtcHJpbnQtc2VhcmNoLWRpcnMgICAgICAgRGlzcGxheSB0aGUgZGlyZWN0b3JpZXMgaW4gdGhlIGNvbXBpbGVyJ3Mgc2VhcmNoIHBhdGguCiAgLXByaW50LWxpYmdjYy1maWxlLW5hbWUgIERpc3BsYXkgdGhlIG5hbWUgb2YgdGhlIGNvbXBpbGVyJ3MgY29tcGFuaW9uIGxpYnJhcnkuCiAgLXByaW50LWZpbGUtbmFtZT08bGliPiAgIERpc3BsYXkgdGhlIGZ1bGwgcGF0aCB0byBsaWJyYXJ5IDxsaWI+LgogIC1wcmludC1wcm9nLW5hbWU9PHByb2c+ICBEaXNwbGF5IHRoZSBmdWxsIHBhdGggdG8gY29tcGlsZXIgY29tcG9uZW50IDxwcm9nPi4KICAtcHJpbnQtbXVsdGlhcmNoICAgICAgICAgRGlzcGxheSB0aGUgdGFyZ2V0J3Mgbm9ybWFsaXplZCBHTlUgdHJpcGxldCwgdXNlZCBhcwogICAgICAgICAgICAgICAgICAgICAgICAgICBhIGNvbXBvbmVudCBpbiB0aGUgbGlicmFyeSBwYXRoLgogIC1wcmludC1tdWx0aS1kaXJlY3RvcnkgICBEaXNwbGF5IHRoZSByb290IGRpcmVjdG9yeSBmb3IgdmVyc2lvbnMgb2YgbGliZ2NjLgogIC1wcmludC1tdWx0aS1saWIgICAgICAgICBEaXNwbGF5IHRoZSBtYXBwaW5nIGJldHdlZW4gY29tbWFuZCBsaW5lIG9wdGlvbnMgYW5kCiAgICAgICAgICAgICAgICAgICAgICAgICAgIG11bHRpcGxlIGxpYnJhcnkgc2VhcmNoIGRpcmVjdG9yaWVzLgogIC1wcmludC1tdWx0aS1vcy1kaXJlY3RvcnkgRGlzcGxheSB0aGUgcmVsYXRpdmUgcGF0aCB0byBPUyBsaWJyYXJpZXMuCiAgLXByaW50LXN5c3Jvb3QgICAgICAgICAgIERpc3BsYXkgdGhlIHRhcmdldCBsaWJyYXJpZXMgZGlyZWN0b3J5LgogIC1wcmludC1zeXNyb290LWhlYWRlcnMtc3VmZml4IERpc3BsYXkgdGhlIHN5c3Jvb3Qgc3VmZml4IHVzZWQgdG8gZmluZCBoZWFkZXJzLgogIC1XYSw8b3B0aW9ucz4gICAgICAgICAgICBQYXNzIGNvbW1hLXNlcGFyYXRlZCA8b3B0aW9ucz4gb24gdG8gdGhlIGFzc2VtYmxlci4KICAtV3AsPG9wdGlvbnM+ICAgICAgICAgICAgUGFzcyBjb21tYS1zZXBhcmF0ZWQgPG9wdGlvbnM+IG9uIHRvIHRoZSBwcmVwcm9jZXNzb3IuCiAgLVdsLDxvcHRpb25zPiAgICAgICAgICAgIFBhc3MgY29tbWEtc2VwYXJhdGVkIDxvcHRpb25zPiBvbiB0byB0aGUgbGlua2VyLgogIC1YYXNzZW1ibGVyIDxhcmc+ICAgICAgICBQYXNzIDxhcmc+IG9uIHRvIHRoZSBhc3NlbWJsZXIuCiAgLVhwcmVwcm9jZXNzb3IgPGFyZz4gICAgIFBhc3MgPGFyZz4gb24gdG8gdGhlIHByZXByb2Nlc3Nvci4KICAtWGxpbmtlciA8YXJnPiAgICAgICAgICAgUGFzcyA8YXJnPiBvbiB0byB0aGUgbGlua2VyLgogIC1zYXZlLXRlbXBzICAgICAgICAgICAgICBEbyBub3QgZGVsZXRlIGludGVybWVkaWF0ZSBmaWxlcy4KICAtc2F2ZS10ZW1wcz08YXJnPiAgICAgICAgRG8gbm90IGRlbGV0ZSBpbnRlcm1lZGlhdGUgZmlsZXMuCiAgLW5vLWNhbm9uaWNhbC1wcmVmaXhlcyAgIERvIG5vdCBjYW5vbmljYWxpemUgcGF0aHMgd2hlbiBidWlsZGluZyByZWxhdGl2ZQogICAgICAgICAgICAgICAgICAgICAgICAgICBwcmVmaXhlcyB0byBvdGhlciBnY2MgY29tcG9uZW50cy4KICAtcGlwZSAgICAgICAgICAgICAgICAgICAgVXNlIHBpcGVzIHJhdGhlciB0aGFuIGludGVybWVkaWF0ZSBmaWxlcy4KICAtdGltZSAgICAgICAgICAgICAgICAgICAgVGltZSB0aGUgZXhlY3V0aW9uIG9mIGVhY2ggc3VicHJvY2Vzcy4KICAtc3BlY3M9PGZpbGU+ICAgICAgICAgICAgT3ZlcnJpZGUgYnVpbHQtaW4gc3BlY3Mgd2l0aCB0aGUgY29udGVudHMgb2YgPGZpbGU+LgogIC1zdGQ9PHN0YW5kYXJkPiAgICAgICAgICBBc3N1bWUgdGhhdCB0aGUgaW5wdXQgc291cmNlcyBhcmUgZm9yIDxzdGFuZGFyZD4uCiAgLS1zeXNyb290PTxkaXJlY3Rvcnk+ICAgIFVzZSA8ZGlyZWN0b3J5PiBhcyB0aGUgcm9vdCBkaXJlY3RvcnkgZm9yIGhlYWRlcnMKICAgICAgICAgICAgICAgICAgICAgICAgICAgYW5kIGxpYnJhcmllcy4KICAtQiA8ZGlyZWN0b3J5PiAgICAgICAgICAgQWRkIDxkaXJlY3Rvcnk+IHRvIHRoZSBjb21waWxlcidzIHNlYXJjaCBwYXRocy4KICAtdiAgICAgICAgICAgICAgICAgICAgICAgRGlzcGxheSB0aGUgcHJvZ3JhbXMgaW52b2tlZCBieSB0aGUgY29tcGlsZXIuCiAgLSMjIyAgICAgICAgICAgICAgICAgICAgIExpa2UgLXYgYnV0IG9wdGlvbnMgcXVvdGVkIGFuZCBjb21tYW5kcyBub3QgZXhlY3V0ZWQuCiAgLUUgICAgICAgICAgICAgICAgICAgICAgIFByZXByb2Nlc3Mgb25seTsgZG8gbm90IGNvbXBpbGUsIGFzc2VtYmxlIG9yIGxpbmsuCiAgLVMgICAgICAgICAgICAgICAgICAgICAgIENvbXBpbGUgb25seTsgZG8gbm90IGFzc2VtYmxlIG9yIGxpbmsuCiAgLWMgICAgICAgICAgICAgICAgICAgICAgIENvbXBpbGUgYW5kIGFzc2VtYmxlLCBidXQgZG8gbm90IGxpbmsuCiAgLW8gPGZpbGU+ICAgICAgICAgICAgICAgIFBsYWNlIHRoZSBvdXRwdXQgaW50byA8ZmlsZT4uCiAgLXBpZSAgICAgICAgICAgICAgICAgICAgIENyZWF0ZSBhIGR5bmFtaWNhbGx5IGxpbmtlZCBwb3NpdGlvbiBpbmRlcGVuZGVudAogICAgICAgICAgICAgICAgICAgICAgICAgICBleGVjdXRhYmxlLgogIC1zaGFyZWQgICAgICAgICAgICAgICAgICBDcmVhdGUgYSBzaGFyZWQgbGlicmFyeS4KICAteCA8bGFuZ3VhZ2U+ICAgICAgICAgICAgU3BlY2lmeSB0aGUgbGFuZ3VhZ2Ugb2YgdGhlIGZvbGxvd2luZyBpbnB1dCBmaWxlcy4KICAgICAgICAgICAgICAgICAgICAgICAgICAgUGVybWlzc2libGUgbGFuZ3VhZ2VzIGluY2x1ZGU6IGMgYysrIGFzc2VtYmxlciBub25lCiAgICAgICAgICAgICAgICAgICAgICAgICAgICdub25lJyBtZWFucyByZXZlcnQgdG8gdGhlIGRlZmF1bHQgYmVoYXZpb3Igb2YKICAgICAgICAgICAgICAgICAgICAgICAgICAgZ3Vlc3NpbmcgdGhlIGxhbmd1YWdlIGJhc2VkIG9uIHRoZSBmaWxlJ3MgZXh0ZW5zaW9uLgoKT3B0aW9ucyBzdGFydGluZyB3aXRoIC1nLCAtZiwgLW0sIC1PLCAtVywgb3IgLS1wYXJhbSBhcmUgYXV0b21hdGljYWxseQogcGFzc2VkIG9uIHRvIHRoZSB2YXJpb3VzIHN1Yi1wcm9jZXNzZXMgaW52b2tlZCBieSBnY2MuICBJbiBvcmRlciB0byBwYXNzCiBvdGhlciBvcHRpb25zIG9uIHRvIHRoZXNlIHByb2Nlc3NlcyB0aGUgLVc8bGV0dGVyPiBvcHRpb25zIG11c3QgYmUgdXNlZC4KCkZvciBidWcgcmVwb3J0aW5nIGluc3RydWN0aW9ucywgcGxlYXNlIHNlZToKPGh0dHBzOi8vZ2NjLmdudS5vcmcvYnVncy8+Lgo=",
+          "text": "Usage: gcc [options] file...\nOptions:\n  -pass-exit-codes         Exit with highest error code from a phase.\n  --help                   Display this information.\n  --target-help            Display target specific command line options (including assembler and linker options).\n  --help={common|optimizers|params|target|warnings|[^]{joined|separate|undocumented}}[,...].\n                           Display specific types of command line options.\n  (Use '-v --help' to display command line options of sub-processes).\n  --version                Display compiler version information.\n  -dumpspecs               Display all of the built in spec strings.\n  -dumpversion             Display the version of the compiler.\n  -dumpmachine             Display the compiler's target processor.\n  -foffload=<targets>      Specify offloading targets.\n  -print-search-dirs       Display the directories in the compiler's search path.\n  -print-libgcc-file-name  Display the name of the compiler's companion library.\n  -print-file-name=<lib>   Display the full path to library <lib>.\n  -print-prog-name=<prog>  Display the full path to compiler component <prog>.\n  -print-multiarch         Display the target's normalized GNU triplet, used as\n                           a component in the library path.\n  -print-multi-directory   Display the root directory for versions of libgcc.\n  -print-multi-lib         Display the mapping between command line options and\n                           multiple library search directories.\n  -print-multi-os-directory Display the relative path to OS libraries.\n  -print-sysroot           Display the target libraries directory.\n  -print-sysroot-headers-suffix Display the sysroot suffix used to find headers.\n  -Wa,<options>            Pass comma-separated <options> on to the assembler.\n  -Wp,<options>            Pass comma-separated <options> on to the preprocessor.\n  -Wl,<options>            Pass comma-separated <options> on to the linker.\n  -Xassembler <arg>        Pass <arg> on to the assembler.\n  -Xpreprocessor <arg>     Pass <arg> on to the preprocessor.\n  -Xlinker <arg>           Pass <arg> on to the linker.\n  -save-temps              Do not delete intermediate files.\n  -save-temps=<arg>        Do not delete intermediate files.\n  -no-canonical-prefixes   Do not canonicalize paths when building relative\n                           prefixes to other gcc components.\n  -pipe                    Use pipes rather than intermediate files.\n  -time                    Time the execution of each subprocess.\n  -specs=<file>            Override built-in specs with the contents of <file>.\n  -std=<standard>          Assume that the input sources are for <standard>.\n  --sysroot=<directory>    Use <directory> as the root directory for headers\n                           and libraries.\n  -B <directory>           Add <directory> to the compiler's search paths.\n  -v                       Display the programs invoked by the compiler.\n  -###                     Like -v but options quoted and commands not executed.\n  -E                       Preprocess only; do not compile, assemble or link.\n  -S                       Compile only; do not assemble or link.\n  -c                       Compile and assemble, but do not link.\n  -o <file>                Place the output into <file>.\n  -pie                     Create a dynamically linked position independent\n                           executable.\n  -shared                  Create a shared library.\n  -x <language>            Specify the language of the following input files.\n                           Permissible languages include: c c++ assembler none\n                           'none' means revert to the default behavior of\n                           guessing the language based on the file's extension.\n\nOptions starting with -g, -f, -m, -O, -W, or --param are automatically\n passed on to the various sub-processes invoked by gcc.  In order to pass\n other options on to these processes the -W<letter> options must be used.\n\nFor bug reporting instructions, please see:\n<https://gcc.gnu.org/bugs/>.\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "no-input",
+      "categories": [
+        "missing-input"
+      ],
+      "arguments": [],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 57,
+          "sha256": "5c8b929d85ec4dfb36b06e508114b66b036025a2c24ce6aff041de2117e90fba",
+          "base64": "Z2NjOiBmYXRhbCBlcnJvcjogbm8gaW5wdXQgZmlsZXMKY29tcGlsYXRpb24gdGVybWluYXRlZC4K",
+          "text": "gcc: fatal error: no input files\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "missing-input-file",
+      "categories": [
+        "missing-input"
+      ],
+      "arguments": [
+        "-c",
+        "absent.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 78,
+          "sha256": "153422371523dc56a448b36e44af49f1b885f56eb3e100d4a3ac6c682c090414",
+          "base64": "Y2MxOiBmYXRhbCBlcnJvcjogYWJzZW50LmM6IE5vIHN1Y2ggZmlsZSBvciBkaXJlY3RvcnkKY29tcGlsYXRpb24gdGVybWluYXRlZC4K",
+          "text": "cc1: fatal error: absent.c: No such file or directory\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "option-missing-argument",
+      "categories": [
+        "option-validation",
+        "missing-input"
+      ],
+      "arguments": [
+        "-o"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 97,
+          "sha256": "9ac154c8e380880326388b6e9c334f071c18b202958f084db59664d8f1afe730",
+          "base64": "Z2NjOiBlcnJvcjogbWlzc2luZyBmaWxlbmFtZSBhZnRlciAnLW8nCmdjYzogZmF0YWwgZXJyb3I6IG5vIGlucHV0IGZpbGVzCmNvbXBpbGF0aW9uIHRlcm1pbmF0ZWQuCg==",
+          "text": "gcc: error: missing filename after '-o'\ngcc: fatal error: no input files\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "option-invalid-language",
+      "categories": [
+        "option-validation"
+      ],
+      "arguments": [
+        "-x",
+        "bogus",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 84,
+          "sha256": "61ca59566faadced34ea2225f6a9c9b4a142694314dfd090f9a499e604f65ff7",
+          "base64": "Z2NjOiBlcnJvcjogbGFuZ3VhZ2UgYm9ndXMgbm90IHJlY29nbml6ZWQKZ2NjOiBlcnJvcjogbGFuZ3VhZ2UgYm9ndXMgbm90IHJlY29nbml6ZWQK",
+          "text": "gcc: error: language bogus not recognized\ngcc: error: language bogus not recognized\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "option-invalid-standard",
+      "categories": [
+        "option-validation",
+        "unsupported-option"
+      ],
+      "arguments": [
+        "-std=bogus",
+        "-c",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 58,
+          "sha256": "a767fb05a81253a07db58845dde03de444e891e88e929714a7325812bb12d49e",
+          "base64": "Z2NjOiBlcnJvcjogdW5yZWNvZ25pemVkIGNvbW1hbmQtbGluZSBvcHRpb24gJy1zdGQ9Ym9ndXMnCg==",
+          "text": "gcc: error: unrecognized command-line option '-std=bogus'\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "option-invalid-frontend-value",
+      "categories": [
+        "option-validation"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-march=bogus",
+        "-c",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 948,
+          "sha256": "8a8db38446da4bdc597dac6396a96571e7ca34fe471abf01ae4aa4205f0f0abe",
+          "base64": "Y2MxOiBlcnJvcjogYmFkIHZhbHVlICdib2d1cycgZm9yICctbWFyY2g9JyBzd2l0Y2gKY2MxOiBub3RlOiB2YWxpZCBhcmd1bWVudHMgdG8gJy1tYXJjaD0nIHN3aXRjaCBhcmU6IG5vY29uYSBjb3JlMiBuZWhhbGVtIGNvcmVpNyB3ZXN0bWVyZSBzYW5keWJyaWRnZSBjb3JlaTctYXZ4IGl2eWJyaWRnZSBjb3JlLWF2eC1pIGhhc3dlbGwgY29yZS1hdngyIGJyb2Fkd2VsbCBza3lsYWtlIHNreWxha2UtYXZ4NTEyIGNhbm5vbmxha2UgaWNlbGFrZS1jbGllbnQgcm9ja2V0bGFrZSBpY2VsYWtlLXNlcnZlciBjYXNjYWRlbGFrZSB0aWdlcmxha2UgY29vcGVybGFrZSBzYXBwaGlyZXJhcGlkcyBlbWVyYWxkcmFwaWRzIGFsZGVybGFrZSByYXB0b3JsYWtlIG1ldGVvcmxha2UgZ3Jhbml0ZXJhcGlkcyBncmFuaXRlcmFwaWRzLWQgYXJyb3dsYWtlIGFycm93bGFrZS1zIGx1bmFybGFrZSBwYW50aGVybGFrZSBkaWFtb25kcmFwaWRzIHdpbGRjYXRsYWtlIG5vdmFsYWtlIGJvbm5lbGwgYXRvbSBzaWx2ZXJtb250IHNsbSBnb2xkbW9udCBnb2xkbW9udC1wbHVzIHRyZW1vbnQgZ3JhY2Vtb250IHNpZXJyYWZvcmVzdCBncmFuZHJpZGdlIGNsZWFyd2F0ZXJmb3Jlc3QgeDg2LTY0IHg4Ni02NC12MiB4ODYtNjQtdjMgeDg2LTY0LXY0IGVkZW4teDIgbmFubyBuYW5vLTEwMDAgbmFuby0yMDAwIG5hbm8tMzAwMCBuYW5vLXgyIGVkZW4teDQgbmFuby14NCBsdWppYXp1aSB5b25nZmVuZyBzaGlqaWRhZGFvIGs4IGs4LXNzZTMgb3B0ZXJvbiBvcHRlcm9uLXNzZTMgYXRobG9uNjQgYXRobG9uNjQtc3NlMyBhdGhsb24tZnggYW1kZmFtMTAgYmFyY2Vsb25hIGJkdmVyMSBiZHZlcjIgYmR2ZXIzIGJkdmVyNCB6bnZlcjEgem52ZXIyIHpudmVyMyB6bnZlcjQgem52ZXI1IHpudmVyNiBidHZlcjEgYnR2ZXIyIGM4Ni00Zy1tNCBjODYtNGctbTYgYzg2LTRnLW03IGM4Ni00Zy1tOCBuYXRpdmUK",
+          "text": "cc1: error: bad value 'bogus' for '-march=' switch\ncc1: note: valid arguments to '-march=' switch are: nocona core2 nehalem corei7 westmere sandybridge corei7-avx ivybridge core-avx-i haswell core-avx2 broadwell skylake skylake-avx512 cannonlake icelake-client rocketlake icelake-server cascadelake tigerlake cooperlake sapphirerapids emeraldrapids alderlake raptorlake meteorlake graniterapids graniterapids-d arrowlake arrowlake-s lunarlake pantherlake diamondrapids wildcatlake novalake bonnell atom silvermont slm goldmont goldmont-plus tremont gracemont sierraforest grandridge clearwaterforest x86-64 x86-64-v2 x86-64-v3 x86-64-v4 eden-x2 nano nano-1000 nano-2000 nano-3000 nano-x2 eden-x4 nano-x4 lujiazui yongfeng shijidadao k8 k8-sse3 opteron opteron-sse3 athlon64 athlon64-sse3 athlon-fx amdfam10 barcelona bdver1 bdver2 bdver3 bdver4 znver1 znver2 znver3 znver4 znver5 znver6 btver1 btver2 c86-4g-m4 c86-4g-m6 c86-4g-m7 c86-4g-m8 native\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "unsupported-long-option",
+      "categories": [
+        "unsupported-option",
+        "missing-input"
+      ],
+      "arguments": [
+        "--bogus-long"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 117,
+          "sha256": "4f1f8ad59ee331dd2835df38fae1b79cc1a2ac019a4491c28c4476593da2cc42",
+          "base64": "Z2NjOiBlcnJvcjogdW5yZWNvZ25pemVkIGNvbW1hbmQtbGluZSBvcHRpb24gJy0tYm9ndXMtbG9uZycKZ2NjOiBmYXRhbCBlcnJvcjogbm8gaW5wdXQgZmlsZXMKY29tcGlsYXRpb24gdGVybWluYXRlZC4K",
+          "text": "gcc: error: unrecognized command-line option '--bogus-long'\ngcc: fatal error: no input files\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "unsupported-flag-option",
+      "categories": [
+        "unsupported-option"
+      ],
+      "arguments": [
+        "-fbogus-flag",
+        "-c",
+        "source.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 60,
+          "sha256": "bb85f2f67be169c5c0b9f070961d450d55161645d629c4e75775b36e67d7e3af",
+          "base64": "Z2NjOiBlcnJvcjogdW5yZWNvZ25pemVkIGNvbW1hbmQtbGluZSBvcHRpb24gJy1mYm9ndXMtZmxhZycK",
+          "text": "gcc: error: unrecognized command-line option '-fbogus-flag'\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "malformed-source",
+      "categories": [
+        "malformed-input"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-c",
+        "bad.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "bad.c",
+          "bytes": 28,
+          "sha256": "b6aeb27447c5b6109f88d664e8ce156ea440920f4699c7fcec4d99bf89ce62ba"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 183,
+          "sha256": "e2983fdca23e48c08c785cd257500c40ab7fd2605e6e48af4282ee9e8fd7c4cb",
+          "base64": "YmFkLmM6IEluIGZ1bmN0aW9uICdtYWluJzoKYmFkLmM6MToyNjogZXJyb3I6IGV4cGVjdGVkICc7JyBiZWZvcmUgJ30nIHRva2VuCiAgICAxIHwgaW50IG1haW4odm9pZCkgeyByZXR1cm4gMCB9CiAgICAgIHwgICAgICAgICAgICAgICAgICAgICAgICAgIF5+CiAgICAgIHwgICAgICAgICAgICAgICAgICAgICAgICAgIDsK",
+          "text": "bad.c: In function 'main':\nbad.c:1:26: error: expected ';' before '}' token\n    1 | int main(void) { return 0 }\n      |                          ^~\n      |                          ;\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "malformed-link-input",
+      "categories": [
+        "malformed-input"
+      ],
+      "arguments": [
+        "data.bin"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "data.bin",
+          "bytes": 15,
+          "sha256": "5f5e17bf2c1c38b188c9ea7bbc65a9d89f74ad574244cd551a079bf8339456f4"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 101,
+          "sha256": "62184127163da74970c39e8eb9b23171a261f59d1ea678e7b9b47429832580ee",
+          "base64": "ZGF0YS5iaW46IGZpbGUgbm90IHJlY29nbml6ZWQ6IGZpbGUgZm9ybWF0IG5vdCByZWNvZ25pemVkCmNvbGxlY3QyOiBlcnJvcjogbGQgcmV0dXJuZWQgMSBleGl0IHN0YXR1cwo=",
+          "text": "data.bin: file not recognized: file format not recognized\ncollect2: error: ld returned 1 exit status\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    }
+  ],
+  "identitySubstitutions": [
+    {
+      "token": "gcc",
+      "where": "the program-name prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`)",
+      "permitted": "the basename a candidate driver is invoked as"
+    },
+    {
+      "token": "/usr/local",
+      "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
+      "permitted": "the candidate's configured install prefix, applied to the whole prefix only"
+    }
+  ],
+  "identitySubstitutionLimit": "No other substitution is permitted: version, target triple, option spellings, diagnostic wording, exit status and stream assignment must match byte-for-byte.",
+  "productionGates": {
+    "reconstructedCandidateComparison": "unavailable",
+    "reason": "These records are the real GCC 16.2.0 frontend reference. Comparing a reconstructed candidate driver against them is downstream work."
+  },
+  "analysisBoundary": "No Ghidra analysis is part of this record; bundled Ghidra isolation and the authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback or analyzeHeadless invocation is introduced."
+}

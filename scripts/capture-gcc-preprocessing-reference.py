@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture real GCC 16.2.0 preprocessing and dependency-generation references.
+"""Capture real GCC 16.2.0 metadata, diagnostic, preprocessing and dependency references.
 
 Every case runs the installed `gcc` of the pinned official base image that
 `build-toolchain.Dockerfile` builds on, with no network, a read-only root
@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ORACLE = ROOT / "oracle/gcc/16.2.0"
 PREPROCESSING_RECORD = ORACLE / "preprocessing-reference-evidence.json"
 DEPENDENCY_RECORD = ORACLE / "dependency-generation-reference.json"
+METADATA_RECORD = ORACLE / "metadata-diagnostic-reference.json"
 IMAGE = "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0"
 IMAGE_CONFIG = "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f"
 ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
@@ -72,10 +73,10 @@ DEPENDENCY_TREE = {
 }
 
 
-def case(case_id, arguments, inputs, stdin=b"", categories=()):
+def case(case_id, arguments, inputs, stdin=b"", categories=(), nostdinc=True):
     return {
         "id": case_id,
-        "arguments": ["-nostdinc", *arguments],
+        "arguments": ["-nostdinc", *arguments] if nostdinc else list(arguments),
         "inputs": inputs,
         "stdin": stdin,
         "categories": list(categories),
@@ -183,6 +184,93 @@ DEPENDENCY_CASES = [
         categories=["MM", "diagnostic"],
     ),
 ]
+
+
+MALFORMED_C = b"int main(void) { return 0 }\n"
+
+
+def query(case_id, arguments, categories):
+    return case(case_id, arguments, {}, categories=categories, nostdinc=False)
+
+
+METADATA_CASES = [
+    query("version", ["--version"], ["version"]),
+    query("dumpversion", ["-dumpversion"], ["version"]),
+    query("dumpfullversion", ["-dumpfullversion"], ["version"]),
+    query("dumpmachine", ["-dumpmachine"], ["target"]),
+    query("verbose-configuration", ["-v"], ["version", "target", "configuration"]),
+    query("print-search-dirs", ["-print-search-dirs"], ["search-directory"]),
+    query("print-prog-name-cc1", ["-print-prog-name=cc1"], ["search-directory"]),
+    query("print-libgcc-file-name", ["-print-libgcc-file-name"], ["search-directory"]),
+    query("help", ["--help"], ["help"]),
+    query("no-input", [], ["missing-input"]),
+    case(
+        "missing-input-file",
+        ["-c", "absent.c"],
+        {},
+        categories=["missing-input"],
+        nostdinc=False,
+    ),
+    query("option-missing-argument", ["-o"], ["option-validation", "missing-input"]),
+    case(
+        "option-invalid-language",
+        ["-x", "bogus", "source.c"],
+        {"source.c": SOURCE_C},
+        categories=["option-validation"],
+        nostdinc=False,
+    ),
+    case(
+        "option-invalid-standard",
+        ["-std=bogus", "-c", "source.c"],
+        {"source.c": SOURCE_C},
+        categories=["option-validation", "unsupported-option"],
+        nostdinc=False,
+    ),
+    case(
+        "option-invalid-frontend-value",
+        ["-march=bogus", "-c", "source.c"],
+        {"source.c": SOURCE_C},
+        categories=["option-validation"],
+    ),
+    query("unsupported-long-option", ["--bogus-long"], ["unsupported-option", "missing-input"]),
+    case(
+        "unsupported-flag-option",
+        ["-fbogus-flag", "-c", "source.c"],
+        {"source.c": SOURCE_C},
+        categories=["unsupported-option"],
+        nostdinc=False,
+    ),
+    case(
+        "malformed-source",
+        ["-c", "bad.c"],
+        {"bad.c": MALFORMED_C},
+        categories=["malformed-input"],
+    ),
+    case(
+        "malformed-link-input",
+        ["data.bin"],
+        {"data.bin": b"\x00not an object\n"},
+        categories=["malformed-input"],
+        nostdinc=False,
+    ),
+]
+
+IDENTITY_SUBSTITUTIONS = [
+    {
+        "token": "gcc",
+        "where": "the program-name prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`)",
+        "permitted": "the basename a candidate driver is invoked as",
+    },
+    {
+        "token": "/usr/local",
+        "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
+        "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
+    },
+]
+IDENTITY_SUBSTITUTION_LIMIT = (
+    "No other substitution is permitted: version, target triple, option spellings, "
+    "diagnostic wording, exit status and stream assignment must match byte-for-byte."
+)
 
 
 def digest(data: bytes) -> str:
@@ -312,8 +400,9 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
     }
 
 
-def records(runtime: str, scratch: Path) -> tuple[dict, dict]:
+def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
     identity = toolchain_identity(runtime, scratch)
+    metadata = [capture_case(runtime, scratch, spec) for spec in METADATA_CASES]
     preprocessing = [capture_case(runtime, scratch, spec) for spec in PREPROCESSING_CASES]
     dependency = [capture_case(runtime, scratch, spec) for spec in DEPENDENCY_CASES]
     capture = {
@@ -352,6 +441,20 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict]:
             "productionGates": gaps,
             "analysisBoundary": ANALYSIS_BOUNDARY,
         },
+        {
+            "schemaVersion": 2,
+            "issue": 706,
+            "id": "gcc-16-2-0-metadata-diagnostic-reference",
+            "status": "captured",
+            "scope": "real-driver-metadata-and-diagnostics",
+            "toolchain": identity,
+            "capture": capture,
+            "cases": metadata,
+            "identitySubstitutions": IDENTITY_SUBSTITUTIONS,
+            "identitySubstitutionLimit": IDENTITY_SUBSTITUTION_LIMIT,
+            "productionGates": gaps,
+            "analysisBoundary": ANALYSIS_BOUNDARY,
+        },
     )
 
 
@@ -371,7 +474,7 @@ def main() -> int:
     scratch = Path(tempfile.mkdtemp(prefix="gcc-preprocessing-", dir=scratch_parent))
     try:
         rendered = {path: render(record) for path, record in zip(
-            (PREPROCESSING_RECORD, DEPENDENCY_RECORD), records(args.runtime, scratch)
+            (PREPROCESSING_RECORD, DEPENDENCY_RECORD, METADATA_RECORD), records(args.runtime, scratch)
         )}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

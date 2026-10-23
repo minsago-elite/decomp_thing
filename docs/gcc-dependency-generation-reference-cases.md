@@ -1,7 +1,8 @@
 # GCC preprocessing and dependency-generation references
 
 `oracle/gcc/16.2.0/preprocessing-reference-evidence.json` (issue #709) and
-`oracle/gcc/16.2.0/dependency-generation-reference.json` (issue #710) are
+`oracle/gcc/16.2.0/dependency-generation-reference.json` (issue #710), together
+with the metadata and diagnostic record described below (issue #706), are
 captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py`.
 
 ## Execution environment
@@ -30,6 +31,16 @@ assembler-with-cpp by `-x` and by `.S` suffix, `.i` input, and `-x c` with `-o`.
 Dependency generation: `-M` on the corpus `source.c`, `-M` versus `-MM` with a
 system header, `-E -MD -MF` with both artifacts, `-MT` with `-MP`, `-MQ`
 quoting, `-MG` for a missing header, and the missing-header diagnostic.
+
+Metadata and diagnostics (`oracle/gcc/16.2.0/metadata-diagnostic-reference.json`,
+issue #706): `--version`, `-dumpversion`, `-dumpfullversion`, `-dumpmachine`,
+`-v`, `-print-search-dirs`, `-print-prog-name=cc1`, `-print-libgcc-file-name`,
+`--help`, no input, a missing input file, `-o` without a filename, invalid `-x`,
+`-std=` and `-march=` values, unrecognized long and `-f` options, a malformed C
+source and a malformed link input. These cases do not pass `-nostdinc`. The
+record's `identitySubstitutions` lists the only differences a candidate may
+show: the driver program name in diagnostic prefixes and the install prefix in
+path output. Everything else must match byte-for-byte.
 
 ## Reproduction
 
