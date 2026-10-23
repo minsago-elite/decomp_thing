@@ -18,8 +18,8 @@ fixed. The script verifies the image config digest and records the driver and
 `cc1` hashes, version and target triple.
 
 Each case runs twice in separate workspaces; the capture fails unless stdout,
-stderr, exit status and produced artifacts are byte-identical. No normalization
-is applied.
+stderr, exit status and produced artifacts are byte-identical. Only the phase
+orchestration record normalizes anything (driver temporary-file names, below).
 
 ## Cases
 
@@ -41,6 +41,22 @@ source and a malformed link input. These cases do not pass `-nostdinc`. The
 record's `identitySubstitutions` lists the only differences a candidate may
 show: the driver program name in diagnostic prefixes and the install prefix in
 path output. Everything else must match byte-for-byte.
+
+Phase orchestration (`oracle/gcc/16.2.0/orchestration-phase-reference.json`,
+issue #712): compile to assembly, compile to object (plain, `-pipe`,
+`-save-temps`), assemble `.s`, preprocess-and-assemble `.S`, link one source,
+two C sources, and mixed C plus assembly, the default `a.out` output, and
+failure propagation from `cc1`, from `as` on a source file, from `as` after a
+successful compile, and from the linker on an undefined symbol. Each repetition
+runs `gcc -###` (the planned phases), `gcc -v` (the phases actually started; a
+failing phase stops the rest) and the plain command (exit status, streams and
+artifacts), then runs any linked program in the same sandbox and records its
+exit status and output. `toolchain.phaseTools` records the path, resolved path
+and hash of `cc1`, `as`, `collect2`, `ld`, `lto-wrapper` and `liblto_plugin.so`,
+plus the binutils versions. Driver temporaries (`/tmp/ccXXXXXX.s` and so on)
+come from `mkstemp`, so plans, traces and streams replace them with `<tmp-N>`
+by order of first appearance; artifacts are never normalized. These cases do
+not pass `-nostdinc`.
 
 ## Reproduction
 
