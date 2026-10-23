@@ -1,0 +1,59 @@
+{
+  "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+  "compilerEngineProfileSha256": "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab",
+  "exporter": {
+    "bytes": 136177,
+    "recoveryMode": "full",
+    "sha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29"
+  },
+  "fullExportProfileSha256": "e9642742f1ecde0fe63088d3e416a3a2ffab97be86f2988282d05d88eba0bbc7",
+  "ghidraArchive": {
+    "bytes": 569445154,
+    "sha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54"
+  },
+  "inputBinary": {
+    "bytes": 2349296,
+    "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+  },
+  "outputTreeSha256": "9204d728b59eee67a0a1e0234f5cfd43bb23363c4205410c6e0a661edbef2e57",
+  "profileId": "gcc-driver-16.2.0",
+  "profileVersion": "16.2.0",
+  "programModel": {
+    "bytes": 7634939,
+    "functionCount": 3384,
+    "sha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379"
+  },
+  "provider": "gcc-compiler-engine-structural-full-export-binding-v2",
+  "receiptLineage": {
+    "compilerEngineProfileSha256": "5020ec7cff82ba368063855aaf169782656eee8088cdc633add8679fbe227dab",
+    "engineId": "driver",
+    "executionPayloadSha256": "3dcb7eae3c427fffb588a9601bf24c0e088af6d7a5b3010c8fdaec36c10f979b",
+    "executionReceiptSha256": "d71cfa9ad7e46521d313d6a5fbac7769532f4c43df098ba269cc5fbeed8c0023",
+    "exportAssessmentReceiptSha256": "3b40d50caef27c02e88138d31a23fd817f1934549e85bcdf8a33a84ba60ba94b",
+    "exportAssessmentSha256": "4f0af2fbf46fc244d28197c050d20efd0a4b0ac191248c0fa5f862390e202ab3",
+    "intentSha256": "567c2f44c557f65e9e6fc86ef9d20cee5b1057b20d1c4acf16804298bc87821c",
+    "operationId": "a27735d8a3f103b89d05f775335cefe609459b1c025ada4533a72bd34e909695",
+    "provider": "gcc-bundled-full-export-receipt-lineage-v1",
+    "schemaVersion": 1
+  },
+  "receiptLineageSha256": "d74f6e5c58a94c3f36ad3c29f03cd00d41493412086cee3b40db4d1c03dc58c5",
+  "schemaVersion": 2,
+  "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+  "targetDescriptor": {
+    "abi": "sysv-amd64",
+    "architecture": "x86_64",
+    "checkedTargetAbiSha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343",
+    "dataEncoding": "little-endian",
+    "elfClass": "ELF64",
+    "elfType": "ET_EXEC",
+    "executableRangesSha256": "b1a428343159fa1555ffb3259c218bf7b6479c032030870fb2732d96eeddbaf3",
+    "ghidraCompilerSpec": "gcc",
+    "ghidraLanguage": "x86:LE:64:default",
+    "id": "sysv-amd64-elf-v1",
+    "imageBase": "0x400000",
+    "machine": 62,
+    "osAbi": 3,
+    "pointerBits": 64
+  },
+  "targetDescriptorSha256": "6b04c4a1554ffd93398505c11d39259a120fa0d9a4e207ccdfd66b4be5c0138e"
+}
