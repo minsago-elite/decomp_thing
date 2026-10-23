@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+import shlex
 import shutil
 import tempfile
 import unittest
@@ -16,6 +18,9 @@ from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     CoverageError,
     build_report as build_coverage,
 )
+from oracle.gcc import report_function_starts, report_symbol_identity  # noqa: E402
+
+COVERAGE_DOC = REPOSITORY_ROOT / "docs/gcc-oracle-accuracy-coverage.md"
 
 
 class RetainedFunctionStartTest(unittest.TestCase):
@@ -151,6 +156,30 @@ class TamperedFunctionStartTest(unittest.TestCase):
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "must not claim release eligibility"):
             build_coverage(self.profile)
+
+
+class DocumentedRegenerationCommandTest(unittest.TestCase):
+    """The documented regeneration commands must parse with each reporter's CLI."""
+
+    def test_documented_commands_parse(self) -> None:
+        parsers = {
+            "oracle/gcc/report_function_starts.py": report_function_starts.build_parser(),
+            "oracle/gcc/report_symbol_identity.py": report_symbol_identity.build_parser(),
+        }
+        text = COVERAGE_DOC.read_text(encoding="utf-8")
+        blocks = re.findall(r"```bash\n(.*?)```", text, flags=re.DOTALL)
+        seen = set()
+        for block in blocks:
+            argv = shlex.split(block.replace("\\\n", " "))
+            if len(argv) < 2 or argv[0] != "python3" or argv[1] not in parsers:
+                continue
+            seen.add(argv[1])
+            with self.subTest(script=argv[1]):
+                try:
+                    parsers[argv[1]].parse_args(argv[2:])
+                except SystemExit:
+                    self.fail(f"documented {argv[1]} command does not parse: {argv[2:]}")
+        self.assertEqual(set(parsers), seen)
 
 
 if __name__ == "__main__":

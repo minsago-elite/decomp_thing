@@ -115,7 +115,7 @@ def build_report(
     }
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Score GCC stripped function starts in a bound recovered model."
     )
@@ -128,7 +128,11 @@ def main() -> int:
     parser.add_argument("--binding", type=Path, required=True)
     parser.add_argument("--qualification", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    arguments = build_parser().parse_args()
     try:
         report = build_report(
             arguments.profile,

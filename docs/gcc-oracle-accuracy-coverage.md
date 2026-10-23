@@ -36,7 +36,6 @@ python3 oracle/gcc/report_symbol_identity.py \
   --program-model <evidence>/captured/program_model.json \
   --binding <evidence>/captured/structural-full-export-binding.json \
   --qualification <evidence>/qualification.json \
-  --run-id 38724253878 --artifact-id 11968496980 \
   --output oracle/gcc/16.2.0/surviving-symbol-identity.json
 ```
 
@@ -59,7 +58,6 @@ python3 oracle/gcc/report_function_starts.py \
   --program-model <evidence>/captured/program_model.json \
   --binding <evidence>/captured/structural-full-export-binding.json \
   --qualification <evidence>/qualification.json \
-  --run-id 38724253878 --artifact-id 11968496980 \
   --output oracle/gcc/16.2.0/function-start-score.json
 ```
 
