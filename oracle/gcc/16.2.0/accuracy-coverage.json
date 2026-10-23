@@ -72,9 +72,19 @@
     "survivingSymbolIdentity": {
       "currentScore": {
         "evidence": {
+          "binding": {
+            "bytes": 2740,
+            "path": "surviving-symbol-identity-binding.json",
+            "sha256": "3293afb3fd547fafb0f84c423b8a971a18bb0a7568f230db3383d7c84b7dd90d"
+          },
           "bytes": 3156,
           "path": "surviving-symbol-identity.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "qualification": {
+            "bytes": 1122,
+            "path": "surviving-symbol-identity-qualification.json",
+            "sha256": "bead696e9755375578e8adbaa67cc432789954acee96b20cf9f621308227552b"
+          },
           "sha256": "134358eada97015c1e0ee828f1d9cfb4c20cb8e1f9a2b4bbe84774d36b3f7dfa"
         },
         "identityRecovery": {

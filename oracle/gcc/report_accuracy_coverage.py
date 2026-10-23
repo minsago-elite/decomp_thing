@@ -73,14 +73,28 @@ def _read_regular(path: Path, label: str, limit: int | None = None) -> bytes:
         raise CoverageError(f"cannot read {label} {path}: {error}") from error
 
 
-def _json(path: Path, label: str, limit: int | None = None) -> dict[str, Any]:
+def _json_snapshot(
+    path: Path, label: str, limit: int | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Decode one read of ``path`` and return it with that read's record."""
+
+    payload = _read_regular(path, label, limit)
     try:
-        value = json.loads(_read_regular(path, label, limit))
+        value = json.loads(payload)
     except json.JSONDecodeError as error:
         raise CoverageError(f"{label} is not valid JSON: {error}") from error
     if not isinstance(value, dict):
         raise CoverageError(f"{label} must contain a JSON object")
-    return value
+    record = {
+        "path": path.name,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    return value, record
+
+
+def _json(path: Path, label: str, limit: int | None = None) -> dict[str, Any]:
+    return _json_snapshot(path, label, limit)[0]
 
 
 def _sha256(path: Path, label: str) -> str:
@@ -149,6 +163,8 @@ def _historical_unattested_score() -> dict[str, Any]:
 
 
 SYMBOL_IDENTITY_REPORT = "surviving-symbol-identity.json"
+SYMBOL_IDENTITY_BINDING = "surviving-symbol-identity-binding.json"
+SYMBOL_IDENTITY_QUALIFICATION = "surviving-symbol-identity-qualification.json"
 SYMBOL_IDENTITY_REPORT_ID = "gcc-driver-surviving-symbol-identity-v1"
 
 
@@ -166,6 +182,10 @@ def _symbol_identity_score(
             "reasonCode": "no-retained-production-symbol-identity-report",
             "productionVerified": False,
         }
+    # Imported here because the bound-model loader reuses this module's
+    # bounded readers.
+    from oracle.gcc.bound_recovered_model import load_bound_provenance
+
     report = _json(report_path, "surviving symbol identity report")
     if report.get("reportId") != SYMBOL_IDENTITY_REPORT_ID or report.get("twin") != "stripped":
         raise CoverageError("surviving symbol identity report has an unexpected identity")
@@ -225,6 +245,20 @@ def _symbol_identity_score(
             "surviving symbol identity report claims release eligibility without "
             "an authenticated admission record"
         )
+    # The model digest and the rest of the provenance are republished only
+    # when they match the retained binding and qualification, which are
+    # themselves verified against this manifest and stripped input.
+    bound = load_bound_provenance(
+        manifest_sha256,
+        loaded_oracle.artifacts["stripped"],
+        profile_directory / SYMBOL_IDENTITY_BINDING,
+        profile_directory / SYMBOL_IDENTITY_QUALIFICATION,
+    )
+    if provenance != bound.provenance:
+        raise CoverageError(
+            "surviving symbol identity report provenance disagrees with its "
+            "retained binding and qualification"
+        )
     return {
         "status": "measured",
         "identityRecovery": {
@@ -238,9 +272,9 @@ def _symbol_identity_score(
         "evidence": {
             **_record(report_path, "surviving symbol identity report"),
             "path": report_path.name,
-            "programModelSha256": _required_mapping(
-                provenance.get("programModel"), "symbol identity program model"
-            ).get("sha256"),
+            "binding": bound.binding_record,
+            "qualification": bound.qualification_record,
+            "programModelSha256": bound.provenance["programModel"]["sha256"],
         },
     }
 
@@ -459,7 +493,12 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, report: dict[str, Any]) -> None:
-    payload = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _write_payload(
+        path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
+
+
+def _write_payload(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False

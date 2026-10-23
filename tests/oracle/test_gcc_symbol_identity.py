@@ -5,11 +5,11 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPOSITORY_ROOT / "oracle/gcc/16.2.0"
-FIXTURES = REPOSITORY_ROOT / "tests/oracle/fixtures/gcc-bound-model"
 # Keep tampered profile copies inside the repository's ignored build tree.
 SCRATCH = REPOSITORY_ROOT / "build/test-scratch"
 
@@ -31,16 +31,17 @@ from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     build_report as build_coverage,
 )
 from oracle.gcc.report_symbol_identity import enumerate_population  # noqa: E402
+import oracle.gcc.report_symbol_identity as report_symbol_identity  # noqa: E402
 
 
-def _fixture(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+def _retained(name: str) -> dict:
+    return json.loads((PROFILE / name).read_text(encoding="utf-8"))
 
 
 class BoundModelRecordTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.binding = _fixture("structural-full-export-binding.json")
-        self.qualification = _fixture("qualification.json")
+        self.binding = _retained("surviving-symbol-identity-binding.json")
+        self.qualification = _retained("surviving-symbol-identity-qualification.json")
 
     def test_accepts_captured_records(self) -> None:
         verify_binding(self.binding)
@@ -153,6 +154,31 @@ class RetainedSymbolIdentityTest(unittest.TestCase):
         self.assertEqual(self.report["summary"]["population"], len(population))
         self.assertFalse(self.report["productionVerified"])
 
+    def test_population_projection_rejects_oversized_report(self) -> None:
+        oracle = load_function_oracle(PROFILE / "function-recovery-oracle.json")
+        # Room for the envelope and one symbol record: the second surviving
+        # alias must be rejected before the population is materialized.
+        limit = report_symbol_identity._REPORT_ENVELOPE_BYTES + 512
+        with mock.patch.object(report_symbol_identity, "MAX_REPORT_BYTES", limit):
+            with self.assertRaisesRegex(CoverageError, "output limit"):
+                enumerate_population(oracle)
+
+    def test_coverage_republishes_the_retained_binding_model_digest(self) -> None:
+        evidence = build_coverage(PROFILE)["dimensions"]["survivingSymbolIdentity"][
+            "currentScore"
+        ]["evidence"]
+        binding = _retained("surviving-symbol-identity-binding.json")
+        self.assertEqual(
+            evidence["programModelSha256"], binding["programModel"]["sha256"]
+        )
+        self.assertEqual(
+            evidence["binding"]["path"], "surviving-symbol-identity-binding.json"
+        )
+        self.assertEqual(
+            evidence["qualification"]["path"],
+            "surviving-symbol-identity-qualification.json",
+        )
+
     def test_accuracy_coverage_reports_measured_identity(self) -> None:
         dimension = build_coverage(PROFILE)["dimensions"]["survivingSymbolIdentity"]
         score = dimension["currentScore"]
@@ -252,6 +278,36 @@ class TamperedSymbolIdentityTest(unittest.TestCase):
         self.report["provenance"]["strippedInputSha256"] = "0" * 64
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "another input"):
+            build_coverage(self.profile)
+
+    def test_rejects_unbound_model_digest(self) -> None:
+        self.report["provenance"]["programModel"]["sha256"] = "0" * 64
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "provenance disagrees"):
+            build_coverage(self.profile)
+
+    def test_rejects_omitted_model_digest(self) -> None:
+        del self.report["provenance"]["programModel"]["sha256"]
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "provenance disagrees"):
+            build_coverage(self.profile)
+
+    def test_rejects_report_without_retained_binding(self) -> None:
+        (self.profile / "surviving-symbol-identity-binding.json").unlink()
+        with self.assertRaisesRegex(CoverageError, "structural full-export binding"):
+            build_coverage(self.profile)
+
+    def test_rejects_binding_edited_to_match_a_foreign_digest(self) -> None:
+        # Editing the report and binding together still disagrees with the
+        # retained qualification's model commitment.
+        foreign = "0" * 64
+        self.report["provenance"]["programModel"]["sha256"] = foreign
+        self._rewrite()
+        binding_path = self.profile / "surviving-symbol-identity-binding.json"
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        binding["programModel"]["sha256"] = foreign
+        binding_path.write_text(json.dumps(binding), encoding="utf-8")
+        with self.assertRaisesRegex(CoverageError, "program models disagree"):
             build_coverage(self.profile)
 
 
