@@ -5,7 +5,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
+import elftools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPOSITORY_ROOT / "oracle/gcc/16.2.0"
@@ -103,6 +105,34 @@ class TamperedCallEdgeTest(unittest.TestCase):
         self._rewrite()
         with self.assertRaisesRegex(CoverageError, "summary disagrees"):
             build_coverage(self.profile)
+
+    def test_rejects_swapped_tail_call(self) -> None:
+        edges = self.report["oracleEdges"]
+        tail = next(edge for edge in edges if edge["tailCall"])
+        plain = next(edge for edge in edges if not edge["tailCall"])
+        tail["tailCall"], plain["tailCall"] = False, True
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "disagrees with the full artifact DWARF"):
+            build_coverage(self.profile)
+
+    def test_rejects_altered_call_site_kinds(self) -> None:
+        kinds = self.report["oracle"]["callSiteKinds"]
+        kind = next(iter(kinds))
+        kinds[kind] += 1
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "disagrees with the full artifact DWARF"):
+            build_coverage(self.profile)
+
+    def test_rejects_release_eligibility_claim(self) -> None:
+        self.report["provenance"]["qualification"]["releaseEligible"] = True
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "must not claim release eligibility"):
+            build_coverage(self.profile)
+
+    def test_rejects_unpinned_decoder(self) -> None:
+        with mock.patch.object(elftools, "__version__", "0.0"):
+            with self.assertRaisesRegex(CoverageError, "requires pyelftools"):
+                build_coverage(self.profile)
 
     def test_rejects_inflated_ratio(self) -> None:
         self.report["summary"]["recall"]["value"] = 1.0

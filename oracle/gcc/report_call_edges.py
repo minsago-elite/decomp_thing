@@ -35,6 +35,7 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+import elftools  # noqa: E402
 from elftools.dwarf.descriptions import describe_form_class  # noqa: E402
 from elftools.dwarf.ranges import BaseAddressEntry, RangeEntry  # noqa: E402
 from elftools.elf.elffile import ELFFile  # noqa: E402
@@ -63,6 +64,7 @@ from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
 
 
 REPORT_ID = "gcc-driver-call-edge-score-v1"
+PYELFTOOLS_VERSION = "0.33"
 CALL_SITE_TAGS = ("DW_TAG_call_site", "DW_TAG_GNU_call_site")
 FUNCTION_ID_PREFIX = "function-rva-"
 MODEL_ID_PREFIX = "fn_"
@@ -97,6 +99,10 @@ def _oracle_edges(
     unique_alias = {
         name: next(iter(rvas)) for name, rvas in candidates.items() if len(rvas) == 1
     }
+    # The oracle population depends on the DWARF decoder, so it is pinned to the
+    # version the retained report was produced with.
+    if getattr(elftools, "__version__", None) != PYELFTOOLS_VERSION:
+        raise CoverageError(f"call edge oracle requires pyelftools {PYELFTOOLS_VERSION}")
     edges: dict[tuple[int, int], set[bool]] = {}
     callers_with_sites: set[int] = set()
     kinds: Counter[str] = Counter()

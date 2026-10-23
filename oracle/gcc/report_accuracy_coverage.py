@@ -365,9 +365,15 @@ def _call_edge_score(
     profile_directory: Path,
     loaded_oracle: Any,
     manifest_sha256: str,
+    full_path: Path,
     full_sha256: str,
 ) -> dict[str, Any]:
-    """Return the current score from a retained, oracle-bound call-edge report."""
+    """Return the current score from a retained, oracle-bound call-edge report.
+
+    The oracle side is re-derived from the verified full artifact's DWARF. The
+    recovered side needs the program model, which the profile does not retain,
+    so it is bound only by digest and the score is never release-eligible.
+    """
 
     report_path = profile_directory / CALL_EDGE_REPORT
     if not report_path.exists():
@@ -411,7 +417,7 @@ def _call_edge_score(
 
     try:
         reference_list = pairs(raw["oracleEdges"])
-        tail_calls = sum(item["tailCall"] is True for item in raw["oracleEdges"])
+        tail_flags = [item["tailCall"] for item in raw["oracleEdges"]]
         missing_list = pairs(raw["missingEdges"])
         fabricated_list = pairs(raw["fabricatedEdges"])
         unchecked_list = pairs(raw["callerWithoutCallSiteEdges"])
@@ -420,6 +426,8 @@ def _call_edge_score(
         scored_recovered = int(summary["scoredRecoveredCount"])
     except (KeyError, TypeError, ValueError) as error:
         raise CoverageError("call edge report outcome is malformed") from error
+    if not all(isinstance(flag, bool) for flag in tail_flags):
+        raise CoverageError("call edge report outcome is malformed")
     reference = set(reference_list)
     missing = set(missing_list)
     fabricated = set(fabricated_list)
@@ -452,7 +460,7 @@ def _call_edge_score(
         or summary.get("falseNegatives") != len(missing)
         or summary.get("falsePositives") != len(fabricated)
         or oracle.get("edgeCount") != len(reference)
-        or oracle.get("tailCallEdgeCount") != tail_calls
+        or oracle.get("tailCallEdgeCount") != sum(tail_flags)
         or oracle.get("callersWithCallSites") != len(callers)
     ):
         raise CoverageError("call edge report summary disagrees with outcomes")
@@ -473,6 +481,30 @@ def _call_edge_score(
     qualification = _required_mapping(
         provenance.get("qualification"), "call edge qualification"
     )
+    if qualification.get("releaseEligible") is not False:
+        raise CoverageError("call edge report must not claim release eligibility")
+
+    # Imported here because the report module imports helpers from this one.
+    from oracle.gcc.report_call_edges import _oracle_edges
+
+    full_payload = _read_regular(full_path, "full artifact")
+    if hashlib.sha256(full_payload).hexdigest() != full_sha256:
+        raise CoverageError("full artifact changed after manifest verification")
+    excluded = {
+        function.rva
+        for function in loaded_oracle.functions
+        if function.rva is not None and function.exclusion is not None
+    }
+    derived_edges, derived_callers, derived_kinds = _oracle_edges(
+        full_payload, loaded_oracle, scoreable, excluded
+    )
+    derived = {pair: sorted(tails) != [False] for pair, tails in derived_edges.items()}
+    if (
+        derived != dict(zip(reference_list, tail_flags))
+        or derived_callers != callers
+        or oracle.get("callSiteKinds") != dict(sorted(derived_kinds.items()))
+    ):
+        raise CoverageError("call edge oracle disagrees with the full artifact DWARF")
     return {
         "status": "measured",
         "precision": precision,
@@ -480,7 +512,13 @@ def _call_edge_score(
         "unrestricted": unrestricted,
         "productionVerified": False,
         "reasonCode": "recovered-model-not-release-eligible",
-        "releaseEligible": qualification.get("releaseEligible") is True,
+        "releaseEligible": False,
+        "oracle": {
+            "edgeCount": len(reference),
+            "tailCallEdgeCount": sum(tail_flags),
+            "callersWithCallSites": len(callers),
+            "populationDefinition": report.get("populationDefinition"),
+        },
         "evidence": {
             **_record(report_path, "call edge report"),
             "path": report_path.name,
@@ -592,17 +630,17 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
     start_score = _function_start_score(profile_directory, loaded_oracle, manifest_sha256)
     start_status = _measured_status(start_score, "oracle-covered-recovery-unavailable")
     edge_score = _call_edge_score(
-        profile_directory, loaded_oracle, manifest_sha256, artifact_files["full"]["sha256"]
+        profile_directory,
+        loaded_oracle,
+        manifest_sha256,
+        profile_directory / artifact_files["full"]["manifestPath"],
+        artifact_files["full"]["sha256"],
     )
     edge_status = _measured_status(edge_score, "unavailable")
     if edge_score["status"] == "measured":
-        edge_report = _json(profile_directory / CALL_EDGE_REPORT, "call edge report")
         edge_oracle = {
             "status": "available",
-            "edgeCount": edge_report["oracle"]["edgeCount"],
-            "tailCallEdgeCount": edge_report["oracle"]["tailCallEdgeCount"],
-            "callersWithCallSites": edge_report["oracle"]["callersWithCallSites"],
-            "populationDefinition": edge_report.get("populationDefinition"),
+            **edge_score.pop("oracle"),
             "productionVerified": False,
         }
     else:
