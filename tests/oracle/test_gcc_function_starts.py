@@ -169,8 +169,13 @@ class DocumentedRegenerationCommandTest(unittest.TestCase):
         text = COVERAGE_DOC.read_text(encoding="utf-8")
         blocks = re.findall(r"```bash\n(.*?)```", text, flags=re.DOTALL)
         seen = set()
-        for block in blocks:
-            argv = shlex.split(block.replace("\\\n", " "))
+        commands = [
+            shlex.split(line)
+            for block in blocks
+            for line in block.replace("\\\n", " ").splitlines()
+            if line.strip()
+        ]
+        for argv in commands:
             if len(argv) < 2 or argv[0] != "python3" or argv[1] not in parsers:
                 continue
             seen.add(argv[1])

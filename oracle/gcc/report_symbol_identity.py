@@ -20,23 +20,50 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from oracle.function_recovery import FunctionOracle  # noqa: E402
+from oracle.function_recovery import (  # noqa: E402
+    MAX_REPORT_BYTES,
+    FunctionOracle,
+    ScoringError,
+    _json_string_encoded_size,
+    report_json_bytes,
+)
 from oracle.gcc.bound_recovered_model import (  # noqa: E402
     TWIN,
     load_bound_stripped_model,
 )
 from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     CoverageError,
-    _write_json,
+    _write_payload,
 )
 
 
 REPORT_ID = "gcc-driver-surviving-symbol-identity-v1"
+# Upper bounds on the indented JSON bytes of the fixed report envelope and of
+# one symbol record excluding its variable-length strings.
+_REPORT_ENVELOPE_BYTES = 64 * 1024
+_SYMBOL_RECORD_BYTES = 384
 
 
-def enumerate_population(oracle: FunctionOracle) -> list[dict[str, Any]]:
-    """Return the sorted surviving stripped alias population of the oracle."""
+def _charge(projection: list[int], size: int) -> None:
+    projection[0] += size
+    if projection[0] > MAX_REPORT_BYTES:
+        raise CoverageError(
+            f"projected symbol identity report exceeds the {MAX_REPORT_BYTES}-byte "
+            "output limit"
+        )
 
+
+def enumerate_population(
+    oracle: FunctionOracle, projection: list[int] | None = None
+) -> list[dict[str, Any]]:
+    """Return the sorted surviving stripped alias population of the oracle.
+
+    Each member is charged against ``projection`` before it is materialized,
+    so an oversized population is rejected without building the full list.
+    """
+
+    if projection is None:
+        projection = [_REPORT_ENVELOPE_BYTES]
     population = []
     for function in oracle.functions:
         for alias in function.aliases:
@@ -46,6 +73,12 @@ def enumerate_population(oracle: FunctionOracle) -> list[dict[str, Any]]:
                 raise CoverageError(
                     f"surviving alias {alias.name} has no oracle RVA"
                 )
+            _charge(
+                projection,
+                _SYMBOL_RECORD_BYTES
+                + _json_string_encoded_size(function.identifier)
+                + _json_string_encoded_size(alias.name),
+            )
             population.append(
                 {
                     "oracleId": function.identifier,
@@ -71,9 +104,16 @@ def build_report(
         qualification_path,
     )
     recovered_by_rva = {function.rva: function for function in bound.model.functions}
+    projection = [_REPORT_ENVELOPE_BYTES]
     outcomes = []
-    for member in enumerate_population(bound.oracle):
+    for member in enumerate_population(bound.oracle, projection):
         recovered = recovered_by_rva.get(member["rva"])
+        if recovered is not None:
+            _charge(
+                projection,
+                _json_string_encoded_size(recovered.name)
+                + _json_string_encoded_size(recovered.status),
+            )
         if recovered is None:
             outcome = "missing"
         elif recovered.name != member["name"]:
@@ -145,7 +185,11 @@ def main() -> int:
             arguments.binding,
             arguments.qualification,
         )
-        _write_json(arguments.output, report)
+        try:
+            payload = report_json_bytes(report)
+        except ScoringError as error:
+            raise CoverageError(str(error)) from error
+        _write_payload(arguments.output, payload)
     except CoverageError as error:
         print(f"symbol identity report failed: {error}", file=sys.stderr)
         return 1

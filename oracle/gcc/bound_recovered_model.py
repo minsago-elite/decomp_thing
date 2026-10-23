@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from oracle.function_recovery import (
+    Artifact,
     FunctionOracle,
     RecoveredModel,
     ScoringError,
@@ -26,6 +27,7 @@ from oracle.function_recovery import (
 from oracle.gcc.report_accuracy_coverage import (
     CoverageError,
     _json,
+    _json_snapshot,
     _required_mapping,
     _sha256,
 )
@@ -278,6 +280,91 @@ def verify_qualification(qualification: dict[str, Any], binding: dict[str, Any])
     )
 
 
+def bound_provenance(
+    manifest_sha256: str,
+    artifact: Artifact,
+    binding: dict[str, Any],
+    qualification: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify both records against the oracle and return their provenance.
+
+    The provenance is derived only from the verified records, so a retained
+    report can be checked against the same binding without the model bytes.
+    """
+
+    verify_binding(binding)
+    verify_qualification(qualification, binding)
+    _require_equal(
+        binding["artifactManifestSha256"],
+        manifest_sha256,
+        "binding is not bound to this artifact manifest",
+    )
+    _require_equal(
+        binding["inputBinary"]["sha256"],
+        artifact.input_sha256,
+        "binding input binary is not the stripped oracle artifact",
+    )
+    image_base = int(binding["targetDescriptor"]["imageBase"], 16)
+    _require_equal(
+        image_base,
+        artifact.elf_image_base,
+        "binding image base disagrees with the stripped oracle artifact",
+    )
+    model_binding = binding["programModel"]
+    return {
+        "artifactManifestSha256": manifest_sha256,
+        "strippedInputSha256": artifact.input_sha256,
+        "imageBase": hex(image_base),
+        "programModel": {
+            "sha256": model_binding["sha256"],
+            "functionCount": model_binding["functionCount"],
+        },
+        "outputTreeSha256": binding["outputTreeSha256"],
+        "exporterSha256": binding["exporter"]["sha256"],
+        "ghidraArchiveSha256": binding["ghidraArchive"]["sha256"],
+        "receiptLineageSha256": binding["receiptLineageSha256"],
+        "sourceRevision": binding["sourceRevision"],
+        "qualification": {
+            "provider": qualification["provider"],
+            "releaseEligible": False,
+            "complete": qualification["complete"],
+            "scored": qualification["scored"],
+            "limitation": qualification["limitation"],
+        },
+    }
+
+
+@dataclass(frozen=True)
+class BoundRecords:
+    provenance: dict[str, Any]
+    binding_record: dict[str, Any]
+    qualification_record: dict[str, Any]
+
+
+def load_bound_provenance(
+    manifest_sha256: str,
+    artifact: Artifact,
+    binding_path: Path,
+    qualification_path: Path,
+) -> BoundRecords:
+    """Read both records through bounded snapshots and return their provenance.
+
+    The byte records describe the same snapshots that were verified.
+    """
+
+    binding, binding_record = _json_snapshot(
+        binding_path, "structural full-export binding", BINDING_MAX_BYTES
+    )
+    qualification, qualification_record = _json_snapshot(
+        qualification_path, "qualification record", QUALIFICATION_MAX_BYTES
+    )
+    return BoundRecords(
+        provenance=bound_provenance(manifest_sha256, artifact, binding, qualification),
+        binding_record=binding_record,
+        qualification_record=qualification_record,
+    )
+
+
 def load_bound_stripped_model(
     profile_directory: Path,
     program_model_path: Path,
@@ -306,37 +393,16 @@ def load_bound_stripped_model(
         "function oracle stripped artifact disagrees with the manifest",
     )
 
-    binding = _json(
-        binding_path, "structural full-export binding", BINDING_MAX_BYTES
-    )
-    qualification = _json(
-        qualification_path, "qualification record", QUALIFICATION_MAX_BYTES
-    )
-    verify_binding(binding)
-    verify_qualification(qualification, binding)
-    model_binding = binding["programModel"]
-    _require_equal(
-        binding["artifactManifestSha256"],
-        manifest_sha256,
-        "binding is not bound to this artifact manifest",
-    )
-    _require_equal(
-        binding["inputBinary"]["sha256"],
-        artifact.input_sha256,
-        "binding input binary is not the stripped oracle artifact",
-    )
-    image_base = int(binding["targetDescriptor"]["imageBase"], 16)
-    _require_equal(
-        image_base,
-        artifact.elf_image_base,
-        "binding image base disagrees with the stripped oracle artifact",
-    )
+    provenance = load_bound_provenance(
+        manifest_sha256, artifact, binding_path, qualification_path
+    ).provenance
+    model_binding = provenance["programModel"]
     try:
         model = load_program_model(
             program_model_path,
             twin=TWIN,
             artifact=artifact,
-            model_image_base=image_base,
+            model_image_base=artifact.elf_image_base,
             expected_sha256=model_binding["sha256"],
         )
     except ScoringError as error:
@@ -346,28 +412,6 @@ def load_bound_stripped_model(
         model_binding["functionCount"],
         "program model function count disagrees with the binding",
     )
-
-    provenance = {
-        "artifactManifestSha256": manifest_sha256,
-        "strippedInputSha256": artifact.input_sha256,
-        "imageBase": hex(image_base),
-        "programModel": {
-            "sha256": model_binding["sha256"],
-            "functionCount": len(model.functions),
-        },
-        "outputTreeSha256": binding["outputTreeSha256"],
-        "exporterSha256": binding["exporter"]["sha256"],
-        "ghidraArchiveSha256": binding["ghidraArchive"]["sha256"],
-        "receiptLineageSha256": binding["receiptLineageSha256"],
-        "sourceRevision": binding["sourceRevision"],
-        "qualification": {
-            "provider": qualification["provider"],
-            "releaseEligible": False,
-            "complete": qualification["complete"],
-            "scored": qualification["scored"],
-            "limitation": qualification["limitation"],
-        },
-    }
     return BoundStrippedModel(
         oracle=oracle,
         model=model,
