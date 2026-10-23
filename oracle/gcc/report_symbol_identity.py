@@ -76,12 +76,9 @@ def build_report(
         run_id=run_id,
         artifact_id=artifact_id,
     )
-    oracle_path = bound.oracle_path
-    model = bound.model
-
-    recovered_by_rva = {function.rva: function for function in model.functions}
+    recovered_by_rva = {function.rva: function for function in bound.model.functions}
     outcomes = []
-    for member in enumerate_population(oracle_path):
+    for member in enumerate_population(bound.oracle_path):
         recovered = recovered_by_rva.get(member["rva"])
         if recovered is None:
             outcome = "missing"

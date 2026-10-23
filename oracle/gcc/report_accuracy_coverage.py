@@ -174,21 +174,48 @@ def _symbol_identity_score(
     symbols = report.get("symbols")
     if not isinstance(symbols, list):
         raise CoverageError("surviving symbol identity report symbols must be an array")
+    counts = {"exact": 0, "name-mismatch": 0, "missing": 0}
     try:
         observed = sorted((int(item["rva"], 16), item["name"]) for item in symbols)
-        exact = sum(item["outcome"] == "exact" for item in symbols)
+        for item in symbols:
+            # Recompute each outcome from the recorded names rather than
+            # trusting the self-reported label.
+            recovered_name = item["recoveredName"]
+            if recovered_name is None:
+                derived = "missing"
+                if item["recoveredStatus"] is not None:
+                    raise ValueError("missing symbol carries a recovered status")
+            elif not isinstance(recovered_name, str):
+                raise TypeError("recovered name must be a string or null")
+            elif recovered_name == item["name"]:
+                derived = "exact"
+            else:
+                derived = "name-mismatch"
+            if item["outcome"] != derived:
+                raise ValueError("symbol outcome disagrees with its recorded names")
+            counts[derived] += 1
     except (KeyError, TypeError, ValueError) as error:
         raise CoverageError("surviving symbol identity report symbol is malformed") from error
     if observed != expected:
         raise CoverageError(
             "surviving symbol identity report population differs from the oracle"
         )
+    exact = counts["exact"]
     summary = _required_mapping(report.get("summary"), "symbol identity summary")
-    if summary.get("exact") != exact or summary.get("population") != len(symbols):
+    if summary.get("population") != len(symbols) or any(
+        summary.get(kind) != count for kind, count in counts.items()
+    ):
         raise CoverageError("surviving symbol identity report summary disagrees with symbols")
     qualification = _required_mapping(
         provenance.get("qualification"), "symbol identity qualification"
     )
+    if qualification.get("releaseEligible") is not False:
+        # No release-admission authority exists for recovered models yet, so a
+        # retained report may never promote itself to release eligibility.
+        raise CoverageError(
+            "surviving symbol identity report claims release eligibility without "
+            "an authenticated admission record"
+        )
     return {
         "status": "measured",
         "identityRecovery": {
@@ -198,7 +225,7 @@ def _symbol_identity_score(
         },
         "productionVerified": False,
         "reasonCode": "recovered-model-not-release-eligible",
-        "releaseEligible": qualification.get("releaseEligible") is True,
+        "releaseEligible": False,
         "evidence": {
             **_record(report_path, "surviving symbol identity report"),
             "path": report_path.name,
