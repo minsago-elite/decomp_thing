@@ -277,26 +277,49 @@ def _function_start_score(
         if function.rva is not None and function.exclusion is None
     }
     summary = _required_mapping(report.get("summary"), "function start summary")
-    false_negatives = report.get("falseNegatives")
-    false_positives = report.get("falsePositives")
-    if not isinstance(false_negatives, list) or not isinstance(false_positives, list):
+    outcomes = [
+        report.get(key)
+        for key in ("exactMatchRvas", "nearMisses", "falseNegatives", "falsePositives")
+    ]
+    if not all(isinstance(outcome, list) for outcome in outcomes):
         raise CoverageError("function start report outcomes must be arrays")
+    exact_rvas, near_misses, false_negatives, false_positives = outcomes
     try:
+        exact = [int(rva, 16) for rva in exact_rvas]
+        near = [
+            (int(item["oracleRva"], 16), int(item["recoveredRva"], 16))
+            for item in near_misses
+        ]
         missed = [int(item["oracleRva"], 16) for item in false_negatives]
         fabricated = [int(item["recoveredRva"], 16) for item in false_positives]
-        true_positives = int(summary["truePositives"])
-        scored_recovered = int(summary["scoredRecoveredCount"])
     except (KeyError, TypeError, ValueError) as error:
         raise CoverageError("function start report outcome is malformed") from error
     if summary.get("referenceCount") != len(scoreable):
         raise CoverageError("function start report population differs from the oracle")
-    if len(set(missed)) != len(missed) or not set(missed) <= scoreable:
-        raise CoverageError("function start false negatives are not scoreable oracle starts")
+    # Every scoreable oracle start is matched exactly, near-missed or missed,
+    # and each recovered start is counted at most once.
+    oracle_outcomes = exact + [oracle_rva for oracle_rva, _ in near] + missed
+    if len(set(oracle_outcomes)) != len(oracle_outcomes) or set(oracle_outcomes) != scoreable:
+        raise CoverageError("function start outcomes do not partition the oracle population")
+    recovered_outcomes = exact + [recovered_rva for _, recovered_rva in near] + fabricated
+    if len(set(recovered_outcomes)) != len(recovered_outcomes):
+        raise CoverageError("function start outcomes count a recovered start twice")
     if any(rva in scoreable for rva in fabricated):
         raise CoverageError("function start false positives include scoreable oracle starts")
+    if any(
+        recovered_rva in scoreable
+        or recovered_rva == oracle_rva
+        or abs(recovered_rva - oracle_rva) > loaded_oracle.near_miss_bytes
+        for oracle_rva, recovered_rva in near
+    ):
+        raise CoverageError("function start near miss is outside the near-miss window")
+    true_positives = len(exact) + len(near)
+    scored_recovered = true_positives + len(fabricated)
     if (
-        true_positives + len(missed) != len(scoreable)
-        or true_positives + len(fabricated) != scored_recovered
+        summary.get("truePositives") != true_positives
+        or summary.get("scoredRecoveredCount") != scored_recovered
+        or summary.get("exactMatches") != len(exact)
+        or summary.get("nearMisses") != len(near)
         or summary.get("falseNegatives") != len(missed)
         or summary.get("falsePositives") != len(fabricated)
     ):

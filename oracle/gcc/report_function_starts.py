@@ -23,7 +23,12 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from oracle.function_recovery import _score_twin  # noqa: E402
+from oracle.function_recovery import (  # noqa: E402
+    _TWIN_NAMES,
+    ScoringError,
+    _preflight_report_projection,
+    _score_twin,
+)
 from oracle.gcc.bound_recovered_model import (  # noqa: E402
     TWIN,
     load_bound_stripped_model,
@@ -68,9 +73,20 @@ def build_report(
         run_id=run_id,
         artifact_id=artifact_id,
     )
-    scored = _score_twin(
-        bound.oracle, bound.model, twin=TWIN, report_projection=[0] * 8
-    )
+    try:
+        # Charging the bound model against every twin slot overestimates the
+        # single-twin report, so the scorer's output limit still holds.
+        report_projection = _preflight_report_projection(
+            bound.oracle, {twin: bound.model for twin in _TWIN_NAMES}
+        )
+        scored = _score_twin(
+            bound.oracle,
+            bound.model,
+            twin=TWIN,
+            report_projection=report_projection,
+        )
+    except ScoringError as error:
+        raise CoverageError(f"function start scoring failed: {error}") from error
     boundaries = scored["boundaries"]
     exclusions = Counter(
         function.exclusion.kind
@@ -92,6 +108,11 @@ def build_report(
         },
         "summary": {field: boundaries[field] for field in SUMMARY_FIELDS},
         "productionVerified": False,
+        # Exact matches pair equal RVAs, so the oracle RVA identifies both sides.
+        "exactMatchRvas": sorted(
+            (match["oracleRva"] for match in scored["exactMatches"]),
+            key=lambda rva: int(rva, 16),
+        ),
         "nearMisses": scored["nearMisses"],
         "falsePositives": scored["falsePositives"],
         "falseNegatives": scored["falseNegatives"],

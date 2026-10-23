@@ -25,10 +25,10 @@
     "functionStarts": {
       "currentScore": {
         "evidence": {
-          "bytes": 50323,
+          "bytes": 99357,
           "path": "function-start-score.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
-          "sha256": "31f78d0b80a6bed17e487d1932a541920b6697ffe16c346e4cb820d8c24647c0",
+          "sha256": "4dbdeaddc7544aae1fc448b6aa1f174a43be8fdc8bcfe342bc6cecb8981fb0c3",
           "workflowRunId": 38724253878
         },
         "nearMisses": 0,
