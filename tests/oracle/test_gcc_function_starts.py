@@ -146,6 +146,12 @@ class TamperedFunctionStartTest(unittest.TestCase):
         with self.assertRaisesRegex(CoverageError, "another input"):
             build_coverage(self.profile)
 
+    def test_rejects_release_eligibility_claim(self) -> None:
+        self.report["provenance"]["qualification"]["releaseEligible"] = True
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "must not claim release eligibility"):
+            build_coverage(self.profile)
+
 
 if __name__ == "__main__":
     unittest.main()
