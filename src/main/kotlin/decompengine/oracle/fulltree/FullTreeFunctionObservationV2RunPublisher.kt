@@ -318,6 +318,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 )
                 if (shards.size > limits.run.maximumShards) v2RunFail("observation-v2 shard count exceeds its bound")
                 if (shards.isEmpty()) v2RunFail("observation-v2 run has no authenticated shards")
+                val shardVisitation = if (traversal.reverseShards) shards.asReversed() else shards
                 val effectiveWorkers = fullTreeFunctionObservationV2EffectiveWorkers(maximumWorkers, shards.size)
                 val runControlSnapshotBytes = fullTreeFunctionObservationV2RunControlSnapshotBytes(
                     authenticatedInventoryBytes = inventoryBytes.size.toLong(),
@@ -363,8 +364,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         limits.maximumScratchBytes,
                     ),
                 )
-                shards.forEach { shard ->
+                shardVisitation.forEach { shard ->
                     deadline.checkpoint("before extracting observation-v2 source entities")
+                    traversal.onShardVisit?.invoke("v2-source", shard.identifier)
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
                     val shardCheckpoint = shardDeadline.beginPhase()
                     val retainedBeforeShard = modeledRetainedBytes
@@ -469,8 +471,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 }
                 deadline.checkpoint("before reconciling full-run observation-v2 anchor claims")
                 val reconciliation = anchorIndex.reconciliation(deadline::checkpoint)
-                shards.forEach { shard ->
+                shardVisitation.forEach { shard ->
                     deadline.checkpoint("before reconciling source entities for ${shard.identifier}")
+                    traversal.onShardVisit?.invoke("v2-reconcile", shard.identifier)
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
                     val reconciliationCheckpoint = shardDeadline.beginPhase()
                     val original = sourceFactsByShard.getValue(shard.identifier)
@@ -568,8 +571,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     val boundedOutputs = ArrayList<BoundedShardPreparedOutput>(shards.size)
                     var preparedBytes = 0L
                     var preparedEntities = 0L
-                    for (shard in shards) {
+                    for (shard in shardVisitation) {
                         deadline.checkpoint("before producing observation-v2 shard ${shard.identifier}")
+                        traversal.onShardVisit?.invoke("v2-output", shard.identifier)
                         val shardDeadline = shardDeadlines.getValue(shard.identifier)
                         val shardCheckpoint = shardDeadline.beginPhase()
                         val inputs = FullTreeFunctionObservationAuthenticatedInputs(
@@ -694,6 +698,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         shardDeadline.endPhase("after observation-v2 shard ${shard.identifier}")
                     }
 
+                    // Execution order never changes the canonical receipt/publication order.
+                    if (traversal.reverseShards) {
+                        receipts.reverse()
+                        boundedOutputs.reverse()
+                    }
                     val runBounds = BoundedShardRunPublicationBounds(
                         maximumShards = shards.size,
                         perShardEntities = perShard.controlLong("entities"),

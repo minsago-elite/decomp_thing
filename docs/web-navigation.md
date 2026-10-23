@@ -297,3 +297,176 @@ Accessibility acceptance cases for [#217](https://github.com/minsago-elite/decom
 The route/state inventory, wireframes, token calculations and desk walkthroughs are the D0 design
 deliverable. Runtime accessibility, packaged parity and actual workflow behavior require their owning
 implementation gates; publication of this specification does not satisfy those later gates.
+
+
+## Implemented named attempt views
+
+The existing attempt overview remains at `/jobs/{jobId}/runs/{runId}`. Named Activity and
+Evidence views use that exact attempt URL followed by `/activity` or `/evidence`. Each direct
+route retains the job and run identifiers and its own page heading, document title and current
+navigation link. Activity mounts the retained progress/activity panels; Evidence mounts the
+retained exploration and validation panels. The overview preserves its combined presentation.
+Navigation and browser Back/Forward only select read-only views. A result-source link continues
+to use the revision recorded by that attempt; it never advances to the latest job revision.
+
+These routes implement the currently available attempt views. The full workspace Structure,
+Revisions, Artifacts and Git routes, URL-bound continuation/comparison state and physical
+scroll/selection restoration still require their original implementation and qualification.
+
+
+## Job snapshot page history
+
+Current job-page responses supply opaque signed `currentCursor` and `previousCursor` values and
+an explicit `pageNumber`. The browser never parses an offset from a cursor or manufactures a
+return token. Moving between pages pushes the returned cursor into the applied-filter URL.
+Whenever a page snapshot is accepted for display, its current history entry is replaced with
+that server cursor before the rows become ready. This includes accepted live snapshots, so
+Upload, Runtime, job links and browser Back departures all retain the displayed snapshot.
+Restoring an entry reads its signed snapshot; a newly opened first page can continue bounded
+live observations while replacing its own entry, without adding history or adopting its URL
+cursor as a new read request. Binding and pathname checks fence obsolete responses.
+
+Pinned pages are read-only snapshots and do not run live refreshes. Explicit Refresh returns to
+the current first page. Invalid saved cursor syntax is removed with a visible explanation before
+a read. A server-rejected or expired saved cursor replaces only that entry's cursor, preserves its
+filters and permits one fresh first-page read; another failure requires explicit recovery. The
+server's original session/query binding, two-minute expiry, eight-snapshot and 32 MiB retained
+bounds still apply, including to empty and single-page snapshots. Older v1 page responses keep
+bounded page-local navigation and explicitly report that saved page history is unavailable.
+
+The component controls use inert metadata transports. They do not qualify physical browser
+scroll restoration, all workspace tabs or the complete packaged navigation journey.
+
+
+### Retained first snapshot page
+
+The existing single first-page cache also supports signed snapshot navigation. Reuse requires
+the exact returned first-page cursor, normalized filters, client, deployment prefix and explicit
+refresh generation. Returning to that first page does not read or rescan the collection; every
+other continuation remains server-backed. Only one extra bounded first page is retained, and
+the unchanged URI/request pin guard still runs before display. The page explicitly says it was
+previously loaded; cached metadata does not establish current server availability or extend the
+server cursor's lifetime. A reload with no client cache still validates its token at the server.
+Explicit Refresh always starts a fresh cursor-free read. Changed filter/client/base/refresh scope
+cannot reuse the old first page, and authorization failures retain their original cache clearing.
+
+This preserves the existing packaged scale journey's retained-first-page/no-new-read assertion;
+that assertion is unchanged. The strengthened inert history method also checks that returning
+to the first page performs no read, preserves its exact snapshot URI, shows the retained-data
+notice, and still permits explicit Refresh and changed-filter recovery.
+
+### Accept a page before committing its history entry
+
+Next/Previous requests keep the displayed page's signed cursor in the URL while
+its rows remain visible. A bounded pending transition binds the current client,
+normalized filters, exact originating query and server-issued target cursor.
+Only an accepted matching response pushes the target URI and replaces the rows.
+Slow and failed reads leave the old rows and their original return URI together;
+leaving the route aborts the read and cannot pin a late target response.
+Explicit selection changes retire the pending transition. No token is minted,
+no retry is automatic, and the original request/path/client/query fences and
+snapshot/live/cache resource limits remain in force.
+
+### Refresh retains the displayed page until fresh data is accepted
+
+Explicit Refresh uses the same bounded transition as Next/Previous, with an
+unknown target cursor because its request intentionally omits the old cursor.
+The old displayed snapshot URI stays in place during the fresh read and after
+an ordinary failure. A verified first-page response commits its server-issued
+cursor and rows together. Refresh increments the existing cache generation,
+so a cached first page cannot satisfy it; accepting fresh data keeps normal
+bounded live updates available. A stale route or existing pending transition
+cannot start another Refresh. An older response without snapshot pagination
+commits its cursor-free limitation only after acceptance and retires the same
+transition. Invalid/expired cursor cleanup still clears rows before its one
+bounded fallback read. This does not establish physical viewport restoration.
+
+
+## Saved validation observations and comparisons
+
+On an attempt overview or Evidence route, validation navigation records the exact graph digest,
+history page, selected owner kind/ID, candidate revision, source/corpus digests, report ID and
+case page. A comparison baseline records its own history/case pages and commitments within that
+same graph; the bounded comparison window is URL state too. These are metadata identities,
+never authentication, prompts, source bytes, output previews or a claim of acceptance.
+
+Explicit history/observation selection, case/history paging, saving/clearing/swapping a baseline
+and comparison-window paging push history only when the canonical selection changes. Direct
+entry and Back/Forward restore read-only metadata from that exact graph and verify every owner,
+report and source association. At most two history pages and two selected reports are read;
+matching history pages and identical selected/baseline receipts are reused within restoration.
+Comparison-window changes use the already loaded bounded comparison index and issue no reads.
+An empty selection does not discover validation evidence automatically.
+
+Malformed or partial query state causes no validation request. Missing owners, changed graphs,
+reports, revisions, source/corpus identities or unavailable comparison windows show a recovery
+notice without substituting current data. Explicit Read validation evidence selects a fresh
+history. Obsolete reads are aborted and fenced by resource, client, active request and URI; no
+late response can rewrite another route or Back/Forward selection. The prior in-memory-only
+component interface remains available for embedding, without a router dependency.
+
+The current implementation uses validationGraph/validationPage and complete validationKind,
+validationOwner, validationRevision, validationSource, validationCorpus, validationReport and
+validationCasePage query groups. Baselines use the corresponding baseline group and baselinePage;
+comparisonPage identifies the complete-corpus comparison window. Query text is bounded to4096
+characters, duplicates/unknown fields are rejected, and all identities/digests/pages are checked.
+No route change starts validation, execution, admission, source preview or a mutation. Physical
+scroll/focus restoration, remaining workspace routes and the full packaged journey still need
+their original qualification; inert component controls do not close that scope.
+
+### History traversal and heading focus
+
+When Back or Forward changes the route, the shell still focuses its heading for
+the route announcement, with `preventScroll` so that focus does not scroll over
+the browser's own restored viewport. A new link navigation keeps the existing
+heading scroll behavior. Query-only navigation keeps its existing focus policy;
+the shell does not replace browser scroll restoration or persist private data.
+The capture-phase history listener is removed with the shell, retains only one
+pathname, and cannot start a request or authorize a workflow.
+
+The inert named-view history control checks the focus options for direct entry,
+new links, Back and Forward. It does not measure a browser viewport or establish
+restoration of the previous focused control, text selection, lazy content height,
+or the full cross-resource scroll/selection acceptance.
+
+### Run-owned route query context
+
+The run component subscribes to the router's URL directly. Validation metadata
+owns the validation/baseline/comparison query namespace; unrelated existing run
+query context is preserved. Namespace keys remain strictly parsed, and requests
+and publication are fenced by the complete current URI. A legacy embedding
+without a router still uses its supplied navigation port or explicit local reads.
+The original discovery/sign-out and restart/obsolete-response controls remain
+unchanged and must pass with this integration.
+
+### Failed continuation cursors retain the displayed origin
+
+An invalid/expired cursor for a pending Next/Previous transition is a failure of
+that target, not an initial restoration failure. Keep the displayed origin URI
+and rows, report the error, and perform no automatic fresh read. The existing
+initial saved-cursor recovery still clears rows and allows one bounded fallback.
+Retained metadata does not extend the server cursor's lifetime or grant access.
+
+
+## Bounded saved Activity windows
+
+On the named attempt Activity route, **Open this paused activity window** explicitly
+opens `?after={opaqueCursor}&through={opaqueCursor}`. The first cursor is exclusive,
+the last is inclusive; both are server-issued journal positions. An optional
+`event={opaqueCursor}` selects an observation inside that verified window. Ordinary
+live delivery does not write history. Task substring input and retained output do
+not enter this URL. The legacy combined overview keeps its existing live controls.
+
+Restoration reads one current snapshot and at most four bounded polling pages,
+with at most 200 observations in total. It validates every returned attempt,
+cursor, sequence and continuation, presents only observations through the requested
+end, and labels the snapshot as current rather than historical. It never connects
+a stream, starts execution, automatically retries or replaces an unavailable
+window with fresh activity. Malformed, incomplete, duplicate or unsupported saved
+selection fields make no Activity request. A gap, missing selected event, mismatched
+response or exhausted read bound preserves the URL and shows recovery. Retry is
+explicit. New route/client bindings abort and reject obsolete responses.
+
+This is an event-window foundation. Log ranges, task/session/revision evidence
+destinations, complete workspace addressing and physical scroll/focus/selection
+qualification remain with their existing open acceptance criteria.

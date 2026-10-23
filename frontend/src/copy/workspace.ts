@@ -1,6 +1,11 @@
 // View-scoped interface copy; protocol values and DOM identities stay in their components.
 
 export const dashboardCopy = {
+  "cachedFirstSnapshot": "Showing a previously loaded page from this snapshot. Refresh jobs to read the current library.",
+  loadingSavedPage: 'Loading saved page…',
+  savedPageUnavailable: 'The saved job page cannot be restored. Reading the current first page with the same filters.',
+  snapshotHistoryUnavailable: 'This response supports page-local navigation only. Saved page history is unavailable.',
+  liveUpdatesPauseOnSnapshotPages: 'This is a saved page snapshot. Refresh jobs to read the current first page.',
   "oldestExplanation": "Oldest jobs first. Completion does not establish validated reconstruction.",
   "newestExplanation": "Newest jobs first. Completion does not establish validated reconstruction.",
   "pageCount": "{count} jobs on this page. No total count is available.",
