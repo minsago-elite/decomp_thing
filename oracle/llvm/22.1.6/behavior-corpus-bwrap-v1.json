@@ -1,0 +1,124 @@
+{
+  "artifactNormalizations": [
+    {
+      "id": "clang-temporary-object",
+      "pattern": "start-[0-9a-f]{6}\\.o\\x00",
+      "replacementBase64": "c3RhcnQtWFhYWFhYLm8A"
+    }
+  ],
+  "cases": [
+    {
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-nostdlib",
+        "-static",
+        "-no-pie",
+        "-Wl,--build-id=none",
+        "-Wl,-e,_start",
+        "start.s",
+        "-o",
+        "program"
+      ],
+      "categories": [
+        "produced-program-compilation",
+        "produced-program-execution"
+      ],
+      "execute": {
+        "arguments": [],
+        "artifact": "program",
+        "expected": {
+          "exitCode": 42,
+          "stderr": {
+            "base64": "",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "base64": "aXNzdWU5Ny1wcm9kdWNlZC1wcm9ncmFtCg==",
+            "bytes": 25,
+            "sha256": "4a8d281d57a5b7f16683cce11538299bd6b0a6e1c6b6b942fb80c6bc1b28e923"
+          }
+        }
+      },
+      "expected": {
+        "artifacts": [
+          {
+            "mode": "0o755",
+            "normalizations": [
+              "clang-temporary-object"
+            ],
+            "path": "program"
+          }
+        ],
+        "exitCode": 0,
+        "stderr": {
+          "base64": "Y2xhbmc6IHdhcm5pbmc6IGFyZ3VtZW50IHVudXNlZCBkdXJpbmcgY29tcGlsYXRpb246ICctbm8tcGllJyBbLVd1bnVzZWQtY29tbWFuZC1saW5lLWFyZ3VtZW50XQo=",
+          "bytes": 95,
+          "sha256": "d757dc4283b8a5881dbec3f027839da0329827cd76361c0098786a476ee96646"
+        },
+        "stdout": {
+          "base64": "",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "id": "reviewed-start-exit-42",
+      "inputs": [
+        {
+          "base64": "IyBMaW51eCBhbWQ2NCBvbmx5OyBubyBpbnRlcnByZXRlciwgbGliYywgZW52aXJvbm1lbnQsIG9yIGZpbGVzeXN0ZW0gYWNjZXNzLgouc2VjdGlvbiAucm9kYXRhCm1lc3NhZ2U6CiAgICAuYXNjaWkgImlzc3VlOTctcHJvZHVjZWQtcHJvZ3JhbVxuIgouc2V0IG1lc3NhZ2Vfc2l6ZSwgLiAtIG1lc3NhZ2UKLnNlY3Rpb24gLnRleHQKLmdsb2JsIF9zdGFydAoudHlwZSBfc3RhcnQsQGZ1bmN0aW9uCl9zdGFydDoKICAgIG1vdiAkMSwgJWVheAogICAgbW92ICQxLCAlZWRpCiAgICBsZWEgbWVzc2FnZSglcmlwKSwgJXJzaQogICAgbW92ICRtZXNzYWdlX3NpemUsICVlZHgKICAgIHN5c2NhbGwKICAgIGNtcCAkbWVzc2FnZV9zaXplLCAlcmF4CiAgICBqbmUgZmFpbGVkCiAgICBtb3YgJDYwLCAlZWF4CiAgICBtb3YgJDQyLCAlZWRpCiAgICBzeXNjYWxsCmZhaWxlZDoKICAgIG1vdiAkNjAsICVlYXgKICAgIG1vdiAkNDMsICVlZGkKICAgIHN5c2NhbGwKLnNpemUgX3N0YXJ0LCAuIC0gX3N0YXJ0Ci5zZWN0aW9uIC5ub3RlLkdOVS1zdGFjaywiIixAcHJvZ2JpdHMK",
+          "bytes": 546,
+          "mode": "0o644",
+          "path": "start.s",
+          "sha256": "067c59ddfc218482261817347938158523e4cf05ef80c3ee31488c5e3582c7f8"
+        }
+      ],
+      "repetitions": 2
+    }
+  ],
+  "environment": {
+    "LC_ALL": "C",
+    "PATH": "/usr/bin",
+    "TMPDIR": "/tmp"
+  },
+  "executable": {
+    "bytes": 84561368,
+    "sha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006"
+  },
+  "id": "clang-22-1-6-produced-program-bwrap-v1",
+  "limits": {
+    "artifactBytes": 16777216,
+    "closureLibraries": 64,
+    "compileAddressSpaceBytes": 4294967296,
+    "cpuSeconds": 10,
+    "executeAddressSpaceBytes": 67108864,
+    "openFiles": 128,
+    "streamBytes": 1048576,
+    "wallSeconds": 10,
+    "workspaceEntries": 2
+  },
+  "sandbox": {
+    "backend": "bubblewrap-v1",
+    "baseArgv": [
+      "--unshare-all",
+      "--die-with-parent",
+      "--new-session",
+      "--cap-drop",
+      "ALL",
+      "--clearenv"
+    ],
+    "executablePath": "/oracle/clang",
+    "executeElfMachine": 62,
+    "hostTools": [
+      {
+        "hostSearchPath": "/usr/bin:/bin",
+        "name": "ld",
+        "sandboxPath": "/usr/bin/ld"
+      }
+    ],
+    "profile": "bubblewrap-hosted-v1",
+    "programPath": "/oracle/program",
+    "workspacePath": "/work"
+  },
+  "schemaVersion": 1,
+  "scope": "production"
+}
