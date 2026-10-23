@@ -350,7 +350,6 @@ def _function_start_score(
         "evidence": {
             **_record(report_path, "function start report"),
             "path": report_path.name,
-            "workflowRunId": provenance.get("workflowRunId"),
             "programModelSha256": _required_mapping(
                 provenance.get("programModel"), "function start program model"
             ).get("sha256"),
