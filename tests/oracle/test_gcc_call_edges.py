@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -47,10 +50,34 @@ class RetainedCallEdgeTest(unittest.TestCase):
         self.assertFalse(score["productionVerified"])
         self.assertFalse(score["releaseEligible"])
 
+    def test_documented_command_uses_supported_options(self) -> None:
+        document = (
+            REPOSITORY_ROOT / "docs/gcc-oracle-accuracy-coverage.md"
+        ).read_text(encoding="utf-8")
+        command = re.search(
+            r"python3 oracle/gcc/report_call_edges\.py(.*?)```", document, re.S
+        )
+        self.assertIsNotNone(command)
+        documented = set(re.findall(r"--[a-z][a-z-]*", command.group(1)))
+        usage = subprocess.run(
+            [sys.executable, "oracle/gcc/report_call_edges.py", "--help"],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+        supported = set(re.findall(r"--[a-z][a-z-]*", usage))
+        self.assertTrue(documented)
+        self.assertLessEqual(documented, supported)
+
 
 class TamperedCallEdgeTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
+        parent = REPOSITORY_ROOT / "build/python-test-tmp"
+        parent.mkdir(exist_ok=True, parents=True)
+        self.directory = tempfile.TemporaryDirectory(
+            prefix="gcc-call-edges-", dir=parent
+        )
         self.profile = Path(self.directory.name) / "16.2.0"
         shutil.copytree(PROFILE, self.profile)
         self.path = self.profile / "call-edge-score.json"
@@ -61,6 +88,9 @@ class TamperedCallEdgeTest(unittest.TestCase):
 
     def _rewrite(self) -> None:
         self.path.write_text(json.dumps(self.report), encoding="utf-8")
+
+    def test_fixture_stays_inside_repository(self) -> None:
+        self.assertTrue(self.profile.resolve().is_relative_to(REPOSITORY_ROOT))
 
     def test_missing_report_is_unavailable(self) -> None:
         self.path.unlink()
