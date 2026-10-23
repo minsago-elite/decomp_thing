@@ -20,22 +20,18 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from oracle.function_recovery import (  # noqa: E402
-    ScoringError,
-    load_function_oracle,
-    load_program_model,
+from oracle.function_recovery import load_function_oracle  # noqa: E402
+from oracle.gcc.bound_recovered_model import (  # noqa: E402
+    TWIN,
+    load_bound_stripped_model,
 )
 from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     CoverageError,
-    _json,
-    _required_mapping,
-    _sha256,
     _write_json,
 )
 
 
 REPORT_ID = "gcc-driver-surviving-symbol-identity-v1"
-TWIN = "stripped"
 
 
 def enumerate_population(oracle_path: Path) -> list[dict[str, Any]]:
@@ -63,11 +59,6 @@ def enumerate_population(oracle_path: Path) -> list[dict[str, Any]]:
     return population
 
 
-def _require_equal(actual: Any, expected: Any, message: str) -> None:
-    if actual != expected:
-        raise CoverageError(message)
-
-
 def build_report(
     profile_directory: Path,
     program_model_path: Path,
@@ -77,82 +68,16 @@ def build_report(
     run_id: int,
     artifact_id: int,
 ) -> dict[str, Any]:
-    profile_directory = profile_directory.resolve()
-    manifest_path = profile_directory / "oracle-manifest.json"
-    oracle_path = profile_directory / "function-recovery-oracle.json"
-    manifest = _json(manifest_path, "oracle artifact manifest")
-    manifest_sha256 = _sha256(manifest_path, "oracle artifact manifest")
-    stripped_record = _required_mapping(
-        _required_mapping(manifest.get("artifacts"), "manifest.artifacts").get(TWIN),
-        f"manifest.artifacts.{TWIN}",
+    bound = load_bound_stripped_model(
+        profile_directory,
+        program_model_path,
+        binding_path,
+        qualification_path,
+        run_id=run_id,
+        artifact_id=artifact_id,
     )
-    oracle = load_function_oracle(oracle_path)
-    _require_equal(
-        oracle.artifact_manifest_sha256,
-        manifest_sha256,
-        "function recovery oracle is not bound to this artifact manifest",
-    )
-    artifact = oracle.artifacts[TWIN]
-    _require_equal(
-        artifact.input_sha256,
-        stripped_record.get("sha256"),
-        "function oracle stripped artifact disagrees with the manifest",
-    )
-
-    binding = _json(binding_path, "structural full-export binding")
-    qualification = _json(qualification_path, "qualification record")
-    model_sha256 = _sha256(program_model_path, "program model")
-    model_binding = _required_mapping(binding.get("programModel"), "binding.programModel")
-    input_binding = _required_mapping(binding.get("inputBinary"), "binding.inputBinary")
-    target = _required_mapping(binding.get("targetDescriptor"), "binding.targetDescriptor")
-    _require_equal(
-        binding.get("artifactManifestSha256"),
-        manifest_sha256,
-        "binding is not bound to this artifact manifest",
-    )
-    _require_equal(
-        input_binding.get("sha256"),
-        artifact.input_sha256,
-        "binding input binary is not the stripped oracle artifact",
-    )
-    _require_equal(
-        model_binding.get("sha256"),
-        model_sha256,
-        "program model bytes do not match the binding",
-    )
-    _require_equal(
-        qualification.get("programModelSha256"),
-        model_sha256,
-        "program model bytes do not match the qualification record",
-    )
-    _require_equal(
-        qualification.get("outputTreeSha256"),
-        binding.get("outputTreeSha256"),
-        "qualification and binding output trees disagree",
-    )
-    image_base_text = target.get("imageBase")
-    if not isinstance(image_base_text, str):
-        raise CoverageError("binding.targetDescriptor.imageBase must be a string")
-    image_base = int(image_base_text, 16)
-    _require_equal(
-        image_base,
-        artifact.elf_image_base,
-        "binding image base disagrees with the stripped oracle artifact",
-    )
-    try:
-        model = load_program_model(
-            program_model_path,
-            twin=TWIN,
-            artifact=artifact,
-            model_image_base=image_base,
-        )
-    except ScoringError as error:
-        raise CoverageError(f"program model rejected: {error}") from error
-    _require_equal(
-        len(model.functions),
-        model_binding.get("functionCount"),
-        "program model function count disagrees with the binding",
-    )
+    oracle_path = bound.oracle_path
+    model = bound.model
 
     recovered_by_rva = {function.rva: function for function in model.functions}
     outcomes = []
@@ -189,33 +114,7 @@ def build_report(
             "aliases whose stripped availability is surviving in the "
             "authenticated function oracle, looked up at the oracle RVA"
         ),
-        "provenance": {
-            "artifactManifestSha256": manifest_sha256,
-            "strippedInputSha256": artifact.input_sha256,
-            "imageBase": hex(image_base),
-            "workflowRunId": run_id,
-            "artifactId": artifact_id,
-            "programModel": {
-                "sha256": model_sha256,
-                "functionCount": len(model.functions),
-            },
-            "outputTreeSha256": binding.get("outputTreeSha256"),
-            "exporterSha256": _required_mapping(
-                binding.get("exporter"), "binding.exporter"
-            ).get("sha256"),
-            "ghidraArchiveSha256": _required_mapping(
-                binding.get("ghidraArchive"), "binding.ghidraArchive"
-            ).get("sha256"),
-            "receiptLineageSha256": binding.get("receiptLineageSha256"),
-            "sourceRevision": binding.get("sourceRevision"),
-            "qualification": {
-                "provider": qualification.get("provider"),
-                "releaseEligible": qualification.get("releaseEligible"),
-                "complete": qualification.get("complete"),
-                "scored": qualification.get("scored"),
-                "limitation": qualification.get("limitation"),
-            },
-        },
+        "provenance": bound.provenance,
         "summary": {
             "population": total,
             **counts,

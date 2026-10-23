@@ -24,9 +24,28 @@
     },
     "functionStarts": {
       "currentScore": {
+        "evidence": {
+          "bytes": 50323,
+          "path": "function-start-score.json",
+          "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "sha256": "31f78d0b80a6bed17e487d1932a541920b6697ffe16c346e4cb820d8c24647c0",
+          "workflowRunId": 38724253878
+        },
+        "nearMisses": 0,
+        "precision": {
+          "denominator": 3273,
+          "numerator": 3269,
+          "value": 0.998778
+        },
         "productionVerified": false,
-        "reasonCode": "no-retained-current-recovered-model",
-        "status": "unavailable"
+        "reasonCode": "recovered-model-not-release-eligible",
+        "recall": {
+          "denominator": 3284,
+          "numerator": 3269,
+          "value": 0.995432
+        },
+        "releaseEligible": false,
+        "status": "measured"
       },
       "historicalReference": {
         "productionVerified": false,
@@ -63,7 +82,7 @@
         "scoreableFunctionCount": 3284,
         "status": "available"
       },
-      "status": "oracle-covered-recovery-unavailable",
+      "status": "measured-not-release-eligible",
       "threshold": {
         "precisionAtLeast": 0.95,
         "recallAtLeast": 0.95

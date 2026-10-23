@@ -1,0 +1,1333 @@
+{
+  "falseNegatives": [
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[250]"
+            }
+          ],
+          "name": "frame_dummy"
+        }
+      ],
+      "oracleId": "function-rva-0x4b40",
+      "oracleRva": "0x4b40"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[4558]"
+            }
+          ],
+          "name": "_ZdlPvm"
+        }
+      ],
+      "oracleId": "function-rva-0xed3a0",
+      "oracleRva": "0xed3a0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[1881]"
+            }
+          ],
+          "name": "_ZdaPv"
+        }
+      ],
+      "oracleId": "function-rva-0xed3b0",
+      "oracleRva": "0xed3b0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[3813]"
+            }
+          ],
+          "name": "_ZdaPvm"
+        }
+      ],
+      "oracleId": "function-rva-0xed3c0",
+      "oracleRva": "0xed3c0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[2526]"
+            }
+          ],
+          "name": "_Znam"
+        }
+      ],
+      "oracleId": "function-rva-0xed5d0",
+      "oracleRva": "0xed5d0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[3386]"
+            }
+          ],
+          "name": "_Z23_txnal_cow_string_c_strPKv"
+        }
+      ],
+      "oracleId": "function-rva-0xf5620",
+      "oracleRva": "0xf5620"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[2748]"
+            }
+          ],
+          "name": "_Z23_txnal_sso_string_c_strPKv"
+        }
+      ],
+      "oracleId": "function-rva-0xf5630",
+      "oracleRva": "0xf5630"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[1803]"
+            }
+          ],
+          "name": "_ZNSs4_Rep10_M_destroyERKSaIcE"
+        }
+      ],
+      "oracleId": "function-rva-0xf7290",
+      "oracleRva": "0xf7290"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[4660]"
+            }
+          ],
+          "name": "_ZNSs6assignESt16initializer_listIcE"
+        }
+      ],
+      "oracleId": "function-rva-0xf7e00",
+      "oracleRva": "0xf7e00"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[3795]"
+            }
+          ],
+          "name": "_ZNSspLERKSs"
+        }
+      ],
+      "oracleId": "function-rva-0xf83d0",
+      "oracleRva": "0xf83d0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[4458]"
+            }
+          ],
+          "name": "_ZNSspLESt16initializer_listIcE"
+        }
+      ],
+      "oracleId": "function-rva-0xf86e0",
+      "oracleRva": "0xf86e0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[3940]"
+            }
+          ],
+          "name": "_ZNSs6appendESt16initializer_listIcE"
+        }
+      ],
+      "oracleId": "function-rva-0xf8720",
+      "oracleRva": "0xf8720"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[1917]"
+            }
+          ],
+          "name": "_ZNSsaSERKSs"
+        }
+      ],
+      "oracleId": "function-rva-0xf8da0",
+      "oracleRva": "0xf8da0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[68]"
+            }
+          ],
+          "name": "_ZNSt12_GLOBAL__N_1L17__libc_arc4randomEPv"
+        }
+      ],
+      "oracleId": "function-rva-0xf97a0",
+      "oracleRva": "0xf97a0"
+    },
+    {
+      "oracleAliases": [
+        {
+          "availability": "removed",
+          "evidence": [
+            {
+              "kind": "elf-symbol",
+              "locator": "rich:section[39]=.symtab:symbol[1998]"
+            }
+          ],
+          "name": "_ZNSt13random_device16_M_getval_pretr1Ev"
+        }
+      ],
+      "oracleId": "function-rva-0xfa1f0",
+      "oracleRva": "0xfa1f0"
+    }
+  ],
+  "falsePositives": [
+    {
+      "recoveredId": "fn_0000000000403020",
+      "recoveredName": "FUN_00403020",
+      "recoveredRva": "0x3020",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "recoveredId": "fn_0000000000404247",
+      "recoveredName": "FUN_00404247",
+      "recoveredRva": "0x4247",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "recoveredId": "fn_0000000000404500",
+      "recoveredName": "FUN_00404500",
+      "recoveredRva": "0x4500",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "recoveredId": "fn_00000000004fb238",
+      "recoveredName": "FUN_004fb238",
+      "recoveredRva": "0xfb238",
+      "recoveredStatus": "recovered"
+    }
+  ],
+  "ignoredExcludedRecoveries": [
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x3980",
+      "recoveredId": "fn_0000000000403980",
+      "recoveredName": "FUN_00403980",
+      "recoveredRva": "0x3980",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x39af",
+      "recoveredId": "fn_00000000004039af",
+      "recoveredName": "FUN_004039af",
+      "recoveredRva": "0x39af",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4084",
+      "recoveredId": "fn_0000000000404084",
+      "recoveredName": "FUN_00404084",
+      "recoveredRva": "0x4084",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x408e",
+      "recoveredId": "fn_000000000040408e",
+      "recoveredName": "FUN_0040408e",
+      "recoveredRva": "0x408e",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x40ba",
+      "recoveredId": "fn_00000000004040ba",
+      "recoveredName": "FUN_004040ba",
+      "recoveredRva": "0x40ba",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x40bf",
+      "recoveredId": "fn_00000000004040bf",
+      "recoveredName": "FUN_004040bf",
+      "recoveredRva": "0x40bf",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x40c4",
+      "recoveredId": "fn_00000000004040c4",
+      "recoveredName": "FUN_004040c4",
+      "recoveredRva": "0x40c4",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x40c9",
+      "recoveredId": "fn_00000000004040c9",
+      "recoveredName": "FUN_004040c9",
+      "recoveredRva": "0x40c9",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x40ce",
+      "recoveredId": "fn_00000000004040ce",
+      "recoveredName": "caseD_5",
+      "recoveredRva": "0x40ce",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4106",
+      "recoveredId": "fn_0000000000404106",
+      "recoveredName": "FUN_00404106",
+      "recoveredRva": "0x4106",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x41b4",
+      "recoveredId": "fn_00000000004041b4",
+      "recoveredName": "FUN_004041b4",
+      "recoveredRva": "0x41b4",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x41e5",
+      "recoveredId": "fn_00000000004041e5",
+      "recoveredName": "FUN_004041e5",
+      "recoveredRva": "0x41e5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x41ea",
+      "recoveredId": "fn_00000000004041ea",
+      "recoveredName": "FUN_004041ea",
+      "recoveredRva": "0x41ea",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4274",
+      "recoveredId": "fn_0000000000404274",
+      "recoveredName": "FUN_00404274",
+      "recoveredRva": "0x4274",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4284",
+      "recoveredId": "fn_0000000000404284",
+      "recoveredName": "FUN_00404284",
+      "recoveredRva": "0x4284",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4294",
+      "recoveredId": "fn_0000000000404294",
+      "recoveredName": "FUN_00404294",
+      "recoveredRva": "0x4294",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x42b8",
+      "recoveredId": "fn_00000000004042b8",
+      "recoveredName": "FUN_004042b8",
+      "recoveredRva": "0x42b8",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x42dc",
+      "recoveredId": "fn_00000000004042dc",
+      "recoveredName": "FUN_004042dc",
+      "recoveredRva": "0x42dc",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x42e8",
+      "recoveredId": "fn_00000000004042e8",
+      "recoveredName": "FUN_004042e8",
+      "recoveredRva": "0x42e8",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x42f4",
+      "recoveredId": "fn_00000000004042f4",
+      "recoveredName": "FUN_004042f4",
+      "recoveredRva": "0x42f4",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4315",
+      "recoveredId": "fn_0000000000404315",
+      "recoveredName": "FUN_00404315",
+      "recoveredRva": "0x4315",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4325",
+      "recoveredId": "fn_0000000000404325",
+      "recoveredName": "FUN_00404325",
+      "recoveredRva": "0x4325",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4335",
+      "recoveredId": "fn_0000000000404335",
+      "recoveredName": "FUN_00404335",
+      "recoveredRva": "0x4335",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4345",
+      "recoveredId": "fn_0000000000404345",
+      "recoveredName": "FUN_00404345",
+      "recoveredRva": "0x4345",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4355",
+      "recoveredId": "fn_0000000000404355",
+      "recoveredName": "FUN_00404355",
+      "recoveredRva": "0x4355",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4365",
+      "recoveredId": "fn_0000000000404365",
+      "recoveredName": "FUN_00404365",
+      "recoveredRva": "0x4365",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4375",
+      "recoveredId": "fn_0000000000404375",
+      "recoveredName": "FUN_00404375",
+      "recoveredRva": "0x4375",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4385",
+      "recoveredId": "fn_0000000000404385",
+      "recoveredName": "FUN_00404385",
+      "recoveredRva": "0x4385",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4395",
+      "recoveredId": "fn_0000000000404395",
+      "recoveredName": "FUN_00404395",
+      "recoveredRva": "0x4395",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43a5",
+      "recoveredId": "fn_00000000004043a5",
+      "recoveredName": "FUN_004043a5",
+      "recoveredRva": "0x43a5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43b5",
+      "recoveredId": "fn_00000000004043b5",
+      "recoveredName": "FUN_004043b5",
+      "recoveredRva": "0x43b5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43c5",
+      "recoveredId": "fn_00000000004043c5",
+      "recoveredName": "FUN_004043c5",
+      "recoveredRva": "0x43c5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43d5",
+      "recoveredId": "fn_00000000004043d5",
+      "recoveredName": "FUN_004043d5",
+      "recoveredRva": "0x43d5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43e5",
+      "recoveredId": "fn_00000000004043e5",
+      "recoveredName": "FUN_004043e5",
+      "recoveredRva": "0x43e5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x43f5",
+      "recoveredId": "fn_00000000004043f5",
+      "recoveredName": "FUN_004043f5",
+      "recoveredRva": "0x43f5",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4405",
+      "recoveredId": "fn_0000000000404405",
+      "recoveredName": "FUN_00404405",
+      "recoveredRva": "0x4405",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4415",
+      "recoveredId": "fn_0000000000404415",
+      "recoveredName": "FUN_00404415",
+      "recoveredRva": "0x4415",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4425",
+      "recoveredId": "fn_0000000000404425",
+      "recoveredName": "FUN_00404425",
+      "recoveredRva": "0x4425",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4435",
+      "recoveredId": "fn_0000000000404435",
+      "recoveredName": "FUN_00404435",
+      "recoveredRva": "0x4435",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4441",
+      "recoveredId": "fn_0000000000404441",
+      "recoveredName": "FUN_00404441",
+      "recoveredRva": "0x4441",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x444d",
+      "recoveredId": "fn_000000000040444d",
+      "recoveredName": "FUN_0040444d",
+      "recoveredRva": "0x444d",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x44b2",
+      "recoveredId": "fn_00000000004044b2",
+      "recoveredName": "FUN_004044b2",
+      "recoveredRva": "0x44b2",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x44e4",
+      "recoveredId": "fn_00000000004044e4",
+      "recoveredName": "FUN_004044e4",
+      "recoveredRva": "0x44e4",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x44f4",
+      "recoveredId": "fn_00000000004044f4",
+      "recoveredName": "FUN_004044f4",
+      "recoveredRva": "0x44f4",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4510",
+      "recoveredId": "fn_0000000000404510",
+      "recoveredName": "FUN_00404510",
+      "recoveredRva": "0x4510",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x451c",
+      "recoveredId": "fn_000000000040451c",
+      "recoveredName": "FUN_0040451c",
+      "recoveredRva": "0x451c",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4528",
+      "recoveredId": "fn_0000000000404528",
+      "recoveredName": "FUN_00404528",
+      "recoveredRva": "0x4528",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4538",
+      "recoveredId": "fn_0000000000404538",
+      "recoveredName": "FUN_00404538",
+      "recoveredRva": "0x4538",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x460d",
+      "recoveredId": "fn_000000000040460d",
+      "recoveredName": "FUN_0040460d",
+      "recoveredRva": "0x460d",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x468a",
+      "recoveredId": "fn_000000000040468a",
+      "recoveredName": "FUN_0040468a",
+      "recoveredRva": "0x468a",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x469a",
+      "recoveredId": "fn_000000000040469a",
+      "recoveredName": "FUN_0040469a",
+      "recoveredRva": "0x469a",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x46e6",
+      "recoveredId": "fn_00000000004046e6",
+      "recoveredName": "FUN_004046e6",
+      "recoveredRva": "0x46e6",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x46ec",
+      "recoveredId": "fn_00000000004046ec",
+      "recoveredName": "FUN_004046ec",
+      "recoveredRva": "0x46ec",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted cold partition; it is compiler-generated split code, not a distinct source function.",
+      "oracleId": "function-rva-0x4706",
+      "recoveredId": "fn_0000000000404706",
+      "recoveredName": "caseD_5",
+      "recoveredRva": "0x4706",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x4830",
+      "recoveredId": "fn_0000000000404830",
+      "recoveredName": "_INIT_9",
+      "recoveredRva": "0x4830",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x4a50",
+      "recoveredId": "fn_0000000000404a50",
+      "recoveredName": "FUN_00404a50",
+      "recoveredRva": "0x4a50",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x16ab9",
+      "recoveredId": "fn_0000000000416ab9",
+      "recoveredName": "_INIT_1",
+      "recoveredRva": "0x16ab9",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x35206",
+      "recoveredId": "fn_0000000000435206",
+      "recoveredName": "_INIT_2",
+      "recoveredRva": "0x35206",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x3bff0",
+      "recoveredId": "fn_000000000043bff0",
+      "recoveredName": "_INIT_3",
+      "recoveredRva": "0x3bff0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x8532c",
+      "recoveredId": "fn_000000000048532c",
+      "recoveredName": "_INIT_4",
+      "recoveredRva": "0x8532c",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x8a636",
+      "recoveredId": "fn_000000000048a636",
+      "recoveredName": "_INIT_5",
+      "recoveredRva": "0x8a636",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x999fd",
+      "recoveredId": "fn_00000000004999fd",
+      "recoveredName": "_INIT_6",
+      "recoveredRva": "0x999fd",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0x99c1d",
+      "recoveredId": "fn_0000000000499c1d",
+      "recoveredName": "_INIT_7",
+      "recoveredRva": "0x99c1d",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated lambda conversion wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0xa6976",
+      "recoveredId": "fn_00000000004a6976",
+      "recoveredName": "FUN_004a6976",
+      "recoveredRva": "0xa6976",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated static-initialization wrapper; it is not a distinct source function.",
+      "oracleId": "function-rva-0xb93ba",
+      "recoveredId": "fn_00000000004b93ba",
+      "recoveredName": "_INIT_8",
+      "recoveredRva": "0xb93ba",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf3220",
+      "recoveredId": "fn_00000000004f3220",
+      "recoveredName": "FUN_004f3220",
+      "recoveredRva": "0xf3220",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf3320",
+      "recoveredId": "fn_00000000004f3320",
+      "recoveredName": "FUN_004f3320",
+      "recoveredRva": "0xf3320",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf3790",
+      "recoveredId": "fn_00000000004f3790",
+      "recoveredName": "FUN_004f3790",
+      "recoveredRva": "0xf3790",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf37b0",
+      "recoveredId": "fn_00000000004f37b0",
+      "recoveredName": "FUN_004f37b0",
+      "recoveredRva": "0xf37b0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5690",
+      "recoveredId": "fn_00000000004f5690",
+      "recoveredName": "FUN_004f5690",
+      "recoveredRva": "0xf5690",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf56f0",
+      "recoveredId": "fn_00000000004f56f0",
+      "recoveredName": "FUN_004f56f0",
+      "recoveredRva": "0xf56f0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5760",
+      "recoveredId": "fn_00000000004f5760",
+      "recoveredName": "FUN_004f5760",
+      "recoveredRva": "0xf5760",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5780",
+      "recoveredId": "fn_00000000004f5780",
+      "recoveredName": "FUN_004f5780",
+      "recoveredRva": "0xf5780",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf57a0",
+      "recoveredId": "fn_00000000004f57a0",
+      "recoveredName": "FUN_004f57a0",
+      "recoveredRva": "0xf57a0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf57c0",
+      "recoveredId": "fn_00000000004f57c0",
+      "recoveredName": "FUN_004f57c0",
+      "recoveredRva": "0xf57c0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5820",
+      "recoveredId": "fn_00000000004f5820",
+      "recoveredName": "FUN_004f5820",
+      "recoveredRva": "0xf5820",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5890",
+      "recoveredId": "fn_00000000004f5890",
+      "recoveredName": "FUN_004f5890",
+      "recoveredRva": "0xf5890",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf58b0",
+      "recoveredId": "fn_00000000004f58b0",
+      "recoveredName": "FUN_004f58b0",
+      "recoveredRva": "0xf58b0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf58d0",
+      "recoveredId": "fn_00000000004f58d0",
+      "recoveredName": "FUN_004f58d0",
+      "recoveredRva": "0xf58d0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5930",
+      "recoveredId": "fn_00000000004f5930",
+      "recoveredName": "FUN_004f5930",
+      "recoveredRva": "0xf5930",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf59a0",
+      "recoveredId": "fn_00000000004f59a0",
+      "recoveredName": "FUN_004f59a0",
+      "recoveredRva": "0xf59a0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf59c0",
+      "recoveredId": "fn_00000000004f59c0",
+      "recoveredName": "FUN_004f59c0",
+      "recoveredRva": "0xf59c0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf59e0",
+      "recoveredId": "fn_00000000004f59e0",
+      "recoveredName": "FUN_004f59e0",
+      "recoveredRva": "0xf59e0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5a40",
+      "recoveredId": "fn_00000000004f5a40",
+      "recoveredName": "FUN_004f5a40",
+      "recoveredRva": "0xf5a40",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5ab0",
+      "recoveredId": "fn_00000000004f5ab0",
+      "recoveredName": "FUN_004f5ab0",
+      "recoveredRva": "0xf5ab0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5ad0",
+      "recoveredId": "fn_00000000004f5ad0",
+      "recoveredName": "FUN_004f5ad0",
+      "recoveredRva": "0xf5ad0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5af0",
+      "recoveredId": "fn_00000000004f5af0",
+      "recoveredName": "FUN_004f5af0",
+      "recoveredRva": "0xf5af0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5b50",
+      "recoveredId": "fn_00000000004f5b50",
+      "recoveredName": "FUN_004f5b50",
+      "recoveredRva": "0xf5b50",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5bc0",
+      "recoveredId": "fn_00000000004f5bc0",
+      "recoveredName": "FUN_004f5bc0",
+      "recoveredRva": "0xf5bc0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5be0",
+      "recoveredId": "fn_00000000004f5be0",
+      "recoveredName": "FUN_004f5be0",
+      "recoveredRva": "0xf5be0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5c00",
+      "recoveredId": "fn_00000000004f5c00",
+      "recoveredName": "FUN_004f5c00",
+      "recoveredRva": "0xf5c00",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5c60",
+      "recoveredId": "fn_00000000004f5c60",
+      "recoveredName": "FUN_004f5c60",
+      "recoveredRva": "0xf5c60",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5cd0",
+      "recoveredId": "fn_00000000004f5cd0",
+      "recoveredName": "FUN_004f5cd0",
+      "recoveredRva": "0xf5cd0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5cf0",
+      "recoveredId": "fn_00000000004f5cf0",
+      "recoveredName": "FUN_004f5cf0",
+      "recoveredRva": "0xf5cf0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5d10",
+      "recoveredId": "fn_00000000004f5d10",
+      "recoveredName": "FUN_004f5d10",
+      "recoveredRva": "0xf5d10",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5d30",
+      "recoveredId": "fn_00000000004f5d30",
+      "recoveredName": "FUN_004f5d30",
+      "recoveredRva": "0xf5d30",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5d90",
+      "recoveredId": "fn_00000000004f5d90",
+      "recoveredName": "FUN_004f5d90",
+      "recoveredRva": "0xf5d90",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5e00",
+      "recoveredId": "fn_00000000004f5e00",
+      "recoveredName": "FUN_004f5e00",
+      "recoveredRva": "0xf5e00",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5e20",
+      "recoveredId": "fn_00000000004f5e20",
+      "recoveredName": "FUN_004f5e20",
+      "recoveredRva": "0xf5e20",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5e40",
+      "recoveredId": "fn_00000000004f5e40",
+      "recoveredName": "FUN_004f5e40",
+      "recoveredRva": "0xf5e40",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5ea0",
+      "recoveredId": "fn_00000000004f5ea0",
+      "recoveredName": "FUN_004f5ea0",
+      "recoveredRva": "0xf5ea0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5f10",
+      "recoveredId": "fn_00000000004f5f10",
+      "recoveredName": "FUN_004f5f10",
+      "recoveredRva": "0xf5f10",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5f30",
+      "recoveredId": "fn_00000000004f5f30",
+      "recoveredName": "FUN_004f5f30",
+      "recoveredRva": "0xf5f30",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5f50",
+      "recoveredId": "fn_00000000004f5f50",
+      "recoveredName": "FUN_004f5f50",
+      "recoveredRva": "0xf5f50",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf5fb0",
+      "recoveredId": "fn_00000000004f5fb0",
+      "recoveredName": "FUN_004f5fb0",
+      "recoveredRva": "0xf5fb0",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf6020",
+      "recoveredId": "fn_00000000004f6020",
+      "recoveredName": "FUN_004f6020",
+      "recoveredRva": "0xf6020",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed compiler-generated transactional clone; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf6040",
+      "recoveredId": "fn_00000000004f6040",
+      "recoveredName": "FUN_004f6040",
+      "recoveredRva": "0xf6040",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0xf9840",
+      "recoveredId": "fn_00000000004f9840",
+      "recoveredName": "FUN_004f9840",
+      "recoveredRva": "0xf9840",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0xfb330",
+      "recoveredId": "fn_00000000004fb330",
+      "recoveredName": "FUN_004fb330",
+      "recoveredRva": "0xfb330",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0xff480",
+      "recoveredId": "fn_00000000004ff480",
+      "recoveredName": "FUN_004ff480",
+      "recoveredRva": "0xff480",
+      "recoveredStatus": "recovered"
+    },
+    {
+      "exclusionKind": "compiler-generated",
+      "exclusionReason": "Reviewed emitted optimization clone or partition; it is not a distinct source function.",
+      "oracleId": "function-rva-0x106070",
+      "recoveredId": "fn_0000000000506070",
+      "recoveredName": "FUN_00506070",
+      "recoveredRva": "0x106070",
+      "recoveredStatus": "recovered"
+    }
+  ],
+  "nearMisses": [],
+  "oracle": {
+    "exclusions": {
+      "compiler-generated": 140,
+      "inlined": 9420
+    },
+    "functionCount": 12844
+  },
+  "populationDefinition": "authenticated function oracle entries without an exclusion; recovered functions at excluded oracle RVAs are ignored",
+  "productionVerified": false,
+  "provenance": {
+    "artifactId": 11968496980,
+    "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "exporterSha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29",
+    "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "imageBase": "0x400000",
+    "outputTreeSha256": "9204d728b59eee67a0a1e0234f5cfd43bb23363c4205410c6e0a661edbef2e57",
+    "programModel": {
+      "functionCount": 3384,
+      "sha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379"
+    },
+    "qualification": {
+      "complete": false,
+      "limitation": "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open",
+      "provider": "gcc-driver-live-full-export-capture-v1",
+      "releaseEligible": false,
+      "scored": false
+    },
+    "receiptLineageSha256": "d74f6e5c58a94c3f36ad3c29f03cd00d41493412086cee3b40db4d1c03dc58c5",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "strippedInputSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "workflowRunId": 38724253878
+  },
+  "reportId": "gcc-driver-function-start-score-v1",
+  "schemaVersion": 1,
+  "summary": {
+    "exactMatches": 3269,
+    "f1": {
+      "denominator": 6557,
+      "numerator": 6538,
+      "value": 0.997102
+    },
+    "falseNegatives": 15,
+    "falsePositives": 4,
+    "ignoredExcludedCount": 111,
+    "nearMisses": 0,
+    "precision": {
+      "denominator": 3273,
+      "numerator": 3269,
+      "value": 0.998778
+    },
+    "rawRecoveredCount": 3384,
+    "recall": {
+      "denominator": 3284,
+      "numerator": 3269,
+      "value": 0.995432
+    },
+    "referenceCount": 3284,
+    "scoredRecoveredCount": 3273,
+    "truePositives": 3269
+  },
+  "twin": "stripped"
+}

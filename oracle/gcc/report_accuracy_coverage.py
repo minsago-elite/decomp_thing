@@ -210,6 +210,102 @@ def _symbol_identity_score(
     }
 
 
+FUNCTION_START_REPORT = "function-start-score.json"
+FUNCTION_START_REPORT_ID = "gcc-driver-function-start-score-v1"
+
+
+def _ratio(numerator: int, denominator: int) -> dict[str, Any]:
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "value": None if denominator == 0 else round(numerator / denominator, 6),
+    }
+
+
+def _function_start_score(
+    profile_directory: Path,
+    loaded_oracle: Any,
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Return the current score from a retained, oracle-bound function-start report."""
+
+    report_path = profile_directory / FUNCTION_START_REPORT
+    if not report_path.exists():
+        return {
+            "status": "unavailable",
+            "reasonCode": "no-retained-current-recovered-model",
+            "productionVerified": False,
+        }
+    report = _json(report_path, "function start report")
+    if report.get("reportId") != FUNCTION_START_REPORT_ID or report.get("twin") != "stripped":
+        raise CoverageError("function start report has an unexpected identity")
+    provenance = _required_mapping(report.get("provenance"), "function start provenance")
+    if provenance.get("artifactManifestSha256") != manifest_sha256:
+        raise CoverageError("function start report is bound to another manifest")
+    if provenance.get("strippedInputSha256") != loaded_oracle.artifacts["stripped"].input_sha256:
+        raise CoverageError("function start report is bound to another input")
+    scoreable = {
+        function.rva
+        for function in loaded_oracle.functions
+        if function.rva is not None and function.exclusion is None
+    }
+    summary = _required_mapping(report.get("summary"), "function start summary")
+    false_negatives = report.get("falseNegatives")
+    false_positives = report.get("falsePositives")
+    if not isinstance(false_negatives, list) or not isinstance(false_positives, list):
+        raise CoverageError("function start report outcomes must be arrays")
+    try:
+        missed = [int(item["oracleRva"], 16) for item in false_negatives]
+        fabricated = [int(item["recoveredRva"], 16) for item in false_positives]
+        true_positives = int(summary["truePositives"])
+        scored_recovered = int(summary["scoredRecoveredCount"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise CoverageError("function start report outcome is malformed") from error
+    if summary.get("referenceCount") != len(scoreable):
+        raise CoverageError("function start report population differs from the oracle")
+    if len(set(missed)) != len(missed) or not set(missed) <= scoreable:
+        raise CoverageError("function start false negatives are not scoreable oracle starts")
+    if any(rva in scoreable for rva in fabricated):
+        raise CoverageError("function start false positives include scoreable oracle starts")
+    if (
+        true_positives + len(missed) != len(scoreable)
+        or true_positives + len(fabricated) != scored_recovered
+        or summary.get("falseNegatives") != len(missed)
+        or summary.get("falsePositives") != len(fabricated)
+    ):
+        raise CoverageError("function start report summary disagrees with outcomes")
+    precision = _ratio(true_positives, scored_recovered)
+    recall = _ratio(true_positives, len(scoreable))
+    if summary.get("precision") != precision or summary.get("recall") != recall:
+        raise CoverageError("function start report ratios disagree with outcomes")
+    qualification = _required_mapping(
+        provenance.get("qualification"), "function start qualification"
+    )
+    return {
+        "status": "measured",
+        "precision": precision,
+        "recall": recall,
+        "nearMisses": summary.get("nearMisses"),
+        "productionVerified": False,
+        "reasonCode": "recovered-model-not-release-eligible",
+        "releaseEligible": qualification.get("releaseEligible") is True,
+        "evidence": {
+            **_record(report_path, "function start report"),
+            "path": report_path.name,
+            "workflowRunId": provenance.get("workflowRunId"),
+            "programModelSha256": _required_mapping(
+                provenance.get("programModel"), "function start program model"
+            ).get("sha256"),
+        },
+    }
+
+
+def _measured_status(score: dict[str, Any], unavailable: str) -> str:
+    if score["status"] != "measured":
+        return unavailable
+    return "measured" if score["releaseEligible"] else "measured-not-release-eligible"
+
+
 def build_report(profile_directory: Path) -> dict[str, Any]:
     profile_directory = profile_directory.resolve()
     manifest_path = profile_directory / "oracle-manifest.json"
@@ -299,12 +395,11 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
     identity_score = _symbol_identity_score(
         profile_directory, loaded_oracle, manifest_sha256
     )
-    if identity_score["status"] != "measured":
-        identity_status = "oracle-population-known-recovery-unavailable"
-    elif identity_score["releaseEligible"]:
-        identity_status = "measured"
-    else:
-        identity_status = "measured-not-release-eligible"
+    identity_status = _measured_status(
+        identity_score, "oracle-population-known-recovery-unavailable"
+    )
+    start_score = _function_start_score(profile_directory, loaded_oracle, manifest_sha256)
+    start_status = _measured_status(start_score, "oracle-covered-recovery-unavailable")
     registry_path = REPOSITORY_ROOT / REGISTRY_PATH
     registry_text = _read_regular(registry_path, "structural replay registry").decode(
         "utf-8"
@@ -351,7 +446,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
         },
         "dimensions": {
             "functionStarts": {
-                "status": "oracle-covered-recovery-unavailable",
+                "status": start_status,
                 "threshold": {"precisionAtLeast": 0.95, "recallAtLeast": 0.95},
                 "oracle": {
                     "status": "available",
@@ -362,11 +457,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
                         "inlineOnly": inline_count,
                     },
                 },
-                "currentScore": {
-                    "status": "unavailable",
-                    "reasonCode": "no-retained-current-recovered-model",
-                    "productionVerified": False,
-                },
+                "currentScore": start_score,
                 "historicalReference": _historical_unattested_score(),
             },
             "survivingSymbolIdentity": {
@@ -443,13 +534,25 @@ def _identity_suffix(score: dict[str, Any]) -> str:
     return f", {ratio['numerator']}/{ratio['denominator']} exact"
 
 
+def _start_suffix(score: dict[str, Any]) -> str:
+    if score["status"] != "measured":
+        return ""
+    precision = score["precision"]
+    recall = score["recall"]
+    return (
+        f", precision {precision['numerator']}/{precision['denominator']}"
+        f", recall {recall['numerator']}/{recall['denominator']}"
+    )
+
+
 def render_human(report: dict[str, Any]) -> str:
     dimensions = report["dimensions"]
     return "\n".join(
         [
             f"profile: {report['profile']['id']}",
             f"function starts: {dimensions['functionStarts']['status']} "
-            f"({dimensions['functionStarts']['oracle']['scoreableFunctionCount']} scoreable oracle functions)",
+            f"({dimensions['functionStarts']['oracle']['scoreableFunctionCount']} scoreable oracle functions"
+            f"{_start_suffix(dimensions['functionStarts']['currentScore'])})",
             f"surviving symbol identity: {dimensions['survivingSymbolIdentity']['status']} "
             f"({dimensions['survivingSymbolIdentity']['oracle']['strippedSurvivingAliasCount']} oracle aliases"
             f"{_identity_suffix(dimensions['survivingSymbolIdentity']['currentScore'])})",
