@@ -135,9 +135,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
@@ -272,9 +271,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        id: gradle-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
@@ -293,9 +292,16 @@ jobs:
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install sandbox host prerequisites
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Bound stalled mirrors without changing required packages or test budgets.
+          apt_acquire_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_acquire_options[@]}" --error-on=any update
+          sudo apt-get "${apt_acquire_options[@]}" install -y --no-install-recommends \
             bubblewrap \
             binutils \
             build-essential \
@@ -471,6 +477,26 @@ jobs:
         with:
           name: kotlin-${{ matrix.shard }}-acp-codex-authentication-evidence
           path: build/acp-codex-compatibility/results
+      # One successful core partition publishes per default-branch revision.
+      # Other partitions and every PR restore only; dependency caches stay separate.
+      - name: Bound compiler cache publication to one GiB
+        id: compiler-cache-size
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.shard == 'core'
+        run: |
+          if test -d "$GITHUB_WORKSPACE/build/ci-compiler-cache"; then
+            cache_bytes="$(du --summarize --bytes "$GITHUB_WORKSPACE/build/ci-compiler-cache" | cut -f1)"
+            printf 'Compiler cache bytes: %s (publication limit: 1073741824)\n' "$cache_bytes"
+            if test "$cache_bytes" -le 1073741824; then
+              echo 'publish=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Publish refreshed compiler outputs after successful qualification
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.shard == 'core' && steps.compiler-cache-size.outputs.publish == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}/build/ci-compiler-cache
+          key: ${{ steps.gradle-cache.outputs.compiler-cache-key }}
+
 
   kotlin:
     runs-on: ubuntu-24.04
@@ -515,9 +541,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
@@ -594,9 +619,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6

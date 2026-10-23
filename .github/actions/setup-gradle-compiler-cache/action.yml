@@ -1,0 +1,45 @@
+name: Set up Gradle and refreshable compiler cache
+description: Keep dependency caching separate from default-branch compiler outputs
+inputs:
+  cache-read-only:
+    description: Preserve the basic Gradle dependency cache write policy
+    required: false
+    default: 'true'
+outputs:
+  compiler-cache-key:
+    description: Exact compiler cache key for the single default-branch publisher
+    value: ${{ steps.compiler-key.outputs.key }}
+  compiler-cache-hit:
+    description: Whether an exact compiler cache entry was restored
+    value: ${{ steps.compiler-restore.outputs.cache-hit }}
+  compiler-cache-matched-key:
+    description: Restored entry, including a matching toolchain bucket from an earlier revision
+    value: ${{ steps.compiler-restore.outputs.cache-matched-key }}
+runs:
+  using: composite
+  steps:
+    - uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-provider: basic
+        cache-read-only: ${{ inputs.cache-read-only }}
+    - name: Identify the compiler cache bucket without launching another JVM
+      id: compiler-key
+      shell: bash
+      env:
+        BUILD_HASH: ${{ hashFiles('**/*.gradle', '**/*.gradle.kts', '**/gradle.properties', 'gradle/**', '**/gradle.lockfile', '.github/actions/setup-gradle-compiler-cache/action.yml', '!**/build/**', '!**/node_modules/**') }}
+        CACHE_REVISION: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        test -f "$JAVA_HOME/release"
+        read -r java_digest _ < <(sha256sum "$JAVA_HOME/release")
+        test -n "$BUILD_HASH"
+        bucket="jvm-compiler-v1-${RUNNER_OS}-${RUNNER_ARCH}-${java_digest}-${BUILD_HASH}-"
+        printf 'prefix=%s\nkey=%s%s\n' "$bucket" "$bucket" "$CACHE_REVISION" >> "$GITHUB_OUTPUT"
+        printf '%s\n' 'DECOMP_CI_COMPILER_CACHE=1' >> "$GITHUB_ENV"
+    - name: Restore compiler outputs from the matching toolchain bucket
+      id: compiler-restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ github.workspace }}/build/ci-compiler-cache
+        key: ${{ steps.compiler-key.outputs.key }}
+        restore-keys: ${{ steps.compiler-key.outputs.prefix }}
