@@ -293,9 +293,16 @@ jobs:
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install sandbox host prerequisites
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Bound stalled mirrors without changing required packages or test budgets.
+          apt_acquire_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
+          sudo apt-get "${apt_acquire_options[@]}" --error-on=any update
+          sudo apt-get "${apt_acquire_options[@]}" install -y --no-install-recommends \
             bubblewrap \
             binutils \
             build-essential \
