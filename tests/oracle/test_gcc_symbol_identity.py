@@ -280,6 +280,29 @@ class TamperedSymbolIdentityTest(unittest.TestCase):
         with self.assertRaisesRegex(CoverageError, "another input"):
             build_coverage(self.profile)
 
+    def test_report_is_scored_and_recorded_from_one_read(self) -> None:
+        import oracle.gcc.report_accuracy_coverage as coverage
+
+        reads = []
+        original = coverage._read_regular
+
+        def counting_read(path, label, limit=None):
+            if Path(path) == self.path:
+                reads.append(path)
+            return original(path, label, limit)
+
+        with mock.patch.object(coverage, "_read_regular", counting_read):
+            build_coverage(self.profile)
+        self.assertEqual(len(reads), 1)
+
+    def test_rejects_cc1_lineage_for_the_driver_profile(self) -> None:
+        binding_path = self.profile / "surviving-symbol-identity-binding.json"
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        binding["receiptLineage"]["engineId"] = "cc1"
+        binding_path.write_text(json.dumps(binding), encoding="utf-8")
+        with self.assertRaisesRegex(CoverageError, "engine is not the driver"):
+            build_coverage(self.profile)
+
     def test_rejects_unbound_model_digest(self) -> None:
         self.report["provenance"]["programModel"]["sha256"] = "0" * 64
         self._rewrite()

@@ -186,7 +186,9 @@ def _symbol_identity_score(
     # bounded readers.
     from oracle.gcc.bound_recovered_model import load_bound_provenance
 
-    report = _json(report_path, "surviving symbol identity report")
+    # Score and record the same snapshot so the evidence digest names the
+    # bytes that produced the ratio.
+    report, report_record = _json_snapshot(report_path, "surviving symbol identity report")
     if report.get("reportId") != SYMBOL_IDENTITY_REPORT_ID or report.get("twin") != "stripped":
         raise CoverageError("surviving symbol identity report has an unexpected identity")
     provenance = _required_mapping(report.get("provenance"), "symbol identity provenance")
@@ -270,8 +272,7 @@ def _symbol_identity_score(
         "reasonCode": "recovered-model-not-release-eligible",
         "releaseEligible": False,
         "evidence": {
-            **_record(report_path, "surviving symbol identity report"),
-            "path": report_path.name,
+            **report_record,
             "binding": bound.binding_record,
             "qualification": bound.qualification_record,
             "programModelSha256": bound.provenance["programModel"]["sha256"],
