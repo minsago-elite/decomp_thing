@@ -291,15 +291,24 @@ comparison skips rather than silently substituting the reproduction identity.
 
 ### Issue #709 evidence boundary
 
-`preprocessing-reference-evidence.json` retains one exact fact from the checked
-`preprocess-file` case: its source hash, staged `tools/cc1` hash, exit status,
-and byte-exact `MOCK-PREPROCESSED` stream. The staged frontend is explicitly a
-deterministic companion program, so this record is driver-orchestration evidence
-with `status: incomplete`, not a real GCC semantic reference. Real frontend
-captures for include search, macro definition/undefinition, language selection,
-and stdin remain unavailable, as does authenticated candidate comparison.
-No Ghidra analysis is performed by this record; the bundled Ghidra and
-authenticated oracle boundaries remain unchanged.
+`preprocessing-reference-evidence.json` (issue #709) and
+`dependency-generation-reference.json` (issue #710) are real GCC 16.2.0
+frontend references captured by `scripts/capture-gcc-preprocessing-reference.py`.
+Each case runs the installed `gcc`/`cc1` of the pinned official
+`docker.io/library/gcc@sha256:2e6f4ae2…` image — the base image of
+`build-toolchain.Dockerfile` — with `-nostdinc`, no network, a read-only root,
+and no capabilities, twice in fresh workspaces; any byte difference fails the
+capture. The records retain the image config digest, driver and `cc1` hashes,
+inputs, exact stdout/stderr, exit status, and produced artifacts. They cover file
+and stdin preprocessing, quote/bracket/`#include_next`/system include search,
+`-D`/`-U` and in-source macro handling, language selection by suffix and `-x`,
+diagnostics, and `-M`/`-MM`/`-MD`/`-MF`/`-MT`/`-MQ`/`-MP`/`-MG` dependency
+output. The frontend is the official image's GCC, not the byte-identical
+`gcc-driver.stripped` oracle artifact; comparison of a reconstructed candidate
+against these references remains downstream work. The `preprocessing-reference`
+job in `gcc-oracle-model.yml` re-captures with `--check`. No Ghidra analysis is
+performed by these records; the bundled Ghidra and authenticated oracle
+boundaries remain unchanged.
 
 That skip is deliberately narrow: only a well-formed executor that retains all
 mandatory isolation capabilities but differs from an authenticated exact
