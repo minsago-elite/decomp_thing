@@ -279,4 +279,42 @@ it('refuses a late source metadata callback after URI departure before the route
       expect(location.pathname + location.search).toBe('/nested/no-such-view?retained=1');
     } finally { view.unmount(); auth.dispose(); }
   }
+
+  // The same file/pin with a new byte selection keeps its metadata identity,
+  // but a read discarded before the router commits cannot leave it loading.
+  const auth = await session();
+  const file = fixture('revision-file-root.json') as RevisionFile;
+  const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'late_range_revision' };
+  file.binding = selected; file.item = { ...file.item, declaredViewable: false };
+  const base = sourceFilePath('/nested', selected, file.item.fileId, file);
+  const pending: { resolve: (value: unknown) => void; signal: AbortSignal }[] = [];
+  transport.get.mockReset();
+  transport.get.mockImplementation((_kind, _path, options) => new Promise(resolve => {
+    pending.push({ resolve, signal: options.signal });
+  }));
+  history.replaceState(null, '', `${base}&byte=0`);
+  const view = render(<App basePath="/nested" session={auth} />);
+  try {
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => {
+      history.replaceState(null, '', `${base}&byte=1`);
+      pending[0]!.resolve({ data: file });
+      for (let index = 0; index < 6; index++) await Promise.resolve();
+    });
+    expect(screen.queryByRole('heading', { name: 'Makefile' })).toBeNull();
+    await act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[0]!.signal.aborted).toBe(true);
+    await act(() => { pending[1]!.resolve({ data: file }); });
+    await screen.findByRole('heading', { name: 'Makefile' });
+    expect(location.pathname + location.search).toBe(`${base}&byte=1`);
+    await act(() => {
+      history.pushState(null, '', `${base}&byte=2`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await screen.findByRole('heading', { name: 'Makefile' });
+    expect(location.pathname + location.search).toBe(`${base}&byte=2`);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.get.mock.calls.every(([kind]) => kind === 'revisionFile')).toBe(true);
+  } finally { view.unmount(); auth.dispose(); }
 });
