@@ -296,3 +296,17 @@ jobs:
             build/gcc-driver-dwarf-interfaces
             build/reports/tests/test
             build/test-results/test
+
+  preprocessing-reference:
+    name: Real GCC preprocessing and dependency references
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'qualify:preprocessing-reference')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pull the pinned official GCC 16.2.0 base image
+        run: docker pull --platform linux/amd64 docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0
+      - name: Re-capture and compare checked-in references
+        run: python3 scripts/capture-gcc-preprocessing-reference.py --runtime docker --check
