@@ -318,3 +318,89 @@ it('refuses a late source metadata callback after URI departure before the route
     expect(transport.get.mock.calls.every(([kind]) => kind === 'revisionFile')).toBe(true);
   } finally { view.unmount(); auth.dispose(); }
 });
+
+it('reuses the first accepted unpinned file metadata for pinned ranges and refuses a different saved pin', async () => {
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', limits: { ...bootstrap.limits, maxSourceChunkBytes: '0' }, sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await auth.initialize({ kind: 'absent' });
+  const file = fixture('revision-file-root.json') as RevisionFile;
+  const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'first_pinned_range_revision' };
+  file.binding = selected;
+  let changed = false;
+  transport.get.mockImplementation(() => Promise.resolve({ data: {
+    ...file, metadataVersion: changed ? '9'.repeat(64) : file.metadataVersion,
+  } }));
+  const unpinned = sourceFilePath('/nested', selected, file.item.fileId);
+  const pinned = sourceFilePath('/nested', selected, file.item.fileId, file);
+  history.replaceState(null, '', `${unpinned}?byte=0`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(sourceCopy.previewDisabled);
+    const heading = screen.getByRole('heading', { name: 'Makefile' });
+    expect(transport.get).toHaveBeenCalledTimes(1);
+    changed = true;
+    await act(() => {
+      history.pushState(null, '', `${pinned}&byte=1`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await screen.findByText(sourceCopy.previewDisabled);
+    expect(screen.getByRole('heading', { name: 'Makefile' })).toBe(heading);
+    expect(location.pathname + location.search).toBe(`${pinned}&byte=1`);
+    expect(transport.get).toHaveBeenCalledTimes(1);
+    const foreign = sourceFilePath('/nested', selected, file.item.fileId, { ...file, metadataVersion: '8'.repeat(64) });
+    await act(() => {
+      history.pushState(null, '', foreign);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', sourceCopy.expired);
+    expect(screen.queryByRole('heading', { name: 'Makefile' })).toBeNull();
+    expect(location.pathname + location.search).toBe(foreign);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.get.mock.calls.every(([kind]) => kind === 'revisionFile')).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('preserves native fragments and rejects the prior source callback before fragment navigation is rendered', async () => {
+  const auth = await session();
+  const directory = fixture('revision-directory-root.json') as RevisionDirectory;
+  const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'fragment_source_revision' };
+  directory.binding = selected;
+  const base = sourceDirectoryPath('/nested', selected);
+  const query = `?sourceSha256=${directory.sourceSha256}&metadataVersion=${directory.metadataVersion}`;
+  const pending: { resolve: (value: unknown) => void; signal: AbortSignal }[] = [];
+  transport.get.mockImplementation((_kind, _path, options) => new Promise(resolve => {
+    pending.push({ resolve, signal: options.signal });
+  }));
+  history.replaceState(null, '', `${base}#original`);
+  const entries = history.length;
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => {
+      history.replaceState(null, '', `${base}#main`);
+      pending[0]!.resolve({ data: directory });
+      for (let index = 0; index < 6; index++) await Promise.resolve();
+    });
+    expect(location.search).toBe(''); expect(location.hash).toBe('#main');
+    expect(screen.queryByRole('link', { name: 'Makefile' })).toBeNull();
+    await act(() => { window.dispatchEvent(new HashChangeEvent('hashchange')); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[0]!.signal.aborted).toBe(true);
+    await act(() => { pending[1]!.resolve({ data: directory }); });
+    await screen.findByRole('link', { name: 'Makefile' });
+    expect(location.pathname + location.search + location.hash).toBe(`${base}${query}#main`);
+    expect(history.length).toBe(entries);
+    await act(() => {
+      history.replaceState(null, '', `${base}${query}#later`);
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    await act(() => { pending[2]!.resolve({ data: directory }); });
+    await screen.findByRole('link', { name: 'Makefile' });
+    expect(location.pathname + location.search + location.hash).toBe(`${base}${query}#later`);
+    expect(history.length).toBe(entries);
+    expect(transport.get.mock.calls.every(([kind]) => kind === 'revisionDirectory')).toBe(true);
+  } finally { auth.dispose(); }
+});

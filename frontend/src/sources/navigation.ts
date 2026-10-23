@@ -14,29 +14,30 @@ export type SourceSnapshot = SourceSnapshotPin;
 export interface SourceHistoryEntry {
   pathname: string;
   search: string;
-  installedSearch: string | null;
-  pin: SourceSnapshotPin | null;
+  hash: string;
+  snapshot: { installedSearch: string | null; pin: SourceSnapshotPin | null };
 }
 
-export function sourceEntryCurrent(entry: SourceHistoryEntry, current: { pathname: string; search: string }): boolean {
-  return current.pathname === entry.pathname && current.search === (entry.installedSearch ?? entry.search);
+export function sourceEntryCurrent(entry: SourceHistoryEntry, current: { pathname: string; search: string; hash: string }): boolean {
+  return current.pathname === entry.pathname && current.search === (entry.snapshot.installedSearch ?? entry.search)
+    && current.hash === entry.hash;
 }
 
 /** Replace this entry once, preserving the raw continuation and never a departed URI. */
 export function pinSourceEntry(entry: SourceHistoryEntry, pin: SourceSnapshotPin,
-  current: () => { pathname: string; search: string }, replace: (url: string) => void): boolean {
+  current: () => { pathname: string; search: string; hash: string }, replace: (url: string) => void): boolean {
   if (!sourceEntryCurrent(entry, current())) return false;
-  if (entry.pin) {
-    if (entry.pin.sourceSha256 !== pin.sourceSha256 || entry.pin.metadataVersion !== pin.metadataVersion) {
+  if (entry.snapshot.pin) {
+    if (entry.snapshot.pin.sourceSha256 !== pin.sourceSha256 || entry.snapshot.pin.metadataVersion !== pin.metadataVersion) {
       throw new ApiClientError('http_error', { serverCode: 'CURSOR_EXPIRED' });
     }
   } else {
     const search = `${entry.search}${entry.search === '' ? '?' : '&'}sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
     const selected = sourceSnapshotSelection(search);
     if (!selected.pin) throw new ApiClientError('invalid_response');
-    replace(`${entry.pathname}${search}`);
-    entry.installedSearch = search;
-    entry.pin = { ...selected.pin };
+    replace(`${entry.pathname}${search}${entry.hash}`);
+    entry.snapshot.installedSearch = search;
+    entry.snapshot.pin = { ...selected.pin };
   }
   return sourceEntryCurrent(entry, current());
 }

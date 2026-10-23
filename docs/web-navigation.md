@@ -497,3 +497,15 @@ client, file and explicit snapshot pin. A pending read discarded during a URI
 transition is restarted for the new entry; it cannot strand the view in loading.
 This reuse neither retains metadata across authentication generations nor adds
 content reads, and explicit refresh still requires a new metadata request.
+
+Native fragments participate in source-entry ownership. Fragment and history
+listeners retire pending reads even when the router leaves a skip link to the
+browser. Pin installation preserves the current fragment; a departed callback
+cannot erase it. Fragment-only entries share the already installed public pin,
+including while the router still carries the initial unpinned query.
+
+The first navigation from an automatically pinned file to a pinned byte/line
+range retains its accepted metadata under the same authenticated client. Reuse
+compares the exact job/run/revision/file and both commitments plus refresh
+generation. A different pin needs a new read and cannot display the old metadata;
+preview opening remains bound to the observation the user explicitly opened.
