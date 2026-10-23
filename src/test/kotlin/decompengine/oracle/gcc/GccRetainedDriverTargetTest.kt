@@ -184,6 +184,9 @@ class GccRetainedDriverTargetTest {
             assertEquals(14_400_000L, retained.exportWallClockMillis("cc1", true))
             assertEquals(1_800_000L, retained.exportWallClockMillis("lto1", false))
             assertFails { retained.exportWallClockMillis("lto1", true) }
+            assertEquals(14_400_000L, retained.exportWallClockMillis("cc1", false, nativeCallObservations = true))
+            assertFails { retained.exportWallClockMillis("cc1", true, nativeCallObservations = true) }
+            assertFails { retained.exportWallClockMillis("lto1", false, nativeCallObservations = true) }
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1",
                 invocationArtifacts(retained, "cc1"), budgets(14_400_000L), true, runtime(root, 5)))
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("lto1",

@@ -1333,7 +1333,7 @@ class GccProductionFullExportQualificationTest {
                 invokeInstalledGccCli(
                     arguments,
                     launcherEvidence,
-                    timeoutSeconds = 2100,
+                    timeoutSeconds = 9900,
                     installation = installation,
                     command = "gcc-engine-native-calls",
                 ),

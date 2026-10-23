@@ -88,14 +88,24 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
-    fun exportWallClockMillis(targetId: String, fullRecovery: Boolean, runtimeDiagnostics: Boolean = false): Long {
+    fun exportWallClockMillis(
+        targetId: String,
+        fullRecovery: Boolean,
+        runtimeDiagnostics: Boolean = false,
+        nativeCallObservations: Boolean = false,
+    ): Long {
         target(targetId)
         if (runtimeDiagnostics) {
+            require(!nativeCallObservations) { "native call observations have no diagnostic budget" }
             return Math.multiplyExact(requireDiagnosticPolicy(targetId, fullRecovery).wallClockSeconds, 1_000L)
+        }
+        require(!nativeCallObservations || (targetId == "cc1" && !fullRecovery)) {
+            "native call observations require the distinct pinned cc1 profile engine"
         }
         require(targetId != "driver" || fullRecovery) { "GCC driver requires full-recovery export" }
         require(!fullRecovery || targetId != "lto1") { "full-recovery export is unsupported for lto1" }
-        return if (fullRecovery && targetId == "cc1") suite.budgets.fullRecoveryCc1ExportWallClockMillis
+        // Native call observations run full cc1 auto-analysis, so they share its retained budget.
+        return if ((fullRecovery || nativeCallObservations) && targetId == "cc1") suite.budgets.fullRecoveryCc1ExportWallClockMillis
         else suite.budgets.exportWallClockMillis
     }
 
@@ -158,7 +168,8 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             }
         }
         requireInvocationArtifacts(engineId, artifacts)
-        require(budgets.wallClockMillis <= exportWallClockMillis(engineId, fullRecoveryExport) &&
+        require(budgets.wallClockMillis <=
+            exportWallClockMillis(engineId, fullRecoveryExport, nativeCallObservations = nativeCallObservations) &&
             budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
         ) { "GCC operation exceeds its retained profile resource ceilings" }
         requireCurrent()

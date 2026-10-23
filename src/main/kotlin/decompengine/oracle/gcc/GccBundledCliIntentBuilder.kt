@@ -131,7 +131,8 @@ internal object GccBundledCliIntentBuilder {
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE, "ExportProgramModel.java", exporter)
                             val intent = GccBundledOperationIntent(operationId, engineId, runKind, artifacts, runtime,
                                 GccCompilerEngineContainmentBudgets(
-                                    profile.exportWallClockMillis(engineId, fullRecoveryExport, runtimeDiagnostics),
+                                    profile.exportWallClockMillis(engineId, fullRecoveryExport, runtimeDiagnostics,
+                                        nativeCallObservations),
                                     suite.budgets.exportMaximumResidentBytes, 128),
                                 diskPolicy, profile, cliInvocation)
                             requireDirectory()
