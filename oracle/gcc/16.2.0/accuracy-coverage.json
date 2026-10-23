@@ -72,11 +72,10 @@
     "survivingSymbolIdentity": {
       "currentScore": {
         "evidence": {
-          "bytes": 3221,
+          "bytes": 3156,
           "path": "surviving-symbol-identity.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
-          "sha256": "530ab0830352610a2e04e83d83df4bd3ad329e0f3800c6902f603e465bf02bd4",
-          "workflowRunId": 38724253878
+          "sha256": "134358eada97015c1e0ee828f1d9cfb4c20cb8e1f9a2b4bbe84774d36b3f7dfa"
         },
         "identityRecovery": {
           "denominator": 6,
