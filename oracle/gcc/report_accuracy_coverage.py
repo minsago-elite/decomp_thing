@@ -484,7 +484,6 @@ def _call_edge_score(
         "evidence": {
             **_record(report_path, "call edge report"),
             "path": report_path.name,
-            "workflowRunId": provenance.get("workflowRunId"),
             "programModelSha256": _required_mapping(
                 provenance.get("programModel"), "call edge program model"
             ).get("sha256"),
