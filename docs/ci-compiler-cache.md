@@ -53,8 +53,10 @@ and HTTPS connection/data timeouts. The enclosing prerequisite step has a
 ten-minute ceiling. Update errors fail the step even when APT could retain old
 indexes; qualification cannot proceed with a failed prerequisite.
 
-This bounds the acquisition stall observed in an ordinary live partition, where
-APT update had not returned after six hours and no JVM tests had started. It
+This bounds the prerequisite stall observed in an ordinary live partition. Its
+last acquisition output came from APT update, the setup step did not finish for
+six hours, and the JVM tests never started. The exact blocked subprocess after
+that last output is not established by the log. This change
 does not diagnose native cleanup failures or demonstrate compiler cache reuse.
 The test selections, commands, native fixtures, runtime limits and aggregate
 requirement remain unchanged. Completed normal Actions must qualify the new
