@@ -9,6 +9,8 @@ import unittest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPOSITORY_ROOT / "oracle/gcc/16.2.0"
+# Keep tampered profile copies inside the repository's ignored build tree.
+SCRATCH = REPOSITORY_ROOT / "build/test-scratch"
 
 from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
     CoverageError,
@@ -58,7 +60,8 @@ class RetainedFunctionStartTest(unittest.TestCase):
 
 class TamperedFunctionStartTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        self.directory = tempfile.TemporaryDirectory(dir=SCRATCH)
         self.profile = Path(self.directory.name) / "16.2.0"
         shutil.copytree(PROFILE, self.profile)
         self.path = self.profile / "function-start-score.json"
@@ -79,7 +82,36 @@ class TamperedFunctionStartTest(unittest.TestCase):
     def test_rejects_unscoreable_false_negative(self) -> None:
         self.report["falseNegatives"][0]["oracleRva"] = "0x1"
         self._rewrite()
-        with self.assertRaisesRegex(CoverageError, "not scoreable oracle starts"):
+        with self.assertRaisesRegex(CoverageError, "do not partition"):
+            build_coverage(self.profile)
+
+    def test_rejects_inflated_true_positives_without_outcome_lists(self) -> None:
+        summary = self.report["summary"]
+        summary["truePositives"] += len(self.report["falseNegatives"])
+        summary["scoredRecoveredCount"] -= len(self.report["falsePositives"])
+        summary["falseNegatives"] = summary["falsePositives"] = 0
+        self.report["falseNegatives"] = []
+        self.report["falsePositives"] = []
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "do not partition"):
+            build_coverage(self.profile)
+
+    def test_rejects_dropped_exact_match(self) -> None:
+        del self.report["exactMatchRvas"][0]
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "do not partition"):
+            build_coverage(self.profile)
+
+    def test_rejects_duplicated_outcome(self) -> None:
+        self.report["exactMatchRvas"].append(self.report["exactMatchRvas"][0])
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "do not partition"):
+            build_coverage(self.profile)
+
+    def test_rejects_missing_exact_match_list(self) -> None:
+        del self.report["exactMatchRvas"]
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "must be arrays"):
             build_coverage(self.profile)
 
     def test_rejects_scoreable_false_positive(self) -> None:
