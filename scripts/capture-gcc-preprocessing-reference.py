@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Capture real GCC 16.2.0 metadata, diagnostic, preprocessing and dependency references.
 
-Every case runs the installed `gcc` of the pinned official base image that
-`build-toolchain.Dockerfile` builds on, with no network, a read-only root
+Every case runs in the pinned official base image that `build-toolchain.Dockerfile`
+builds on. Driver-only metadata cases run the authenticated oracle driver mounted at
+its configured bindir; every other case runs the image's installed `gcc`. Runs have
+no network, a read-only root
 filesystem, no capabilities, and only staged include roots; preprocessing and
 dependency cases add `-nostdinc`, metadata cases invoke the driver as users do. Each
 case is executed twice in fresh workspaces; any byte difference fails the
@@ -28,6 +30,9 @@ ORACLE = ROOT / "oracle/gcc/16.2.0"
 PREPROCESSING_RECORD = ORACLE / "preprocessing-reference-evidence.json"
 DEPENDENCY_RECORD = ORACLE / "dependency-generation-reference.json"
 METADATA_RECORD = ORACLE / "metadata-diagnostic-reference.json"
+ORACLE_MANIFEST = ORACLE / "oracle-manifest.json"
+BUILD_RECORD = ORACLE / "build-record.json"
+ORACLE_DRIVER = ORACLE / "artifacts/gcc-driver.stripped"
 IMAGE = "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0"
 IMAGE_CONFIG = "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f"
 ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
@@ -192,8 +197,13 @@ MALFORMED_C = b"int main(void) { return 0 }\n"
 
 
 # Metadata cases exercise the driver as invoked by users, so none passes -nostdinc.
-def metadata_case(case_id, arguments, categories, inputs=None):
-    return case(case_id, arguments, inputs or {}, categories=categories, nostdinc=False)
+# Driver-only cases run the authenticated oracle driver, so target, configuration and
+# search-directory output are the oracle's own. The oracle install tree is not retained,
+# so cases whose output comes from cc1, collect2 or ld run the image's GCC instead.
+def metadata_case(case_id, arguments, categories, inputs=None, driver="oracle"):
+    spec = case(case_id, arguments, inputs or {}, categories=categories, nostdinc=False)
+    spec["driver"] = driver
+    return spec
 
 
 METADATA_CASES = [
@@ -207,7 +217,7 @@ METADATA_CASES = [
     metadata_case("print-libgcc-file-name", ["-print-libgcc-file-name"], ["search-directory"]),
     metadata_case("help", ["--help"], ["help"]),
     metadata_case("no-input", [], ["missing-input"]),
-    metadata_case("missing-input-file", ["-c", "absent.c"], ["missing-input"]),
+    metadata_case("missing-input-file", ["-c", "absent.c"], ["missing-input"], driver="image"),
     metadata_case("option-missing-argument", ["-o"], ["option-validation", "missing-input"]),
     metadata_case(
         "option-invalid-language",
@@ -226,6 +236,7 @@ METADATA_CASES = [
         ["-march=bogus", "-c", "source.c"],
         ["option-validation"],
         {"source.c": SOURCE_C},
+        driver="image",
     ),
     metadata_case("unsupported-long-option", ["--bogus-long"], ["unsupported-option", "missing-input"]),
     metadata_case(
@@ -234,18 +245,28 @@ METADATA_CASES = [
         ["unsupported-option"],
         {"source.c": SOURCE_C},
     ),
-    metadata_case("malformed-source", ["-c", "bad.c"], ["malformed-input"], {"bad.c": MALFORMED_C}),
+    metadata_case("malformed-source", ["-c", "bad.c"], ["malformed-input"], {"bad.c": MALFORMED_C}, driver="image"),
     metadata_case(
         "malformed-link-input",
         ["data.bin"],
         ["malformed-input"],
         {"data.bin": b"\x00not an object\n"},
+        driver="image",
     ),
 ]
 
 # Each pattern's group 1 is the only span the substitution may replace. The driver
 # name sites were found by running every case as a differently named symlink;
 # `gcc version` in `-v` and `other gcc components` in `--help` are literal text.
+def oracle_install_prefix() -> str:
+    configure = json.loads(BUILD_RECORD.read_text())["commands"]["configure"]
+    return next(argument.split("=", 1)[1] for argument in configure if argument.startswith("--prefix="))
+
+
+# The oracle driver is mounted at its configured bindir so its prefixes are not relocated.
+ORACLE_PREFIX = oracle_install_prefix()
+ORACLE_DRIVER_PATH = f"{ORACLE_PREFIX}/bin/gcc"
+
 IDENTITY_SUBSTITUTIONS = [
     {
         "id": "driver-basename",
@@ -265,17 +286,17 @@ IDENTITY_SUBSTITUTIONS = [
     },
     {
         "id": "driver-argv0",
-        "token": "gcc",
+        "token": ORACLE_DRIVER_PATH,
         "where": "the `COLLECT_GCC=` line of `-v` output",
         "permitted": "the exact argv[0] string a candidate driver is invoked with",
-        "patterns": [r"^COLLECT_GCC=(gcc)$"],
+        "patterns": [rf"^COLLECT_GCC=({re.escape(ORACLE_DRIVER_PATH)})$"],
     },
     {
         "id": "install-prefix",
-        "token": "/usr/local",
-        "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
+        "token": ORACLE_PREFIX,
+        "where": "install-prefix components of search-directory and `-v` configuration output",
         "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
-        "patterns": [r"(?<![\w/.])(/usr/local)(?=/)"],
+        "patterns": [rf"(?<![\w/.])({re.escape(ORACLE_PREFIX)})(?=/)"],
     },
 ]
 
@@ -323,7 +344,9 @@ def stream(data: bytes) -> dict:
     }
 
 
-def run_container(runtime: str, workspace: Path, arguments: list[str], stdin: bytes) -> subprocess.CompletedProcess:
+def run_container(
+    runtime: str, workspace: Path, arguments: list[str], stdin: bytes, mounts: tuple = ()
+) -> subprocess.CompletedProcess:
     command = [
         runtime, "run", "--rm", "-i",
         "--platform", "linux/amd64",
@@ -335,6 +358,8 @@ def run_container(runtime: str, workspace: Path, arguments: list[str], stdin: by
         "-v", f"{workspace}:{WORKDIR}",
         "-w", WORKDIR,
     ]
+    for source, target in mounts:
+        command += ["-v", f"{source}:{target}:ro"]
     for key, value in sorted(ENVIRONMENT.items()):
         command += ["-e", f"{key}={value}"]
     command += [IMAGE, *arguments]
@@ -367,10 +392,14 @@ def execute(runtime: str, scratch: Path, spec: dict, attempt: str, alternate: bo
     workspace = scratch / f"{spec['id']}-{attempt}"
     workspace.mkdir()
     stage(workspace, spec["inputs"])
-    command = ["gcc", *spec["arguments"]]
+    oracle = spec.get("driver") == "oracle"
+    driver = ORACLE_DRIVER_PATH if oracle else "gcc"
+    mounts = ((ORACLE_DRIVER, ORACLE_DRIVER_PATH),) if oracle else ()
+    command = [driver, *spec["arguments"]]
     if alternate:
-        command = ["sh", "-c", 'ln -s "$(command -v gcc)" "$0" && exec "$0" "$@"', ALTERNATE_DRIVER, *spec["arguments"]]
-    result = run_container(runtime, workspace, command, spec["stdin"])
+        script = 'ln -s "$(command -v "$1")" "$0" && shift && exec "$0" "$@"'
+        command = ["sh", "-c", script, ALTERNATE_DRIVER, driver, *spec["arguments"]]
+    result = run_container(runtime, workspace, command, spec["stdin"], mounts)
     if alternate:
         (workspace / Path(ALTERNATE_DRIVER).relative_to(WORKDIR)).unlink(missing_ok=True)
     return {
@@ -388,6 +417,7 @@ def capture_case(runtime: str, scratch: Path, spec: dict) -> dict:
         raise SystemExit(f"{spec['id']}: independent repetition differs")
     return {
         "id": spec["id"],
+        **({"driver": spec["driver"]} if "driver" in spec else {}),
         "categories": spec["categories"],
         "arguments": spec["arguments"],
         "environment": ENVIRONMENT,
@@ -413,6 +443,23 @@ def check_driver_name_substitution(runtime: str, scratch: Path, spec: dict, obse
     }
     if alternate != expected:
         raise SystemExit(f"{spec['id']}: driver-name substitutions do not account for {ALTERNATE_DRIVER}")
+
+
+def oracle_driver_identity() -> dict:
+    manifest = json.loads(ORACLE_MANIFEST.read_text())
+    stripped = manifest["artifacts"]["stripped"]
+    data = ORACLE_DRIVER.read_bytes()
+    if (len(data), digest(data)) != (stripped["bytes"], stripped["sha256"]):
+        raise SystemExit(f"{ORACLE_DRIVER.relative_to(ROOT)} does not match {ORACLE_MANIFEST.relative_to(ROOT)}")
+    return {
+        "id": manifest["oracle"]["id"],
+        "artifact": f"oracle/gcc/16.2.0/{stripped['path']}",
+        "bytes": stripped["bytes"],
+        "sha256": stripped["sha256"],
+        "manifest": {"path": "oracle/gcc/16.2.0/oracle-manifest.json", "sha256": digest(ORACLE_MANIFEST.read_bytes())},
+        "mountedAt": ORACLE_DRIVER_PATH,
+        "installTree": "not retained; only the driver is mounted, read-only, in the pinned image",
+    }
 
 
 def toolchain_identity(runtime: str, scratch: Path) -> dict:
@@ -457,6 +504,7 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
 
 def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
     identity = toolchain_identity(runtime, scratch)
+    oracle_driver = oracle_driver_identity()
     metadata = [capture_case(runtime, scratch, spec) for spec in METADATA_CASES]
     for spec, captured in zip(METADATA_CASES, metadata):
         check_driver_name_substitution(runtime, scratch, spec, captured["observed"])
@@ -504,7 +552,15 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
             "id": "gcc-16-2-0-metadata-diagnostic-reference",
             "status": "captured",
             "scope": "real-driver-metadata-and-diagnostics",
-            "toolchain": identity,
+            "toolchain": {
+                **identity,
+                "includeSearch": "the driver's default include search; no metadata case passes -nostdinc",
+            },
+            "oracleDriver": oracle_driver,
+            "driverSelection": (
+                "cases with driver `oracle` run the authenticated oracle driver; cases with driver "
+                "`image` need cc1, collect2 or ld, which the oracle does not retain, and run the image's gcc"
+            ),
             "capture": capture,
             "cases": metadata,
             "identitySubstitutions": IDENTITY_SUBSTITUTIONS,

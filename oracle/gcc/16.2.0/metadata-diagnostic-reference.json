@@ -21,9 +21,22 @@
       "sha256": "bc1bcbeccfaaf269c1a8c1bb74a0bc4d73bff56a0c6c6dbd4bb248d11f6232a0"
     },
     "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
-    "includeSearch": "-nostdinc; only staged workspace include roots are searched",
+    "includeSearch": "the driver's default include search; no metadata case passes -nostdinc",
     "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges"
   },
+  "oracleDriver": {
+    "id": "gcc-driver-16.2.0",
+    "artifact": "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped",
+    "bytes": 2349296,
+    "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "manifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "mountedAt": "/oracle/install/bin/gcc",
+    "installTree": "not retained; only the driver is mounted, read-only, in the pinned image"
+  },
+  "driverSelection": "cases with driver `oracle` run the authenticated oracle driver; cases with driver `image` need cc1, collect2 or ld, which the oracle does not retain, and run the image's gcc",
   "capture": {
     "tool": "scripts/capture-gcc-preprocessing-reference.py",
     "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results"
@@ -31,6 +44,7 @@
   "cases": [
     {
       "id": "version",
+      "driver": "oracle",
       "categories": [
         "version"
       ],
@@ -68,6 +82,7 @@
     },
     {
       "id": "dumpversion",
+      "driver": "oracle",
       "categories": [
         "version"
       ],
@@ -105,6 +120,7 @@
     },
     {
       "id": "dumpfullversion",
+      "driver": "oracle",
       "categories": [
         "version"
       ],
@@ -142,6 +158,7 @@
     },
     {
       "id": "dumpmachine",
+      "driver": "oracle",
       "categories": [
         "target"
       ],
@@ -161,10 +178,10 @@
       "observed": {
         "exitCode": 0,
         "stdout": {
-          "bytes": 17,
-          "sha256": "08cababdf891ccbf96eb376f1e84f279f70302fb13d84e5f98637becdfc6d989",
-          "base64": "eDg2XzY0LWxpbnV4LWdudQo=",
-          "text": "x86_64-linux-gnu\n"
+          "bytes": 20,
+          "sha256": "1c7da408e283702561a445e700b61c0f55a082230a3cfe323208841221274a6a",
+          "base64": "eDg2XzY0LXBjLWxpbnV4LWdudQo=",
+          "text": "x86_64-pc-linux-gnu\n"
         },
         "stderr": {
           "bytes": 0,
@@ -179,6 +196,7 @@
     },
     {
       "id": "verbose-configuration",
+      "driver": "oracle",
       "categories": [
         "version",
         "target",
@@ -206,10 +224,10 @@
           "text": ""
         },
         "stderr": {
-          "bytes": 356,
-          "sha256": "9bbdf75fd1afb2cd5697d3909fd34a85a07ec5db46ec117bd20d082b5e53c29c",
-          "base64": "VXNpbmcgYnVpbHQtaW4gc3BlY3MuCkNPTExFQ1RfR0NDPWdjYwpDT0xMRUNUX0xUT19XUkFQUEVSPS91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvbHRvLXdyYXBwZXIKVGFyZ2V0OiB4ODZfNjQtbGludXgtZ251CkNvbmZpZ3VyZWQgd2l0aDogL3Vzci9zcmMvZ2NjL2NvbmZpZ3VyZSAtLWJ1aWxkPXg4Nl82NC1saW51eC1nbnUgLS1kaXNhYmxlLW11bHRpbGliIC0tZW5hYmxlLWxhbmd1YWdlcz1jLGMrKyxmb3J0cmFuLGdvClRocmVhZCBtb2RlbDogcG9zaXgKU3VwcG9ydGVkIExUTyBjb21wcmVzc2lvbiBhbGdvcml0aG1zOiB6bGliIHpzdGQKZ2NjIHZlcnNpb24gMTYuMi4wIChHQ0MpIAo=",
-          "text": "Using built-in specs.\nCOLLECT_GCC=gcc\nCOLLECT_LTO_WRAPPER=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper\nTarget: x86_64-linux-gnu\nConfigured with: /usr/src/gcc/configure --build=x86_64-linux-gnu --disable-multilib --enable-languages=c,c++,fortran,go\nThread model: posix\nSupported LTO compression algorithms: zlib zstd\ngcc version 16.2.0 (GCC) \n"
+          "bytes": 557,
+          "sha256": "fd690f5baa1432a05ef80ed18b87b51d23785303f255786e18b22f01e037ee05",
+          "base64": "VXNpbmcgYnVpbHQtaW4gc3BlY3MuCkNPTExFQ1RfR0NDPS9vcmFjbGUvaW5zdGFsbC9iaW4vZ2NjClRhcmdldDogeDg2XzY0LXBjLWxpbnV4LWdudQpDb25maWd1cmVkIHdpdGg6IC9vcmFjbGUvc291cmNlL2djYy0xNi4yLjAvY29uZmlndXJlIC0tcHJlZml4PS9vcmFjbGUvaW5zdGFsbCAtLWVuYWJsZS1sYW5ndWFnZXM9YyAtLWRpc2FibGUtYm9vdHN0cmFwIC0tZGlzYWJsZS1tdWx0aWxpYiAtLWRpc2FibGUtbmxzIC0tZGlzYWJsZS1saWJzYW5pdGl6ZXIgLS1kaXNhYmxlLWxpYnF1YWRtYXRoIC0tZGlzYWJsZS1saWJnb21wIC0tZGlzYWJsZS1saWJhdG9taWMgLS1kaXNhYmxlLWxpYnNzcCAtLWRpc2FibGUtbGlidnR2IC0tZGlzYWJsZS1saWJzdGRjeHgtcGNoIC0td2l0aC1zeXN0ZW0temxpYiAtLWVuYWJsZS1jaGVja2luZz1yZWxlYXNlIC0td2l0aC1hcmNoPXg4Ni02NCAtLXdpdGgtdHVuZT1nZW5lcmljClRocmVhZCBtb2RlbDogcG9zaXgKU3VwcG9ydGVkIExUTyBjb21wcmVzc2lvbiBhbGdvcml0aG1zOiB6bGliIHpzdGQKZ2NjIHZlcnNpb24gMTYuMi4wIChHQ0MpIAo=",
+          "text": "Using built-in specs.\nCOLLECT_GCC=/oracle/install/bin/gcc\nTarget: x86_64-pc-linux-gnu\nConfigured with: /oracle/source/gcc-16.2.0/configure --prefix=/oracle/install --enable-languages=c --disable-bootstrap --disable-multilib --disable-nls --disable-libsanitizer --disable-libquadmath --disable-libgomp --disable-libatomic --disable-libssp --disable-libvtv --disable-libstdcxx-pch --with-system-zlib --enable-checking=release --with-arch=x86-64 --with-tune=generic\nThread model: posix\nSupported LTO compression algorithms: zlib zstd\ngcc version 16.2.0 (GCC) \n"
         },
         "artifacts": []
       },
@@ -218,6 +236,7 @@
     },
     {
       "id": "print-search-dirs",
+      "driver": "oracle",
       "categories": [
         "search-directory"
       ],
@@ -237,10 +256,10 @@
       "observed": {
         "exitCode": 0,
         "stdout": {
-          "bytes": 1394,
-          "sha256": "ff82d0c3b8ec5c4783ba68763b9eb7fe006144ac64bc49bf58fd24e2e44c36c1",
-          "base64": "aW5zdGFsbDogL3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLwpwcm9ncmFtczogPS91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliZXhlYy9nY2MveDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvYmluL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4vLi4veDg2XzY0LWxpbnV4LWdudS9iaW4veDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvYmluLwpsaWJyYXJpZXM6ID0vdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbG9jYWwvbGliL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC8uLi8uLi8uLi8uLi94ODZfNjQtbGludXgtZ251L2xpYi94ODZfNjQtbGludXgtZ251LzE2LjIuMC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvbGliL3g4Nl82NC1saW51eC1nbnUvOi91c3IvbG9jYWwvbGliL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC8uLi8uLi8uLi8uLi94ODZfNjQtbGludXgtZ251L2xpYi8uLi9saWI2NC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4veDg2XzY0LWxpbnV4LWdudS86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL2xpYjY0LzovbGliL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovbGliL3g4Nl82NC1saW51eC1nbnUvOi9saWIvLi4vbGliNjQvOi91c3IvbGliL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLzovdXNyL2xpYi94ODZfNjQtbGludXgtZ251LzovdXNyL2xpYi8uLi9saWI2NC86L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wLy4uLy4uLy4uLy4uL3g4Nl82NC1saW51eC1nbnUvbGliLzovdXNyL2xvY2FsL2xpYi9nY2MveDg2XzY0LWxpbnV4LWdudS8xNi4yLjAvLi4vLi4vLi4vOi9saWIvOi91c3IvbGliLwo=",
-          "text": "install: /usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/\nprograms: =/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/libexec/gcc/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/bin/\nlibraries: =/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/../lib64/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../x86_64-linux-gnu/16.2.0/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../lib64/:/lib/x86_64-linux-gnu/16.2.0/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/16.2.0/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../../x86_64-linux-gnu/lib/:/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/../../../:/lib/:/usr/lib/\n"
+          "bytes": 1085,
+          "sha256": "bba3456ad4ef802da1f6f67b2858c2e2f4c042ed0193c5be792e1009a86b9361",
+          "base64": "aW5zdGFsbDogL29yYWNsZS9pbnN0YWxsL2xpYi9nY2MveDg2XzY0LXBjLWxpbnV4LWdudS8xNi4yLjAvCnByb2dyYW1zOiA9L29yYWNsZS9pbnN0YWxsL2xpYmV4ZWMvZ2NjL3g4Nl82NC1wYy1saW51eC1nbnUvMTYuMi4wLzovb3JhY2xlL2luc3RhbGwvbGliZXhlYy9nY2MveDg2XzY0LXBjLWxpbnV4LWdudS8xNi4yLjAvOi9vcmFjbGUvaW5zdGFsbC9saWJleGVjL2djYy94ODZfNjQtcGMtbGludXgtZ251Lzovb3JhY2xlL2luc3RhbGwvbGliL2djYy94ODZfNjQtcGMtbGludXgtZ251LzE2LjIuMC86L29yYWNsZS9pbnN0YWxsL2xpYi9nY2MveDg2XzY0LXBjLWxpbnV4LWdudS86L29yYWNsZS9pbnN0YWxsL3g4Nl82NC1wYy1saW51eC1nbnUvYmluL3g4Nl82NC1wYy1saW51eC1nbnUvMTYuMi4wLzovb3JhY2xlL2luc3RhbGwveDg2XzY0LXBjLWxpbnV4LWdudS9iaW4veDg2XzY0LWxpbnV4LWdudS86L29yYWNsZS9pbnN0YWxsL3g4Nl82NC1wYy1saW51eC1nbnUvYmluLwpsaWJyYXJpZXM6ID0vb3JhY2xlL2luc3RhbGwvbGliL2djYy94ODZfNjQtcGMtbGludXgtZ251LzE2LjIuMC86L29yYWNsZS9pbnN0YWxsL3g4Nl82NC1wYy1saW51eC1nbnUvbGliL3g4Nl82NC1wYy1saW51eC1nbnUvMTYuMi4wLzovb3JhY2xlL2luc3RhbGwveDg2XzY0LXBjLWxpbnV4LWdudS9saWIveDg2XzY0LWxpbnV4LWdudS86L29yYWNsZS9pbnN0YWxsL3g4Nl82NC1wYy1saW51eC1nbnUvbGliLy4uL2xpYjY0Lzovb3JhY2xlL2luc3RhbGwvbGliL3g4Nl82NC1wYy1saW51eC1nbnUvMTYuMi4wLzovb3JhY2xlL2luc3RhbGwvbGliL3g4Nl82NC1saW51eC1nbnUvOi9vcmFjbGUvaW5zdGFsbC9saWIvLi4vbGliNjQvOi9saWIveDg2XzY0LXBjLWxpbnV4LWdudS8xNi4yLjAvOi9saWIveDg2XzY0LWxpbnV4LWdudS86L2xpYi8uLi9saWI2NC86L3Vzci9saWIveDg2XzY0LXBjLWxpbnV4LWdudS8xNi4yLjAvOi91c3IvbGliL3g4Nl82NC1saW51eC1nbnUvOi91c3IvbGliLy4uL2xpYjY0Lzovb3JhY2xlL2luc3RhbGwveDg2XzY0LXBjLWxpbnV4LWdudS9saWIvOi9vcmFjbGUvaW5zdGFsbC9saWIvOi9saWIvOi91c3IvbGliLwo=",
+          "text": "install: /oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/\nprograms: =/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/:/oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/lib/gcc/x86_64-pc-linux-gnu/:/oracle/install/x86_64-pc-linux-gnu/bin/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/x86_64-pc-linux-gnu/bin/x86_64-linux-gnu/:/oracle/install/x86_64-pc-linux-gnu/bin/\nlibraries: =/oracle/install/lib/gcc/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/x86_64-pc-linux-gnu/lib/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/x86_64-pc-linux-gnu/lib/x86_64-linux-gnu/:/oracle/install/x86_64-pc-linux-gnu/lib/../lib64/:/oracle/install/lib/x86_64-pc-linux-gnu/16.2.0/:/oracle/install/lib/x86_64-linux-gnu/:/oracle/install/lib/../lib64/:/lib/x86_64-pc-linux-gnu/16.2.0/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-pc-linux-gnu/16.2.0/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/oracle/install/x86_64-pc-linux-gnu/lib/:/oracle/install/lib/:/lib/:/usr/lib/\n"
         },
         "stderr": {
           "bytes": 0,
@@ -255,6 +274,7 @@
     },
     {
       "id": "print-prog-name-cc1",
+      "driver": "oracle",
       "categories": [
         "search-directory"
       ],
@@ -274,10 +294,10 @@
       "observed": {
         "exitCode": 0,
         "stdout": {
-          "bytes": 51,
-          "sha256": "9269227a054ff4e77d0e1af8c15689d200632622d7dd6a427181d41132aba538",
-          "base64": "L3Vzci9sb2NhbC9saWJleGVjL2djYy94ODZfNjQtbGludXgtZ251LzE2LjIuMC9jYzEK",
-          "text": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/cc1\n"
+          "bytes": 4,
+          "sha256": "6a9b62ed34f291a4eac3b0a5ae4e8c2329334ce6c94a74714d045b829809a34b",
+          "base64": "Y2MxCg==",
+          "text": "cc1\n"
         },
         "stderr": {
           "bytes": 0,
@@ -292,6 +312,7 @@
     },
     {
       "id": "print-libgcc-file-name",
+      "driver": "oracle",
       "categories": [
         "search-directory"
       ],
@@ -311,10 +332,10 @@
       "observed": {
         "exitCode": 0,
         "stdout": {
-          "bytes": 52,
-          "sha256": "d389abf172258542313f020b4dd4688b502e2d7a1c51f13dc6649eb5d22d6344",
-          "base64": "L3Vzci9sb2NhbC9saWIvZ2NjL3g4Nl82NC1saW51eC1nbnUvMTYuMi4wL2xpYmdjYy5hCg==",
-          "text": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/libgcc.a\n"
+          "bytes": 9,
+          "sha256": "c316fa8da3a591e26e8e26ec1807e325abdf83ba8234966b028396a4a0ae0a22",
+          "base64": "bGliZ2NjLmEK",
+          "text": "libgcc.a\n"
         },
         "stderr": {
           "bytes": 0,
@@ -329,6 +350,7 @@
     },
     {
       "id": "help",
+      "driver": "oracle",
       "categories": [
         "help"
       ],
@@ -366,6 +388,7 @@
     },
     {
       "id": "no-input",
+      "driver": "oracle",
       "categories": [
         "missing-input"
       ],
@@ -401,6 +424,7 @@
     },
     {
       "id": "missing-input-file",
+      "driver": "image",
       "categories": [
         "missing-input"
       ],
@@ -439,6 +463,7 @@
     },
     {
       "id": "option-missing-argument",
+      "driver": "oracle",
       "categories": [
         "option-validation",
         "missing-input"
@@ -477,6 +502,7 @@
     },
     {
       "id": "option-invalid-language",
+      "driver": "oracle",
       "categories": [
         "option-validation"
       ],
@@ -522,6 +548,7 @@
     },
     {
       "id": "option-invalid-standard",
+      "driver": "oracle",
       "categories": [
         "option-validation",
         "unsupported-option"
@@ -568,6 +595,7 @@
     },
     {
       "id": "option-invalid-frontend-value",
+      "driver": "image",
       "categories": [
         "option-validation"
       ],
@@ -613,6 +641,7 @@
     },
     {
       "id": "unsupported-long-option",
+      "driver": "oracle",
       "categories": [
         "unsupported-option",
         "missing-input"
@@ -651,6 +680,7 @@
     },
     {
       "id": "unsupported-flag-option",
+      "driver": "oracle",
       "categories": [
         "unsupported-option"
       ],
@@ -696,6 +726,7 @@
     },
     {
       "id": "malformed-source",
+      "driver": "image",
       "categories": [
         "malformed-input"
       ],
@@ -740,6 +771,7 @@
     },
     {
       "id": "malformed-link-input",
+      "driver": "image",
       "categories": [
         "malformed-input"
       ],
@@ -797,20 +829,20 @@
     },
     {
       "id": "driver-argv0",
-      "token": "gcc",
+      "token": "/oracle/install/bin/gcc",
       "where": "the `COLLECT_GCC=` line of `-v` output",
       "permitted": "the exact argv[0] string a candidate driver is invoked with",
       "patterns": [
-        "^COLLECT_GCC=(gcc)$"
+        "^COLLECT_GCC=(/oracle/install/bin/gcc)$"
       ]
     },
     {
       "id": "install-prefix",
-      "token": "/usr/local",
-      "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
+      "token": "/oracle/install",
+      "where": "install-prefix components of search-directory and `-v` configuration output",
       "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
       "patterns": [
-        "(?<![\\w/.])(/usr/local)(?=/)"
+        "(?<![\\w/.])(/oracle/install)(?=/)"
       ]
     }
   ],
