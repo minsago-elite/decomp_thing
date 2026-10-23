@@ -3,7 +3,8 @@
 
 Every case runs the installed `gcc` of the pinned official base image that
 `build-toolchain.Dockerfile` builds on, with no network, a read-only root
-filesystem, no capabilities, `-nostdinc`, and only staged include roots. Each
+filesystem, no capabilities, and only staged include roots; preprocessing and
+dependency cases add `-nostdinc`, metadata cases invoke the driver as users do. Each
 case is executed twice in fresh workspaces; any byte difference fails the
 capture. `--check` re-captures and compares with the checked-in records.
 """
@@ -15,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -189,88 +191,123 @@ DEPENDENCY_CASES = [
 MALFORMED_C = b"int main(void) { return 0 }\n"
 
 
-def query(case_id, arguments, categories):
-    return case(case_id, arguments, {}, categories=categories, nostdinc=False)
+# Metadata cases exercise the driver as invoked by users, so none passes -nostdinc.
+def metadata_case(case_id, arguments, categories, inputs=None):
+    return case(case_id, arguments, inputs or {}, categories=categories, nostdinc=False)
 
 
 METADATA_CASES = [
-    query("version", ["--version"], ["version"]),
-    query("dumpversion", ["-dumpversion"], ["version"]),
-    query("dumpfullversion", ["-dumpfullversion"], ["version"]),
-    query("dumpmachine", ["-dumpmachine"], ["target"]),
-    query("verbose-configuration", ["-v"], ["version", "target", "configuration"]),
-    query("print-search-dirs", ["-print-search-dirs"], ["search-directory"]),
-    query("print-prog-name-cc1", ["-print-prog-name=cc1"], ["search-directory"]),
-    query("print-libgcc-file-name", ["-print-libgcc-file-name"], ["search-directory"]),
-    query("help", ["--help"], ["help"]),
-    query("no-input", [], ["missing-input"]),
-    case(
-        "missing-input-file",
-        ["-c", "absent.c"],
-        {},
-        categories=["missing-input"],
-        nostdinc=False,
-    ),
-    query("option-missing-argument", ["-o"], ["option-validation", "missing-input"]),
-    case(
+    metadata_case("version", ["--version"], ["version"]),
+    metadata_case("dumpversion", ["-dumpversion"], ["version"]),
+    metadata_case("dumpfullversion", ["-dumpfullversion"], ["version"]),
+    metadata_case("dumpmachine", ["-dumpmachine"], ["target"]),
+    metadata_case("verbose-configuration", ["-v"], ["version", "target", "configuration"]),
+    metadata_case("print-search-dirs", ["-print-search-dirs"], ["search-directory"]),
+    metadata_case("print-prog-name-cc1", ["-print-prog-name=cc1"], ["search-directory"]),
+    metadata_case("print-libgcc-file-name", ["-print-libgcc-file-name"], ["search-directory"]),
+    metadata_case("help", ["--help"], ["help"]),
+    metadata_case("no-input", [], ["missing-input"]),
+    metadata_case("missing-input-file", ["-c", "absent.c"], ["missing-input"]),
+    metadata_case("option-missing-argument", ["-o"], ["option-validation", "missing-input"]),
+    metadata_case(
         "option-invalid-language",
         ["-x", "bogus", "source.c"],
+        ["option-validation"],
         {"source.c": SOURCE_C},
-        categories=["option-validation"],
-        nostdinc=False,
     ),
-    case(
+    metadata_case(
         "option-invalid-standard",
         ["-std=bogus", "-c", "source.c"],
+        ["option-validation", "unsupported-option"],
         {"source.c": SOURCE_C},
-        categories=["option-validation", "unsupported-option"],
-        nostdinc=False,
     ),
-    case(
+    metadata_case(
         "option-invalid-frontend-value",
         ["-march=bogus", "-c", "source.c"],
+        ["option-validation"],
         {"source.c": SOURCE_C},
-        categories=["option-validation"],
     ),
-    query("unsupported-long-option", ["--bogus-long"], ["unsupported-option", "missing-input"]),
-    case(
+    metadata_case("unsupported-long-option", ["--bogus-long"], ["unsupported-option", "missing-input"]),
+    metadata_case(
         "unsupported-flag-option",
         ["-fbogus-flag", "-c", "source.c"],
+        ["unsupported-option"],
         {"source.c": SOURCE_C},
-        categories=["unsupported-option"],
-        nostdinc=False,
     ),
-    case(
-        "malformed-source",
-        ["-c", "bad.c"],
-        {"bad.c": MALFORMED_C},
-        categories=["malformed-input"],
-    ),
-    case(
+    metadata_case("malformed-source", ["-c", "bad.c"], ["malformed-input"], {"bad.c": MALFORMED_C}),
+    metadata_case(
         "malformed-link-input",
         ["data.bin"],
+        ["malformed-input"],
         {"data.bin": b"\x00not an object\n"},
-        categories=["malformed-input"],
-        nostdinc=False,
     ),
 ]
 
+# Each pattern's group 1 is the only span the substitution may replace. The driver
+# name sites were found by running every case as a differently named symlink;
+# `gcc version` in `-v` and `other gcc components` in `--help` are literal text.
 IDENTITY_SUBSTITUTIONS = [
     {
+        "id": "driver-basename",
         "token": "gcc",
-        "where": "the program-name prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`)",
+        "where": (
+            "the driver program name: the prefix of driver diagnostics (`gcc: error:`, "
+            "`gcc: fatal error:`), the `--version` banner (`gcc (GCC) 16.2.0`), and the "
+            "`--help` usage line and sub-process sentence (`Usage: gcc`, `invoked by gcc.`)"
+        ),
         "permitted": "the basename a candidate driver is invoked as",
+        "patterns": [
+            r"^(gcc)(?=: (?:fatal )?error: )",
+            r"^(gcc)(?= \(GCC\) )",
+            r"^Usage: (gcc)(?= \[options\] file\.\.\.$)",
+            r"(?<= invoked by )(gcc)(?=\.  )",
+        ],
     },
     {
+        "id": "driver-argv0",
+        "token": "gcc",
+        "where": "the `COLLECT_GCC=` line of `-v` output",
+        "permitted": "the exact argv[0] string a candidate driver is invoked with",
+        "patterns": [r"^COLLECT_GCC=(gcc)$"],
+    },
+    {
+        "id": "install-prefix",
         "token": "/usr/local",
         "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
         "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
+        "patterns": [r"(?<![\w/.])(/usr/local)(?=/)"],
     },
 ]
+
+# Metadata cases are re-run through a symlink with this name to prove the driver-name rules.
+ALTERNATE_DRIVER = f"{WORKDIR}/candidate-cc"
+ALTERNATE_SUBSTITUTION = {
+    "driver-basename": ALTERNATE_DRIVER.rsplit("/", 1)[1],
+    "driver-argv0": ALTERNATE_DRIVER,
+}
+
 IDENTITY_SUBSTITUTION_LIMIT = (
     "No other substitution is permitted: version, target triple, option spellings, "
     "diagnostic wording, exit status and stream assignment must match byte-for-byte."
 )
+
+
+def substitute(data: bytes, values: dict[str, str]) -> bytes:
+    """Replace the group-1 span of each matching identity pattern, line by line."""
+    lines = data.decode("utf-8", "surrogateescape").split("\n")
+    for rule in IDENTITY_SUBSTITUTIONS:
+        if rule["id"] not in values:
+            continue
+        value = values[rule["id"]]
+        for pattern in rule["patterns"]:
+            regex = re.compile(pattern)
+
+            def replace(match: re.Match) -> str:
+                start, end = match.start(1) - match.start(), match.end(1) - match.start()
+                return match.group(0)[:start] + value + match.group(0)[end:]
+
+            lines = [regex.sub(replace, line) for line in lines]
+    return "\n".join(lines).encode("utf-8", "surrogateescape")
 
 
 def digest(data: bytes) -> str:
@@ -326,11 +363,16 @@ def collect(workspace: Path, inputs: dict[str, bytes]) -> list[dict]:
     return artifacts
 
 
-def execute(runtime: str, scratch: Path, spec: dict, attempt: int) -> dict:
+def execute(runtime: str, scratch: Path, spec: dict, attempt: str, alternate: bool = False) -> dict:
     workspace = scratch / f"{spec['id']}-{attempt}"
     workspace.mkdir()
     stage(workspace, spec["inputs"])
-    result = run_container(runtime, workspace, ["gcc", *spec["arguments"]], spec["stdin"])
+    command = ["gcc", *spec["arguments"]]
+    if alternate:
+        command = ["sh", "-c", 'ln -s "$(command -v gcc)" "$0" && exec "$0" "$@"', ALTERNATE_DRIVER, *spec["arguments"]]
+    result = run_container(runtime, workspace, command, spec["stdin"])
+    if alternate:
+        (workspace / Path(ALTERNATE_DRIVER).relative_to(WORKDIR)).unlink(missing_ok=True)
     return {
         "exitCode": result.returncode,
         "stdout": stream(result.stdout),
@@ -358,6 +400,19 @@ def capture_case(runtime: str, scratch: Path, spec: dict) -> dict:
         "repetitions": 2,
         "normalizations": [],
     }
+
+
+def check_driver_name_substitution(runtime: str, scratch: Path, spec: dict, observed: dict) -> None:
+    alternate = execute(runtime, scratch, spec, "alternate", alternate=True)
+    expected = {
+        **observed,
+        **{
+            name: stream(substitute(base64.b64decode(observed[name]["base64"]), ALTERNATE_SUBSTITUTION))
+            for name in ("stdout", "stderr")
+        },
+    }
+    if alternate != expected:
+        raise SystemExit(f"{spec['id']}: driver-name substitutions do not account for {ALTERNATE_DRIVER}")
 
 
 def toolchain_identity(runtime: str, scratch: Path) -> dict:
@@ -403,6 +458,8 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
 def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
     identity = toolchain_identity(runtime, scratch)
     metadata = [capture_case(runtime, scratch, spec) for spec in METADATA_CASES]
+    for spec, captured in zip(METADATA_CASES, metadata):
+        check_driver_name_substitution(runtime, scratch, spec, captured["observed"])
     preprocessing = [capture_case(runtime, scratch, spec) for spec in PREPROCESSING_CASES]
     dependency = [capture_case(runtime, scratch, spec) for spec in DEPENDENCY_CASES]
     capture = {
@@ -451,6 +508,11 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
             "capture": capture,
             "cases": metadata,
             "identitySubstitutions": IDENTITY_SUBSTITUTIONS,
+            "identitySubstitutionCheck": (
+                f"each case also ran as a symlinked driver {ALTERNATE_DRIVER}; its streams, exit "
+                "status and artifacts equal the reference after the driver-basename and "
+                "driver-argv0 substitutions"
+            ),
             "identitySubstitutionLimit": IDENTITY_SUBSTITUTION_LIMIT,
             "productionGates": gaps,
             "analysisBoundary": ANALYSIS_BOUNDARY,

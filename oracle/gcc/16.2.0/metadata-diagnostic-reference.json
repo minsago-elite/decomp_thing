@@ -572,7 +572,6 @@
         "option-validation"
       ],
       "arguments": [
-        "-nostdinc",
         "-march=bogus",
         "-c",
         "source.c"
@@ -701,7 +700,6 @@
         "malformed-input"
       ],
       "arguments": [
-        "-nostdinc",
         "-c",
         "bad.c"
       ],
@@ -786,16 +784,37 @@
   ],
   "identitySubstitutions": [
     {
+      "id": "driver-basename",
       "token": "gcc",
-      "where": "the program-name prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`)",
-      "permitted": "the basename a candidate driver is invoked as"
+      "where": "the driver program name: the prefix of driver diagnostics (`gcc: error:`, `gcc: fatal error:`), the `--version` banner (`gcc (GCC) 16.2.0`), and the `--help` usage line and sub-process sentence (`Usage: gcc`, `invoked by gcc.`)",
+      "permitted": "the basename a candidate driver is invoked as",
+      "patterns": [
+        "^(gcc)(?=: (?:fatal )?error: )",
+        "^(gcc)(?= \\(GCC\\) )",
+        "^Usage: (gcc)(?= \\[options\\] file\\.\\.\\.$)",
+        "(?<= invoked by )(gcc)(?=\\.  )"
+      ]
     },
     {
+      "id": "driver-argv0",
+      "token": "gcc",
+      "where": "the `COLLECT_GCC=` line of `-v` output",
+      "permitted": "the exact argv[0] string a candidate driver is invoked with",
+      "patterns": [
+        "^COLLECT_GCC=(gcc)$"
+      ]
+    },
+    {
+      "id": "install-prefix",
       "token": "/usr/local",
       "where": "install-prefix components of search-directory, program-name, libgcc and `-v` configuration output",
-      "permitted": "the candidate's configured install prefix, applied to the whole prefix only"
+      "permitted": "the candidate's configured install prefix, applied to the whole prefix only",
+      "patterns": [
+        "(?<![\\w/.])(/usr/local)(?=/)"
+      ]
     }
   ],
+  "identitySubstitutionCheck": "each case also ran as a symlinked driver /w/candidate-cc; its streams, exit status and artifacts equal the reference after the driver-basename and driver-argv0 substitutions",
   "identitySubstitutionLimit": "No other substitution is permitted: version, target triple, option spellings, diagnostic wording, exit status and stream assignment must match byte-for-byte.",
   "productionGates": {
     "reconstructedCandidateComparison": "unavailable",

@@ -12,8 +12,8 @@ official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
 read-only root filesystem, no capabilities and `no-new-privileges`; it sees only
-a fresh per-case workspace. `-nostdinc` is passed so only staged include roots
-are searched, and `LC_ALL=C`, `TZ=UTC` and `SOURCE_DATE_EPOCH=1786060800` are
+a fresh per-case workspace. Preprocessing and dependency cases pass `-nostdinc`
+so only staged include roots are searched, and `LC_ALL=C`, `TZ=UTC` and `SOURCE_DATE_EPOCH=1786060800` are
 fixed. The script verifies the image config digest and records the driver and
 `cc1` hashes, version and target triple.
 
@@ -39,8 +39,12 @@ issue #706): `--version`, `-dumpversion`, `-dumpfullversion`, `-dumpmachine`,
 `-std=` and `-march=` values, unrecognized long and `-f` options, a malformed C
 source and a malformed link input. These cases do not pass `-nostdinc`. The
 record's `identitySubstitutions` lists the only differences a candidate may
-show: the driver program name in diagnostic prefixes and the install prefix in
-path output. Everything else must match byte-for-byte.
+show, each with patterns that bound the replaceable span: the driver basename in
+diagnostic prefixes, the `--version` banner and the `--help` usage text; the
+invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
+path output. The capture re-runs every metadata case through a symlinked driver
+named `candidate-cc` and fails unless the driver-name substitutions account for
+every difference. Everything else must match byte-for-byte.
 
 ## Reproduction
 
