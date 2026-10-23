@@ -37,6 +37,10 @@ LINEAGE_PROVIDER = "gcc-bundled-full-export-receipt-lineage-v1"
 QUALIFICATION_PROVIDER = "gcc-driver-live-full-export-capture-v1"
 PROFILE_ID = "gcc-driver-16.2.0"
 PROFILE_VERSION = "16.2.0"
+# Matches the producer cap in GccBundledFullExportCliResult; the qualification
+# record is a small fixed-shape object.
+BINDING_MAX_BYTES = 256 * 1024
+QUALIFICATION_MAX_BYTES = 64 * 1024
 
 BINDING_KEYS = frozenset(
     {
@@ -116,7 +120,6 @@ _IMAGE_BASE = re.compile(r"0x[0-9a-f]+")
 
 @dataclass(frozen=True)
 class BoundStrippedModel:
-    oracle_path: Path
     oracle: FunctionOracle
     model: RecoveredModel
     provenance: dict[str, Any]
@@ -280,9 +283,6 @@ def load_bound_stripped_model(
     program_model_path: Path,
     binding_path: Path,
     qualification_path: Path,
-    *,
-    run_id: int,
-    artifact_id: int,
 ) -> BoundStrippedModel:
     profile_directory = profile_directory.resolve()
     manifest_path = profile_directory / "oracle-manifest.json"
@@ -306,8 +306,12 @@ def load_bound_stripped_model(
         "function oracle stripped artifact disagrees with the manifest",
     )
 
-    binding = _json(binding_path, "structural full-export binding")
-    qualification = _json(qualification_path, "qualification record")
+    binding = _json(
+        binding_path, "structural full-export binding", BINDING_MAX_BYTES
+    )
+    qualification = _json(
+        qualification_path, "qualification record", QUALIFICATION_MAX_BYTES
+    )
     verify_binding(binding)
     verify_qualification(qualification, binding)
     model_binding = binding["programModel"]
@@ -347,8 +351,6 @@ def load_bound_stripped_model(
         "artifactManifestSha256": manifest_sha256,
         "strippedInputSha256": artifact.input_sha256,
         "imageBase": hex(image_base),
-        "workflowRunId": run_id,
-        "artifactId": artifact_id,
         "programModel": {
             "sha256": model_binding["sha256"],
             "functionCount": len(model.functions),
@@ -367,7 +369,6 @@ def load_bound_stripped_model(
         },
     }
     return BoundStrippedModel(
-        oracle_path=oracle_path,
         oracle=oracle,
         model=model,
         provenance=provenance,

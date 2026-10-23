@@ -61,17 +61,12 @@ def build_report(
     program_model_path: Path,
     binding_path: Path,
     qualification_path: Path,
-    *,
-    run_id: int,
-    artifact_id: int,
 ) -> dict[str, Any]:
     bound = load_bound_stripped_model(
         profile_directory,
         program_model_path,
         binding_path,
         qualification_path,
-        run_id=run_id,
-        artifact_id=artifact_id,
     )
     try:
         # Charging the bound model against every twin slot overestimates the
@@ -132,8 +127,6 @@ def main() -> int:
     parser.add_argument("--program-model", type=Path, required=True)
     parser.add_argument("--binding", type=Path, required=True)
     parser.add_argument("--qualification", type=Path, required=True)
-    parser.add_argument("--run-id", type=int, required=True)
-    parser.add_argument("--artifact-id", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     try:
@@ -142,8 +135,6 @@ def main() -> int:
             arguments.program_model,
             arguments.binding,
             arguments.qualification,
-            run_id=arguments.run_id,
-            artifact_id=arguments.artifact_id,
         )
         _write_json(arguments.output, report)
     except CoverageError as error:

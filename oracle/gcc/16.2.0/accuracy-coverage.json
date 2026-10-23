@@ -59,11 +59,10 @@
     "functionStarts": {
       "currentScore": {
         "evidence": {
-          "bytes": 99357,
+          "bytes": 99292,
           "path": "function-start-score.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
-          "sha256": "4dbdeaddc7544aae1fc448b6aa1f174a43be8fdc8bcfe342bc6cecb8981fb0c3",
-          "workflowRunId": 38724253878
+          "sha256": "acb822274ad9d9570d6f9957e7b3a2efe982d0f4138558896cc59569b2c6cd8e"
         },
         "nearMisses": 0,
         "precision": {
@@ -125,11 +124,10 @@
     "survivingSymbolIdentity": {
       "currentScore": {
         "evidence": {
-          "bytes": 3221,
+          "bytes": 3156,
           "path": "surviving-symbol-identity.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
-          "sha256": "530ab0830352610a2e04e83d83df4bd3ad329e0f3800c6902f603e465bf02bd4",
-          "workflowRunId": 38724253878
+          "sha256": "134358eada97015c1e0ee828f1d9cfb4c20cb8e1f9a2b4bbe84774d36b3f7dfa"
         },
         "identityRecovery": {
           "denominator": 6,

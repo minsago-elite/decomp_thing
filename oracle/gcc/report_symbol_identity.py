@@ -20,7 +20,7 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from oracle.function_recovery import load_function_oracle  # noqa: E402
+from oracle.function_recovery import FunctionOracle  # noqa: E402
 from oracle.gcc.bound_recovered_model import (  # noqa: E402
     TWIN,
     load_bound_stripped_model,
@@ -34,10 +34,9 @@ from oracle.gcc.report_accuracy_coverage import (  # noqa: E402
 REPORT_ID = "gcc-driver-surviving-symbol-identity-v1"
 
 
-def enumerate_population(oracle_path: Path) -> list[dict[str, Any]]:
+def enumerate_population(oracle: FunctionOracle) -> list[dict[str, Any]]:
     """Return the sorted surviving stripped alias population of the oracle."""
 
-    oracle = load_function_oracle(oracle_path)
     population = []
     for function in oracle.functions:
         for alias in function.aliases:
@@ -64,21 +63,16 @@ def build_report(
     program_model_path: Path,
     binding_path: Path,
     qualification_path: Path,
-    *,
-    run_id: int,
-    artifact_id: int,
 ) -> dict[str, Any]:
     bound = load_bound_stripped_model(
         profile_directory,
         program_model_path,
         binding_path,
         qualification_path,
-        run_id=run_id,
-        artifact_id=artifact_id,
     )
     recovered_by_rva = {function.rva: function for function in bound.model.functions}
     outcomes = []
-    for member in enumerate_population(bound.oracle_path):
+    for member in enumerate_population(bound.oracle):
         recovered = recovered_by_rva.get(member["rva"])
         if recovered is None:
             outcome = "missing"
@@ -138,8 +132,6 @@ def main() -> int:
     parser.add_argument("--program-model", type=Path, required=True)
     parser.add_argument("--binding", type=Path, required=True)
     parser.add_argument("--qualification", type=Path, required=True)
-    parser.add_argument("--run-id", type=int, required=True)
-    parser.add_argument("--artifact-id", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     try:
@@ -148,8 +140,6 @@ def main() -> int:
             arguments.program_model,
             arguments.binding,
             arguments.qualification,
-            run_id=arguments.run_id,
-            artifact_id=arguments.artifact_id,
         )
         _write_json(arguments.output, report)
     except CoverageError as error:

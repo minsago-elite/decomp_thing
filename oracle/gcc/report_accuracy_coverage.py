@@ -40,7 +40,7 @@ class CoverageError(RuntimeError):
     """Raised when the checked oracle inputs cannot be authenticated."""
 
 
-def _read_regular(path: Path, label: str) -> bytes:
+def _read_regular(path: Path, label: str, limit: int | None = None) -> bytes:
     try:
         if path.is_symlink():
             raise CoverageError(f"{label} is a symlink: {path}")
@@ -49,12 +49,21 @@ def _read_regular(path: Path, label: str) -> bytes:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 raise CoverageError(f"{label} is not a regular file: {path}")
+            if limit is not None and metadata.st_size > limit:
+                raise CoverageError(f"{label} exceeds {limit} bytes: {path}")
             chunks: list[bytes] = []
+            size = 0
             while True:
-                chunk = os.read(descriptor, 1024 * 1024)
+                request = 1024 * 1024
+                if limit is not None:
+                    request = min(request, limit + 1 - size)
+                chunk = os.read(descriptor, request)
                 if not chunk:
                     break
                 chunks.append(chunk)
+                size += len(chunk)
+                if limit is not None and size > limit:
+                    raise CoverageError(f"{label} exceeds {limit} bytes: {path}")
             return b"".join(chunks)
         finally:
             os.close(descriptor)
@@ -64,9 +73,9 @@ def _read_regular(path: Path, label: str) -> bytes:
         raise CoverageError(f"cannot read {label} {path}: {error}") from error
 
 
-def _json(path: Path, label: str) -> dict[str, Any]:
+def _json(path: Path, label: str, limit: int | None = None) -> dict[str, Any]:
     try:
-        value = json.loads(_read_regular(path, label))
+        value = json.loads(_read_regular(path, label, limit))
     except json.JSONDecodeError as error:
         raise CoverageError(f"{label} is not valid JSON: {error}") from error
     if not isinstance(value, dict):
@@ -229,7 +238,6 @@ def _symbol_identity_score(
         "evidence": {
             **_record(report_path, "surviving symbol identity report"),
             "path": report_path.name,
-            "workflowRunId": provenance.get("workflowRunId"),
             "programModelSha256": _required_mapping(
                 provenance.get("programModel"), "symbol identity program model"
             ).get("sha256"),
@@ -342,7 +350,6 @@ def _function_start_score(
         "evidence": {
             **_record(report_path, "function start report"),
             "path": report_path.name,
-            "workflowRunId": provenance.get("workflowRunId"),
             "programModelSha256": _required_mapping(
                 provenance.get("programModel"), "function start program model"
             ).get("sha256"),
