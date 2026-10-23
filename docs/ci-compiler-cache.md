@@ -44,3 +44,24 @@ Provider contracts:
 - [Pinned restore-only action](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/restore/action.yml)
 - [Pinned save-only action](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/save/action.yml)
 - [Gradle build cache input validation](https://docs.gradle.org/current/userguide/build_cache.html)
+
+## Prerequisite acquisition boundary
+
+The Kotlin partitions keep their existing sandbox package list and host checks.
+Their APT update and installation use two download retries and 30-second HTTP
+and HTTPS connection/data timeouts. The enclosing prerequisite step has a
+ten-minute ceiling. Update errors fail the step even when APT could retain old
+indexes; qualification cannot proceed with a failed prerequisite.
+
+This bounds the acquisition stall observed in an ordinary live partition, where
+APT update had not returned after six hours and no JVM tests had started. It
+does not diagnose native cleanup failures or demonstrate compiler cache reuse.
+The test selections, commands, native fixtures, runtime limits and aggregate
+requirement remain unchanged. Completed normal Actions must qualify the new
+source; the configured bounds alone are not runtime evidence.
+
+- [APT download retry configuration](https://manpages.debian.org/bookworm/apt/apt.conf.5.en.html)
+- [HTTP connection and data timeout](https://manpages.debian.org/bookworm/apt/apt-transport-http.1.en.html)
+- [HTTPS transport options](https://manpages.debian.org/bookworm/apt/apt-transport-https.1.en.html)
+- [APT update error handling](https://manpages.debian.org/bookworm/apt/apt-get.8.en.html)
+- [Actions step timeout](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepstimeout-minutes)
