@@ -19,7 +19,10 @@ from oracle.function_recovery import (  # noqa: E402
     load_program_model,
 )
 from oracle.gcc.bound_recovered_model import (  # noqa: E402
+    BINDING_MAX_BYTES,
+    QUALIFICATION_MAX_BYTES,
     TWIN,
+    load_bound_stripped_model,
     verify_binding,
     verify_qualification,
 )
@@ -105,6 +108,33 @@ class BoundModelRecordTest(unittest.TestCase):
                     expected_sha256="0" * 64,
                 )
 
+    def _load_with_padding(self, binding_padding: int, qualification_padding: int) -> None:
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            binding = Path(directory) / "binding.json"
+            qualification = Path(directory) / "qualification.json"
+            binding.write_text(
+                json.dumps(self.binding) + " " * binding_padding, encoding="utf-8"
+            )
+            qualification.write_text(
+                json.dumps(self.qualification) + " " * qualification_padding,
+                encoding="utf-8",
+            )
+            load_bound_stripped_model(
+                PROFILE,
+                Path(directory) / "program_model.json",
+                binding,
+                qualification,
+            )
+
+    def test_rejects_oversized_binding_before_decoding(self) -> None:
+        with self.assertRaisesRegex(CoverageError, "binding exceeds"):
+            self._load_with_padding(BINDING_MAX_BYTES, 0)
+
+    def test_rejects_oversized_qualification_before_decoding(self) -> None:
+        with self.assertRaisesRegex(CoverageError, "qualification record exceeds"):
+            self._load_with_padding(0, QUALIFICATION_MAX_BYTES)
+
 
 class RetainedSymbolIdentityTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -113,7 +143,9 @@ class RetainedSymbolIdentityTest(unittest.TestCase):
         )
 
     def test_report_covers_exactly_the_oracle_population(self) -> None:
-        population = enumerate_population(PROFILE / "function-recovery-oracle.json")
+        population = enumerate_population(
+            load_function_oracle(PROFILE / "function-recovery-oracle.json")
+        )
         self.assertEqual(
             [(item["name"], hex(item["rva"])) for item in population],
             [(item["name"], item["rva"]) for item in self.report["symbols"]],

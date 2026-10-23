@@ -2,7 +2,6 @@
   "populationDefinition": "aliases whose stripped availability is surviving in the authenticated function oracle, looked up at the oracle RVA",
   "productionVerified": false,
   "provenance": {
-    "artifactId": 11968496980,
     "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
     "exporterSha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29",
     "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
@@ -21,8 +20,7 @@
     },
     "receiptLineageSha256": "d74f6e5c58a94c3f36ad3c29f03cd00d41493412086cee3b40db4d1c03dc58c5",
     "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
-    "strippedInputSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
-    "workflowRunId": 38724253878
+    "strippedInputSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
   },
   "reportId": "gcc-driver-surviving-symbol-identity-v1",
   "schemaVersion": 1,
