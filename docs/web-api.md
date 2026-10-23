@@ -1283,3 +1283,17 @@ Normal case inspection also applies the canonical retained-input shape and budge
 Normal case inspection shares the archive verifier's exact executable metadata policy: the closed field set, recorded binary digest, reference/candidate role, immutable mode 320, positive integer byte length and runtime manifest digest must agree before any case detail is exposed. Failed-operation details with retained source and graph context also validate the complete runtime configuration against its recorded digest, canonical shape, registered tool roles, normalized mounts and selected profile. Copying the bound runtime digest into an inconsistent receipt does not admit a producer diagnostic. These checks read retained metadata and do not launch a process or read executable bytes.
 
 For failed operations, the producer's exact empty source-snapshot object means source capture did not complete. It is treated as unavailable, like a legacy null snapshot, and yields a partial report without source-attributed failure labels. Nonempty malformed snapshots remain invalid. Before exposing details for retained source, the reader also requires the exact graph/host behavior-budget evidence and checks that the source quota's mount commitment equals the runtime's normalized source mount. Coherently bound metadata preserves the existing finite enclosing-operation diagnostic; it does not establish case comparisons or cleanup.
+
+
+### Optional job snapshot navigation metadata
+
+The shared v1 page shape permits `currentCursor`, `previousCursor` and `pageNumber`. Job responses
+from this server provide the complete triplet. `currentCursor` selects the returned page,
+`previousCursor` is null only for page one, and `pageNumber` is a bounded one-based display value.
+Clients treat cursor bytes as opaque and return them with the same filters and page limit.
+Legacy responses may omit the entire triplet; partial or contradictory job metadata is rejected.
+
+First pages, including empty results, have a signed zero-offset return cursor. All tokens retain
+the existing session, normalized query, limit, HMAC and process-local expiry checks. Current and
+previous tokens do not rescan storage or execute workflows. Snapshot count/byte/scan/admission
+limits remain unchanged; invalid, expired and evicted cursors retain explicit error responses.

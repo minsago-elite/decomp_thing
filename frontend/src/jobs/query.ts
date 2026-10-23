@@ -51,3 +51,23 @@ export function filterSearch(filters: JobFilters): string {
   for (const [key, value] of Object.entries(filters)) if (value && value !== DEFAULT_FILTERS[key as keyof JobFilters]) params.set(key, value);
   return params.toString();
 }
+
+
+/** Opaque server cursors are carried unchanged; only filters are interpreted by the browser. */
+export function jobLocation(search: string): { filters: JobFilters; cursor: string | null; invalidCursor: boolean } {
+  if (search.length > 4096) throw new Error('Invalid filters');
+  const params = new URLSearchParams(search), values = params.getAll('cursor');
+  params.delete('cursor');
+  const filters = jobFilters(params.toString());
+  const invalidCursor = values.length > 1 || (values.length === 1 && !/^[A-Za-z0-9_-]{1,128}$/.test(values[0]!));
+  return { filters, cursor: values.length === 1 && !invalidCursor ? values[0]! : null, invalidCursor };
+}
+
+export function jobPageSearch(filters: JobFilters, cursor: string | null): string {
+  const params = new URLSearchParams(filterSearch(filters));
+  if (cursor !== null) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(cursor)) throw new Error('Invalid job page cursor');
+    params.set('cursor', cursor);
+  }
+  return params.toString();
+}

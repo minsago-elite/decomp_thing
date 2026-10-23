@@ -145,6 +145,15 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
   return `${jobPath(basePath, jobId)}/runs/${runId}`;
 }
 
+export type RunView = 'overview' | 'activity' | 'evidence';
+
+/** Named, read-only views of the same immutable attempt identity. */
+export function runViewPath(basePath: string, jobId: string, runId: string, view: RunView): string {
+  if (view !== 'overview' && view !== 'activity' && view !== 'evidence') return invalidUrl();
+  const path = runPath(basePath, jobId, runId);
+  return view === 'overview' ? path : `${path}/${view}`;
+}
+
 export interface SourceSelection { jobId: string; runId: string; revisionId: string }
 export interface SourceSnapshotPin { sourceSha256: string; metadataVersion: string }
 
