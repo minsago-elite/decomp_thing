@@ -25,28 +25,42 @@ async function settle() { for (let index = 0; index < 6; index++) await Promise.
 it('pins only the current source entry once while retaining raw continuation and refusing removed or changed pins', () => {
   const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) };
   for (const search of ['', '?cursor=page%5F2', '?byte=0&line=1']) {
-    const entry: SourceHistoryEntry = { pathname: '/nested/source', search, installedSearch: null, pin: null };
-    let uri = { pathname: entry.pathname, search }; const replacements: string[] = [];
+    const entry: SourceHistoryEntry = { pathname: '/nested/source', search, hash: '', snapshot: { installedSearch: null, pin: null } };
+    let uri = { pathname: entry.pathname, search, hash: '' }; const replacements: string[] = [];
     const replace = (url: string) => { replacements.push(url); uri = new URL(url, 'https://source.invalid'); };
     expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(true);
     const expected = `${search}${search === '' ? '?' : '&'}sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
-    expect(uri.search).toBe(expected); expect(entry.pin).toEqual(pin);
+    expect(uri.search).toBe(expected); expect(entry.snapshot.pin).toEqual(pin);
     expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(true);
     expect(replacements).toEqual([`${entry.pathname}${expected}`]);
     expect(() => pinSourceEntry(entry, { ...pin, metadataVersion: '9'.repeat(64) }, () => uri, replace)).toThrow(ApiClientError);
-    uri = { pathname: entry.pathname, search };
+    uri = { pathname: entry.pathname, search, hash: '' };
     expect(sourceEntryCurrent(entry, uri)).toBe(false);
     expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(false);
     expect(replacements).toHaveLength(1);
-    const explicit: SourceHistoryEntry = { pathname: entry.pathname, search: expected, installedSearch: null, pin };
-    uri = { pathname: entry.pathname, search: expected };
+    const explicit: SourceHistoryEntry = { pathname: entry.pathname, search: expected, hash: '', snapshot: { installedSearch: null, pin } };
+    uri = { pathname: entry.pathname, search: expected, hash: '' };
     expect(pinSourceEntry(explicit, pin, () => uri, replace)).toBe(true);
-    expect(explicit.installedSearch).toBeNull(); expect(replacements).toHaveLength(1);
-    const departed: SourceHistoryEntry = { pathname: '/nested/old', search, installedSearch: null, pin: null };
+    expect(explicit.snapshot.installedSearch).toBeNull(); expect(replacements).toHaveLength(1);
+    const departed: SourceHistoryEntry = { pathname: '/nested/old', search, hash: '', snapshot: { installedSearch: null, pin: null } };
     expect(pinSourceEntry(departed, pin, () => uri, replace)).toBe(false);
-    expect(departed.pin).toBeNull(); expect(departed.installedSearch).toBeNull();
+    expect(departed.snapshot.pin).toBeNull(); expect(departed.snapshot.installedSearch).toBeNull();
     expect(replacements).toHaveLength(1);
   }
+  const fragmentEntry: SourceHistoryEntry = { pathname: '/nested/source', search: '', hash: '#original',
+    snapshot: { installedSearch: null, pin: null } };
+  let fragmentUri = new URL('/nested/source#main', 'https://source.invalid');
+  const fragments: string[] = [];
+  const replaceFragment = (url: string) => { fragments.push(url); fragmentUri = new URL(url, 'https://source.invalid'); };
+  expect(pinSourceEntry(fragmentEntry, pin, () => fragmentUri, replaceFragment)).toBe(false);
+  expect(fragmentEntry.snapshot.pin).toBeNull(); expect(fragments).toEqual([]);
+  const restored = { ...fragmentEntry, hash: '#main' };
+  expect(pinSourceEntry(restored, pin, () => fragmentUri, replaceFragment)).toBe(true);
+  expect(fragmentUri.hash).toBe('#main');
+  expect(fragments).toEqual([`/nested/source?sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}#main`]);
+  fragmentUri.hash = '#later';
+  expect(pinSourceEntry(restored, pin, () => fragmentUri, replaceFragment)).toBe(false);
+  expect(fragments).toHaveLength(1);
 });
 
 it('carries source and metadata commitments across directories files and pinned downloads', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { sourceCopy as copy } from '../copy/sources';
 import { message } from '../shared/messages';
@@ -36,7 +36,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
   try { cursor = sourceCursor(search); } catch { invalid = true; }
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.directoryId, search, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
   const entry = useRef(historyEntry); entry.current = historyEntry;
-  const binding = useMemo(() => ({ client, key, historyEntry }), [client, key, historyEntry]);
+  const binding = useMemo(() => ({ client, key, historyEntry, refresh }), [client, key, historyEntry, refresh]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
   const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionDirectory> }>({ binding, value: { key, state: 'loading' } });
   const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
@@ -45,7 +45,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     if (invalid) throw new ApiClientError('invalid_request');
     const response = await client.get('revisionDirectory', directoryReadRoute(selected, cursor), { signal });
     if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
-    const page = bindDirectory(response.data, selected, entry.current.pin ?? (cursor === undefined ? undefined : expected.current));
+    const page = bindDirectory(response.data, selected, entry.current.snapshot.pin ?? (cursor === undefined ? undefined : expected.current));
     if (!pinSourceEntry(entry.current, page, () => window.location, url => history.replaceState(null, '', url))) {
       throw new ApiClientError('aborted');
     }
@@ -53,7 +53,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
     return page;
   }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid]);
   const current: SourceReadState<RevisionDirectory> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
-  const effectivePin = historyEntry.pin;
+  const effectivePin = historyEntry.snapshot.pin;
   const data = current.state === 'ready' ? current.value : null;
   const loading = current.state === 'loading';
   useEffect(() => {
@@ -110,17 +110,21 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
 function File({ selected, basePath, runtime, search, pin, historyEntry }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string; pin: SourceSnapshotPin | null; historyEntry: SourceHistoryEntry }) {
   const { client } = usePrivateTransport(basePath);
   const [refresh, setRefresh] = useState(0);
-  const [previewOpened, setPreviewOpened] = useState(false);
+  const [previewOpened, setPreviewOpened] = useState<SourceSnapshotPin | null>(null);
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, pin?.sourceSha256, pin?.metadataVersion, pin ? '' : historyEntry.search, refresh].join('/');
   const entry = useRef(historyEntry); entry.current = historyEntry;
-  const binding = useMemo(() => ({ client, key, historyEntry }), [client, key, historyEntry]);
+  const binding = useMemo(() => ({ client, key, historyEntry, refresh }), [client, key, historyEntry, refresh]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
   const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionFile> }>({ binding, value: { key, state: 'loading' } });
   const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
   // A position-only navigation may reuse already accepted metadata from this
   // client and exact file/pin. An unfinished or discarded read must restart.
-  const reusable = historyEntry.pin !== null && read.binding.client === client && read.binding.key === key && read.value.state === 'ready'
-    ? read.value.value : null;
+  const accepted = read.value.state === 'ready' ? read.value.value : null;
+  const reusable = accepted && historyEntry.snapshot.pin && read.binding.client === client && read.binding.refresh === refresh
+    && accepted.binding.jobId === selected.jobId && accepted.binding.runId === selected.runId
+    && accepted.binding.revisionId === selected.revisionId && accepted.item.fileId === selected.fileId
+    && accepted.sourceSha256 === historyEntry.snapshot.pin.sourceSha256
+    && accepted.metadataVersion === historyEntry.snapshot.pin.metadataVersion ? accepted : null;
   useEffect(() => {
     if (reusable && isCurrent()) {
       setRead({ binding, value: { key, state: 'ready', value: reusable } });
@@ -130,7 +134,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       if (!isCurrent()) throw new ApiClientError('aborted');
       const response = await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal });
       if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
-      const file = bindFile(response.data, selected, entry.current.pin ?? undefined);
+      const file = bindFile(response.data, selected, entry.current.snapshot.pin ?? undefined);
       if (!pinSourceEntry(entry.current, file, () => window.location, url => history.replaceState(null, '', url))) {
         throw new ApiClientError('aborted');
       }
@@ -139,7 +143,7 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
   }, [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
   const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key)
     : reusable && isCurrent() ? { key, state: 'ready', value: reusable } : { key, state: 'loading' };
-  const effectivePin = historyEntry.pin;
+  const effectivePin = historyEntry.snapshot.pin;
   const data = current.state === 'ready' ? current.value : null;
   const loading = current.state === 'loading';
   const policy = data ? sourceFilePolicy(data.item, runtime.limits.maxSourceChunkBytes) : null;
@@ -172,10 +176,10 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       </section> : <p>{copy.moduleUnavailable}</p>}
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
-      {policy.preview === 'available' && (previewOpened || search !== ''
+      {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
         ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
             maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} />
-        : <button type="button" onClick={() => setPreviewOpened(true)}>{copy.openPreview}</button>)}
+        : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
       {policy.download && <SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} />}
       {policy.download
         ? <a href={apiPath(basePath, sourceDownloadRoute(selected, selected.fileId, data.metadataVersion))} download="">{copy.download}</a>
@@ -193,6 +197,19 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   const selected = { jobId, runId, revisionId };
   const uri = new URL(location.url, 'https://source.invalid');
   const rawSearch = uri.search;
+  // The router leaves native #fragment links to the browser and omits the
+  // fragment from popstate URLs. Subscribe so a pending read gets a new owner.
+  const [, fragmentChanged] = useState(0);
+  useLayoutEffect(() => {
+    const changed = () => fragmentChanged(value => value + 1);
+    window.addEventListener('hashchange', changed);
+    window.addEventListener('popstate', changed);
+    return () => {
+      window.removeEventListener('hashchange', changed);
+      window.removeEventListener('popstate', changed);
+    };
+  }, []);
+  const hash = window.location.hash;
   let search = ''; let pin: SourceSnapshotPin | null = null;
   let valid = true;
   try {
@@ -201,8 +218,12 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
     if (resource === 'directory') sourceCursor(search);
     if (resource === 'file') sourcePosition(search);
   } catch { valid = false; }
-  const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, installedSearch: null, pin }),
+  // Native fragment navigation keeps the installed public pin even while the
+  // router still carries the original unpinned search. Each fragment owns its read.
+  const snapshot = useMemo<SourceHistoryEntry['snapshot']>(() => ({ installedSearch: null, pin }),
     [location.url, jobId, runId, revisionId, resource, directoryId, fileId]);
+  const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, hash, snapshot }),
+    [snapshot, hash]);
   return <section class="source-navigation" aria-labelledby="source-title">
     <h1 id="source-title">{resource === 'directory' ? copy.title : copy.fileTitle}</h1>
     {valid ? <>
@@ -211,7 +232,7 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
         ? resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
               selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />
-          : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
+          : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`}
               selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} />
         : <p>{copy.connect}</p>}
     </> : <><p role="alert">{copy.invalid}</p><a href={appPath(basePath, '/')}>{copy.returnJobs}</a></>}
