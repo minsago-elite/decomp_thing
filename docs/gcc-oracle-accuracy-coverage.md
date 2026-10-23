@@ -57,16 +57,23 @@ are the reference population, recoveries at excluded RVAs are ignored, and the
 report retains every near miss, false positive, false negative and ignored
 recovery. The stripped twin scores precision 3269/3273 (0.998778) and recall
 3269/3284 (0.995432) with no near misses, 4 false positives and 15 false
-negatives. The coverage generator recomputes true positives, ratios and the
-reference population from the retained outcomes and the oracle, and rejects a
-report bound to another manifest or input. The dimension is
+negatives. The captured model is retained as
+`stripped-recovered-program-model.json`, scored against the same retained
+binding and qualification as the identity report. The coverage generator
+recomputes true positives, ratios and the reference population from the
+retained outcomes and the oracle, rejects a report bound to another manifest or
+input, and then rescores the retained model (whose bytes must hash to the
+binding) and requires the retained report to equal that rescore exactly, so an
+edited outcome cannot raise the published score. The dimension is
 `measured-not-release-eligible` for the same #679 gate:
 
 ```bash
+cp <evidence>/captured/program_model.json \
+  oracle/gcc/16.2.0/stripped-recovered-program-model.json
 python3 oracle/gcc/report_function_starts.py \
-  --program-model <evidence>/captured/program_model.json \
-  --binding <evidence>/captured/structural-full-export-binding.json \
-  --qualification <evidence>/qualification.json \
+  --program-model oracle/gcc/16.2.0/stripped-recovered-program-model.json \
+  --binding oracle/gcc/16.2.0/surviving-symbol-identity-binding.json \
+  --qualification oracle/gcc/16.2.0/surviving-symbol-identity-qualification.json \
   --output oracle/gcc/16.2.0/function-start-score.json
 ```
 

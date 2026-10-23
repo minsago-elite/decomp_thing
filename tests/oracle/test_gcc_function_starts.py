@@ -151,6 +151,46 @@ class TamperedFunctionStartTest(unittest.TestCase):
         with self.assertRaisesRegex(CoverageError, "another input"):
             build_coverage(self.profile)
 
+    def test_rejects_consistent_outcome_edit_not_backed_by_model(self) -> None:
+        # Promote a missed start to an exact match and drop a false positive,
+        # recomputing every count and ratio so the outcomes stay consistent.
+        missed = self.report["falseNegatives"].pop(0)["oracleRva"]
+        self.report["exactMatchRvas"] = sorted(
+            [*self.report["exactMatchRvas"], missed], key=lambda rva: int(rva, 16)
+        )
+        del self.report["falsePositives"][-1]
+        summary = self.report["summary"]
+        summary["exactMatches"] += 1
+        summary["truePositives"] += 1
+        summary["falseNegatives"] -= 1
+        summary["falsePositives"] -= 1
+        true_positives = summary["truePositives"]
+        for key, denominator in (
+            ("precision", summary["scoredRecoveredCount"]),
+            ("recall", summary["referenceCount"]),
+        ):
+            summary[key] = {
+                "numerator": true_positives,
+                "denominator": denominator,
+                "value": round(true_positives / denominator, 6),
+            }
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "rescore of its retained recovered model"):
+            build_coverage(self.profile)
+
+    def test_rejects_missing_retained_model(self) -> None:
+        (self.profile / "stripped-recovered-program-model.json").unlink()
+        with self.assertRaisesRegex(CoverageError, "no retained recovered model"):
+            build_coverage(self.profile)
+
+    def test_rejects_substituted_retained_model(self) -> None:
+        model_path = self.profile / "stripped-recovered-program-model.json"
+        model = json.loads(model_path.read_text(encoding="utf-8"))
+        model["functions"].pop()
+        model_path.write_text(json.dumps(model), encoding="utf-8")
+        with self.assertRaisesRegex(CoverageError, "program model rejected"):
+            build_coverage(self.profile)
+
     def test_rejects_release_eligibility_claim(self) -> None:
         self.report["provenance"]["qualification"]["releaseEligible"] = True
         self._rewrite()

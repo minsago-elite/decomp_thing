@@ -281,6 +281,12 @@ def _symbol_identity_score(
 
 FUNCTION_START_REPORT = "function-start-score.json"
 FUNCTION_START_REPORT_ID = "gcc-driver-function-start-score-v1"
+# The function-start report is scored from the same captured model as the
+# identity report, so it is rescored from the retained model bytes and the
+# same retained binding and qualification records.
+FUNCTION_START_MODEL = "stripped-recovered-program-model.json"
+FUNCTION_START_BINDING = SYMBOL_IDENTITY_BINDING
+FUNCTION_START_QUALIFICATION = SYMBOL_IDENTITY_QUALIFICATION
 
 
 def _ratio(numerator: int, denominator: int) -> dict[str, Any]:
@@ -373,9 +379,31 @@ def _function_start_score(
     qualification = _required_mapping(
         provenance.get("qualification"), "function start qualification"
     )
-    # The recovered side is bound by digest only, so the score cannot qualify.
+    # No release-admission authority exists for recovered models yet.
     if qualification.get("releaseEligible") is not False:
         raise CoverageError("function start report must not claim release eligibility")
+    # The checks above only prove the outcomes are self-consistent with the
+    # oracle.  The recovered starts themselves are authenticated by rescoring
+    # the retained model, whose bytes must hash to the retained binding, and
+    # requiring the retained report to equal that rescore exactly.
+    model_path = profile_directory / FUNCTION_START_MODEL
+    binding_path = profile_directory / FUNCTION_START_BINDING
+    qualification_path = profile_directory / FUNCTION_START_QUALIFICATION
+    for path in (model_path, binding_path, qualification_path):
+        if not path.exists():
+            raise CoverageError(
+                f"function start report has no retained recovered model record: {path.name}"
+            )
+    # Imported here because the reporter reuses this module's bounded readers.
+    from oracle.gcc.report_function_starts import build_report as score_function_starts
+
+    rescored = score_function_starts(
+        profile_directory, model_path, binding_path, qualification_path
+    )
+    if report != rescored:
+        raise CoverageError(
+            "function start report disagrees with a rescore of its retained recovered model"
+        )
     return {
         "status": "measured",
         "precision": precision,
@@ -387,9 +415,10 @@ def _function_start_score(
         "evidence": {
             **_record(report_path, "function start report"),
             "path": report_path.name,
-            "programModelSha256": _required_mapping(
-                provenance.get("programModel"), "function start program model"
-            ).get("sha256"),
+            "programModel": _record(model_path, "function start recovered model"),
+            "binding": _record(binding_path, "structural full-export binding"),
+            "qualification": _record(qualification_path, "qualification record"),
+            "programModelSha256": rescored["provenance"]["programModel"]["sha256"],
         },
     }
 
