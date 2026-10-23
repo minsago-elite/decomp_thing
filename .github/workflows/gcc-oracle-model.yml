@@ -91,9 +91,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
-          key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-lookup
           restore-keys: |
-            gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-
+            gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
       - name: Require the cached cc1 pair
         run: |
           test -n "${{ steps.cc1-artifact-cache.outputs.cache-matched-key }}" || { echo 'no cached cc1 pair; run cc1-runtime-diagnostics once to populate it' >&2; exit 1; }
