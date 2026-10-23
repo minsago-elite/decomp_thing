@@ -71,16 +71,29 @@
     },
     "survivingSymbolIdentity": {
       "currentScore": {
+        "evidence": {
+          "bytes": 3221,
+          "path": "surviving-symbol-identity.json",
+          "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "sha256": "530ab0830352610a2e04e83d83df4bd3ad329e0f3800c6902f603e465bf02bd4",
+          "workflowRunId": 38724253878
+        },
+        "identityRecovery": {
+          "denominator": 6,
+          "numerator": 6,
+          "value": 1.0
+        },
         "productionVerified": false,
-        "reasonCode": "no-retained-production-symbol-identity-report",
-        "status": "unavailable"
+        "reasonCode": "recovered-model-not-release-eligible",
+        "releaseEligible": false,
+        "status": "measured"
       },
       "oracle": {
         "populationDefinition": "aliases whose stripped availability is surviving in the authenticated function oracle",
         "status": "available",
         "strippedSurvivingAliasCount": 6
       },
-      "status": "oracle-population-known-recovery-unavailable",
+      "status": "measured-not-release-eligible",
       "threshold": {
         "identityRecovery": 1.0
       }
