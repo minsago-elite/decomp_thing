@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Job, Run, RevisionDirectory, RevisionFile } from '../src/api/generated';
 import { App } from '../src/app/App';
-import { runViewPath } from '../src/app/paths';
+import { runViewPath, sourceDirectoryPath, sourceFilePath } from '../src/app/paths';
 import { sourceCopy } from '../src/copy/sources';
 import { createBrowserSession } from '../src/session/session';
 
@@ -155,4 +155,128 @@ it('restores the named attempt view and exact run identity through direct entry 
     expect(() => runViewPath('/nested', sampleRun.jobId, '../foreign', 'activity')).toThrow();
     expect(() => runViewPath('/nested', sampleRun.jobId, sampleRun.runId, 'foreign' as 'activity')).toThrow();
   } finally { focus.mockRestore(); auth.dispose(); }
+});
+
+
+it('pins an initially unpinned directory before departure and restores or refuses that exact observation on history traversal', async () => {
+  const auth = await session();
+  const directory = fixture('revision-directory-root.json') as RevisionDirectory;
+  const file = fixture('revision-file-root.json') as RevisionFile;
+  const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'initial_directory_revision' };
+  directory.binding = selected; file.binding = selected;
+  let changed = false;
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'revisionDirectory'
+    ? { ...directory, metadataVersion: changed ? '9'.repeat(64) : directory.metadataVersion } : file }));
+  const base = sourceDirectoryPath('/nested', selected);
+  const query = `?sourceSha256=${directory.sourceSha256}&metadataVersion=${directory.metadataVersion}`;
+  history.replaceState(null, '', base);
+  const entries = history.length;
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const link = await screen.findByRole('link', { name: 'Makefile' });
+    expect(location.pathname + location.search).toBe(base + query);
+    expect(history.length).toBe(entries);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'revisionDirectory')).toHaveLength(1);
+    expect(link.getAttribute('href')).toBe(sourceFilePath('/nested', selected, file.item.fileId, directory));
+    fireEvent.click(link);
+    await screen.findByRole('button', { name: sourceCopy.openPreview });
+    expect(location.search).toBe(query);
+    await act(() => { history.back(); });
+    await screen.findByRole('link', { name: 'Makefile' });
+    expect(location.pathname + location.search).toBe(base + query);
+    await act(() => { history.forward(); });
+    await screen.findByRole('button', { name: sourceCopy.openPreview });
+    changed = true;
+    await act(() => { history.back(); });
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', sourceCopy.expired);
+    expect(screen.queryByRole('link', { name: 'Makefile' })).toBeNull();
+    expect(location.pathname + location.search).toBe(base + query);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'revisionDirectory')).toHaveLength(3);
+    expect(transport.get.mock.calls.every(([kind]) => ['revisionDirectory', 'revisionFile'].includes(kind))).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('pins initial file metadata without opening zero-limit content or adding a history entry and retains it through parent and shell navigation', async () => {
+  const auth = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', limits: { ...bootstrap.limits, maxSourceChunkBytes: '0' }, sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await auth.initialize({ kind: 'absent' });
+  const directory = fixture('revision-directory-root.json') as RevisionDirectory;
+  const file = fixture('revision-file-root.json') as RevisionFile;
+  const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'initial_file_revision' };
+  directory.binding = selected; file.binding = selected;
+  transport.get.mockImplementation(kind => {
+    if (kind === 'revisionDirectory') return Promise.resolve({ data: directory });
+    if (kind === 'revisionFile') return Promise.resolve({ data: file });
+    if (kind === 'jobs') return Promise.resolve({ data: { items: [], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } });
+    return Promise.reject(new Error('Unexpected content read in metadata history control'));
+  });
+  const base = sourceFilePath('/nested', selected, file.item.fileId);
+  const query = `?byte=0&line=1&sourceSha256=${file.sourceSha256}&metadataVersion=${file.metadataVersion}`;
+  history.replaceState(null, '', `${base}?byte=0&line=1`);
+  const entries = history.length;
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(sourceCopy.previewDisabled);
+    expect(location.pathname + location.search).toBe(base + query);
+    expect(history.length).toBe(entries);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'revisionFile')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: sourceCopy.openPreview })).toBeNull();
+    await act(() => auth.refresh());
+    await screen.findByText(sourceCopy.previewDisabled);
+    expect(location.pathname + location.search).toBe(base + query);
+    expect(history.length).toBe(entries);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'revisionFile')).toHaveLength(2);
+    const parent = screen.getByRole('link', { name: sourceCopy.returnDirectory });
+    expect(parent.getAttribute('href')).toBe(sourceDirectoryPath('/nested', selected, file.parentDirectoryId, undefined, file));
+    fireEvent.click(parent);
+    await screen.findByRole('link', { name: 'Makefile' });
+    await act(() => { history.back(); });
+    await screen.findByText(sourceCopy.previewDisabled);
+    expect(location.pathname + location.search).toBe(base + query);
+    fireEvent.click(screen.getByRole('link', { name: 'All jobs' }));
+    await screen.findByText('No uploaded jobs yet.');
+    await act(() => { history.back(); });
+    await screen.findByText(sourceCopy.previewDisabled);
+    expect(location.pathname + location.search).toBe(base + query);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'revisionFile')).toHaveLength(4);
+    expect(transport.get.mock.calls.every(([kind]) => ['revisionDirectory', 'revisionFile', 'jobs'].includes(kind))).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('refuses a late source metadata callback after URI departure before the router commits and aborts on unmount', async () => {
+  for (const resource of ['directory', 'file'] as const) {
+    const auth = await session();
+    const dto = fixture(resource === 'directory' ? 'revision-directory-root.json' : 'revision-file-root.json') as RevisionDirectory | RevisionFile;
+    const selected = { jobId: sampleRun.jobId, runId: sampleRun.runId, revisionId: 'late_source_revision' };
+    dto.binding = selected;
+    let resolveRead: (value: unknown) => void = () => undefined;
+    let signal: AbortSignal | undefined;
+    transport.get.mockReset();
+    transport.get.mockImplementation((_kind, _path, options) => {
+      signal = options.signal;
+      return new Promise(resolve => { resolveRead = resolve; });
+    });
+    history.replaceState(null, '', resource === 'directory' ? sourceDirectoryPath('/nested', selected)
+      : sourceFilePath('/nested', selected, (dto as RevisionFile).item.fileId));
+    const view = render(<App basePath="/nested" session={auth} />);
+    try {
+      await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(1));
+      expect(signal?.aborted).toBe(false);
+      await act(async () => {
+        history.replaceState(null, '', '/nested/no-such-view?retained=1');
+        resolveRead({ data: dto });
+        for (let index = 0; index < 6; index++) await Promise.resolve();
+      });
+      expect(location.pathname + location.search).toBe('/nested/no-such-view?retained=1');
+      expect(screen.queryByRole('link', { name: 'Makefile' })).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'Makefile' })).toBeNull();
+      expect(screen.queryByText(sourceCopy.pinnedSnapshot)).toBeNull();
+      await act(() => { window.dispatchEvent(new PopStateEvent('popstate')); });
+      await waitFor(() => expect(signal?.aborted).toBe(true));
+      expect(transport.get).toHaveBeenCalledTimes(1);
+      expect(location.pathname + location.search).toBe('/nested/no-such-view?retained=1');
+    } finally { view.unmount(); auth.dispose(); }
+  }
 });

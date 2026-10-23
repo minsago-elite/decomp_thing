@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { sourceCopy as copy } from '../copy/sources';
 import { message } from '../shared/messages';
@@ -10,8 +10,8 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useSession } from '../session/useSession';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { formatExactBytes } from '../jobs/metadataFormat';
-import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../sources/navigation';
-import type { DirectorySelection, FileSelection, SourceReadState, SourceSnapshot } from '../sources/navigation';
+import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../sources/navigation';
+import type { DirectorySelection, FileSelection, SourceHistoryEntry, SourceReadState, SourceSnapshot } from '../sources/navigation';
 import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
@@ -25,7 +25,7 @@ function Context({ selected, sourceSha256 }: { selected: SourceSelection; source
   </dl>;
 }
 
-function Directory({ selected, basePath, pin, search }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string }) {
+function Directory({ selected, basePath, pin, search, historyEntry }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -35,16 +35,25 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
   let cursor: string | undefined; let invalid = false;
   try { cursor = sourceCursor(search); } catch { invalid = true; }
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.directoryId, search, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
-  const [read, setRead] = useState<SourceReadState<RevisionDirectory>>({ key, state: 'loading' });
+  const entry = useRef(historyEntry); entry.current = historyEntry;
+  const binding = useMemo(() => ({ client, key }), [client, key]);
+  const activeBinding = useRef(binding); activeBinding.current = binding;
+  const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionDirectory> }>({ binding, value: { key, state: 'loading' } });
+  const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
   useEffect(() => beginSourceRead(key, async signal => {
+    if (!isCurrent()) throw new ApiClientError('aborted');
     if (invalid) throw new ApiClientError('invalid_request');
     const response = await client.get('revisionDirectory', directoryReadRoute(selected, cursor), { signal });
-    if (signal.aborted) throw new ApiClientError('aborted');
-    const page = bindDirectory(response.data, selected, pin ?? (cursor === undefined ? undefined : expected.current));
+    if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
+    const page = bindDirectory(response.data, selected, entry.current.pin ?? (cursor === undefined ? undefined : expected.current));
+    if (!pinSourceEntry(entry.current, page, () => window.location, url => history.replaceState(null, '', url))) {
+      throw new ApiClientError('aborted');
+    }
     expected.current = { metadataVersion: page.metadataVersion, sourceSha256: page.sourceSha256 };
     return page;
-  }, setRead), [client, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid, key]);
-  const current = currentSourceRead(read, key);
+  }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.directoryId, cursor, invalid]);
+  const current: SourceReadState<RevisionDirectory> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
+  const effectivePin = historyEntry.pin;
   const data = current.state === 'ready' ? current.value : null;
   const loading = current.state === 'loading';
   useEffect(() => {
@@ -54,13 +63,13 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
   }, [current]);
   function first() {
     expected.current = undefined; moveFocus.current = true;
-    location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, undefined, pin ?? undefined));
+    location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, undefined, effectivePin ?? undefined));
     setRefresh(value => value + 1);
   }
   return <>
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p><p>{copy.browseLimitation}</p><p>{copy.emptyDirectories}</p>
-    {pin && <p>{copy.pinnedSnapshot}</p>}
+    {effectivePin && <p>{copy.pinnedSnapshot}</p>}
     <button type="button" disabled={loading} onClick={first}>{copy.refresh}</button>
     {loading && <p role="status">{copy.loading}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
@@ -69,16 +78,16 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
         {data.breadcrumbs.map((crumb, index) => <li key={crumb.directoryId}>
           {index === 1 && data.omittedAncestors > 0 && <span>{message(copy.omitted, { count: data.omittedAncestors })} </span>}
           {crumb.directoryId === data.directoryId ? <span aria-current="page"><bdi>{crumb.displayName ?? copy.root}</bdi></span>
-            : <a href={sourceDirectoryPath(basePath, selected, crumb.directoryId, undefined, pin ?? undefined)}><bdi>{crumb.displayName ?? copy.root}</bdi></a>}
+            : <a href={sourceDirectoryPath(basePath, selected, crumb.directoryId, undefined, effectivePin ?? undefined)}><bdi>{crumb.displayName ?? copy.root}</bdi></a>}
         </li>)}
       </ol></nav>
-      {data.parentDirectoryId !== null && <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, pin ?? undefined)}>{copy.returnDirectory}</a></p>}
+      {data.parentDirectoryId !== null && <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>}
       <h2 ref={heading} tabIndex={-1}><bdi>{data.displayName ?? copy.root}</bdi></h2>
       <p role="status">{message(copy.page, { count: data.items.length, total: data.totalChildren })}</p>
       <ul class="job-list" aria-label={copy.title}>
         {data.items.map(item => <li key={item.kind === 'directory' ? item.directoryId : item.fileId}>
-          <a href={item.kind === 'directory' ? sourceDirectoryPath(basePath, selected, item.directoryId, undefined, pin ?? undefined)
-            : sourceFilePath(basePath, selected, item.fileId, pin ?? undefined)}><bdi>{item.displayName}</bdi></a>
+          <a href={item.kind === 'directory' ? sourceDirectoryPath(basePath, selected, item.directoryId, undefined, effectivePin ?? undefined)
+            : sourceFilePath(basePath, selected, item.fileId, effectivePin ?? undefined)}><bdi>{item.displayName}</bdi></a>
           <p>{item.kind === 'directory' ? copy.directory : copy.file}</p>
           {item.kind === 'directory' ? <p>{message(copy.descendants, { count: item.sourceFileCount })}</p>
             : <><p>{formatExactBytes(item.sizeBytes)}</p><p>{item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
@@ -91,23 +100,35 @@ function Directory({ selected, basePath, pin, search }: { selected: DirectorySel
       <button type="button" disabled={loading || !data?.page.nextCursor} onClick={() => {
         if (data?.page.nextCursor) {
           moveFocus.current = true;
-          location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, data.page.nextCursor, pin ?? undefined));
+          location.route(sourceDirectoryPath(basePath, selected, selected.directoryId, data.page.nextCursor, effectivePin ?? undefined));
         }
       }}>{copy.next}</button>
     </nav>
   </>;
 }
 
-function File({ selected, basePath, runtime, search, pin }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string; pin: SourceSnapshotPin | null }) {
+function File({ selected, basePath, runtime, search, pin, historyEntry }: { selected: FileSelection; basePath: string; runtime: RuntimeSnapshot; search: string; pin: SourceSnapshotPin | null; historyEntry: SourceHistoryEntry }) {
   const { client } = usePrivateTransport(basePath);
   const [refresh, setRefresh] = useState(0);
   const [previewOpened, setPreviewOpened] = useState(false);
-  const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
-  const [read, setRead] = useState<SourceReadState<RevisionFile>>({ key, state: 'loading' });
-  useEffect(() => beginSourceRead(key, async signal => bindFile(
-    (await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal })).data, selected, pin ?? undefined), setRead),
-  [client, selected.jobId, selected.runId, selected.revisionId, selected.fileId, key]);
-  const current = currentSourceRead(read, key);
+  const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, pin?.sourceSha256, pin?.metadataVersion, pin ? '' : historyEntry.search, refresh].join('/');
+  const entry = useRef(historyEntry); entry.current = historyEntry;
+  const binding = useMemo(() => ({ client, key }), [client, key]);
+  const activeBinding = useRef(binding); activeBinding.current = binding;
+  const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionFile> }>({ binding, value: { key, state: 'loading' } });
+  const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
+  useEffect(() => beginSourceRead(key, async signal => {
+    if (!isCurrent()) throw new ApiClientError('aborted');
+    const response = await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal });
+    if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
+    const file = bindFile(response.data, selected, entry.current.pin ?? undefined);
+    if (!pinSourceEntry(entry.current, file, () => window.location, url => history.replaceState(null, '', url))) {
+      throw new ApiClientError('aborted');
+    }
+    return file;
+  }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
+  const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
+  const effectivePin = historyEntry.pin;
   const data = current.state === 'ready' ? current.value : null;
   const loading = current.state === 'loading';
   const policy = data ? sourceFilePolicy(data.item, runtime.limits.maxSourceChunkBytes) : null;
@@ -116,12 +137,12 @@ function File({ selected, basePath, runtime, search, pin }: { selected: FileSele
   return <>
     <Context selected={selected} {...(data ? { sourceSha256: data.sourceSha256 } : {})} />
     <p>{copy.metadataNotice}</p>
-    {pin && <p>{copy.pinnedSnapshot}</p>}
+    {effectivePin && <p>{copy.pinnedSnapshot}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshFile}</button>
     {loading && <p role="status">{copy.readingFile}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && policy && <>
-      <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, pin ?? undefined)}>{copy.returnDirectory}</a></p>
+      <p><a href={sourceDirectoryPath(basePath, selected, data.parentDirectoryId, undefined, effectivePin ?? undefined)}>{copy.returnDirectory}</a></p>
       <h2><bdi>{data.item.displayName}</bdi></h2>
       <dl class="job-facts"><dt>{copy.size}</dt><dd>{formatExactBytes(data.item.sizeBytes)}</dd>
         <dt>{copy.fileDigest}</dt><dd><code>{data.item.sha256}</code></dd>
@@ -142,7 +163,7 @@ function File({ selected, basePath, runtime, search, pin }: { selected: FileSele
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && (previewOpened || search !== ''
         ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
-            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(pin ? { snapshotPin: pin } : {})} />
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} />
         : <button type="button" onClick={() => setPreviewOpened(true)}>{copy.openPreview}</button>)}
       {policy.download && <SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} />}
       {policy.download
@@ -159,7 +180,8 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
   const state = useSession(session);
   const location = useLocation();
   const selected = { jobId, runId, revisionId };
-  const rawSearch = new URL(location.url, 'https://source.invalid').search;
+  const uri = new URL(location.url, 'https://source.invalid');
+  const rawSearch = uri.search;
   let search = ''; let pin: SourceSnapshotPin | null = null;
   let valid = true;
   try {
@@ -168,6 +190,8 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
     if (resource === 'directory') sourceCursor(search);
     if (resource === 'file') sourcePosition(search);
   } catch { valid = false; }
+  const historyEntry = useMemo<SourceHistoryEntry>(() => ({ pathname: uri.pathname, search: rawSearch, installedSearch: null, pin }),
+    [location.url, jobId, runId, revisionId, resource, directoryId, fileId]);
   return <section class="source-navigation" aria-labelledby="source-title">
     <h1 id="source-title">{resource === 'directory' ? copy.title : copy.fileTitle}</h1>
     {valid ? <>
@@ -175,9 +199,9 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
       {session && state?.status === 'authenticated'
         ? resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
-              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} />
+              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />
           : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
-              selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} />
+              selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} />
         : <p>{copy.connect}</p>}
     </> : <><p role="alert">{copy.invalid}</p><a href={appPath(basePath, '/')}>{copy.returnJobs}</a></>}
   </section>;

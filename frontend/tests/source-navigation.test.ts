@@ -7,8 +7,8 @@ import { ApiClientError } from '../src/api/errors';
 import { decodeContract, decodeResponse } from '../src/api/decode';
 import { sourceDirectoryPath, sourceDownloadRoute, sourceFilePath, sourceReadRoute } from '../src/app/paths';
 import { sourceCopy as copy } from '../src/copy/sources';
-import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, sourceCursor, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../src/sources/navigation';
-import type { SourceReadState } from '../src/sources/navigation';
+import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../src/sources/navigation';
+import type { SourceHistoryEntry, SourceReadState } from '../src/sources/navigation';
 
 // Synthetic wire DTOs and controlled callbacks only: no DOM, server, browser, worker or fetch is started.
 const selected = { jobId: 'a'.repeat(32), runId: 'run_1', revisionId: 'revision_1' };
@@ -21,6 +21,33 @@ function file(): RevisionFile {
   dto.binding = { ...selected }; return dto;
 }
 async function settle() { for (let index = 0; index < 6; index++) await Promise.resolve(); }
+
+it('pins only the current source entry once while retaining raw continuation and refusing removed or changed pins', () => {
+  const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) };
+  for (const search of ['', '?cursor=page%5F2', '?byte=0&line=1']) {
+    const entry: SourceHistoryEntry = { pathname: '/nested/source', search, installedSearch: null, pin: null };
+    let uri = { pathname: entry.pathname, search }; const replacements: string[] = [];
+    const replace = (url: string) => { replacements.push(url); uri = new URL(url, 'https://source.invalid'); };
+    expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(true);
+    const expected = `${search}${search === '' ? '?' : '&'}sourceSha256=${pin.sourceSha256}&metadataVersion=${pin.metadataVersion}`;
+    expect(uri.search).toBe(expected); expect(entry.pin).toEqual(pin);
+    expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(true);
+    expect(replacements).toEqual([`${entry.pathname}${expected}`]);
+    expect(() => pinSourceEntry(entry, { ...pin, metadataVersion: '9'.repeat(64) }, () => uri, replace)).toThrow(ApiClientError);
+    uri = { pathname: entry.pathname, search };
+    expect(sourceEntryCurrent(entry, uri)).toBe(false);
+    expect(pinSourceEntry(entry, pin, () => uri, replace)).toBe(false);
+    expect(replacements).toHaveLength(1);
+    const explicit: SourceHistoryEntry = { pathname: entry.pathname, search: expected, installedSearch: null, pin };
+    uri = { pathname: entry.pathname, search: expected };
+    expect(pinSourceEntry(explicit, pin, () => uri, replace)).toBe(true);
+    expect(explicit.installedSearch).toBeNull(); expect(replacements).toHaveLength(1);
+    const departed: SourceHistoryEntry = { pathname: '/nested/old', search, installedSearch: null, pin: null };
+    expect(pinSourceEntry(departed, pin, () => uri, replace)).toBe(false);
+    expect(departed.pin).toBeNull(); expect(departed.installedSearch).toBeNull();
+    expect(replacements).toHaveLength(1);
+  }
+});
 
 it('carries source and metadata commitments across directories files and pinned downloads', () => {
   const pin = { sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64) }, id = file().item.fileId;
