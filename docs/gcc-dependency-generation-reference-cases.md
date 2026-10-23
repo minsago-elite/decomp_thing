@@ -37,8 +37,20 @@ issue #706): `--version`, `-dumpversion`, `-dumpfullversion`, `-dumpmachine`,
 `-v`, `-print-search-dirs`, `-print-prog-name=cc1`, `-print-libgcc-file-name`,
 `--help`, no input, a missing input file, `-o` without a filename, invalid `-x`,
 `-std=` and `-march=` values, unrecognized long and `-f` options, a malformed C
-source and a malformed link input. These cases do not pass `-nostdinc`. The
-record's `identitySubstitutions` lists the only differences a candidate may
+source and a malformed link input. These cases do not pass `-nostdinc`.
+
+Each metadata case records its `driver`. Driver-only cases (`oracle`) run
+`oracle/gcc/16.2.0/artifacts/gcc-driver.stripped`, checked against
+`oracle-manifest.json` and mounted read-only at its configured
+`/oracle/install/bin/gcc`. Their target triple (`x86_64-pc-linux-gnu`), `-v`
+configuration and search directories are therefore the oracle's own, and agree
+with `behavior-corpus.json`. The oracle install tree is not retained, so
+`-print-prog-name=cc1` and `-print-libgcc-file-name` report bare names, and `-v`
+has no `COLLECT_LTO_WRAPPER` line. The missing-file, `-march=`,
+malformed-source and malformed-link cases need `cc1`, `collect2` or `ld`. They
+run the image's GCC (`image`), and their output names no target or prefix.
+
+The record's `identitySubstitutions` lists the only differences a candidate may
 show, each with patterns that bound the replaceable span: the driver basename in
 diagnostic prefixes, the `--version` banner and the `--help` usage text; the
 invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
