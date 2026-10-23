@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxSyscallException
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.OracleSchemaException
 import decompengine.oracle.core.OracleSchemas
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -84,7 +85,7 @@ class FullTreeFunctionTruthSqliteV3Test {
     @Test
     fun `truth v3 final staging recheck rejects rewriting an earlier shard`() =
         inControlTemporaryDirectory { root ->
-            val fixture = createBoundaryTruthFixture(root)
+            val fixture = createBoundaryTruthFixture(root, verifyShardOrder = true)
             val generated = fixture.generated
             val generatedBytes = v3TreeBytes(generated.root)
             val staging = copyTree(generated.root, root.resolve("staging"))
@@ -481,10 +482,15 @@ class FullTreeFunctionTruthSqliteV3Test {
 
     private data class BoundaryTruthFixture(val generated: FullTreeFunctionTruthV3Generation, val scratch: Path)
 
-    private fun createBoundaryTruthFixture(root: Path): BoundaryTruthFixture {
+    private fun createBoundaryTruthFixture(root: Path, verifyShardOrder: Boolean = false): BoundaryTruthFixture {
         // Production publishers share the small authenticated control fixture; no compiler or golden substitution.
         val fixture = createFunctionTruthFixture(root.resolve("inputs"))
         val limits = tightScratchLimits()
+        val shardVisits = ArrayList<Pair<String, String>>()
+        val traversal = if (verifyShardOrder) FullTreeSourceIdentityTraversal(onShardVisit = { phase, shard ->
+            check(shardVisits.size < 128) { "boundary fixture shard trace exceeds its fixed bound" }
+            shardVisits += phase to shard
+        }) else FullTreeSourceIdentityTraversal.CANONICAL
         val observationRoot = root.resolve("observations-v2")
         val observation = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
             richArtifact = fixture.rich,
@@ -494,6 +500,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             outputRoot = observationRoot,
             maximumWorkers = 2,
             limits = limits.observationV2,
+            traversal = traversal,
         )
         val generated = FullTreeFunctionTruthSqliteV3.generateAndPublish(
             richArtifact = fixture.rich,
@@ -506,9 +513,102 @@ class FullTreeFunctionTruthSqliteV3Test {
             scratchParent = fixture.scratch,
             outputRoot = root.resolve("truth-v3"),
             limits = limits,
+            traversal = traversal,
         )
+        if (verifyShardOrder) {
+            assertMultiShardTraversalParity(fixture, observationRoot, observation, generated, root, limits, shardVisits)
+        }
         assertDirectoryEmpty(fixture.scratch)
         return BoundaryTruthFixture(generated, fixture.scratch)
+    }
+
+    private fun assertMultiShardTraversalParity(
+        fixture: FunctionTruthFixture,
+        observationRoot: Path,
+        observation: FullTreeFunctionObservationV2RunPublication,
+        generated: FullTreeFunctionTruthV3Generation,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+        forwardVisits: List<Pair<String, String>>,
+    ) {
+        val shardIds = observation.binding.outputs.map { it.shardId }
+        assertEquals(2, shardIds.size, "the control must really process two authenticated shards")
+        assertEquals(2, observation.maximumWorkers, "both runs use the same admitted worker bound")
+        assertTrue(generated.counts.sourceEntities > 0L, "the multi-shard control must include a real source census")
+        assertEquals(2, generated.index.controlArray("shards").size)
+        val inputHashes = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex)
+            .associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(observationRoot)
+        val truthBytes = v3TreeBytes(generated.root)
+        val reverseVisits = ArrayList<Pair<String, String>>()
+        val reverseTraversal = FullTreeSourceIdentityTraversal(reverseShards = true, onShardVisit = { phase, shard ->
+            check(reverseVisits.size < 128) { "boundary fixture shard trace exceeds its fixed bound" }
+            reverseVisits += phase to shard
+        })
+        val reverseObservation = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+            richArtifact = fixture.rich,
+            inventoryPath = fixture.inventoryPath,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = root.resolve("observations-v2-reverse-shards"),
+            maximumWorkers = 2,
+            limits = limits.observationV2,
+            traversal = reverseTraversal,
+        )
+        assertEquals(observation.maximumWorkers, reverseObservation.maximumWorkers)
+        assertEquals(observation.outputs, reverseObservation.outputs)
+        assertEquals(observation.reconciliation, reverseObservation.reconciliation)
+        assertEquals(observation.binding.indexArtifactSha256, reverseObservation.binding.indexArtifactSha256)
+        assertEquals(observationBytes, v3TreeBytes(reverseObservation.binding.root), "complete same-bound V2 tree")
+        val reverseTruth = FullTreeFunctionTruthSqliteV3.generateAndPublish(
+            richArtifact = fixture.rich,
+            strippedArtifact = fixture.stripped,
+            inventoryPath = fixture.inventoryPath,
+            elfFunctionIndex = fixture.elfIndex,
+            observationV2Root = observationRoot,
+            expectedObservationV2IndexArtifactSha256 = observation.binding.indexArtifactSha256,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = root.resolve("truth-v3-reverse-shards"),
+            limits = limits,
+            traversal = reverseTraversal,
+        )
+        assertEquals(generated.counts, reverseTruth.counts)
+        assertEquals(generated.indexArtifactSha256, reverseTruth.indexArtifactSha256)
+        assertEquals(truthBytes, v3TreeBytes(reverseTruth.root), "complete same-bound V3 tree")
+        val validated = FullTreeFunctionTruthSqliteV3.loadAndValidate(
+            candidateRoot = generated.root,
+            richArtifact = fixture.rich,
+            strippedArtifact = fixture.stripped,
+            inventoryPath = fixture.inventoryPath,
+            elfFunctionIndex = fixture.elfIndex,
+            observationV2Root = observationRoot,
+            expectedObservationV2IndexArtifactSha256 = observation.binding.indexArtifactSha256,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            limits = limits,
+            traversal = reverseTraversal,
+        )
+        assertTrue(validated.rawInputsRederived && validated.candidateBytesMatchedAtValidationBoundary)
+        assertEquals(generated.indexArtifactSha256, validated.indexArtifactSha256)
+        fun assertVisits(visits: List<Pair<String, String>>, expectedOrder: List<String>, v2Passes: Int, v3Passes: Int) {
+            assertEquals(setOf("v2-source", "v2-reconcile", "v2-output", "v3-project"), visits.map { it.first }.toSet())
+            listOf("v2-source", "v2-reconcile", "v2-output", "v3-project").forEach { phase ->
+                val passes = if (phase == "v3-project") v3Passes else v2Passes
+                assertEquals(List(passes) { expectedOrder }.flatten(), visits.filter { it.first == phase }.map { it.second },
+                    "$phase must observe every actual processing pass in the requested shard order")
+            }
+        }
+        // Observation publication plus the two raw passes in V3 generation; validation adds two more.
+        assertVisits(forwardVisits, shardIds, v2Passes = 3, v3Passes = 1)
+        assertVisits(reverseVisits, shardIds.asReversed(), v2Passes = 5, v3Passes = 2)
+        assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
+        assertEquals(observationBytes, v3TreeBytes(observationRoot))
+        assertEquals(truthBytes, v3TreeBytes(generated.root))
+        assertDirectoryEmpty(fixture.scratch)
+        println("truth-v3-shard-order shards=${shardIds.size} workers=${observation.maximumWorkers} " +
+            "sourceEntities=${generated.counts.sourceEntities} forwardV2Passes=3 reverseV2Passes=5 " +
+            "forwardV3Passes=1 reverseV3Passes=2 v2BytesEqual=true v3BytesEqual=true inputsUnchanged=true scratchEmpty=true")
     }
 
     private fun boundaryProjection(
@@ -1023,7 +1123,10 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertEquals(first.indexArtifactSha256, validated.indexArtifactSha256)
             assertEquals(first.outputBytes, validated.outputBytes)
 
+            assertStrictV3Schemas(first)
             assertPublicInlineSiteConflationRejected(first, fixture, root, limits)
+            assertPublicTypedTupleAndOriginMutationsRejected(first, fixture, root, limits)
+            assertPublicInstanceSplitRejected(first, fixture, root, limits)
 
             val forged = copyTree(first.root, root.resolve("truth-v3-forged"))
             mutateAndRehashSourceIdentity(forged)
@@ -1044,7 +1147,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             }
             assertEquals(forgedBytes, v3TreeBytes(forged), "rejected candidate bytes remain unchanged")
 
-            assertSelfConsistentMutationsRejected(first, root)
+            assertSelfConsistentMutationsRejected(first, fixture, root, limits)
             assertV3RawInputPathReplacementIsDetected(fixture, root)
             assertV3CandidateSnapshotRejectsRaces(first, root)
             assertV3StagingIsReauthenticatedAroundFreeze(first, root)
@@ -1252,10 +1355,66 @@ class FullTreeFunctionTruthSqliteV3Test {
         })
     }
 
+    private fun assertStrictV3Schemas(expected: FullTreeFunctionTruthV3Generation) {
+        val index = parseControlObject(expected.root.resolve("index.json"))
+        val shard = parseControlObject(expected.root.resolve(
+            (index.controlArray("shards").first() as JsonObject).controlString("path"),
+        ))
+        var rejected = 0
+        fun reject(schema: String, document: JsonObject, label: String) {
+            val failure = assertFailsWith<OracleSchemaException>(label) {
+                OracleSchemas.validate(schema, document)
+            }
+            assertTrue(failure.message.orEmpty().contains("$schema schema validation"), label)
+            rejected++
+        }
+        val documents = listOf(
+            Triple(FullTreeFunctionTruthSqliteV3.INDEX_SCHEMA_NAME, index, setOf(
+                "schemaVersion", "complete", "oracle", "counts", "shards", "exclusions",
+                "indexSha256", "identityReconciliation",
+            )),
+            Triple(FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME, shard, setOf(
+                "schemaVersion", "oracle", "shard", "counts", "functions", "nonEmitted", "sourceEntities",
+            )),
+        )
+        documents.forEach { (schema, document, required) ->
+            OracleSchemas.validate(schema, document)
+            assertEquals(required, document.keys, "$schema positive fixture has every required root field")
+            reject(schema, document.withField("unexpectedField", JsonPrimitive(true)), "$schema extra root field")
+            reject(schema, document.withField("schemaVersion", JsonPrimitive(1)), "$schema rejects old wire version")
+            required.forEach { field ->
+                reject(schema, JsonObject(document - field), "$schema missing $field")
+                reject(schema, document.withField(field, JsonNull), "$schema mistyped $field")
+            }
+        }
+        val schema = FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME
+        val rows = shard.controlArray("sourceEntities").controlObjects("source entities")
+        val row = rows.first { it.controlArray("edges").isNotEmpty() }
+        fun withRow(changed: JsonObject): JsonObject = shard.withField(
+            "sourceEntities", JsonArray(rows.map { if (it == row) changed else it }),
+        )
+        reject(schema, withRow(row.withField("unexpectedField", JsonPrimitive(true))), "extra source field")
+        row.keys.forEach { field ->
+            reject(schema, withRow(JsonObject(row - field)), "missing source field $field")
+        }
+        listOf("entityKind", "identityObservability", "denominatorDisposition").forEach { field ->
+            reject(schema, withRow(row.withField(field, JsonPrimitive("unsupported"))), "unknown source $field")
+        }
+        val edge = row.controlArray("edges").first()
+        val atLimit = withRow(row.withField("edges", JsonArray(List(32) { edge })))
+        // This is a schema cardinality control, not a claim that repeated edges match raw DWARF.
+        OracleSchemas.validate(schema, atLimit)
+        reject(schema, withRow(row.withField("edges", JsonArray(List(33) { edge }))), "33 identity edges")
+        println("truth-v3-schema-negative cases=$rejected rejected=schema-validation")
+    }
+
     private fun assertSelfConsistentMutationsRejected(
         expected: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
         root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
     ) {
+        val baselineBytes = v3TreeBytes(expected.root)
         val index = parseControlObject(expected.root.resolve("index.json"))
         val shard = parseControlObject(expected.root.resolve((index.controlArray("shards").single() as JsonObject).controlString("path")))
         val rows = shard.controlArray("sourceEntities").controlObjects("source entities")
@@ -1341,15 +1500,29 @@ class FullTreeFunctionTruthSqliteV3Test {
             Files.list(candidate.resolve("shards")).use { paths ->
                 paths.forEach { OracleSchemas.validate(FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME, parseControlObject(it)) }
             }
-            assertFailsWith<FullTreeFunctionTruthV3Exception>("rehashed ${case.name} mutation must fail raw-derived byte comparison") {
+            val candidateBytes = v3TreeBytes(candidate)
+            val totalBytes = candidateBytes.values.sumOf { it.size.toLong() }
+            // Admit growing mutations to the component comparison so its byte cap cannot mask
+            // the intended mismatch. Public validation keeps its separate raw-derived cap.
+            val comparisonBytes = maxOf(expected.outputBytes, totalBytes)
+            assertTrue(comparisonBytes <= minOf(
+                limits.maximumOutputBytes,
+                fixture.scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("serializedBytes"),
+            ), "${case.name} stays within the unchanged configured/authenticated output ceilings")
+            val failure = assertFailsWith<FullTreeFunctionTruthV3Exception>("rehashed ${case.name} mutation must fail raw-derived byte comparison") {
                 FullTreeFunctionTruthSqliteV3.compareV3CandidateTreeBytes(
                     candidate,
                     expected.root,
                     changedIndex.controlArray("shards").size.toLong() + 2L,
-                    expected.outputBytes,
+                    comparisonBytes,
                 )
             }
+            assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", failure.message,
+                "${case.name} must reach the intended comparison after byte admission")
+            assertEquals(candidateBytes, v3TreeBytes(candidate), "${case.name} rejected bytes stay unchanged")
+            println("truth-v3-component-mutation case=${case.name.replace(' ', '-')} bytes=$totalBytes rejected=raw-rederivation")
         }
+        assertEquals(baselineBytes, v3TreeBytes(expected.root), "all component mutations preserve the raw-derived baseline")
     }
 
     private fun assertPublicInlineSiteConflationRejected(
@@ -1438,6 +1611,208 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
         assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
         assertDirectoryEmpty(fixture.scratch)
+    }
+
+    private fun assertPublicTypedTupleAndOriginMutationsRejected(
+        baseline: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+    ) {
+        val rows = allSourceRows(baseline.root).map { FullTreeSourceEntityFact.fromCanonicalJson(it) }
+        val templates = rows.filter {
+            it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.semanticAnchorCandidateId != null
+        }
+        val (intInstance, longInstance) = templates.asSequence().flatMap { a -> templates.asSequence().map { a to it } }
+            .firstOrNull { (a, b) ->
+                val left = requireNotNull(a.semanticAnchorFields)
+                val right = requireNotNull(b.semanticAnchorFields)
+                val leftArguments = left.templateActualArguments.toString()
+                val rightArguments = right.templateActualArguments.toString()
+                a.semanticAnchorCandidateId != b.semanticAnchorCandidateId &&
+                    left.sourceName?.substringBefore('<') == right.sourceName?.substringBefore('<') &&
+                    left.sourcePath == right.sourcePath && left.lexicalContext == right.lexicalContext &&
+                    left.templateActualArguments?.size == right.templateActualArguments?.size &&
+                    leftArguments.contains("int") && !leftArguments.contains("long") && rightArguments.contains("long")
+            } ?: error("compiler fixture must contain distinct complete int/long instances of the same template")
+        // Candidate capture is bounded by raw-derived output bytes. Copy the smaller complete
+        // tuple so the public refusal tests rederivation rather than an enlarged input tree.
+        val (larger, smaller) = listOf(intInstance, longInstance).sortedByDescending {
+            OracleJson.canonicalBytes(requireNotNull(it.semanticAnchorFields).canonicalJson()).size
+        }.let { it[0] to it[1] }
+        val conflated = larger.copy(
+            semanticAnchorFields = smaller.semanticAnchorFields,
+            semanticAnchorCandidateId = smaller.semanticAnchorCandidateId,
+        )
+        assertEquals(larger.physicalDie, conflated.physicalDie)
+        assertEquals(larger.linkedEmittedRva, conflated.linkedEmittedRva)
+
+        val origin = rows.firstOrNull { row ->
+            row.kind == FullTreeSourceEntityKind.INLINE_INSTANCE && row.edges.any {
+                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN && it.target != null
+            }
+        } ?: error("compiler fixture must contain a resolved inline origin")
+        val edge = origin.edges.first { it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN && it.target != null }
+        val oldTarget = requireNotNull(edge.target)
+        val replacement = rows.map { it.physicalDie }.firstOrNull { target ->
+            target != oldTarget && target != origin.physicalDie && target.locator().length == oldTarget.locator().length &&
+                origin.edges.none { it.target == target }
+        } ?: error("compiler fixture must contain a different same-width physical origin target")
+        val repointed = origin.copy(edges = origin.edges.map { if (it == edge) it.copy(target = replacement) else it })
+        assertEquals(edge.rawReference, repointed.edges[origin.edges.indexOf(edge)].rawReference)
+        assertEquals(origin.semanticAnchorFields?.canonicalJson(), repointed.semanticAnchorFields?.canonicalJson())
+        val detachedOrigin = origin.copy(edges = origin.edges.filterNot { it == edge })
+        assertEquals(origin.edges.size - 1, detachedOrigin.edges.size)
+        val templateType = larger.edges.firstOrNull {
+            it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.state == FullTreeSourceIdentityEdgeState.RESOLVED
+        } ?: error("complete concrete template fixture must retain a resolved type-evidence edge")
+        val detachedType = larger.copy(edges = larger.edges.filterNot { it == templateType })
+        assertEquals(larger.edges.size - 1, detachedType.edges.size)
+
+        val inputs = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex).associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(fixture.observationV2Root)
+        val baselineBytes = v3TreeBytes(baseline.root)
+        listOf(
+            Triple("typed-template-tuple", larger, conflated),
+            Triple("inline-origin-target", origin, repointed),
+            Triple("inline-origin-detached", origin, detachedOrigin),
+            Triple("template-type-edge-detached", larger, detachedType),
+        ).forEachIndexed { ordinal, (name, original, forged) ->
+            assertEquals(original.sourceEntityId, forged.sourceEntityId)
+            assertTrue(original.canonicalJson() != forged.canonicalJson())
+            assertEquals(forged.canonicalJson(), FullTreeSourceEntityFact.fromCanonicalJson(forged.canonicalJson()).canonicalJson())
+            val candidate = copyTree(baseline.root, root.resolve("truth-v3-public-mutation-$ordinal"))
+            mutateAndRehashSourceRow(candidate, original.sourceEntityId) { forged.canonicalJson() }
+            val candidateBytes = v3TreeBytes(candidate)
+            val candidateTotal = candidateBytes.values.sumOf { it.size.toLong() }
+            assertTrue(candidateTotal <= baseline.outputBytes, "$name must fit the raw-derived candidate byte allowance")
+            val index = parseControlObject(candidate.resolve("index.json"))
+            assertEquals(baseline.index.controlObject("counts"), index.controlObject("counts"))
+            assertEquals(index.controlString("indexSha256"), OracleArtifacts.sha256(
+                OracleJson.canonicalBytes(JsonObject(index.filterKeys { it != "indexSha256" })),
+            ))
+            index.controlArray("shards").controlObjects("shards").forEach { record ->
+                val path = candidate.resolve(record.controlString("path"))
+                assertEquals(record.controlLong("bytes"), Files.size(path))
+                assertEquals(record.controlString("sha256"), fixtureSha256(path))
+            }
+            val rejection = assertFailsWith<FullTreeFunctionTruthV3Exception>(name) {
+                FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                    candidateRoot = candidate,
+                    richArtifact = fixture.rich,
+                    strippedArtifact = fixture.stripped,
+                    inventoryPath = fixture.inventoryPath,
+                    elfFunctionIndex = fixture.elfIndex,
+                    observationV2Root = fixture.observationV2Root,
+                    expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                    scope = fixture.scope,
+                    scratchParent = fixture.scratch,
+                    limits = limits,
+                )
+            }
+            assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", rejection.message)
+            assertEquals(candidateBytes, v3TreeBytes(candidate))
+            assertEquals(baselineBytes, v3TreeBytes(baseline.root))
+            assertEquals(inputs, inputs.keys.associateWith(::fixtureSha256))
+            assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
+            assertDirectoryEmpty(fixture.scratch)
+            println("truth-v3-public-mutation case=$name rows=${rows.size} bytes=$candidateTotal rejected=raw-rederivation inputsUnchanged=true scratchEmpty=true")
+        }
+    }
+
+    private fun assertPublicInstanceSplitRejected(
+        baseline: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+    ) {
+        val rows = allSourceRows(baseline.root).map { FullTreeSourceEntityFact.fromCanonicalJson(it) }
+        assertEquals(1, baseline.index.controlArray("shards").size, "split control uses the pinned single-shard compiler fixture")
+        val instance = rows.firstOrNull {
+            it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.linkedEmittedRva != null &&
+                it.semanticAnchorFields?.sourceName == "template_pattern<int>" && it.semanticAnchorCandidateId != null
+        } ?: error("compiler fixture must retain the verified emitted int instance")
+        // Match the raw V2 split control: forge a second claim on a real referenced type DIE,
+        // preserving the original instance, tuple and emitted link rather than inventing a locator.
+        val splitPhysical = instance.edges.asSequence().filter {
+            it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.state == FullTreeSourceIdentityEdgeState.RESOLVED
+        }.mapNotNull { it.target }.firstOrNull { target ->
+            target.unitId == instance.physicalDie.unitId && rows.none { it.physicalDie == target }
+        } ?: error("verified instance must reference a real type DIE outside the source census")
+        val split = instance.copy(
+            sourceEntityId = splitPhysical.sourceEntityId(instance.kind),
+            physicalDie = splitPhysical,
+            edges = instance.edges.map { edge ->
+                if (edge.source == instance.physicalDie) edge.copy(source = splitPhysical) else edge
+            },
+        )
+        assertTrue(instance.sourceEntityId != split.sourceEntityId)
+        assertEquals(instance.semanticAnchorCandidateId, split.semanticAnchorCandidateId)
+        assertEquals(instance.linkedEmittedRva, split.linkedEmittedRva)
+        val splitRows = FullTreeSourceEntityFact.deterministicOrder(rows + split)
+        assertEquals(rows.size + 1, splitRows.size)
+        assertEquals(splitRows.size, splitRows.map { it.physicalDie }.distinct().size)
+        splitRows.forEach { fact ->
+            assertEquals(fact.canonicalJson(), FullTreeSourceEntityFact.fromCanonicalJson(fact.canonicalJson()).canonicalJson())
+        }
+        val inputs = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex).associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(fixture.observationV2Root)
+        val baselineBytes = v3TreeBytes(baseline.root)
+        val candidate = copyTree(baseline.root, root.resolve("truth-v3-public-instance-split"))
+        mutateAndRehashSourcePopulation(candidate, instance.sourceEntityId) { _, _ ->
+            JsonArray(splitRows.map { it.canonicalJson() })
+        }
+        val index = parseControlObject(candidate.resolve("index.json"))
+        assertCensusCounts(candidate, index)
+        assertEquals(splitRows.size.toLong(), index.controlObject("counts").controlLong("sourceEntities"))
+        assertEquals(
+            baseline.index.controlObject("counts").filterKeys { !it.startsWith("sourceEntities") },
+            index.controlObject("counts").filterKeys { !it.startsWith("sourceEntities") },
+            "the forged source claim does not change any emitted/non-emitted denominator count",
+        )
+        index.controlArray("shards").controlObjects("shards").forEach { record ->
+            val path = candidate.resolve(record.controlString("path"))
+            val shard = parseControlObject(path)
+            val original = parseControlObject(baseline.root.resolve(record.controlString("path")))
+            assertEquals(original.controlArray("functions"), shard.controlArray("functions"))
+            assertEquals(original.controlArray("nonEmitted"), shard.controlArray("nonEmitted"))
+            assertEquals(shard.controlArray("sourceEntities").size.toLong(), record.controlLong("sourceEntities"))
+            assertEquals(record.controlLong("bytes"), Files.size(path))
+            assertEquals(record.controlString("sha256"), fixtureSha256(path))
+        }
+        assertEquals(index.controlString("indexSha256"), OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(JsonObject(index.filterKeys { it != "indexSha256" })),
+        ))
+        assertTrue(allSourceRows(candidate).contains(instance.canonicalJson()), "the verified original instance remains")
+        assertTrue(allSourceRows(candidate).contains(split.canonicalJson()), "the additional false claim remains distinct")
+        val candidateBytes = v3TreeBytes(candidate)
+        val candidateTotal = candidateBytes.values.sumOf { it.size.toLong() }
+        assertTrue(candidateTotal > baseline.outputBytes, "adding a complete physical claim grows this candidate")
+        assertTrue(candidateTotal <= minOf(
+            limits.maximumOutputBytes,
+            fixture.scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("serializedBytes"),
+        ))
+        val publicFailure = assertFailsWith<FullTreeFunctionTruthV3Exception> {
+            FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                candidate, fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex,
+                fixture.observationV2Root, fixture.observationV2IndexSha256, fixture.scope, fixture.scratch, limits,
+            )
+        }
+        assertEquals("truth-v3 artifact exceeds its output-byte bound", publicFailure.message,
+            "the growing split hits the unchanged raw-derived public candidate cap")
+        val componentFailure = assertFailsWith<FullTreeFunctionTruthV3Exception> {
+            FullTreeFunctionTruthSqliteV3.compareV3CandidateTreeBytes(
+                candidate, baseline.root, index.controlArray("shards").size.toLong() + 2L, candidateTotal,
+            )
+        }
+        assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", componentFailure.message)
+        assertEquals(candidateBytes, v3TreeBytes(candidate))
+        assertEquals(baselineBytes, v3TreeBytes(baseline.root))
+        assertEquals(inputs, inputs.keys.associateWith(::fixtureSha256))
+        assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
+        assertDirectoryEmpty(fixture.scratch)
+        println("truth-v3-public-mutation case=template-instance-split rows=${splitRows.size} bytes=$candidateTotal " +
+            "rejected=raw-derived-output-bound componentRejected=raw-rederivation inputsUnchanged=true scratchEmpty=true")
     }
 
     private fun assertPublicEntityBoundEnforcement(
@@ -1909,6 +2284,12 @@ class FullTreeFunctionTruthSqliteV3Test {
     }
 
     private fun mutateAndRehashSourceRow(root: Path, sourceEntityId: String, mutate: (JsonObject) -> JsonObject) {
+        mutateAndRehashSourcePopulation(root, sourceEntityId) { rows, index ->
+            JsonArray(rows.toMutableList().apply { this[index] = mutate(this[index] as JsonObject) })
+        }
+    }
+
+    private fun mutateAndRehashSourcePopulation(root: Path, sourceEntityId: String, mutate: (JsonArray, Int) -> JsonArray) {
         makeTreeWritable(root)
         val selected = Files.list(root.resolve("shards")).use { paths ->
             paths.toList().asSequence().mapNotNull { path ->
@@ -1924,9 +2305,8 @@ class FullTreeFunctionTruthSqliteV3Test {
                 )
             }.firstOrNull()
         } ?: error("candidate census row is missing before mutation")
-        val sources = selected.shard.controlArray("sourceEntities").toMutableList()
-        sources[selected.sourceIndex] = mutate(selected.source)
-        val changedShard = withSourceRowsAndCounts(selected.shard, JsonArray(sources))
+        val sources = mutate(selected.shard.controlArray("sourceEntities"), selected.sourceIndex)
+        val changedShard = withSourceRowsAndCounts(selected.shard, sources)
         OracleSchemas.validate(FullTreeFunctionTruthSqliteV3.SHARD_SCHEMA_NAME, changedShard)
         val changedShardBytes = OracleJson.canonicalBytes(changedShard)
         Files.write(selected.path, changedShardBytes)
@@ -1939,6 +2319,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 JsonObject(record.toMutableMap().apply {
                     put("bytes", JsonPrimitive(changedShardBytes.size))
                     put("sha256", JsonPrimitive(OracleArtifacts.sha256(changedShardBytes)))
+                    put("sourceEntities", JsonPrimitive(sources.size))
                 })
             } else record
         }
