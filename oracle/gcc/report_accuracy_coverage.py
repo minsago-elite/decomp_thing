@@ -339,6 +339,9 @@ def _function_start_score(
     qualification = _required_mapping(
         provenance.get("qualification"), "function start qualification"
     )
+    # The recovered side is bound by digest only, so the score cannot qualify.
+    if qualification.get("releaseEligible") is not False:
+        raise CoverageError("function start report must not claim release eligibility")
     return {
         "status": "measured",
         "precision": precision,
@@ -346,7 +349,7 @@ def _function_start_score(
         "nearMisses": summary.get("nearMisses"),
         "productionVerified": False,
         "reasonCode": "recovered-model-not-release-eligible",
-        "releaseEligible": qualification.get("releaseEligible") is True,
+        "releaseEligible": False,
         "evidence": {
             **_record(report_path, "function start report"),
             "path": report_path.name,
