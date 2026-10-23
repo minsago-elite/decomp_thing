@@ -36,7 +36,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
   try { cursor = sourceCursor(search); } catch { invalid = true; }
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.directoryId, search, pin?.sourceSha256, pin?.metadataVersion, refresh].join('/');
   const entry = useRef(historyEntry); entry.current = historyEntry;
-  const binding = useMemo(() => ({ client, key }), [client, key]);
+  const binding = useMemo(() => ({ client, key, historyEntry }), [client, key, historyEntry]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
   const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionDirectory> }>({ binding, value: { key, state: 'loading' } });
   const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
@@ -113,21 +113,32 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
   const [previewOpened, setPreviewOpened] = useState(false);
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, pin?.sourceSha256, pin?.metadataVersion, pin ? '' : historyEntry.search, refresh].join('/');
   const entry = useRef(historyEntry); entry.current = historyEntry;
-  const binding = useMemo(() => ({ client, key }), [client, key]);
+  const binding = useMemo(() => ({ client, key, historyEntry }), [client, key, historyEntry]);
   const activeBinding = useRef(binding); activeBinding.current = binding;
   const [read, setRead] = useState<{ binding: typeof binding; value: SourceReadState<RevisionFile> }>({ binding, value: { key, state: 'loading' } });
   const isCurrent = () => activeBinding.current === binding && sourceEntryCurrent(entry.current, window.location);
-  useEffect(() => beginSourceRead(key, async signal => {
-    if (!isCurrent()) throw new ApiClientError('aborted');
-    const response = await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal });
-    if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
-    const file = bindFile(response.data, selected, entry.current.pin ?? undefined);
-    if (!pinSourceEntry(entry.current, file, () => window.location, url => history.replaceState(null, '', url))) {
-      throw new ApiClientError('aborted');
+  // A position-only navigation may reuse already accepted metadata from this
+  // client and exact file/pin. An unfinished or discarded read must restart.
+  const reusable = historyEntry.pin !== null && read.binding.client === client && read.binding.key === key && read.value.state === 'ready'
+    ? read.value.value : null;
+  useEffect(() => {
+    if (reusable && isCurrent()) {
+      setRead({ binding, value: { key, state: 'ready', value: reusable } });
+      return;
     }
-    return file;
-  }, value => { if (isCurrent()) setRead({ binding, value }); }), [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
-  const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key) : { key, state: 'loading' };
+    return beginSourceRead(key, async signal => {
+      if (!isCurrent()) throw new ApiClientError('aborted');
+      const response = await client.get('revisionFile', sourceReadRoute(selected, 'file', selected.fileId), { signal });
+      if (signal.aborted || !isCurrent()) throw new ApiClientError('aborted');
+      const file = bindFile(response.data, selected, entry.current.pin ?? undefined);
+      if (!pinSourceEntry(entry.current, file, () => window.location, url => history.replaceState(null, '', url))) {
+        throw new ApiClientError('aborted');
+      }
+      return file;
+    }, value => { if (isCurrent()) setRead({ binding, value }); });
+  }, [binding, selected.jobId, selected.runId, selected.revisionId, selected.fileId]);
+  const current: SourceReadState<RevisionFile> = read.binding === binding ? currentSourceRead(read.value, key)
+    : reusable && isCurrent() ? { key, state: 'ready', value: reusable } : { key, state: 'loading' };
   const effectivePin = historyEntry.pin;
   const data = current.state === 'ready' ? current.value : null;
   const loading = current.state === 'loading';

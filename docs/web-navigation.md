@@ -491,3 +491,9 @@ including departures before the router renders. A late callback cannot pin a
 new route or revive an entry whose installed pin was removed. The inert metadata
 and history controls do not qualify physical browser scroll/selection restoration
 or the remaining workspace navigation acceptance criteria.
+
+Position-only file navigation reuses already accepted metadata only for the same
+client, file and explicit snapshot pin. A pending read discarded during a URI
+transition is restarted for the new entry; it cannot strand the view in loading.
+This reuse neither retains metadata across authentication generations nor adds
+content reads, and explicit refresh still requires a new metadata request.
