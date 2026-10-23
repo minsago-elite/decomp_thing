@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Any
@@ -56,12 +57,31 @@ SUMMARY_FIELDS = (
 )
 
 
+@dataclass(frozen=True)
+class ScoredReport:
+    report: dict[str, Any]
+    # Byte records of the model, binding and qualification snapshots that
+    # produced ``report``.
+    evidence: dict[str, dict[str, Any]]
+
+
 def build_report(
     profile_directory: Path,
     program_model_path: Path,
     binding_path: Path,
     qualification_path: Path,
 ) -> dict[str, Any]:
+    return score_report(
+        profile_directory, program_model_path, binding_path, qualification_path
+    ).report
+
+
+def score_report(
+    profile_directory: Path,
+    program_model_path: Path,
+    binding_path: Path,
+    qualification_path: Path,
+) -> ScoredReport:
     bound = load_bound_stripped_model(
         profile_directory,
         program_model_path,
@@ -88,7 +108,7 @@ def build_report(
         for function in bound.oracle.functions
         if function.exclusion is not None
     )
-    return {
+    report = {
         "schemaVersion": 1,
         "reportId": REPORT_ID,
         "twin": TWIN,
@@ -113,6 +133,14 @@ def build_report(
         "falseNegatives": scored["falseNegatives"],
         "ignoredExcludedRecoveries": scored["ignoredExcludedRecoveries"],
     }
+    return ScoredReport(
+        report=report,
+        evidence={
+            "programModel": bound.model_record,
+            "binding": bound.binding_record,
+            "qualification": bound.qualification_record,
+        },
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

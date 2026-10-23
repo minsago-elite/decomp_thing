@@ -26,7 +26,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from oracle.elf_oracle import verify_oracle_manifest  # noqa: E402
-from oracle.function_recovery import load_function_oracle  # noqa: E402
+from oracle.function_recovery import (  # noqa: E402
+    MAX_REPORT_BYTES,
+    load_function_oracle,
+)
 
 
 REPORT_ID = "gcc-driver-accuracy-coverage-v1"
@@ -314,7 +317,9 @@ def _function_start_score(
         }
     # Score and record the same snapshot so the evidence digest names the
     # bytes that were compared with the rescore.
-    report, report_record = _json_snapshot(report_path, "function start report")
+    report, report_record = _json_snapshot(
+        report_path, "function start report", MAX_REPORT_BYTES
+    )
     if report.get("reportId") != FUNCTION_START_REPORT_ID or report.get("twin") != "stripped":
         raise CoverageError("function start report has an unexpected identity")
     provenance = _required_mapping(report.get("provenance"), "function start provenance")
@@ -398,11 +403,10 @@ def _function_start_score(
                 f"function start report has no retained recovered model record: {path.name}"
             )
     # Imported here because the reporter reuses this module's bounded readers.
-    from oracle.gcc.report_function_starts import build_report as score_function_starts
+    from oracle.gcc.report_function_starts import score_report
 
-    rescored = score_function_starts(
-        profile_directory, model_path, binding_path, qualification_path
-    )
+    scored = score_report(profile_directory, model_path, binding_path, qualification_path)
+    rescored = scored.report
     if report != rescored:
         raise CoverageError(
             "function start report disagrees with a rescore of its retained recovered model"
@@ -417,9 +421,8 @@ def _function_start_score(
         "releaseEligible": False,
         "evidence": {
             **report_record,
-            "programModel": _record(model_path, "function start recovered model"),
-            "binding": _record(binding_path, "structural full-export binding"),
-            "qualification": _record(qualification_path, "qualification record"),
+            # Recorded from the snapshots that were verified and rescored.
+            **scored.evidence,
             "programModelSha256": rescored["provenance"]["programModel"]["sha256"],
         },
     }

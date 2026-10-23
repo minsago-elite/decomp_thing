@@ -81,6 +81,48 @@ class RetainedFunctionStartTest(unittest.TestCase):
         self.assertEqual(len(reads), 1)
 
 
+    def test_evidence_records_the_validated_snapshots(self) -> None:
+        import oracle.function_recovery as recovery
+        import oracle.gcc.report_accuracy_coverage as coverage
+
+        retained = {
+            PROFILE / name: 0
+            for name in (
+                "stripped-recovered-program-model.json",
+                "surviving-symbol-identity-binding.json",
+                "surviving-symbol-identity-qualification.json",
+            )
+        }
+        coverage_read = coverage._read_regular
+        recovery_read = recovery._read_regular_snapshot
+
+        def counting(original):
+            def read(path, *args, **kwargs):
+                if Path(path) in retained:
+                    retained[Path(path)] += 1
+                return original(path, *args, **kwargs)
+
+            return read
+
+        # The identity dimension reads the same binding and qualification, so
+        # stub it out to count only the function-start reads.
+        unavailable = {
+            "status": "unavailable",
+            "reasonCode": "stub",
+            "productionVerified": False,
+        }
+        with mock.patch.object(
+            coverage, "_read_regular", counting(coverage_read)
+        ), mock.patch.object(
+            recovery, "_read_regular_snapshot", counting(recovery_read)
+        ), mock.patch.object(
+            coverage, "_symbol_identity_score", return_value=unavailable
+        ):
+            build_coverage(PROFILE)
+        # Each record is read once, for validation, and recorded from that read.
+        self.assertEqual(set(retained.values()), {1})
+
+
 class TamperedFunctionStartTest(unittest.TestCase):
     def setUp(self) -> None:
         SCRATCH.mkdir(parents=True, exist_ok=True)
@@ -207,6 +249,31 @@ class TamperedFunctionStartTest(unittest.TestCase):
         model["functions"].pop()
         model_path.write_text(json.dumps(model), encoding="utf-8")
         with self.assertRaisesRegex(CoverageError, "program model rejected"):
+            build_coverage(self.profile)
+
+    def test_rejects_oversized_report_before_decoding(self) -> None:
+        from oracle.function_recovery import MAX_REPORT_BYTES
+
+        with self.path.open("r+b") as stream:
+            stream.truncate(MAX_REPORT_BYTES + 1)
+        # Rejected from the file size, before the payload is read or decoded.
+        with self.assertRaisesRegex(CoverageError, "function start report exceeds"):
+            build_coverage(self.profile)
+
+    def test_rejects_model_length_disagreeing_with_binding(self) -> None:
+        # The digest still matches, so only the bound length can catch this.
+        for name, field in (
+            ("surviving-symbol-identity-binding.json", ("programModel", "bytes")),
+            ("surviving-symbol-identity-qualification.json", ("programModelBytes",)),
+        ):
+            path = self.profile / name
+            record = json.loads(path.read_text(encoding="utf-8"))
+            target = record
+            for key in field[:-1]:
+                target = target[key]
+            target[field[-1]] += 1
+            path.write_text(json.dumps(record), encoding="utf-8")
+        with self.assertRaisesRegex(CoverageError, "bound byte length"):
             build_coverage(self.profile)
 
     def test_rejects_release_eligibility_claim(self) -> None:
