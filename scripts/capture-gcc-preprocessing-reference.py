@@ -362,6 +362,12 @@ def phase_commands(text: str) -> list[dict]:
     for line in text.splitlines():
         if not line.startswith(" "):
             continue
+        # The driver ends a command whose stdout feeds the next one (-pipe) with an unquoted
+        # " |". It is a pipeline connector, not an argument of the phase tool. A literal "|"
+        # argument is printed quoted by -###, so it never matches here.
+        piped = line.endswith(" |")
+        if piped:
+            line = line[:-2]
         try:
             argv = shlex.split(line)
         except ValueError:
@@ -372,7 +378,7 @@ def phase_commands(text: str) -> list[dict]:
         if tool not in PHASE_TOOLS:
             continue
         phase = "preprocess" if tool == "cc1" and "-E" in argv else PHASE_TOOLS[tool]
-        commands.append({"phase": phase, "tool": argv[0], "argv": argv})
+        commands.append({"phase": phase, "tool": argv[0], "argv": argv, "stdoutPipedToNextPhase": piped})
     return commands
 
 
@@ -512,6 +518,10 @@ def run_container(runtime: str, workspace: Path, arguments: list[str], stdin: by
         "--platform", "linux/amd64",
         "--network", "none",
         "--read-only",
+        # The driver writes its temporaries to /tmp. Docker's --read-only leaves /tmp read-only,
+        # so GCC would fall back to "./ccXXXXXX" names, while podman mounts a tmpfs there; an
+        # explicit tmpfs gives both runtimes the same writable /tmp.
+        "--tmpfs", "/tmp",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pull", "never",
@@ -616,7 +626,7 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
         "frontend": {"role": "cc1", "path": cc1, "sha256": hashes[cc1]},
         "resourceIncludeDirectory": include,
         "includeSearch": "-nostdinc; only staged workspace include roots are searched",
-        "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges",
+        "sandbox": "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges",
     }
 
 

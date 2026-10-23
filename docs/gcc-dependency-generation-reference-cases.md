@@ -55,8 +55,11 @@ exit status and output. `toolchain.phaseTools` records the path, resolved path
 and hash of `cc1`, `as`, `collect2`, `ld`, `lto-wrapper` and `liblto_plugin.so`,
 plus the binutils versions. Driver temporaries (`/tmp/ccXXXXXX.s` and so on)
 come from `mkstemp`, so plans, traces and streams replace them with `<tmp-N>`
-by order of first appearance; artifacts are never normalized. These cases do
-not pass `-nostdinc`.
+by order of first appearance; artifacts are never normalized. Every container
+gets a tmpfs `/tmp`, so Docker and Podman pick the same temporary directory.
+Each phase records its `argv` without the driver's trailing ` |` pipeline
+connector; `stdoutPipedToNextPhase` says whether its output feeds the next
+phase. These cases do not pass `-nostdinc`.
 
 ## Reproduction
 

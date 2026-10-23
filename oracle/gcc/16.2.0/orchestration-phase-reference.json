@@ -22,7 +22,7 @@
     },
     "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
     "includeSearch": "default system include search",
-    "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges",
+    "sandbox": "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges",
     "phaseTools": {
       "compile": {
         "role": "cc1",
@@ -132,7 +132,8 @@
                 "-march=x86-64",
                 "-o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -161,7 +162,8 @@
                 "-version",
                 "-o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -245,7 +247,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -256,7 +259,8 @@
                 "-o",
                 "source.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -285,7 +289,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -297,7 +302,8 @@
                 "-o",
                 "source.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -382,9 +388,9 @@
                 "-mtune=generic",
                 "-march=x86-64",
                 "-o",
-                "-",
-                "|"
-              ]
+                "-"
+              ],
+              "stdoutPipedToNextPhase": true
             },
             {
               "phase": "assemble",
@@ -394,7 +400,8 @@
                 "--64",
                 "-o",
                 "source.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -422,9 +429,9 @@
                 "-march=x86-64",
                 "-version",
                 "-o",
-                "-",
-                "|"
-              ]
+                "-"
+              ],
+              "stdoutPipedToNextPhase": true
             },
             {
               "phase": "assemble",
@@ -435,7 +442,8 @@
                 "--64",
                 "-o",
                 "source.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -519,7 +527,8 @@
                 "-fpch-preprocess",
                 "-o",
                 "source.i"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "compile",
@@ -537,7 +546,8 @@
                 "-march=x86-64",
                 "-o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -548,7 +558,8 @@
                 "-o",
                 "source.o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -573,7 +584,8 @@
                 "-fpch-preprocess",
                 "-o",
                 "source.i"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "compile",
@@ -592,7 +604,8 @@
                 "-version",
                 "-o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -604,7 +617,8 @@
                 "-o",
                 "source.o",
                 "source.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -692,7 +706,8 @@
                 "-o",
                 "helper.o",
                 "helper.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -711,7 +726,8 @@
                 "-o",
                 "helper.o",
                 "helper.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -795,7 +811,8 @@
                 "-fno-directives-only",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -806,7 +823,8 @@
                 "-o",
                 "code.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -832,7 +850,8 @@
                 "-fno-directives-only",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -844,7 +863,8 @@
                 "-o",
                 "code.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -933,7 +953,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -944,7 +965,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -989,7 +1011,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1020,7 +1043,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1032,7 +1056,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1077,7 +1102,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1188,7 +1214,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1199,7 +1226,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "compile",
@@ -1221,7 +1249,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1232,7 +1261,8 @@
                 "-o",
                 "<tmp-3>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1278,7 +1308,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1309,7 +1340,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1321,7 +1353,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "compile",
@@ -1345,7 +1378,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1357,7 +1391,8 @@
                 "-o",
                 "<tmp-3>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1403,7 +1438,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1514,7 +1550,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1525,7 +1562,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1536,7 +1574,8 @@
                 "-o",
                 "<tmp-3>.o",
                 "helper.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1582,7 +1621,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1613,7 +1653,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1625,7 +1666,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1637,7 +1679,8 @@
                 "-o",
                 "<tmp-3>.o",
                 "helper.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1683,7 +1726,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1784,7 +1828,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1795,7 +1840,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1838,7 +1884,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -1869,7 +1916,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -1881,7 +1929,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -1924,7 +1973,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2024,7 +2074,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -2035,7 +2086,8 @@
                 "-o",
                 "bad.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2064,7 +2116,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2131,7 +2184,8 @@
                 "-o",
                 "bad.o",
                 "bad.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2150,7 +2204,8 @@
                 "-o",
                 "bad.o",
                 "bad.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2227,7 +2282,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -2238,7 +2294,8 @@
                 "-o",
                 "inline.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2267,7 +2324,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -2279,7 +2337,8 @@
                 "-o",
                 "inline.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2360,7 +2419,8 @@
                 "-march=x86-64",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -2371,7 +2431,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -2416,7 +2477,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
@@ -2447,7 +2509,8 @@
                 "-version",
                 "-o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "assemble",
@@ -2459,7 +2522,8 @@
                 "-o",
                 "<tmp-2>.o",
                 "<tmp-1>.s"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             },
             {
               "phase": "link",
@@ -2504,7 +2568,8 @@
                 "-lgcc_s_asneeded",
                 "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
                 "/lib/x86_64-linux-gnu/crtn.o"
-              ]
+              ],
+              "stdoutPipedToNextPhase": false
             }
           ]
         },
