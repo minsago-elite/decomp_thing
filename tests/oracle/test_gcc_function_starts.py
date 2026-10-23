@@ -7,6 +7,7 @@ import shlex
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +62,23 @@ class RetainedFunctionStartTest(unittest.TestCase):
             (PROFILE / "accuracy-coverage.json").read_text(encoding="utf-8")
         )
         self.assertEqual(retained, build_coverage(PROFILE))
+
+
+    def test_report_is_compared_and_recorded_from_one_read(self) -> None:
+        import oracle.gcc.report_accuracy_coverage as coverage
+
+        report_path = PROFILE / "function-start-score.json"
+        reads = []
+        original = coverage._read_regular
+
+        def counting_read(path, label, limit=None):
+            if Path(path) == report_path:
+                reads.append(path)
+            return original(path, label, limit)
+
+        with mock.patch.object(coverage, "_read_regular", counting_read):
+            build_coverage(PROFILE)
+        self.assertEqual(len(reads), 1)
 
 
 class TamperedFunctionStartTest(unittest.TestCase):

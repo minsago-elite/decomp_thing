@@ -312,7 +312,9 @@ def _function_start_score(
             "reasonCode": "no-retained-current-recovered-model",
             "productionVerified": False,
         }
-    report = _json(report_path, "function start report")
+    # Score and record the same snapshot so the evidence digest names the
+    # bytes that were compared with the rescore.
+    report, report_record = _json_snapshot(report_path, "function start report")
     if report.get("reportId") != FUNCTION_START_REPORT_ID or report.get("twin") != "stripped":
         raise CoverageError("function start report has an unexpected identity")
     provenance = _required_mapping(report.get("provenance"), "function start provenance")
@@ -414,8 +416,7 @@ def _function_start_score(
         "reasonCode": "recovered-model-not-release-eligible",
         "releaseEligible": False,
         "evidence": {
-            **_record(report_path, "function start report"),
-            "path": report_path.name,
+            **report_record,
             "programModel": _record(model_path, "function start recovered model"),
             "binding": _record(binding_path, "structural full-export binding"),
             "qualification": _record(qualification_path, "qualification record"),
