@@ -70,7 +70,7 @@ python3 scripts/verify-gcc-oracle-source.py \
 Run the mutation-focused unit tests with:
 
 ```bash
-python3 -m unittest discover -s tests/oracle -v
+python3 -m unittest discover -s tests/oracle -t . -v
 ```
 
 ## Scope of this checkpoint
