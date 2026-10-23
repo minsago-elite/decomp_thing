@@ -30,11 +30,13 @@ export function matchesActivity(event: WebEvent, group: 'all' | ActivityGroup, t
   return event.payload.fields.taskIdSha256?.includes(taskDigest) ?? false;
 }
 
-export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: string }) {
+export function ActivityRow({ event, basePath, selected = false, inspectionHref }: { event: WebEvent; basePath: string; selected?: boolean; inspectionHref?: string }) {
   const [referencesOpen, setReferencesOpen] = useState(false);
-  return <li class="activity-row">
+  return <li class="activity-row" aria-current={selected ? 'true' : undefined}>
     <time dateTime={event.occurredAt} title={event.occurredAt}>{formatExactTimestamp(event.occurredAt)}</time>{' '}<span>{displayMessage(copy.sequence, { sequence: event.sequence })}</span>
     <p><a href={runPath(basePath, event.jobId, event.runId)}>{displayMessage(copy.attempt, { run: event.runId })}</a></p>
+    {selected && <p>{copy.selectedObservation}</p>}
+    {inspectionHref && <p><a href={inspectionHref}>{displayMessage(copy.inspectObservation, { sequence: event.sequence })}</a></p>}
     {event.type === 'workflow.observation' ? <>
       <p>{displayMessage(copy.observed, { kind: event.payload.observationKind, phase: event.payload.fields.phase ? displayMessage(copy.phase, { phase: event.payload.fields.phase }) : '' })}</p>
       {event.payload.fields.status && <p>{displayMessage(copy.observedStatus, { status: event.payload.fields.status })}</p>}

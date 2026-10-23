@@ -24,6 +24,15 @@ class WebJobPagesTest {
         assertEquals(listOf("c"), ids(first)); assertEquals(listOf("b"), ids(second))
         assertEquals(second, pages.page("owner", query, cursor(first)))
         assertEquals(listOf("a"), ids(pages.page("owner", query, cursor(second))))
+        val firstInfo = first.getValue("page").jsonObject
+        val secondInfo = second.getValue("page").jsonObject
+        val firstToken = firstInfo.getValue("currentCursor").jsonPrimitive.content
+        assertEquals(firstToken, secondInfo.getValue("previousCursor").jsonPrimitive.content)
+        assertEquals(first, pages.page("owner", query, firstToken))
+        assertEquals(first, pages.page("owner", query, secondInfo.getValue("previousCursor").jsonPrimitive.content))
+        assertEquals(1, firstInfo.getValue("pageNumber").jsonPrimitive.int)
+        assertEquals(2, secondInfo.getValue("pageNumber").jsonPrimitive.int)
+        assertEquals(JsonNull, firstInfo.getValue("previousCursor"))
         assertEquals(1, scans)
         assertEquals(listOf("z"), ids(pages.page("owner", query, null)))
     }
@@ -37,7 +46,14 @@ class WebJobPagesTest {
             Triple("owner", query.copy(sort = "oldest"), token), Triple("owner", query.copy(limit = 2), token), Triple("owner", query, token + "x"))) {
             assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page(owner, filter, candidate) }.code)
         }
+        val firstToken = pages.page("owner", query, token).getValue("page").jsonObject.getValue("previousCursor").jsonPrimitive.content
+        for ((owner, filter, candidate) in listOf(Triple("other", query, firstToken),
+            Triple("owner", query.copy(search = "other"), firstToken), Triple("owner", query.copy(limit = 2), firstToken),
+            Triple("owner", query, firstToken + "x"))) {
+            assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page(owner, filter, candidate) }.code)
+        }
         clock = 120_000_000_001
+        assertEquals(410, assertFailsWith<WebAccessDenied> { pages.page("owner", query, firstToken) }.status)
         assertEquals(410, assertFailsWith<WebAccessDenied> { pages.page("owner", query, token) }.status)
     }
 
@@ -46,6 +62,14 @@ class WebJobPagesTest {
         val pages = WebJobPages({ sequenceOf(row("a"), row("b", date = "2026-09-05T02:00:00+01:00"),
             row("c", status = "failed"), row("d", name = "other.elf"), row("e", date = "2026-09-06T00:00:00Z")) })
         assertEquals(listOf("b", "a"), ids(pages.page("owner", query, null)))
+        val emptyQuery = query.copy(search = "no-matching-name")
+        val empty = pages.page("owner", emptyQuery, null)
+        val emptyInfo = empty.getValue("page").jsonObject
+        assertTrue(ids(empty).isEmpty())
+        assertEquals(JsonNull, emptyInfo.getValue("previousCursor"))
+        assertEquals(JsonNull, emptyInfo.getValue("nextCursor"))
+        assertEquals(1, emptyInfo.getValue("pageNumber").jsonPrimitive.int)
+        assertEquals(empty, pages.page("owner", emptyQuery, emptyInfo.getValue("currentCursor").jsonPrimitive.content))
         listOf("sort=wrong", "sort=oldest&sort=newest", "limit=0", "limit=201", "limit=01", "limit=1&limit=2", "unknown=value", "status=bogus", "search=%FF", "search=%00",
             "createdAfter=wrong", "createdAfter=2026-09-06T00:00:00Z&createdBefore=2026-09-05T00:00:00Z", "search=" + "x".repeat(257))
             .forEach { invalid -> assertEquals(422, assertFailsWith<WebAccessDenied>(invalid) { WebJobQuery.parse(invalid) }.status) }

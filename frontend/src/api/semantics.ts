@@ -311,6 +311,16 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'jobs': {
       const { items, page } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map((item) => item.jobId)).size === items.length);
+      const snapshotFields = [page.currentCursor, page.previousCursor, page.pageNumber];
+      requireValue(snapshotFields.every(field => field === undefined) || snapshotFields.every(field => field !== undefined));
+      if (page.pageNumber !== undefined) {
+        requireValue(page.currentCursor !== null && page.currentCursor !== undefined);
+        requireValue((page.pageNumber === 1) === (page.previousCursor === null));
+        requireValue(page.nextCursor === null || page.nextCursor !== page.currentCursor);
+        requireValue(page.previousCursor === null || page.previousCursor !== page.currentCursor);
+        requireValue(page.previousCursor === null || page.previousCursor !== page.nextCursor);
+        requireValue(page.pageNumber === 1 || items.length > 0);
+      }
       break;
     }
     case 'bootstrap': {

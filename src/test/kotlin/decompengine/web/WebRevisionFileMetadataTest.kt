@@ -117,5 +117,18 @@ class WebRevisionFileMetadataTest {
             "$run/revisions/$revisionId/sources/root/extra", "/other/jobs/$jobId/runs/$runId", "${base}api/v1/jobs/$jobId")) {
             assertNull(canonicalSpaDocumentPath(base, path))
         }
+        // Named attempt views are document routes under both root and nested deployments.
+        // These are string-only classifier decisions; no server or browser is constructed.
+        for (prefix in listOf("/", "/nested/")) {
+            val selected = "${prefix}jobs/$jobId/runs/$runId"
+            for (view in listOf("activity", "evidence")) {
+                val path = "$selected/$view"
+                assertEquals(path, canonicalSpaDocumentPath(prefix, path))
+                assertEquals(path, canonicalSpaDocumentPath(prefix, "$path/"))
+            }
+            for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//")) {
+                assertNull(canonicalSpaDocumentPath(prefix, "$selected/$suffix"))
+            }
+        }
     }
 }
