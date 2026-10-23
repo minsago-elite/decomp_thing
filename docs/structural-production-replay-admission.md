@@ -41,3 +41,31 @@ The production gap remains explicit: `StructuralReplayAdapterRegistry.production
 The future production adapter must keep unresolved, unobservable, contradicted, and fabricated states visible and use the application-bundled Ghidra Java APIs. Production qualification must not depend on `GHIDRA_HOME` or an external `analyzeHeadless` installation.
 
 The A6 acceptance criterion remains open. No scored production model or production qualification is claimed.
+
+## Driver capture and selected boundary replay — 2026-09-27
+
+The retained export selector now supports the checked GCC driver separately from
+the unchanged `cc1`/`lto1` compiler-engine suite. Driver selection retains its
+pinned manifest and source/build controls, binds both binary identities, and
+requires a fresh full export with the existing 1,800-second export ceiling.
+Planning, resume, and cross-target profile substitutions are rejected. The
+shared structural profile and receipt binding retain the actual selected target,
+loader, image base, executable ranges, exporter, runtime and captured model.
+
+`gcc-engine-full-export driver` also emits `driver-boundary-observation.json`
+and `driver-boundary-binding.json` before publishing its result. The observation
+uses the immutable captured stripped model and pinned driver function oracle,
+reviewed exclusions and historical matching policy. It includes the actual
+selected function mapping and unmatched populations without inventing a rich
+model projection. The existing 20,000-function and 20-million-matching-cell
+limits remain in force. Retained evidence verification replays the observation
+and binds it to the exact full-export binding, model and output-tree commitments.
+
+The existing full-export Actions workflow accepts `qualify:driver-full-export`.
+It verifies the tracked driver binary pair directly, then uses the bundled
+runtime and contained execution path. Driver qualification requires both new
+evidence files and checks that a substituted full-export tree is rejected. This
+implementation checkpoint is not a completed live qualification: Actions must
+retain the real model, receipts and replay evidence before that run can be
+claimed. Structural global/type identity admission, the production capability,
+structural scoring and repeated production regeneration remain open.
