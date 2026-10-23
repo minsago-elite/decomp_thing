@@ -388,7 +388,13 @@ def _call_edge_score(
     summary = _required_mapping(report.get("summary"), "call edge summary")
     raw = {
         key: report.get(key)
-        for key in ("oracleEdges", "missingEdges", "fabricatedEdges", "callersWithCallSites")
+        for key in (
+            "oracleEdges",
+            "missingEdges",
+            "fabricatedEdges",
+            "callerWithoutCallSiteEdges",
+            "callersWithCallSites",
+        )
     }
     if not all(isinstance(value, list) for value in raw.values()):
         raise CoverageError("call edge report outcomes must be arrays")
@@ -401,6 +407,7 @@ def _call_edge_score(
         tail_calls = sum(item["tailCall"] is True for item in raw["oracleEdges"])
         missing_list = pairs(raw["missingEdges"])
         fabricated_list = pairs(raw["fabricatedEdges"])
+        unchecked_list = pairs(raw["callerWithoutCallSiteEdges"])
         callers = {int(rva, 16) for rva in raw["callersWithCallSites"]}
         true_positives = int(summary["truePositives"])
         scored_recovered = int(summary["scoredRecoveredCount"])
@@ -409,18 +416,24 @@ def _call_edge_score(
     reference = set(reference_list)
     missing = set(missing_list)
     fabricated = set(fabricated_list)
+    unchecked = set(unchecked_list)
     if (
         len(reference) != len(reference_list)
         or len(missing) != len(missing_list)
         or len(fabricated) != len(fabricated_list)
+        or len(unchecked) != len(unchecked_list)
         or len(callers) != len(raw["callersWithCallSites"])
     ):
         raise CoverageError("call edge report repeats an edge or caller")
-    endpoints = {rva for pair in reference | fabricated for rva in pair} | callers
+    endpoints = {
+        rva for pair in reference | fabricated | unchecked for rva in pair
+    } | callers
     if not endpoints <= scoreable:
         raise CoverageError("call edge report endpoints are not scoreable oracle functions")
     if any(caller not in callers for caller, _ in reference | fabricated):
         raise CoverageError("call edge report caller has no retained call site")
+    if any(caller in callers for caller, _ in unchecked):
+        raise CoverageError("call edge unscored edge has a caller with call sites")
     if not missing <= reference:
         raise CoverageError("call edge missing edges are not oracle edges")
     if fabricated & reference:
@@ -440,6 +453,16 @@ def _call_edge_score(
     recall = _ratio(true_positives, len(reference))
     if summary.get("precision") != precision or summary.get("recall") != recall:
         raise CoverageError("call edge report ratios disagree with outcomes")
+    # Every oracle caller has a call site, so unscored edges are all fabricated
+    # and the unrestricted figures follow from the retained outcomes.
+    unrestricted_count = scored_recovered + len(unchecked)
+    unrestricted = {
+        "scoredRecoveredCount": unrestricted_count,
+        "precision": _ratio(true_positives, unrestricted_count),
+        "recall": recall,
+    }
+    if summary.get("unrestricted") != unrestricted:
+        raise CoverageError("call edge unrestricted summary disagrees with outcomes")
     qualification = _required_mapping(
         provenance.get("qualification"), "call edge qualification"
     )
@@ -447,9 +470,7 @@ def _call_edge_score(
         "status": "measured",
         "precision": precision,
         "recall": recall,
-        "unrestricted": _required_mapping(
-            summary.get("unrestricted"), "call edge unrestricted summary"
-        ),
+        "unrestricted": unrestricted,
         "productionVerified": False,
         "reasonCode": "recovered-model-not-release-eligible",
         "releaseEligible": qualification.get("releaseEligible") is True,

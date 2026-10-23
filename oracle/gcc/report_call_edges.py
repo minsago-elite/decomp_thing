@@ -14,8 +14,9 @@ model.  An edge is scored when both endpoints are scoreable oracle functions
 and the caller has at least one DWARF call site, because a function compiled
 without call-site information cannot witness a missing or fabricated edge.
 The unrestricted figures are reported alongside.  The report retains every
-oracle, missing and fabricated edge; it does not admit the model for release
-scoring.
+oracle, missing and fabricated edge, and every recovered edge excluded only
+because its caller has no call site, so each figure can be recomputed; it does
+not admit the model for release scoring.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import argparse
 from collections import Counter
 import gc
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -66,7 +68,7 @@ FUNCTION_ID_PREFIX = "function-rva-"
 MODEL_ID_PREFIX = "fn_"
 
 
-def _full_artifact(profile_directory: Path) -> tuple[Path, str]:
+def _full_artifact(profile_directory: Path) -> tuple[bytes, str]:
     manifest = _json(profile_directory / "oracle-manifest.json", "oracle artifact manifest")
     record = _required_mapping(
         _required_mapping(manifest.get("artifacts"), "manifest.artifacts").get("full"),
@@ -75,15 +77,16 @@ def _full_artifact(profile_directory: Path) -> tuple[Path, str]:
     relative = record.get("path")
     if not isinstance(relative, str):
         raise CoverageError("manifest.artifacts.full.path must be a string")
-    path = profile_directory / relative
-    digest = hashlib.sha256(_read_regular(path, "full artifact")).hexdigest()
+    payload = _read_regular(profile_directory / relative, "full artifact")
+    digest = hashlib.sha256(payload).hexdigest()
     if digest != record.get("sha256"):
         raise CoverageError("full artifact disagrees with the manifest")
-    return path, digest
+    # Callers parse these verified bytes; the path is never reopened.
+    return payload, digest
 
 
 def _oracle_edges(
-    full_path: Path, oracle: Any, scoreable: set[int], excluded: set[int]
+    full_payload: bytes, oracle: Any, scoreable: set[int], excluded: set[int]
 ) -> tuple[dict[tuple[int, int], set[bool]], set[int], Counter[str]]:
     candidates: dict[str, set[int]] = {}
     for function in oracle.functions:
@@ -98,7 +101,7 @@ def _oracle_edges(
     callers_with_sites: set[int] = set()
     kinds: Counter[str] = Counter()
     helpers = (BaseAddressEntry, RangeEntry, describe_form_class)
-    with open(full_path, "rb") as stream:
+    with io.BytesIO(full_payload) as stream:
         elf = ELFFile(stream)
         dwarf = elf.get_dwarf_info(follow_links=False)
         loads = [
@@ -227,7 +230,7 @@ def build_report(
         run_id=run_id,
         artifact_id=artifact_id,
     )
-    full_path, full_sha256 = _full_artifact(profile_directory)
+    full_payload, full_sha256 = _full_artifact(profile_directory)
     oracle = bound.oracle
     scoreable = {
         function.rva
@@ -245,7 +248,7 @@ def build_report(
         if function.rva is not None
     }
     oracle_edges, callers_with_sites, kinds = _oracle_edges(
-        full_path, oracle, scoreable, excluded
+        full_payload, oracle, scoreable, excluded
     )
     recovered = _recovered_edges(
         program_model_path,
@@ -313,6 +316,9 @@ def build_report(
         ],
         "missingEdges": [edge(pair) for pair in sorted(reference - scored)],
         "fabricatedEdges": [edge(pair) for pair in sorted(scored - reference)],
+        "callerWithoutCallSiteEdges": [
+            edge(pair) for pair in sorted(unrestricted - scored)
+        ],
     }
 
 

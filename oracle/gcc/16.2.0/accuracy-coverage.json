@@ -3,10 +3,10 @@
     "callEdges": {
       "currentScore": {
         "evidence": {
-          "bytes": 712270,
+          "bytes": 843832,
           "path": "call-edge-score.json",
           "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
-          "sha256": "2bc0f4afa3aeaffb7fddc469a15a6af136ca0b05f4f1449efbf0c8b5954a432e",
+          "sha256": "eb41d3ef4576d257402fc79adbf1947ac6c6543e391477735ab38aa1f9ebad7d",
           "workflowRunId": 38724253878
         },
         "precision": {

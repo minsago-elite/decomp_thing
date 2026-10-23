@@ -110,6 +110,27 @@ class TamperedCallEdgeTest(unittest.TestCase):
         with self.assertRaisesRegex(CoverageError, "ratios disagree"):
             build_coverage(self.profile)
 
+    def test_rejects_inflated_unrestricted_precision(self) -> None:
+        self.report["summary"]["unrestricted"]["precision"]["value"] = 1.0
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "unrestricted summary disagrees"):
+            build_coverage(self.profile)
+
+    def test_rejects_dropped_unscored_edge(self) -> None:
+        del self.report["callerWithoutCallSiteEdges"][-1]
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "unrestricted summary disagrees"):
+            build_coverage(self.profile)
+
+    def test_rejects_unscored_edge_from_caller_with_call_sites(self) -> None:
+        edge = self.report["oracleEdges"][0]
+        self.report["callerWithoutCallSiteEdges"][0].update(
+            callerRva=edge["callerRva"], calleeRva=edge["calleeRva"]
+        )
+        self._rewrite()
+        with self.assertRaisesRegex(CoverageError, "caller with call sites"):
+            build_coverage(self.profile)
+
     def test_rejects_foreign_manifest(self) -> None:
         self.report["provenance"]["artifactManifestSha256"] = "0" * 64
         self._rewrite()
