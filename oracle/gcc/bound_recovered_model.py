@@ -194,6 +194,9 @@ def verify_binding(binding: dict[str, Any]) -> None:
     _require_equal(lineage["provider"], LINEAGE_PROVIDER, "receipt lineage provider disagrees")
     if type(lineage["schemaVersion"]) is not int or lineage["schemaVersion"] != 1:
         raise CoverageError("receipt lineage schemaVersion must be 1")
+    # This profile measures the driver stripped twin, so its lineage names the
+    # driver engine (the driver full-export producer pairs gcc-driver-16.2.0
+    # with "driver"; "cc1" lineages belong to the separate cc1 profile).
     _require_equal(lineage["engineId"], "driver", "receipt lineage engine is not the driver")
     for key in LINEAGE_KEYS - {"provider", "schemaVersion", "engineId"}:
         _digest(lineage[key], f"binding.receiptLineage.{key}")
