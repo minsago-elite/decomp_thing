@@ -47,6 +47,7 @@
             "normalizations": [
               "clang-temporary-object"
             ],
+            "normalizedSha256": "410ac003de21de01ecd687f80b754fd9b25d05b20b22bd3a948b41deed5f45de",
             "path": "program"
           }
         ],
@@ -92,9 +93,12 @@
     "cpuSeconds": 10,
     "executeAddressSpaceBytes": 67108864,
     "openFiles": 128,
+    "processes": 32,
     "streamBytes": 1048576,
     "wallSeconds": 10,
-    "workspaceEntries": 2
+    "workspaceEntries": 2,
+    "writableBytes": 67108864,
+    "writableEntries": 64
   },
   "sandbox": {
     "backend": "bubblewrap-v1",

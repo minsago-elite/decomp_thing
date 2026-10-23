@@ -163,3 +163,52 @@ controls, observes, then re-verifies offline). Pure controls: `python3 -B -m uni
 **Limits.** Offline verification cross-binds the supplied bytes; it is not an attestation that execution occurred.
 Linker and library bytes are host-dependent and are recorded, not pinned. This is a Python compatibility reference
 observation of the locked Clang's produced program, not evidence about any reconstructed candidate.
+
+## Generic corpus delivery: `bubblewrap-v1` backend
+
+The standalone profile above runs its own executor. The same observation is also delivered through the
+program-neutral corpus/runner/report contract: `oracle/behavior_corpus_bwrap.py` is a second, explicitly versioned
+sandbox backend (`sandbox.backend: "bubblewrap-v1"`) beside the OCI backend in `oracle/behavior_corpus.py`, and
+`oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json` is the supplemental Clang corpus it runs. That corpus is generated
+only from the locked issue97 constants by `oracle/llvm/behavior_corpus_bwrap.py` and must equal its `build_corpus()`
+byte for byte. The historical OCI `behavior-corpus.json` and its evidence are unchanged.
+
+**Corpus contract.** Each case declares its argv, inputs, exact compile exit/stdout/stderr, its artifacts (path, mode,
+named normalizations and the **reviewed normalized SHA-256**) and optionally one artifact to execute with its exact
+exit/stdout/stderr. Replay compares every repetition's normalized artifact with the corpus digest, so it
+authenticates the produced bytes, not only their repeatability. Normalization patterns are restricted to fixed-width
+sequences of single-byte sets (literals, `\xHH`/punctuation escapes, `[...]` sets and exact `{n}` repeats, at most 64
+bytes wide). They are applied only after the report's rules have been bound to the corpus, so a report can never
+supply an expression that runs. A corpus is rejected when its worst-case report could not fit the 64 MiB retention
+limit, or when one command's declared argv and environment exceed 256 KiB.
+
+**Aggregate host bounds** beyond the per-process `RLIMIT_CPU/AS/NOFILE/FSIZE/CORE` limits and the wall-clock kill:
+
+- `limits.processes`: `RLIMIT_NPROC` is set to this user's current task count plus `processes` before bubblewrap
+  creates its user namespace. Linux (≥ 5.14) charges that limit per user namespace and checks every ancestor, so the
+  sandbox cannot raise the user's task total by more than `processes`. Aggregate memory is therefore bounded by
+  `processes` × the address-space limit. The backend refuses to run as root, which the limit exempts.
+- `limits.writableBytes` / `limits.writableEntries`: the sandbox root is remounted read-only and has no `/dev`, so
+  the only writable storage is the case workspace and `/tmp`, both host directories. A monitor walks both every
+  10 ms while the process runs, and kills it once their recursive entry count or allocated bytes exceed the quota. An
+  unreadable directory also counts as a violation. Overshoot is limited to what can be written in one polling interval.
+- The spawned command is checked against `ARG_MAX` before it starts. Host metadata (tools and loader closure) must
+  fit a fixed 1 MiB reserve of the report.
+
+```sh
+python3 -B -m oracle.llvm.behavior_corpus_bwrap --run \
+  --artifact-root "$PWD/build/issue97-bwrap/artifacts" \
+  --temporary-root "$PWD/build/issue97-bwrap/tmp" \
+  --json-output "$PWD/build/issue97-bwrap/evidence/behavior-corpus-bwrap-v1-report.json"
+python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
+  oracle/llvm/22.1.6/behavior-corpus-bwrap-v1.json \
+  "$PWD/build/issue97-bwrap/evidence/behavior-corpus-bwrap-v1-report.json"
+python3 -B -m oracle.llvm.behavior_corpus_bwrap --write-corpus   # regenerate the committed corpus
+```
+
+Offline controls: `python3 -B -m unittest tests.oracle.test_behavior_corpus_bwrap`. With
+`BEHAVIOR_CORPUS_BWRAP_LIVE=1` (and `/usr/bin/bwrap` plus a host C compiler, otherwise the run fails rather than
+skips), the same module also runs an adversarial helper under the real kernel. That helper shows that an entry flood
+and a byte flood are killed live by the quota, a fork flood is capped, and the root is read-only with no `/dev`. The
+hosted `produced-program-bwrap-observation` dispatch job runs these live controls, the corpus live and its offline
+replay. The authority limits of the standalone profile apply unchanged.

@@ -9,10 +9,14 @@ import base64
 import copy
 import hashlib
 import json
+import os
+import resource
 import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from oracle import behavior_corpus_bwrap as backend
 from oracle.behavior_corpus import BehaviorCorpusError
@@ -72,8 +76,17 @@ def run_record(program: bytes, corpus: dict) -> dict:
     }
 
 
-def valid_pair() -> tuple[dict, bytes, dict]:
+def synthetic_corpus() -> dict:
+    """The reviewed corpus with its normalized digest repinned to the synthetic program's."""
     corpus = adapter.build_corpus()
+    corpus["cases"][0]["expected"]["artifacts"][0]["normalizedSha256"] = artifact(
+        synthetic_program(b"abcdef"), corpus
+    )["normalizedSha256"]
+    return backend.validate_corpus(corpus)
+
+
+def valid_pair() -> tuple[dict, bytes, dict]:
+    corpus = synthetic_corpus()
     payload = backend.corpus_json_bytes(corpus)
     case = corpus["cases"][0]
     report = {
@@ -120,7 +133,7 @@ class CommittedCorpusTests(unittest.TestCase):
 
     def test_adapter_rejects_a_drifted_corpus(self) -> None:
         corpus = adapter.build_corpus()
-        corpus["cases"][0]["repetitions"] = 3
+        corpus["cases"][0]["repetitions"] = 1
         with self.assertRaisesRegex(BehaviorCorpusError, "differs from the reviewed"):
             adapter._require_reviewed_corpus(backend.validate_corpus(corpus))
 
@@ -128,7 +141,11 @@ class CommittedCorpusTests(unittest.TestCase):
 class PairTests(unittest.TestCase):
     def assert_pair_rejected(self, mutate, message: str) -> None:
         corpus, payload, report = valid_pair()
+        original = copy.deepcopy(corpus)
         mutate(corpus, report)
+        if corpus != original:
+            payload = backend.corpus_json_bytes(corpus)
+            report["corpus"]["sha256"] = sha(payload)
         with self.assertRaisesRegex(BehaviorCorpusError, message):
             backend.validate_corpus_report_pair(corpus, payload, report)
 
@@ -141,15 +158,54 @@ class PairTests(unittest.TestCase):
         self.assertEqual(runs[0]["artifacts"][0]["normalizedSha256"], runs[1]["artifacts"][0]["normalizedSha256"])
 
     def test_report_file_round_trip_and_offline_replay(self) -> None:
-        _, _, report = valid_pair()
+        corpus, payload, report = valid_pair()
         with tempfile.TemporaryDirectory(dir=ROOT / "build" if (ROOT / "build").is_dir() else None) as directory:
             path = Path(directory) / "report.json"
             path.write_bytes(backend.report_json_bytes(report))
-            checked = adapter.verify_supplemental_pair(adapter.CORPUS_PATH, path)
+            loaded, _ = backend.load_report(path)
+            checked = backend.validate_corpus_report_pair(corpus, payload, loaded)
             self.assertEqual(checked["summary"]["passed"], 1)
+            # The synthetic program is not the reviewed one, so the committed corpus refuses it even
+            # when the report is otherwise bound to that corpus.
+            report["corpus"]["sha256"] = sha(adapter.CORPUS_PATH.read_bytes())
+            path.write_bytes(backend.report_json_bytes(report))
+            with self.assertRaisesRegex(BehaviorCorpusError, "normalized digest differs from the corpus"):
+                adapter.verify_supplemental_pair(adapter.CORPUS_PATH, path)
             path.write_bytes(json.dumps(report).encode())
             with self.assertRaisesRegex(BehaviorCorpusError, "canonical JSON"):
-                adapter.verify_supplemental_pair(adapter.CORPUS_PATH, path)
+                backend.load_report(path)
+
+    def test_consistently_replaced_artifact_is_rejected(self) -> None:
+        def mutate(corpus, report):
+            for run, name in zip(report["cases"][0]["runs"], (b"abcdef", b"123abc")):
+                run["artifacts"] = [artifact(synthetic_program(name) + b"forged", corpus)]
+        self.assert_pair_rejected(mutate, "normalized digest differs from the corpus")
+
+    def test_single_repetition_artifact_is_still_pinned(self) -> None:
+        def mutate(corpus, report):
+            corpus["cases"][0]["repetitions"] = 1
+            del report["cases"][0]["runs"][1]
+            report["cases"][0]["runs"][0]["artifacts"] = [artifact(synthetic_program(b"abcdef") + b"x", corpus)]
+        corpus, _, report = valid_pair()
+        mutate(corpus, report)
+        payload = backend.corpus_json_bytes(corpus)
+        report["corpus"]["sha256"] = sha(payload)
+        with self.assertRaisesRegex(BehaviorCorpusError, "normalized digest differs from the corpus"):
+            backend.validate_corpus_report_pair(corpus, payload, report)
+
+    def test_report_rules_are_bound_to_the_corpus_before_they_run(self) -> None:
+        corpus, payload, report = valid_pair()
+        # Well-formed but never matching: applying it first would fail with "matched 0 times".
+        report["artifactNormalizations"][0]["pattern"] = "zzzz"
+        backend.validate_report(copy.deepcopy(report))
+        with self.assertRaisesRegex(BehaviorCorpusError, "artifactNormalizations differs from the corpus"):
+            backend.validate_corpus_report_pair(corpus, payload, report)
+
+    def test_report_with_a_backtracking_rule_is_rejected_structurally(self) -> None:
+        _, _, report = valid_pair()
+        report["artifactNormalizations"][0]["pattern"] = "(?:a|aa)+$"
+        with self.assertRaisesRegex(BehaviorCorpusError, "may only use literals"):
+            backend.validate_report(report)
 
     def test_execution_exit_code_mismatch_is_rejected(self) -> None:
         def mutate(_, report):
@@ -175,12 +231,12 @@ class PairTests(unittest.TestCase):
         def mutate(corpus, report):
             program = synthetic_program(b"abcdef") + b"drift"
             report["cases"][0]["runs"][1]["artifacts"] = [artifact(program, corpus)]
-        self.assert_pair_rejected(mutate, "differ between repetitions")
+        self.assert_pair_rejected(mutate, "run 1 artifact program normalized digest differs")
 
     def test_forged_normalized_hash_is_rejected(self) -> None:
         def mutate(_, report):
             report["cases"][0]["runs"][0]["artifacts"][0]["normalizedSha256"] = "f" * 64
-        self.assert_pair_rejected(mutate, "normalizedSha256 does not match")
+        self.assert_pair_rejected(mutate, "normalizedSha256 does not match its content")
 
     def test_unknown_normalization_is_rejected(self) -> None:
         def mutate(_, report):
@@ -188,7 +244,7 @@ class PairTests(unittest.TestCase):
         self.assert_pair_rejected(mutate, "unknown rule")
 
     def test_normalization_must_match_exactly_once(self) -> None:
-        corpus = adapter.build_corpus()
+        corpus = synthetic_corpus()
         twice = synthetic_program(b"abcdef") + b"start-012345.o\0"
         with self.assertRaisesRegex(BehaviorCorpusError, "matched 2 times"):
             artifact(twice, corpus)
@@ -196,16 +252,22 @@ class PairTests(unittest.TestCase):
         with self.assertRaisesRegex(BehaviorCorpusError, "matched 0 times"):
             artifact(never, corpus)
 
+    @staticmethod
+    def replace_programs(corpus: dict, report: dict, **options) -> None:
+        """Replace both runs' programs and repin the corpus digest, so only the ELF check differs."""
+        for run, name in zip(report["cases"][0]["runs"], (b"abcdef", b"123abc")):
+            run["artifacts"] = [artifact(synthetic_program(name, **options), corpus)]
+        digest = report["cases"][0]["runs"][0]["artifacts"][0]["normalizedSha256"]
+        corpus["cases"][0]["expected"]["artifacts"][0]["normalizedSha256"] = digest
+
     def test_dynamic_program_is_rejected(self) -> None:
         def mutate(corpus, report):
-            for run, name in zip(report["cases"][0]["runs"], (b"abcdef", b"123abc")):
-                run["artifacts"] = [artifact(synthetic_program(name, interpreter=True), corpus)]
+            self.replace_programs(corpus, report, interpreter=True)
         self.assert_pair_rejected(mutate, "no interpreter or dynamic section")
 
     def test_wrong_machine_program_is_rejected(self) -> None:
         def mutate(corpus, report):
-            for run, name in zip(report["cases"][0]["runs"], (b"abcdef", b"123abc")):
-                run["artifacts"] = [artifact(synthetic_program(name, machine=183), corpus)]
+            self.replace_programs(corpus, report, machine=183)
         self.assert_pair_rejected(mutate, "static ET_EXEC for machine 62")
 
     def test_host_machine_mismatch_is_rejected(self) -> None:
@@ -275,11 +337,86 @@ class CorpusValidationTests(unittest.TestCase):
 
     def test_capturing_or_empty_normalization_is_rejected(self) -> None:
         self.assert_corpus_rejected(
-            lambda c: c["artifactNormalizations"][0].update(pattern="(start)"), "must not capture"
+            lambda c: c["artifactNormalizations"][0].update(pattern="(start)"), "may only use literals"
         )
         self.assert_corpus_rejected(
-            lambda c: c["artifactNormalizations"][0].update(pattern="x*"), "must not capture"
+            lambda c: c["artifactNormalizations"][0].update(pattern="x*"), "may only use literals"
         )
+
+    def test_only_fixed_width_deterministic_patterns_are_accepted(self) -> None:
+        for pattern in ("start-[0-9a-f]{6}\\.o\\x00", "abc", "[^a-z\\]]{3}x", "\\x00{64}", "[a-]z"):
+            backend._pattern_width(pattern, "pattern")
+        rejected = {
+            "(?:a|aa)+$": "may only use literals",
+            "a|b": "may only use literals",
+            "a+": "may only use literals",
+            "a{1,3}": "repeats must be exact",
+            "a{0}": "repeats must be exact",
+            "a{65}": "repeats must be exact",
+            ".": "may only use literals",
+            "^a": "may only use literals",
+            "\\d": "may only escape punctuation",
+            "[]": "empty or unterminated",
+            "[ab": "empty or unterminated",
+            "[[a]]": "must not nest",
+            "a{64}b": "between 1 and 64 bytes",
+            "": "between 1 and 64 bytes",
+        }
+        for pattern, message in rejected.items():
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(BehaviorCorpusError, message):
+                backend._pattern_width(pattern, "pattern")
+
+    def test_missing_normalized_digest_is_rejected(self) -> None:
+        self.assert_corpus_rejected(
+            lambda c: c["cases"][0]["expected"]["artifacts"][0].pop("normalizedSha256"), "normalizedSha256"
+        )
+
+    def test_unrepresentable_report_limits_are_rejected(self) -> None:
+        self.assert_corpus_rejected(
+            lambda c: c["limits"].update(artifactBytes=128 * 1024 * 1024), "beyond the 67108864-byte retention limit"
+        )
+        self.assert_corpus_rejected(lambda c: c["cases"][0].update(repetitions=4), "retention limit")
+
+    def test_committed_corpus_worst_case_report_fits(self) -> None:
+        bound = backend.worst_case_report_bytes(adapter.build_corpus())
+        self.assertLessEqual(bound, backend.MAX_REPORT_BYTES)
+
+    def test_worst_case_bound_covers_a_maximal_report(self) -> None:
+        corpus = synthetic_corpus()
+        corpus["limits"].update(streamBytes=3001, artifactBytes=70001)
+        corpus["id"] = "x" * 120
+        corpus["cases"][0]["categories"] = [f"category-{index}-" + "c" * 100 for index in range(40)]
+        corpus = backend.validate_corpus(corpus)
+        _, _, report = valid_pair()
+        report["limits"] = copy.deepcopy(corpus["limits"])
+        report["corpus"]["id"] = corpus["id"]
+        report["cases"][0]["id"] = corpus["cases"][0]["id"]
+        report["cases"][0]["categories"] = corpus["cases"][0]["categories"]
+        report["summary"]["categories"] = {category: 1 for category in sorted(corpus["cases"][0]["categories"])}
+        full = backend.blob(b"\xff" * 3001)
+        for run in report["cases"][0]["runs"]:
+            for record in (run["compile"], run["execution"]):
+                record.update(stdout=full, stderr=full, wallMillis=10 ** 6)
+            run["artifacts"][0].update(backend.blob(b"\xff" * 70001))
+        metadata = {key: report[key] for key in ("host", "hostTools", "libraries")}
+        encoded = len(backend.report_json_bytes(report))
+        bound = backend.worst_case_report_bytes(corpus) - backend.HOST_METADATA_RESERVE_BYTES
+        self.assertLessEqual(encoded, bound + backend._json_bytes(metadata))
+
+    def test_oversized_declared_command_is_rejected(self) -> None:
+        self.assert_corpus_rejected(
+            lambda c: c["cases"][0].update(arguments=["a" * 4096] * 64), "exceed the 262144-byte command bound"
+        )
+        self.assert_corpus_rejected(
+            lambda c: c["cases"][0]["execute"].update(arguments=["a" * 4096] * 64), "execute.arguments"
+        )
+
+    def test_aggregate_limits_are_required_and_bounded(self) -> None:
+        for name in ("processes", "writableBytes", "writableEntries"):
+            with self.subTest(name=name):
+                self.assert_corpus_rejected(lambda c, name=name: c["limits"].pop(name), "limits")
+        self.assert_corpus_rejected(lambda c: c["limits"].update(processes=100000), "processes")
+        self.assert_corpus_rejected(lambda c: c["limits"].update(writableEntries=1), "writableEntries")
 
     def test_unused_normalization_is_rejected(self) -> None:
         def mutate(corpus):
@@ -290,6 +427,247 @@ class CorpusValidationTests(unittest.TestCase):
         self.assert_corpus_rejected(
             lambda c: c["cases"][0]["execute"].update(artifact="other"), "must name an expected artifact"
         )
+
+
+class SandboxConstructionTests(unittest.TestCase):
+    def test_compile_sandbox_has_no_dev_and_a_read_only_root(self) -> None:
+        corpus = adapter.build_corpus()
+        tools = [{"realPath": "/usr/bin/ld.bfd", "sandboxPath": "/usr/bin/ld"}]
+        command = backend._compile_command(
+            Path("/usr/bin/bwrap"), corpus, Path("/r/exe"), tools, ["/lib/libc.so.6"], Path("/r/work"),
+            Path("/r/tmp"), ["-c", "x.s"],
+        )
+        self.assertNotIn("--dev", command)
+        self.assertNotIn("--tmpfs", command)
+        self.assertIn(["--bind", "/r/tmp", "/tmp"], [command[i:i + 3] for i in range(len(command))])
+        boundary = len(command) - 1 - command[::-1].index("/oracle/clang")
+        self.assertEqual(command[boundary - 2:boundary], ["--remount-ro", "/"])
+        self.assertEqual(command[boundary + 1:], ["-c", "x.s"])
+
+    def test_execute_sandbox_root_is_read_only_and_empty(self) -> None:
+        command = backend._execute_command(Path("/usr/bin/bwrap"), adapter.build_corpus(), Path("/r/p"), ["a"])
+        self.assertEqual(command[len(backend.BASE_ARGV) + 1:],
+                         ["--ro-bind", "/r/p", "/oracle/program", "--remount-ro", "/", "--chdir", "/",
+                          "/oracle/program", "a"])
+
+    def test_root_is_refused(self) -> None:
+        with mock.patch.object(backend.os, "getuid", return_value=0), \
+                self.assertRaisesRegex(BehaviorCorpusError, "must not run as root"):
+            backend._run_sandboxed(["/bin/true"], Path("/nonexistent"), adapter.build_corpus()["limits"], 1 << 20,
+                                   artifacts=False)
+
+    def test_oversized_spawned_command_is_refused_before_spawning(self) -> None:
+        with mock.patch.object(backend.subprocess, "Popen") as popen, \
+                self.assertRaisesRegex(BehaviorCorpusError, "argument bound"):
+            backend._run_sandboxed(["x" * 4096] * 512, Path("/nonexistent"), adapter.build_corpus()["limits"],
+                                   1 << 20, artifacts=False)
+        popen.assert_not_called()
+
+    def test_limit_setter_applies_the_aggregate_task_ceiling(self) -> None:
+        limits = adapter.build_corpus()["limits"]
+        tasks = backend.user_task_count() + limits["processes"]
+        self.assertGreater(tasks, limits["processes"])
+        result = subprocess.run(
+            ["python3", "-I", "-S", "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_NPROC))"],
+            preexec_fn=backend._limit_setter(limits, 1 << 30, tasks, artifacts=False),
+            capture_output=True, text=True, check=True, env={},
+        )
+        self.assertEqual(result.stdout.strip(), str((tasks, tasks)))
+
+
+class WritableQuotaTests(unittest.TestCase):
+    LIMITS = {"writableEntries": 4, "writableBytes": 64 * 1024}
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(dir=ROOT / "build" if (ROOT / "build").is_dir() else None)
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.work, self.tmp = self.root / "work", self.root / "tmp"
+        self.work.mkdir()
+        self.tmp.mkdir()
+
+    def violation(self):
+        return backend.writable_usage_violation([self.work, self.tmp], self.LIMITS)
+
+    def test_usage_within_quota_is_accepted(self) -> None:
+        (self.work / "a").write_bytes(b"x" * 1000)
+        (self.tmp / "b").write_bytes(b"y")
+        self.assertIsNone(self.violation())
+
+    def test_entries_are_counted_recursively_across_directories(self) -> None:
+        nested = self.work / "d" / "e"
+        nested.mkdir(parents=True)
+        (nested / "f").write_bytes(b"")
+        (self.tmp / "g").write_bytes(b"")
+        self.assertIsNone(self.violation())
+        (self.tmp / "h").write_bytes(b"")
+        self.assertRegex(self.violation(), "entry quota of 4")
+
+    def test_bytes_are_counted_across_directories(self) -> None:
+        (self.work / "a").write_bytes(b"x" * 40 * 1024)
+        (self.tmp / "b").write_bytes(b"x" * 40 * 1024)
+        self.assertRegex(self.violation(), "byte quota of 65536")
+
+    def test_sparse_files_count_their_apparent_size(self) -> None:
+        with (self.tmp / "sparse").open("wb") as handle:
+            handle.truncate(1024 * 1024)
+        self.assertRegex(self.violation(), "byte quota")
+
+    def test_unreadable_directory_is_a_violation(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions")
+        hidden = self.work / "hidden"
+        hidden.mkdir()
+        hidden.chmod(0)
+        self.addCleanup(hidden.chmod, 0o700)
+        self.assertRegex(self.violation(), "unreadable")
+
+
+ADVERSARY_SOURCE = r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static int entries(void) {
+    char path[64];
+    for (int i = 0; i < 100000; i++) {
+        snprintf(path, sizeof path, "d%d", i);
+        if (mkdir(path, 0755) != 0 || chdir(path) != 0) break;
+    }
+    sleep(30);
+    return 0;
+}
+
+static int bytes(void) {
+    static char chunk[1024 * 1024];
+    char path[64];
+    memset(chunk, 'x', sizeof chunk);
+    for (int i = 0; i < 32; i++) {
+        snprintf(path, sizeof path, "/tmp/f%d", i);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0 || write(fd, chunk, sizeof chunk) != (ssize_t)sizeof chunk) break;
+        close(fd);
+    }
+    sleep(30);
+    return 0;
+}
+
+static int forks(void) {
+    int count = 0;
+    for (; count < 500; count++) {
+        pid_t child = fork();
+        if (child == 0) { pause(); _exit(0); }
+        if (child < 0) break;
+    }
+    printf(count < 500 && errno == EAGAIN && count < 16 ? "capped\n" : "uncapped %d\n", count);
+    return 0;
+}
+
+static int readonly(void) {
+    int writable = open("/escape", O_WRONLY | O_CREAT, 0644) >= 0 || mkdir("/oracle/escape", 0755) == 0;
+    int device = access("/dev/null", F_OK) == 0;
+    printf(writable || device ? "escaped\n" : "readonly\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    if (!strcmp(argv[1], "entries")) return entries();
+    if (!strcmp(argv[1], "bytes")) return bytes();
+    if (!strcmp(argv[1], "forks")) return forks();
+    if (!strcmp(argv[1], "readonly")) return readonly();
+    return 2;
+}
+"""
+
+
+@unittest.skipUnless(os.environ.get("BEHAVIOR_CORPUS_BWRAP_LIVE") == "1", "set BEHAVIOR_CORPUS_BWRAP_LIVE=1")
+class LiveAggregateBoundTests(unittest.TestCase):
+    """Run an adversarial executable through run_corpus under the real bubblewrap and kernel.
+
+    Explicitly requested live verification fails rather than skips when a prerequisite is missing.
+    """
+
+    BWRAP = Path("/usr/bin/bwrap")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        compiler = next((name for name in ("cc", "gcc", "clang") if subprocess.run(
+            ["sh", "-c", f"command -v {name}"], capture_output=True).returncode == 0), None)
+        if not cls.BWRAP.is_file() or compiler is None:
+            raise AssertionError("live controls require /usr/bin/bwrap and a host C compiler")
+        (ROOT / "build").mkdir(exist_ok=True)
+        cls.directory = tempfile.TemporaryDirectory(dir=ROOT / "build")
+        cls.root = Path(cls.directory.name)
+        source = cls.root / "adversary.c"
+        source.write_text(ADVERSARY_SOURCE)
+        cls.executable = cls.root / "adversary"
+        subprocess.run([compiler, "-O1", "-o", os.fspath(cls.executable), os.fspath(source)], check=True)
+        cls.payload = cls.executable.read_bytes()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.directory.cleanup()
+
+    def corpus(self, mode: str, stdout: bytes = b"") -> dict:
+        return backend.validate_corpus({
+            "schemaVersion": 1,
+            "scope": "fixture",
+            "id": f"aggregate-bound-{mode}",
+            "executable": {"bytes": len(self.payload), "sha256": sha(self.payload)},
+            "sandbox": {
+                "backend": backend.BACKEND,
+                "profile": "aggregate-bound-control",
+                "baseArgv": list(backend.BASE_ARGV),
+                "executablePath": "/oracle/exe",
+                "workspacePath": "/work",
+                "programPath": "/oracle/program",
+                "executeElfMachine": 62,
+                "hostTools": [],
+            },
+            "environment": {},
+            "limits": {
+                "wallSeconds": 10, "cpuSeconds": 10, "streamBytes": 4096, "artifactBytes": 1024 * 1024 + 4096,
+                "compileAddressSpaceBytes": 1024 ** 3, "executeAddressSpaceBytes": 64 * 1024 * 1024,
+                "openFiles": 64, "closureLibraries": 64, "workspaceEntries": 2, "processes": 8,
+                "writableBytes": 4 * 1024 * 1024, "writableEntries": 64,
+            },
+            "artifactNormalizations": [],
+            "cases": [{
+                "id": mode,
+                "categories": ["aggregate-bound"],
+                "repetitions": 1,
+                "arguments": [mode],
+                "inputs": [],
+                "expected": {"exitCode": 0, "stdout": backend.blob(stdout), "stderr": backend.blob(b""),
+                             "artifacts": []},
+                "execute": None,
+            }],
+        })
+
+    def run_mode(self, mode: str, stdout: bytes = b"") -> dict:
+        return backend.run_corpus(self.corpus(mode, stdout), self.executable, bwrap=self.BWRAP,
+                                  temporary_root=self.root)
+
+    def test_entry_flood_is_killed_live(self) -> None:
+        # The adversary sleeps past the wall limit after flooding, so only a live kill names the quota.
+        with self.assertRaisesRegex(BehaviorCorpusError, "exceeded the writable entry quota of 64"):
+            self.run_mode("entries")
+
+    def test_byte_flood_in_tmp_is_killed_live(self) -> None:
+        with self.assertRaisesRegex(BehaviorCorpusError, "exceeded the writable byte quota of 4194304"):
+            self.run_mode("bytes")
+
+    def test_fork_flood_is_capped_by_the_aggregate_task_limit(self) -> None:
+        report = self.run_mode("forks", b"capped\n")
+        self.assertEqual(report["summary"]["passed"], 1)
+
+    def test_root_is_read_only_and_dev_is_absent(self) -> None:
+        report = self.run_mode("readonly", b"readonly\n")
+        self.assertEqual(report["summary"]["passed"], 1)
 
 
 class ManifestTests(unittest.TestCase):

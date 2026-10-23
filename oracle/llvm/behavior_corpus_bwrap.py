@@ -3,7 +3,8 @@
 The supplemental corpus ``22.1.6/behavior-corpus-bwrap-v1.json`` expresses the issue97
 ``bubblewrap-hosted-v1`` produced-program observation as ordinary corpus data for the program-neutral
 runner in ``oracle.behavior_corpus_bwrap``: the same locked Clang, the same reviewed ``_start``
-fixture, the same pinned argv, limits, compile diagnostic and single temporary-object normalization.
+fixture, the same pinned argv, limits, compile diagnostic and single temporary-object normalization,
+plus the reviewed normalized program digest and the backend's aggregate process and storage bounds.
 It neither reuses nor replaces the historical OCI corpus ``22.1.6/behavior-corpus.json``. It grants no
 candidate, Kotlin-runtime, effectiveness or release authority.
 """
@@ -44,6 +45,12 @@ from oracle.llvm.produced_program_bwrap import (
 CORPUS_ID = "clang-22-1-6-produced-program-bwrap-v1"
 CORPUS_PATH = PROFILE / "behavior-corpus-bwrap-v1.json"
 NORMALIZATION_ID = "clang-temporary-object"
+# SHA-256 of the produced program after its one temporary-object name is normalized. It was identical
+# on hosted ubuntu-24.04 (GNU ld 2.42) and on Gentoo (GNU ld 2.47), so replay pins the content itself.
+NORMALIZED_PROGRAM_SHA256 = "410ac003de21de01ecd687f80b754fd9b25d05b20b22bd3a948b41deed5f45de"
+# Aggregate bounds the generic backend adds beyond the issue97 per-process limits: tasks the sandbox may
+# add to this user's total, and the live quota over its writable workspace and /tmp.
+AGGREGATE_LIMITS = {"processes": 32, "writableBytes": 64 * 1024 * 1024, "writableEntries": 64}
 
 
 def build_corpus() -> dict[str, Any]:
@@ -65,7 +72,7 @@ def build_corpus() -> dict[str, Any]:
             "hostTools": [{"name": "ld", "hostSearchPath": "/usr/bin:/bin", "sandboxPath": "/usr/bin/ld"}],
         },
         "environment": {"LC_ALL": "C", "PATH": "/usr/bin", "TMPDIR": "/tmp"},
-        "limits": dict(LIMITS),
+        "limits": {**LIMITS, **AGGREGATE_LIMITS},
         "artifactNormalizations": [{
             "id": NORMALIZATION_ID,
             "pattern": TEMP_OBJECT.pattern.decode("ascii"),
@@ -81,7 +88,12 @@ def build_corpus() -> dict[str, Any]:
                 "exitCode": 0,
                 "stdout": blob(b""),
                 "stderr": blob(COMPILE_STDERR),
-                "artifacts": [{"path": "program", "mode": "0o755", "normalizations": [NORMALIZATION_ID]}],
+                "artifacts": [{
+                    "path": "program",
+                    "mode": "0o755",
+                    "normalizations": [NORMALIZATION_ID],
+                    "normalizedSha256": NORMALIZED_PROGRAM_SHA256,
+                }],
             },
             "execute": {
                 "artifact": "program",

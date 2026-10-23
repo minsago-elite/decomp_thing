@@ -5,17 +5,28 @@ This is a second, explicitly versioned sandbox backend beside the OCI backend in
 but has its own corpus and report schema, because the OCI schema hard-requires a pinned container
 runtime, image and cgroup policy that a stock hosted runner cannot provide.
 
-The identity and limit semantics are those of the issue97 ``bubblewrap-hosted-v1`` profile
-(``oracle/llvm/produced_program_bwrap.py``): every sandboxed process runs under
+Every sandboxed process runs under
 ``bwrap --unshare-all --die-with-parent --new-session --cap-drop ALL --clearenv`` with an empty host
 environment, ``RLIMIT_CPU``/``RLIMIT_AS``/``RLIMIT_NOFILE``/``RLIMIT_FSIZE``/``RLIMIT_CORE`` limits,
-a wall-clock process-group kill and bounded stdout/stderr retention. Each case compiles inside a
-sandbox that binds only the executable under test, its declared host tools and their recorded
-shared-library closure, then optionally runs one produced static ELF artifact in a second sandbox
-whose root contains nothing but that artifact.
+a wall-clock process-group kill and bounded stdout/stderr retention. Aggregate host impact is bounded
+as well:
+
+* ``RLIMIT_NPROC`` is set to this user's current task count plus ``limits.processes`` before
+  bubblewrap creates its user namespace. Since Linux 5.14 the limit is charged per user namespace
+  and checked against every ancestor, so the sandbox cannot raise this user's task total by more
+  than ``processes``; aggregate memory is therefore at most ``processes`` times the address-space
+  limit. The backend refuses to run as root, for whom the limit is not enforced.
+* The sandbox root is remounted read-only and no ``/dev`` is mounted. The only writable storage is
+  two host directories, the workspace and ``/tmp``; a monitor walks both while the process runs and
+  kills it once their recursive entry count or allocated bytes exceed ``limits.writableEntries`` or
+  ``limits.writableBytes``. Overshoot is limited to what can be written in one polling interval.
+
+Each case compiles inside a sandbox that binds only the executable under test, its declared host
+tools and their recorded shared-library closure, then optionally runs one produced static ELF
+artifact in a second sandbox whose read-only root contains nothing but that artifact.
 
 Nothing here names a particular program: the executable, its argv, its inputs, the produced
-artifact and the expected observations all come from the corpus.
+artifact, its normalized digest and the expected observations all come from the corpus.
 """
 from __future__ import annotations
 
@@ -72,11 +83,29 @@ LIMIT_BOUNDS = {
     "openFiles": (16, 4096),
     "closureLibraries": (1, 256),
     "workspaceEntries": (1, 256),
+    "processes": (4, 1024),
+    "writableBytes": (64 * 1024, 4 * 1024 ** 3),
+    "writableEntries": (2, 4096),
 }
 MAX_HOST_TOOLS = 8
 MAX_REPETITIONS = 4
 MAX_NORMALIZATIONS = 16
 MAX_PATTERN_CHARACTERS = 256
+# Normalization patterns are fixed-width sequences of single-byte sets, so matching has no choice
+# points and costs at most this many comparisons per artifact byte.
+MAX_PATTERN_WIDTH = 64
+MAX_PATTERN_REPEAT = 64
+# The declared argv and environment of one sandboxed command, and the complete spawned command
+# including bubblewrap's own mount arguments. Linux needs both well under ARG_MAX.
+MAX_DECLARED_COMMAND_BYTES = 256 * 1024
+MAX_COMMAND_BYTES = 1024 * 1024
+# A report holds every stream and artifact as base64. validate_corpus rejects a corpus whose
+# worst-case report cannot fit MAX_REPORT_BYTES; host metadata must fit its own fixed reserve.
+REPORT_OVERHEAD_BYTES = 64 * 1024
+HOST_METADATA_RESERVE_BYTES = 1024 * 1024
+BLOB_OVERHEAD_BYTES = 256
+RECORD_OVERHEAD_BYTES = 512
+QUOTA_POLL_SECONDS = 0.01
 MAX_HOST_FILE_BYTES = 256 * 1024 * 1024
 MAX_CLOSURE_LISTING_BYTES = 64 * 1024
 HOST_PROBE_SECONDS = 10
@@ -208,6 +237,68 @@ def _validate_environment(value: Any, path: str) -> dict[str, str]:
     return value
 
 
+_PATTERN_SPECIAL = frozenset(".^$*+?{}[]\\|()")
+_PATTERN_ESCAPABLE = frozenset(".^$*+?{}[]\\|()-/")
+
+
+def _pattern_escape(text: str, index: int, label: str) -> int:
+    """Length of the literal escape at ``text[index]``: ``\\xHH`` or a backslashed punctuation mark."""
+    if text.startswith("\\x", index) and re.fullmatch(r"[0-9a-fA-F]{2}", text[index + 2:index + 4]):
+        return 4
+    if index + 1 < len(text) and text[index + 1] in _PATTERN_ESCAPABLE:
+        return 2
+    raise BehaviorCorpusError(f"{label} may only escape punctuation or use \\xHH")
+
+
+def _pattern_width(text: str, label: str) -> int:
+    """Width of a fixed-width pattern of single-byte sets, each optionally repeated exactly ``{n}``.
+
+    Anything else (alternation, groups, open-ended or ranged quantifiers, anchors, ``.``) is
+    rejected, so the regular expression engine never backtracks and matching is linear.
+    """
+    width = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\\":
+            index += _pattern_escape(text, index, label)
+        elif character == "[":
+            index += 1
+            if text.startswith("^", index):
+                index += 1
+            members = 0
+            while index < len(text) and text[index] != "]":
+                if text[index] == "[":
+                    raise BehaviorCorpusError(f"{label} character sets must not nest")
+                index += _pattern_escape(text, index, label) if text[index] == "\\" else 1
+                if text.startswith("-", index) and not text.startswith("-]", index):
+                    index += 1
+                    if index >= len(text):
+                        break
+                    index += _pattern_escape(text, index, label) if text[index] == "\\" else 1
+                members += 1
+            if index >= len(text) or members == 0:
+                raise BehaviorCorpusError(f"{label} has an empty or unterminated character set")
+            index += 1
+        elif character in _PATTERN_SPECIAL or not 0x20 <= ord(character) < 0x7F:
+            raise BehaviorCorpusError(
+                f"{label} may only use literals, escapes, character sets and exact {{n}} repeats"
+            )
+        else:
+            index += 1
+        repeat = 1
+        if text.startswith("{", index):
+            match = re.match(r"\{([1-9][0-9]{0,2})\}", text[index:])
+            if match is None or int(match.group(1)) > MAX_PATTERN_REPEAT:
+                raise BehaviorCorpusError(f"{label} repeats must be exact {{n}} with 1 <= n <= {MAX_PATTERN_REPEAT}")
+            repeat = int(match.group(1))
+            index += match.end()
+        width += repeat
+    if not 1 <= width <= MAX_PATTERN_WIDTH:
+        raise BehaviorCorpusError(f"{label} must match between 1 and {MAX_PATTERN_WIDTH} bytes")
+    return width
+
+
 def _validate_normalizations(value: Any, path: str) -> dict[str, tuple[re.Pattern[bytes], bytes]]:
     entries = _array(value, path, maximum=MAX_NORMALIZATIONS)
     result: dict[str, tuple[re.Pattern[bytes], bytes]] = {}
@@ -220,6 +311,7 @@ def _validate_normalizations(value: Any, path: str) -> dict[str, tuple[re.Patter
         pattern_text = _string(entry["pattern"], f"{label}.pattern", maximum=MAX_PATTERN_CHARACTERS)
         if not pattern_text.isascii():
             raise BehaviorCorpusError(f"{label}.pattern must be ASCII")
+        _pattern_width(pattern_text, f"{label}.pattern")
         try:
             pattern = re.compile(pattern_text.encode("ascii"))
         except re.error as error:
@@ -257,6 +349,49 @@ def _validate_expected_streams(value: Any, path: str, limits: Mapping[str, int],
     for stream in ("stdout", "stderr"):
         _validate_blob(expected[stream], f"{path}.{stream}", maximum=limits["streamBytes"])
     return expected
+
+
+def _command_bytes(arguments: Sequence[str]) -> int:
+    """Kernel cost of an argv: each NUL-terminated string plus its pointer."""
+    return sum(len(os.fsencode(argument)) + 1 + 8 for argument in arguments) + 8
+
+
+def _bound_declared_command(arguments: Sequence[str], environment: Mapping[str, str], path: str) -> None:
+    declared = list(arguments)
+    for name, value in environment.items():
+        declared += ["--setenv", name, value]
+    if _command_bytes(declared) > MAX_DECLARED_COMMAND_BYTES:
+        raise BehaviorCorpusError(
+            f"{path} and the environment exceed the {MAX_DECLARED_COMMAND_BYTES}-byte command bound"
+        )
+
+
+def _encoded_blob_bytes(size: int) -> int:
+    return 4 * ((size + 2) // 3) + BLOB_OVERHEAD_BYTES
+
+
+def _json_bytes(value: Any) -> int:
+    # Doubled to cover the deeper indentation of the same value inside a report.
+    return 2 * len(json.dumps(value, indent=2, sort_keys=True))
+
+
+def worst_case_report_bytes(corpus: Mapping[str, Any]) -> int:
+    """Upper bound of the canonical report for any run this corpus admits, excluding host metadata."""
+    limits = corpus["limits"]
+    streams = 2 * _encoded_blob_bytes(limits["streamBytes"])
+    total = REPORT_OVERHEAD_BYTES + HOST_METADATA_RESERVE_BYTES
+    total += _json_bytes({field: corpus[field] for field in (
+        "id", "executable", "sandbox", "environment", "limits", "artifactNormalizations"
+    )})
+    for case in corpus["cases"]:
+        run = RECORD_OVERHEAD_BYTES + streams
+        for artifact in case["expected"]["artifacts"]:
+            run += RECORD_OVERHEAD_BYTES + _encoded_blob_bytes(limits["artifactBytes"]) + _json_bytes(artifact)
+        if case["execute"] is not None:
+            run += RECORD_OVERHEAD_BYTES + streams
+        total += 2 * _json_bytes({"id": case["id"], "categories": case["categories"]}) + RECORD_OVERHEAD_BYTES
+        total += case["repetitions"] * run
+    return total
 
 
 def validate_corpus(value: dict[str, Any]) -> dict[str, Any]:
@@ -327,9 +462,12 @@ def validate_corpus(value: dict[str, Any]) -> dict[str, Any]:
         artifact_names: list[str] = []
         for artifact_index, raw_artifact in enumerate(artifacts):
             artifact_label = f"{label}.expected.artifacts[{artifact_index}]"
-            artifact = _object(raw_artifact, artifact_label, {"path", "mode", "normalizations"})
+            artifact = _object(raw_artifact, artifact_label, {"path", "mode", "normalizations", "normalizedSha256"})
             artifact_names.append(_single_component(artifact["path"], f"{artifact_label}.path"))
             _mode(artifact["mode"], f"{artifact_label}.mode")
+            # The reviewed digest of the normalized bytes: replay authenticates the produced
+            # content itself, not merely its repeatability.
+            _sha256(artifact["normalizedSha256"], f"{artifact_label}.normalizedSha256")
             rules = _array(
                 artifact["normalizations"], f"{artifact_label}.normalizations", maximum=MAX_NORMALIZATIONS
             )
@@ -341,6 +479,9 @@ def validate_corpus(value: dict[str, Any]) -> dict[str, Any]:
         _unique(names + artifact_names, f"{label} workspace entries")
         if len(names) + len(artifact_names) > limits["workspaceEntries"]:
             raise BehaviorCorpusError(f"{label} exceeds the workspace entry limit")
+        if len(names) + len(artifact_names) > limits["writableEntries"]:
+            raise BehaviorCorpusError(f"{label} exceeds the writable entry quota")
+        _bound_declared_command(arguments, corpus["environment"], f"{label}.arguments")
         if case["execute"] is not None:
             execute = _object(case["execute"], f"{label}.execute", {"artifact", "arguments", "expected"})
             if execute["artifact"] not in artifact_names:
@@ -350,9 +491,14 @@ def validate_corpus(value: dict[str, Any]) -> dict[str, Any]:
             execute_arguments = _array(execute["arguments"], f"{label}.execute.arguments", maximum=MAX_ARGUMENTS)
             for argument_index, argument in enumerate(execute_arguments):
                 _string(argument, f"{label}.execute.arguments[{argument_index}]", allow_empty=True, maximum=4096)
+            _bound_declared_command(execute_arguments, {}, f"{label}.execute.arguments")
             _validate_expected_streams(execute["expected"], f"{label}.execute.expected", limits, set())
     if unused := sorted(set(normalizations) - used_normalizations):
         raise BehaviorCorpusError(f"corpus.artifactNormalizations are unused: {unused}")
+    if (bound := worst_case_report_bytes(corpus)) > MAX_REPORT_BYTES:
+        raise BehaviorCorpusError(
+            f"corpus limits admit a {bound}-byte report, beyond the {MAX_REPORT_BYTES}-byte retention limit"
+        )
     del sandbox
     return corpus
 
@@ -517,7 +663,27 @@ def _resolve_host_tools(sandbox: Mapping[str, Any]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------------------------
 
 
-def _limit_setter(limits: Mapping[str, int], address_space: int, *, artifacts: bool):
+def user_task_count() -> int:
+    """Tasks (threads included) whose real UID is this process's, as RLIMIT_NPROC counts them."""
+    uid = os.getuid()
+    total = 0
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = Path(entry.path, "status").read_text()
+        except OSError:
+            continue
+        fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+        try:
+            if int(fields["Uid"].split()[0]) == uid:
+                total += int(fields["Threads"])
+        except (KeyError, ValueError, IndexError):
+            continue
+    return total
+
+
+def _limit_setter(limits: Mapping[str, int], address_space: int, tasks: int, *, artifacts: bool):
     def apply() -> None:
         os.umask(0o022)
         resource.setrlimit(resource.RLIMIT_CPU, (limits["cpuSeconds"], limits["cpuSeconds"]))
@@ -526,8 +692,48 @@ def _limit_setter(limits: Mapping[str, int], address_space: int, *, artifacts: b
         size = limits["artifactBytes"] if artifacts else limits["streamBytes"]
         resource.setrlimit(resource.RLIMIT_FSIZE, (size, size))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        # bubblewrap's user namespace inherits this as its ceiling, and every ancestor namespace is
+        # checked too, so the sandbox can add at most ``processes`` tasks to this user's total.
+        resource.setrlimit(resource.RLIMIT_NPROC, (tasks, tasks))
 
     return apply
+
+
+def writable_usage_violation(directories: Sequence[Path], limits: Mapping[str, int]) -> str | None:
+    """Walk every writable directory once; describe the first quota violation, if any.
+
+    The walk stops as soon as the entry quota is exceeded, so its cost is bounded by the quota
+    rather than by whatever the sandboxed process created. An unreadable directory is a violation:
+    the monitor must be able to see everything it bounds.
+    """
+    entries = 0
+    allocated = 0
+    pending = list(directories)
+    while pending:
+        directory = pending.pop()
+        try:
+            iterator = os.scandir(directory)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return f"made {directory.name} unreadable to the writable-storage monitor"
+        with iterator:
+            for entry in iterator:
+                entries += 1
+                if entries > limits["writableEntries"]:
+                    return f"exceeded the writable entry quota of {limits['writableEntries']}"
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return f"made {entry.name} unreadable to the writable-storage monitor"
+                allocated += max(metadata.st_blocks * 512, metadata.st_size)
+                if allocated > limits["writableBytes"]:
+                    return f"exceeded the writable byte quota of {limits['writableBytes']}"
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append(Path(entry.path))
+    return None
 
 
 def _run_sandboxed(
@@ -537,12 +743,21 @@ def _run_sandboxed(
     address_space: int,
     *,
     artifacts: bool,
+    writable: Sequence[Path] = (),
 ) -> tuple[int, bytes, bytes, int]:
-    """One bounded process: wall-clock group kill, bounded streams, no inherited environment."""
+    """One bounded process: wall-clock group kill, live storage quota, bounded streams, no environment."""
+    if os.getuid() == 0 or os.geteuid() == 0:
+        raise BehaviorCorpusError("the bubblewrap backend must not run as root, which RLIMIT_NPROC exempts")
+    maximum = min(MAX_COMMAND_BYTES, os.sysconf("SC_ARG_MAX") // 2)
+    if _command_bytes(command) > maximum:
+        raise BehaviorCorpusError(f"sandbox command exceeds its {maximum}-byte argument bound")
     out_path, err_path = scratch / "stdout", scratch / "stderr"
     for path in (out_path, err_path):
         path.unlink(missing_ok=True)
+    tasks = user_task_count() + limits["processes"]
     started = time.monotonic()
+    deadline = started + limits["wallSeconds"]
+    violation = None
     with out_path.open("xb") as out, err_path.open("xb") as err:
         process = subprocess.Popen(
             list(command),
@@ -552,19 +767,30 @@ def _run_sandboxed(
             env={},
             close_fds=True,
             start_new_session=True,
-            preexec_fn=_limit_setter(limits, address_space, artifacts=artifacts),
+            preexec_fn=_limit_setter(limits, address_space, tasks, artifacts=artifacts),
         )
         try:
-            code = process.wait(timeout=limits["wallSeconds"])
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise BehaviorCorpusError("sandboxed process exceeded its wall-clock limit") from None
+            while True:
+                try:
+                    code = process.wait(timeout=QUOTA_POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if time.monotonic() >= deadline:
+                    violation = "exceeded its wall-clock limit"
+                    break
+                if (violation := writable_usage_violation(writable, limits)) is not None:
+                    break
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+            process.wait()
+    if violation is None:
+        violation = writable_usage_violation(writable, limits)
+    if violation is not None:
+        raise BehaviorCorpusError(f"sandboxed process {violation}")
     elapsed = int((time.monotonic() - started) * 1000)
     streams = []
     for path in (out_path, err_path):
@@ -587,10 +813,13 @@ def _compile_command(
     tools: Sequence[Mapping[str, Any]],
     libraries: Sequence[str],
     workspace: Path,
+    temporary: Path,
     arguments: Sequence[str],
 ) -> list[str]:
+    # No /dev, and a read-only root: the workspace and /tmp, both monitored host directories,
+    # are the only writable storage.
     sandbox = corpus["sandbox"]
-    command = _base(bwrap) + ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    command = _base(bwrap) + ["--proc", "/proc", "--bind", os.fspath(temporary), "/tmp"]
     command += ["--ro-bind", os.fspath(executable), sandbox["executablePath"]]
     for tool in tools:
         command += ["--ro-bind", tool["realPath"], tool["sandboxPath"]]
@@ -600,15 +829,17 @@ def _compile_command(
     for name, value in corpus["environment"].items():
         command += ["--setenv", name, value]
     directories = sorted({os.path.dirname(path) for path in libraries if "/ld-linux" not in path})
-    command += ["--setenv", "LD_LIBRARY_PATH", ":".join(directories)]
+    command += ["--setenv", "LD_LIBRARY_PATH", ":".join(directories), "--remount-ro", "/"]
     return command + [sandbox["executablePath"], *arguments]
 
 
 def _execute_command(bwrap: Path, corpus: Mapping[str, Any], program: Path, arguments: Sequence[str]) -> list[str]:
-    # The produced static ELF is the only file in an otherwise empty root: no /proc, /dev,
-    # libraries, network or environment.
+    # The produced static ELF is the only file in an otherwise empty, read-only root: no /proc,
+    # /dev, libraries, network, environment or writable storage.
     path = corpus["sandbox"]["programPath"]
-    return _base(bwrap) + ["--ro-bind", os.fspath(program), path, "--chdir", "/", path, *arguments]
+    return _base(bwrap) + [
+        "--ro-bind", os.fspath(program), path, "--remount-ro", "/", "--chdir", "/", path, *arguments
+    ]
 
 
 def require_static_elf(payload: bytes, machine: int, label: str) -> None:
@@ -685,6 +916,10 @@ def _collect_workspace(
             raise BehaviorCorpusError(f"{label} artifact {artifact['path']} has mode {mode}, expected {artifact['mode']}")
         payload = _read_regular_snapshot(path, f"{label} artifact {artifact['path']}", limits["artifactBytes"])
         normalized = normalize_artifact(payload, artifact["normalizations"], normalizations, f"{label} artifact {artifact['path']}")
+        if _sha(normalized) != artifact["normalizedSha256"]:
+            raise BehaviorCorpusError(
+                f"{label} artifact {artifact['path']} normalized digest {_sha(normalized)} differs from the corpus"
+            )
         collected.append(
             (
                 {
@@ -745,24 +980,30 @@ def run_corpus(
             library_set.update(_closure(Path(tool["realPath"]), limits["closureLibraries"]))
         libraries = sorted(library_set)
         library_identities = [_file_identity(path) for path in libraries]
+        metadata = {"host": host, "hostTools": tools, "libraries": library_identities}
+        if _json_bytes(metadata) > HOST_METADATA_RESERVE_BYTES:
+            raise BehaviorCorpusError("host metadata exceeds the report's fixed retention reserve")
         for case_index, case in enumerate(validated["cases"]):
             runs = []
             for repetition in range(case["repetitions"]):
                 label = f"case {case['id']} run {repetition}"
                 run_root = root / f"case{case_index}-run{repetition}"
-                workspace, scratch = run_root / "work", run_root / "scratch"
-                for path in (run_root, workspace, scratch):
+                workspace, temporary, scratch = run_root / "work", run_root / "tmp", run_root / "scratch"
+                for path in (run_root, workspace, temporary, scratch):
                     path.mkdir(mode=0o700)
                 for item in case["inputs"]:
                     target = workspace / item["path"]
                     _write_exclusive(target, base64.b64decode(item["base64"]), 0o600)
                     os.chmod(target, int(item["mode"], 8))
                 code, stdout, stderr, wall = _run_sandboxed(
-                    _compile_command(bwrap, validated, staged, tools, libraries, workspace, case["arguments"]),
+                    _compile_command(
+                        bwrap, validated, staged, tools, libraries, workspace, temporary, case["arguments"]
+                    ),
                     scratch,
                     limits,
                     limits["compileAddressSpaceBytes"],
                     artifacts=True,
+                    writable=(workspace, temporary),
                 )
                 _check_streams(f"{label} compile", code, stdout, stderr, case["expected"])
                 compile_observation = _observation(code, stdout, stderr, wall)
@@ -924,7 +1165,7 @@ def validate_report(value: dict[str, Any]) -> dict[str, Any]:
             artifacts = _array(run["artifacts"], f"{run_label}.artifacts", maximum=limits["workspaceEntries"])
             for artifact_index, raw_artifact in enumerate(artifacts):
                 artifact_label = f"{run_label}.artifacts[{artifact_index}]"
-                record, payload = _validate_blob(
+                record, _ = _validate_blob(
                     raw_artifact,
                     artifact_label,
                     maximum=limits["artifactBytes"],
@@ -935,9 +1176,9 @@ def validate_report(value: dict[str, Any]) -> dict[str, Any]:
                 rules = _array(record["normalizations"], f"{artifact_label}.normalizations", maximum=MAX_NORMALIZATIONS)
                 if any(rule not in normalizations for rule in rules):
                     raise BehaviorCorpusError(f"{artifact_label}.normalizations names an unknown rule")
-                normalized = normalize_artifact(payload, rules, normalizations, artifact_label)
-                if _sha256(record["normalizedSha256"], f"{artifact_label}.normalizedSha256") != _sha(normalized):
-                    raise BehaviorCorpusError(f"{artifact_label}.normalizedSha256 does not match its content")
+                # Structural only: the rules come from the report, so they are applied solely by
+                # validate_corpus_report_pair after it binds them to the corpus.
+                _sha256(record["normalizedSha256"], f"{artifact_label}.normalizedSha256")
             if run["execution"] is not None:
                 _validate_observation(run["execution"], f"{run_label}.execution", limits)
     _unique([case["id"] for case in cases], "report.cases ids")
@@ -972,13 +1213,14 @@ def validate_corpus_report_pair(
             raise BehaviorCorpusError(f"report.{field} differs from the corpus")
     if [case["id"] for case in checked["cases"]] != [case["id"] for case in validated["cases"]]:
         raise BehaviorCorpusError("report.cases do not match the corpus cases in order")
+    # The report's rules equal the corpus's (checked above), so only reviewed patterns run here.
+    normalizations = _validate_normalizations(validated["artifactNormalizations"], "corpus.artifactNormalizations")
     for expected_case, reported in zip(validated["cases"], checked["cases"]):
         label = f"report case {reported['id']}"
         if reported["categories"] != expected_case["categories"]:
             raise BehaviorCorpusError(f"{label} categories differ from the corpus")
         if len(reported["runs"]) != expected_case["repetitions"]:
             raise BehaviorCorpusError(f"{label} has {len(reported['runs'])} runs, expected {expected_case['repetitions']}")
-        normalized_by_run = []
         for run_index, run in enumerate(reported["runs"]):
             run_label = f"{label} run {run_index}"
             expected = expected_case["expected"]
@@ -987,9 +1229,20 @@ def validate_corpus_report_pair(
                 {"path": item["path"], "mode": item["mode"], "normalizations": item["normalizations"]}
                 for item in run["artifacts"]
             ]
-            if shape != expected["artifacts"]:
+            if shape != [
+                {"path": item["path"], "mode": item["mode"], "normalizations": item["normalizations"]}
+                for item in expected["artifacts"]
+            ]:
                 raise BehaviorCorpusError(f"{run_label} artifacts differ from the corpus")
-            normalized_by_run.append([item["normalizedSha256"] for item in run["artifacts"]])
+            for item, reviewed in zip(run["artifacts"], expected["artifacts"]):
+                artifact_label = f"{run_label} artifact {item['path']}"
+                normalized = normalize_artifact(
+                    base64.b64decode(item["base64"]), reviewed["normalizations"], normalizations, artifact_label
+                )
+                if item["normalizedSha256"] != _sha(normalized):
+                    raise BehaviorCorpusError(f"{artifact_label} normalizedSha256 does not match its content")
+                if item["normalizedSha256"] != reviewed["normalizedSha256"]:
+                    raise BehaviorCorpusError(f"{artifact_label} normalized digest differs from the corpus")
             execute = expected_case["execute"]
             if execute is None:
                 if run["execution"] is not None:
@@ -1004,8 +1257,6 @@ def validate_corpus_report_pair(
                 f"{run_label} artifact {artifact['path']}",
             )
             _expect_streams(run["execution"], execute["expected"], f"{run_label} execution")
-        if any(item != normalized_by_run[0] for item in normalized_by_run):
-            raise BehaviorCorpusError(f"{label} normalized artifacts differ between repetitions")
     return checked
 
 
