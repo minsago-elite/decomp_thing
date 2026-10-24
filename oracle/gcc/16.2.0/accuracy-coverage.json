@@ -1,22 +1,55 @@
 {
   "dimensions": {
     "callEdges": {
-      "oracle": {
+      "currentScore": {
+        "evidence": {
+          "bytes": 843767,
+          "path": "call-edge-score.json",
+          "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "sha256": "24062d35c2d859c47b84f10f2e0f1334166ff4d2fef479547129ef89f307032c"
+        },
+        "precision": {
+          "denominator": 6197,
+          "numerator": 5780,
+          "value": 0.932709
+        },
         "productionVerified": false,
-        "reasonCode": "no-authenticated-gcc-call-oracle",
-        "status": "unavailable"
+        "reasonCode": "recovered-model-not-release-eligible",
+        "recall": {
+          "denominator": 5860,
+          "numerator": 5780,
+          "value": 0.986348
+        },
+        "releaseEligible": false,
+        "status": "measured",
+        "unrestricted": {
+          "precision": {
+            "denominator": 6894,
+            "numerator": 5780,
+            "value": 0.83841
+          },
+          "recall": {
+            "denominator": 5860,
+            "numerator": 5780,
+            "value": 0.986348
+          },
+          "scoredRecoveredCount": 6894
+        }
+      },
+      "oracle": {
+        "callersWithCallSites": 2032,
+        "edgeCount": 5860,
+        "populationDefinition": "unique caller/callee function-start pairs from full-twin DWARF call sites whose callee is a definition or a uniquely named oracle alias, with both endpoints scoreable; recovered edges are scored when both endpoints are scoreable and the caller has a DWARF call site",
+        "productionVerified": false,
+        "status": "available",
+        "tailCallEdgeCount": 12
       },
       "productionReplay": {
         "evidence": "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
         "reasonCode": "production-registry-empty",
         "status": "unavailable"
       },
-      "recovery": {
-        "productionVerified": false,
-        "reasonCode": "no-authenticated-gcc-recovered-call-sites",
-        "status": "unavailable"
-      },
-      "status": "unavailable",
+      "status": "measured-not-release-eligible",
       "threshold": {
         "precisionAtLeast": 0.9,
         "recallAtLeast": 0.9
@@ -24,9 +57,42 @@
     },
     "functionStarts": {
       "currentScore": {
+        "evidence": {
+          "binding": {
+            "bytes": 2740,
+            "path": "surviving-symbol-identity-binding.json",
+            "sha256": "3293afb3fd547fafb0f84c423b8a971a18bb0a7568f230db3383d7c84b7dd90d"
+          },
+          "bytes": 99292,
+          "path": "function-start-score.json",
+          "programModel": {
+            "bytes": 7634939,
+            "path": "stripped-recovered-program-model.json",
+            "sha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379"
+          },
+          "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "qualification": {
+            "bytes": 1122,
+            "path": "surviving-symbol-identity-qualification.json",
+            "sha256": "bead696e9755375578e8adbaa67cc432789954acee96b20cf9f621308227552b"
+          },
+          "sha256": "acb822274ad9d9570d6f9957e7b3a2efe982d0f4138558896cc59569b2c6cd8e"
+        },
+        "nearMisses": 0,
+        "precision": {
+          "denominator": 3273,
+          "numerator": 3269,
+          "value": 0.998778
+        },
         "productionVerified": false,
-        "reasonCode": "no-retained-current-recovered-model",
-        "status": "unavailable"
+        "reasonCode": "recovered-model-not-release-eligible",
+        "recall": {
+          "denominator": 3284,
+          "numerator": 3269,
+          "value": 0.995432
+        },
+        "releaseEligible": false,
+        "status": "measured"
       },
       "historicalReference": {
         "productionVerified": false,
@@ -63,7 +129,7 @@
         "scoreableFunctionCount": 3284,
         "status": "available"
       },
-      "status": "oracle-covered-recovery-unavailable",
+      "status": "measured-not-release-eligible",
       "threshold": {
         "precisionAtLeast": 0.95,
         "recallAtLeast": 0.95

@@ -26,7 +26,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from oracle.elf_oracle import verify_oracle_manifest  # noqa: E402
-from oracle.function_recovery import load_function_oracle  # noqa: E402
+from oracle.function_recovery import (  # noqa: E402
+    MAX_REPORT_BYTES,
+    load_function_oracle,
+)
 
 
 REPORT_ID = "gcc-driver-accuracy-coverage-v1"
@@ -280,6 +283,329 @@ def _symbol_identity_score(
     }
 
 
+FUNCTION_START_REPORT = "function-start-score.json"
+FUNCTION_START_REPORT_ID = "gcc-driver-function-start-score-v1"
+# The function-start report is scored from the same captured model as the
+# identity report, so it is rescored from the retained model bytes and the
+# same retained binding and qualification records.
+FUNCTION_START_MODEL = "stripped-recovered-program-model.json"
+FUNCTION_START_BINDING = SYMBOL_IDENTITY_BINDING
+FUNCTION_START_QUALIFICATION = SYMBOL_IDENTITY_QUALIFICATION
+
+
+def _ratio(numerator: int, denominator: int) -> dict[str, Any]:
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "value": None if denominator == 0 else round(numerator / denominator, 6),
+    }
+
+
+def _function_start_score(
+    profile_directory: Path,
+    loaded_oracle: Any,
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Return the current score from a retained, oracle-bound function-start report."""
+
+    report_path = profile_directory / FUNCTION_START_REPORT
+    if not report_path.exists():
+        return {
+            "status": "unavailable",
+            "reasonCode": "no-retained-current-recovered-model",
+            "productionVerified": False,
+        }
+    # Score and record the same snapshot so the evidence digest names the
+    # bytes that were compared with the rescore.
+    report, report_record = _json_snapshot(
+        report_path, "function start report", MAX_REPORT_BYTES
+    )
+    if report.get("reportId") != FUNCTION_START_REPORT_ID or report.get("twin") != "stripped":
+        raise CoverageError("function start report has an unexpected identity")
+    provenance = _required_mapping(report.get("provenance"), "function start provenance")
+    if provenance.get("artifactManifestSha256") != manifest_sha256:
+        raise CoverageError("function start report is bound to another manifest")
+    if provenance.get("strippedInputSha256") != loaded_oracle.artifacts["stripped"].input_sha256:
+        raise CoverageError("function start report is bound to another input")
+    scoreable = {
+        function.rva
+        for function in loaded_oracle.functions
+        if function.rva is not None and function.exclusion is None
+    }
+    summary = _required_mapping(report.get("summary"), "function start summary")
+    outcomes = [
+        report.get(key)
+        for key in ("exactMatchRvas", "nearMisses", "falseNegatives", "falsePositives")
+    ]
+    if not all(isinstance(outcome, list) for outcome in outcomes):
+        raise CoverageError("function start report outcomes must be arrays")
+    exact_rvas, near_misses, false_negatives, false_positives = outcomes
+    try:
+        exact = [int(rva, 16) for rva in exact_rvas]
+        near = [
+            (int(item["oracleRva"], 16), int(item["recoveredRva"], 16))
+            for item in near_misses
+        ]
+        missed = [int(item["oracleRva"], 16) for item in false_negatives]
+        fabricated = [int(item["recoveredRva"], 16) for item in false_positives]
+    except (KeyError, TypeError, ValueError) as error:
+        raise CoverageError("function start report outcome is malformed") from error
+    if summary.get("referenceCount") != len(scoreable):
+        raise CoverageError("function start report population differs from the oracle")
+    # Every scoreable oracle start is matched exactly, near-missed or missed,
+    # and each recovered start is counted at most once.
+    oracle_outcomes = exact + [oracle_rva for oracle_rva, _ in near] + missed
+    if len(set(oracle_outcomes)) != len(oracle_outcomes) or set(oracle_outcomes) != scoreable:
+        raise CoverageError("function start outcomes do not partition the oracle population")
+    recovered_outcomes = exact + [recovered_rva for _, recovered_rva in near] + fabricated
+    if len(set(recovered_outcomes)) != len(recovered_outcomes):
+        raise CoverageError("function start outcomes count a recovered start twice")
+    if any(rva in scoreable for rva in fabricated):
+        raise CoverageError("function start false positives include scoreable oracle starts")
+    if any(
+        recovered_rva in scoreable
+        or recovered_rva == oracle_rva
+        or abs(recovered_rva - oracle_rva) > loaded_oracle.near_miss_bytes
+        for oracle_rva, recovered_rva in near
+    ):
+        raise CoverageError("function start near miss is outside the near-miss window")
+    true_positives = len(exact) + len(near)
+    scored_recovered = true_positives + len(fabricated)
+    if (
+        summary.get("truePositives") != true_positives
+        or summary.get("scoredRecoveredCount") != scored_recovered
+        or summary.get("exactMatches") != len(exact)
+        or summary.get("nearMisses") != len(near)
+        or summary.get("falseNegatives") != len(missed)
+        or summary.get("falsePositives") != len(fabricated)
+    ):
+        raise CoverageError("function start report summary disagrees with outcomes")
+    precision = _ratio(true_positives, scored_recovered)
+    recall = _ratio(true_positives, len(scoreable))
+    if summary.get("precision") != precision or summary.get("recall") != recall:
+        raise CoverageError("function start report ratios disagree with outcomes")
+    qualification = _required_mapping(
+        provenance.get("qualification"), "function start qualification"
+    )
+    # No release-admission authority exists for recovered models yet.
+    if qualification.get("releaseEligible") is not False:
+        raise CoverageError("function start report must not claim release eligibility")
+    # The checks above only prove the outcomes are self-consistent with the
+    # oracle.  The recovered starts themselves are authenticated by rescoring
+    # the retained model, whose bytes must hash to the retained binding, and
+    # requiring the retained report to equal that rescore exactly.
+    model_path = profile_directory / FUNCTION_START_MODEL
+    binding_path = profile_directory / FUNCTION_START_BINDING
+    qualification_path = profile_directory / FUNCTION_START_QUALIFICATION
+    for path in (model_path, binding_path, qualification_path):
+        if not path.exists():
+            raise CoverageError(
+                f"function start report has no retained recovered model record: {path.name}"
+            )
+    # Imported here because the reporter reuses this module's bounded readers.
+    from oracle.gcc.report_function_starts import score_report
+
+    scored = score_report(profile_directory, model_path, binding_path, qualification_path)
+    rescored = scored.report
+    if report != rescored:
+        raise CoverageError(
+            "function start report disagrees with a rescore of its retained recovered model"
+        )
+    return {
+        "status": "measured",
+        "precision": precision,
+        "recall": recall,
+        "nearMisses": summary.get("nearMisses"),
+        "productionVerified": False,
+        "reasonCode": "recovered-model-not-release-eligible",
+        "releaseEligible": False,
+        "evidence": {
+            **report_record,
+            # Recorded from the snapshots that were verified and rescored.
+            **scored.evidence,
+            "programModelSha256": rescored["provenance"]["programModel"]["sha256"],
+        },
+    }
+
+
+CALL_EDGE_REPORT = "call-edge-score.json"
+CALL_EDGE_REPORT_ID = "gcc-driver-call-edge-score-v1"
+
+
+def _call_edge_score(
+    profile_directory: Path,
+    loaded_oracle: Any,
+    manifest_sha256: str,
+    full_path: Path,
+    full_sha256: str,
+) -> dict[str, Any]:
+    """Return the current score from a retained, oracle-bound call-edge report.
+
+    The oracle side is re-derived from the verified full artifact's DWARF. The
+    recovered side needs the program model, which the profile does not retain,
+    so it is bound only by digest and the score is never release-eligible.
+    """
+
+    report_path = profile_directory / CALL_EDGE_REPORT
+    if not report_path.exists():
+        return {
+            "status": "unavailable",
+            "reasonCode": "no-retained-current-recovered-call-model",
+            "productionVerified": False,
+        }
+    report = _json(report_path, "call edge report")
+    if report.get("reportId") != CALL_EDGE_REPORT_ID or report.get("twin") != "stripped":
+        raise CoverageError("call edge report has an unexpected identity")
+    provenance = _required_mapping(report.get("provenance"), "call edge provenance")
+    if provenance.get("artifactManifestSha256") != manifest_sha256:
+        raise CoverageError("call edge report is bound to another manifest")
+    if provenance.get("strippedInputSha256") != loaded_oracle.artifacts["stripped"].input_sha256:
+        raise CoverageError("call edge report is bound to another input")
+    if provenance.get("fullArtifactSha256") != full_sha256:
+        raise CoverageError("call edge report is bound to another full artifact")
+    scoreable = {
+        function.rva
+        for function in loaded_oracle.functions
+        if function.rva is not None and function.exclusion is None
+    }
+    oracle = _required_mapping(report.get("oracle"), "call edge oracle")
+    summary = _required_mapping(report.get("summary"), "call edge summary")
+    raw = {
+        key: report.get(key)
+        for key in (
+            "oracleEdges",
+            "missingEdges",
+            "fabricatedEdges",
+            "callerWithoutCallSiteEdges",
+            "callersWithCallSites",
+        )
+    }
+    if not all(isinstance(value, list) for value in raw.values()):
+        raise CoverageError("call edge report outcomes must be arrays")
+
+    def pairs(items: list[Any]) -> list[tuple[int, int]]:
+        return [(int(item["callerRva"], 16), int(item["calleeRva"], 16)) for item in items]
+
+    try:
+        reference_list = pairs(raw["oracleEdges"])
+        tail_flags = [item["tailCall"] for item in raw["oracleEdges"]]
+        missing_list = pairs(raw["missingEdges"])
+        fabricated_list = pairs(raw["fabricatedEdges"])
+        unchecked_list = pairs(raw["callerWithoutCallSiteEdges"])
+        callers = {int(rva, 16) for rva in raw["callersWithCallSites"]}
+        true_positives = int(summary["truePositives"])
+        scored_recovered = int(summary["scoredRecoveredCount"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise CoverageError("call edge report outcome is malformed") from error
+    if not all(isinstance(flag, bool) for flag in tail_flags):
+        raise CoverageError("call edge report outcome is malformed")
+    reference = set(reference_list)
+    missing = set(missing_list)
+    fabricated = set(fabricated_list)
+    unchecked = set(unchecked_list)
+    if (
+        len(reference) != len(reference_list)
+        or len(missing) != len(missing_list)
+        or len(fabricated) != len(fabricated_list)
+        or len(unchecked) != len(unchecked_list)
+        or len(callers) != len(raw["callersWithCallSites"])
+    ):
+        raise CoverageError("call edge report repeats an edge or caller")
+    endpoints = {
+        rva for pair in reference | fabricated | unchecked for rva in pair
+    } | callers
+    if not endpoints <= scoreable:
+        raise CoverageError("call edge report endpoints are not scoreable oracle functions")
+    if any(caller not in callers for caller, _ in reference | fabricated):
+        raise CoverageError("call edge report caller has no retained call site")
+    if any(caller in callers for caller, _ in unchecked):
+        raise CoverageError("call edge unscored edge has a caller with call sites")
+    if not missing <= reference:
+        raise CoverageError("call edge missing edges are not oracle edges")
+    if fabricated & reference:
+        raise CoverageError("call edge fabricated edges include oracle edges")
+    if (
+        true_positives + len(missing) != len(reference)
+        or true_positives + len(fabricated) != scored_recovered
+        or summary.get("referenceCount") != len(reference)
+        or summary.get("falseNegatives") != len(missing)
+        or summary.get("falsePositives") != len(fabricated)
+        or oracle.get("edgeCount") != len(reference)
+        or oracle.get("tailCallEdgeCount") != sum(tail_flags)
+        or oracle.get("callersWithCallSites") != len(callers)
+    ):
+        raise CoverageError("call edge report summary disagrees with outcomes")
+    precision = _ratio(true_positives, scored_recovered)
+    recall = _ratio(true_positives, len(reference))
+    if summary.get("precision") != precision or summary.get("recall") != recall:
+        raise CoverageError("call edge report ratios disagree with outcomes")
+    # Every oracle caller has a call site, so unscored edges are all fabricated
+    # and the unrestricted figures follow from the retained outcomes.
+    unrestricted_count = scored_recovered + len(unchecked)
+    unrestricted = {
+        "scoredRecoveredCount": unrestricted_count,
+        "precision": _ratio(true_positives, unrestricted_count),
+        "recall": recall,
+    }
+    if summary.get("unrestricted") != unrestricted:
+        raise CoverageError("call edge unrestricted summary disagrees with outcomes")
+    qualification = _required_mapping(
+        provenance.get("qualification"), "call edge qualification"
+    )
+    if qualification.get("releaseEligible") is not False:
+        raise CoverageError("call edge report must not claim release eligibility")
+
+    # Imported here because the report module imports helpers from this one.
+    from oracle.gcc.report_call_edges import _oracle_edges
+
+    full_payload = _read_regular(full_path, "full artifact")
+    if hashlib.sha256(full_payload).hexdigest() != full_sha256:
+        raise CoverageError("full artifact changed after manifest verification")
+    excluded = {
+        function.rva
+        for function in loaded_oracle.functions
+        if function.rva is not None and function.exclusion is not None
+    }
+    derived_edges, derived_callers, derived_kinds = _oracle_edges(
+        full_payload, loaded_oracle, scoreable, excluded
+    )
+    derived = {pair: sorted(tails) != [False] for pair, tails in derived_edges.items()}
+    if (
+        derived != dict(zip(reference_list, tail_flags))
+        or derived_callers != callers
+        or oracle.get("callSiteKinds") != dict(sorted(derived_kinds.items()))
+    ):
+        raise CoverageError("call edge oracle disagrees with the full artifact DWARF")
+    return {
+        "status": "measured",
+        "precision": precision,
+        "recall": recall,
+        "unrestricted": unrestricted,
+        "productionVerified": False,
+        "reasonCode": "recovered-model-not-release-eligible",
+        "releaseEligible": False,
+        "oracle": {
+            "edgeCount": len(reference),
+            "tailCallEdgeCount": sum(tail_flags),
+            "callersWithCallSites": len(callers),
+            "populationDefinition": report.get("populationDefinition"),
+        },
+        "evidence": {
+            **_record(report_path, "call edge report"),
+            "path": report_path.name,
+            "programModelSha256": _required_mapping(
+                provenance.get("programModel"), "call edge program model"
+            ).get("sha256"),
+        },
+    }
+
+
+def _measured_status(score: dict[str, Any], unavailable: str) -> str:
+    if score["status"] != "measured":
+        return unavailable
+    return "measured" if score["releaseEligible"] else "measured-not-release-eligible"
+
+
 def build_report(profile_directory: Path) -> dict[str, Any]:
     profile_directory = profile_directory.resolve()
     manifest_path = profile_directory / "oracle-manifest.json"
@@ -369,12 +695,31 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
     identity_score = _symbol_identity_score(
         profile_directory, loaded_oracle, manifest_sha256
     )
-    if identity_score["status"] != "measured":
-        identity_status = "oracle-population-known-recovery-unavailable"
-    elif identity_score["releaseEligible"]:
-        identity_status = "measured"
+    identity_status = _measured_status(
+        identity_score, "oracle-population-known-recovery-unavailable"
+    )
+    start_score = _function_start_score(profile_directory, loaded_oracle, manifest_sha256)
+    start_status = _measured_status(start_score, "oracle-covered-recovery-unavailable")
+    edge_score = _call_edge_score(
+        profile_directory,
+        loaded_oracle,
+        manifest_sha256,
+        profile_directory / artifact_files["full"]["manifestPath"],
+        artifact_files["full"]["sha256"],
+    )
+    edge_status = _measured_status(edge_score, "unavailable")
+    if edge_score["status"] == "measured":
+        edge_oracle = {
+            "status": "available",
+            **edge_score.pop("oracle"),
+            "productionVerified": False,
+        }
     else:
-        identity_status = "measured-not-release-eligible"
+        edge_oracle = {
+            "status": "unavailable",
+            "reasonCode": "no-authenticated-gcc-call-oracle",
+            "productionVerified": False,
+        }
     registry_path = REPOSITORY_ROOT / REGISTRY_PATH
     registry_text = _read_regular(registry_path, "structural replay registry").decode(
         "utf-8"
@@ -421,7 +766,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
         },
         "dimensions": {
             "functionStarts": {
-                "status": "oracle-covered-recovery-unavailable",
+                "status": start_status,
                 "threshold": {"precisionAtLeast": 0.95, "recallAtLeast": 0.95},
                 "oracle": {
                     "status": "available",
@@ -432,11 +777,7 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
                         "inlineOnly": inline_count,
                     },
                 },
-                "currentScore": {
-                    "status": "unavailable",
-                    "reasonCode": "no-retained-current-recovered-model",
-                    "productionVerified": False,
-                },
+                "currentScore": start_score,
                 "historicalReference": _historical_unattested_score(),
             },
             "survivingSymbolIdentity": {
@@ -453,18 +794,10 @@ def build_report(profile_directory: Path) -> dict[str, Any]:
                 "currentScore": identity_score,
             },
             "callEdges": {
-                "status": "unavailable",
+                "status": edge_status,
                 "threshold": {"precisionAtLeast": 0.90, "recallAtLeast": 0.90},
-                "oracle": {
-                    "status": "unavailable",
-                    "reasonCode": "no-authenticated-gcc-call-oracle",
-                    "productionVerified": False,
-                },
-                "recovery": {
-                    "status": "unavailable",
-                    "reasonCode": "no-authenticated-gcc-recovered-call-sites",
-                    "productionVerified": False,
-                },
+                "oracle": edge_oracle,
+                "currentScore": edge_score,
                 "productionReplay": replay_status,
             },
         },
@@ -518,17 +851,30 @@ def _identity_suffix(score: dict[str, Any]) -> str:
     return f", {ratio['numerator']}/{ratio['denominator']} exact"
 
 
+def _start_suffix(score: dict[str, Any]) -> str:
+    if score["status"] != "measured":
+        return ""
+    precision = score["precision"]
+    recall = score["recall"]
+    return (
+        f", precision {precision['numerator']}/{precision['denominator']}"
+        f", recall {recall['numerator']}/{recall['denominator']}"
+    )
+
+
 def render_human(report: dict[str, Any]) -> str:
     dimensions = report["dimensions"]
     return "\n".join(
         [
             f"profile: {report['profile']['id']}",
             f"function starts: {dimensions['functionStarts']['status']} "
-            f"({dimensions['functionStarts']['oracle']['scoreableFunctionCount']} scoreable oracle functions)",
+            f"({dimensions['functionStarts']['oracle']['scoreableFunctionCount']} scoreable oracle functions"
+            f"{_start_suffix(dimensions['functionStarts']['currentScore'])})",
             f"surviving symbol identity: {dimensions['survivingSymbolIdentity']['status']} "
             f"({dimensions['survivingSymbolIdentity']['oracle']['strippedSurvivingAliasCount']} oracle aliases"
             f"{_identity_suffix(dimensions['survivingSymbolIdentity']['currentScore'])})",
-            f"call edges: {dimensions['callEdges']['status']}",
+            f"call edges: {dimensions['callEdges']['status']}"
+            f"{_start_suffix(dimensions['callEdges']['currentScore'])}",
             f"next boundary: {report['nextBoundary']['id']} ({report['nextBoundary']['status']})",
         ]
     ) + "\n"
