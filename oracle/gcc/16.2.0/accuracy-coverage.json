@@ -1,22 +1,55 @@
 {
   "dimensions": {
     "callEdges": {
-      "oracle": {
+      "currentScore": {
+        "evidence": {
+          "bytes": 843767,
+          "path": "call-edge-score.json",
+          "programModelSha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379",
+          "sha256": "24062d35c2d859c47b84f10f2e0f1334166ff4d2fef479547129ef89f307032c"
+        },
+        "precision": {
+          "denominator": 6197,
+          "numerator": 5780,
+          "value": 0.932709
+        },
         "productionVerified": false,
-        "reasonCode": "no-authenticated-gcc-call-oracle",
-        "status": "unavailable"
+        "reasonCode": "recovered-model-not-release-eligible",
+        "recall": {
+          "denominator": 5860,
+          "numerator": 5780,
+          "value": 0.986348
+        },
+        "releaseEligible": false,
+        "status": "measured",
+        "unrestricted": {
+          "precision": {
+            "denominator": 6894,
+            "numerator": 5780,
+            "value": 0.83841
+          },
+          "recall": {
+            "denominator": 5860,
+            "numerator": 5780,
+            "value": 0.986348
+          },
+          "scoredRecoveredCount": 6894
+        }
+      },
+      "oracle": {
+        "callersWithCallSites": 2032,
+        "edgeCount": 5860,
+        "populationDefinition": "unique caller/callee function-start pairs from full-twin DWARF call sites whose callee is a definition or a uniquely named oracle alias, with both endpoints scoreable; recovered edges are scored when both endpoints are scoreable and the caller has a DWARF call site",
+        "productionVerified": false,
+        "status": "available",
+        "tailCallEdgeCount": 12
       },
       "productionReplay": {
         "evidence": "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
         "reasonCode": "production-registry-empty",
         "status": "unavailable"
       },
-      "recovery": {
-        "productionVerified": false,
-        "reasonCode": "no-authenticated-gcc-recovered-call-sites",
-        "status": "unavailable"
-      },
-      "status": "unavailable",
+      "status": "measured-not-release-eligible",
       "threshold": {
         "precisionAtLeast": 0.9,
         "recallAtLeast": 0.9
