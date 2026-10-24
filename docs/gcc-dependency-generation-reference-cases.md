@@ -1,24 +1,52 @@
-# GCC dependency-generation reference slice
+# GCC preprocessing and dependency-generation references
 
-`oracle/gcc/16.2.0/dependency-generation-reference.json` records one bounded
-dependency-generation case without inventing an expected result. It reuses the
-`source.c` bytes and digest already retained by the checked GCC behavior corpus,
-and binds the case to the source-aligned GCC 16.2.0 driver, source lock, build
-record, and toolchain image digest already checked into `oracle/gcc/16.2.0`.
+`oracle/gcc/16.2.0/preprocessing-reference-evidence.json` (issue #709) and
+`oracle/gcc/16.2.0/dependency-generation-reference.json` (issue #710) are
+captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py`.
 
-The record remains `unresolved`. The current behavior corpus has 14 cases, but
-its preprocessing cases invoke the staged `tools/cc1` mock and expect the fixed
-`MOCK-PREPROCESSED` line; that is driver forwarding evidence, not a real GCC
-dependency-list observation. The record therefore has no expected stdout,
-diagnostic, exit code, or execution receipt.
+## Execution environment
 
-Production capture is currently unavailable here: Docker and Podman are absent,
-and the host `/usr/bin/gcc` is not the recorded `/usr/local/bin/gcc` toolchain
-identity. A truthful completion still requires a replay in the authenticated
-pinned OCI environment, with declared frontend/resource/include/input
-identities, exact dependency output and diagnostics, exit status, and an
-independent repeat. Until those gates exist, this slice cannot qualify issue
-#710 or the downstream reconstructed-driver comparison.
+Every case runs the installed `/usr/local/bin/gcc` and its `cc1` inside the pinned
+official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
+(config `sha256:103614947d5e…`), which is the base image of
+`oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
+read-only root filesystem, no capabilities and `no-new-privileges`; it sees only
+a fresh per-case workspace. `-nostdinc` is passed so only staged include roots
+are searched, and `LC_ALL=C`, `TZ=UTC` and `SOURCE_DATE_EPOCH=1786060800` are
+fixed. The script verifies the image config digest and records the driver and
+`cc1` hashes, version and target triple.
 
-This record does not add an external Ghidra prerequisite, invoke
-`analyzeHeadless`, or move authority across the oracle/candidate boundary.
+Each case runs twice in separate workspaces; the capture fails unless stdout,
+stderr, exit status and produced artifacts are byte-identical. No normalization
+is applied.
+
+## Cases
+
+Preprocessing: file and stdin input (with and without `-x c`), quote,
+bracket, `#include_next` and `-isystem` search, a missing header, command-line
+and in-source macro definition/undefinition, `-dD` macro dumps, `#error`,
+assembler-with-cpp by `-x` and by `.S` suffix, `.i` input, and `-x c` with `-o`.
+
+Dependency generation: `-M` on the corpus `source.c`, `-M` versus `-MM` with a
+system header, `-E -MD -MF` with both artifacts, `-MT` with `-MP`, `-MQ`
+quoting, `-MG` for a missing header, and the missing-header diagnostic.
+
+## Reproduction
+
+```sh
+python3 scripts/capture-gcc-preprocessing-reference.py --runtime podman   # rewrite
+python3 scripts/capture-gcc-preprocessing-reference.py --check            # compare
+```
+
+CI runs `--check` in the `preprocessing-reference` job of
+`.github/workflows/gcc-oracle-model.yml` on dispatch, on master pushes, and on
+pull requests labeled `qualify:preprocessing-reference`.
+
+## Boundary
+
+The frontend is the official image's GCC 16.2.0, not the byte-identical
+`artifacts/gcc-driver.stripped` oracle driver, so these records establish real
+GCC frontend semantics rather than oracle-artifact identity. Comparing a
+reconstructed candidate driver against them remains downstream work. No Ghidra
+analysis, `GHIDRA_HOME` fallback or `analyzeHeadless` invocation is introduced,
+and no authority crosses the oracle/candidate boundary.

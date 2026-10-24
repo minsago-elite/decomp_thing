@@ -61,12 +61,14 @@ internal object GccBundledFullExportCliResultV2 {
             binding.requiredLong("schemaVersion", "structural binding") == 2L
         ) { "structural binding does not match its closed schema" }
         val profileId = binding.requiredString("profileId", "structural binding")
-        require(profileId.matches(Regex("[a-z0-9][a-z0-9._-]{0,127}"))) {
-            "structural binding profile ID is invalid"
+        val engineId = when (profileId) {
+            "gcc-cc1-16.2.0" -> "cc1"
+            "gcc-driver-16.2.0" -> "driver"
+            else -> throw IllegalArgumentException("structural binding profile does not support full-export capture")
         }
         val profileVersion = binding.requiredString("profileVersion", "structural binding")
-        require(profileVersion.matches(Regex("[A-Za-z0-9._+-]{1,64}"))) {
-            "structural binding profile version is invalid"
+        require(profileVersion == "16.2.0") {
+            "structural binding profile version differs from the selected full-export target"
         }
         require(binding.requiredString("sourceRevision", "structural binding").matches(Regex("[a-f0-9]{40}"))) {
             "structural binding source revision is invalid"
@@ -133,11 +135,14 @@ internal object GccBundledFullExportCliResultV2 {
 
         val lineage = binding.getValue("receiptLineage") as? JsonObject
             ?: throw IllegalArgumentException("structural binding receipt lineage must be an object")
+        val lineageVersion = lineage.requiredLong("schemaVersion", "structural binding receipt lineage")
+        require(lineageVersion == 1L || (lineageVersion == 2L && engineId == "cc1")) {
+            "full-export receipt lineage version is unsupported for its engine"
+        }
         require(lineage.keys == RECEIPT_LINEAGE_KEYS &&
             lineage.requiredString("provider", "structural binding receipt lineage") ==
-            "gcc-bundled-full-export-receipt-lineage-v1" &&
-            lineage.requiredLong("schemaVersion", "structural binding receipt lineage") == 1L &&
-            lineage.requiredString("engineId", "structural binding receipt lineage") == "cc1" &&
+            "gcc-bundled-full-export-receipt-lineage-v$lineageVersion" &&
+            lineage.requiredString("engineId", "structural binding receipt lineage") == engineId &&
             lineage.requiredString("operationId", "structural binding receipt lineage") == operationId &&
             lineage.requiredDigest("intentSha256", "structural binding receipt lineage") == requestSha256 &&
             lineage.requiredDigest("compilerEngineProfileSha256", "structural binding receipt lineage") ==

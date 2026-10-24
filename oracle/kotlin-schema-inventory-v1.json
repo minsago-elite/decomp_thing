@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 82,
+  "schemaCount": 83,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -499,6 +499,15 @@
       "formatVersions": [
         1
       ],
+      "name": "gcc/compiler-engines-exporter17",
+      "path": "oracle/gcc/compiler-engines-exporter17.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "2c6de2807d2f4bb18264098436bce04211e0bdc65ce78d161374b0bff5562d42"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
       "name": "gcc/oracle-manifest",
       "path": "oracle/gcc/oracle-manifest.schema.json",
       "registration": "shared-kotlin",
@@ -751,5 +760,5 @@
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 78
+  "sharedCatalogCount": 79
 }
