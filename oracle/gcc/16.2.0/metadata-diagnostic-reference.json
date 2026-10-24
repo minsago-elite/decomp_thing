@@ -22,7 +22,7 @@
     },
     "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
     "includeSearch": "the driver's default include search; no metadata case passes -nostdinc",
-    "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges"
+    "sandbox": "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges"
   },
   "oracleDriver": {
     "id": "gcc-driver-16.2.0",
