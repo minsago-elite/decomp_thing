@@ -1,71 +1,518 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "issue": 710,
   "id": "gcc-16-2-0-dependency-generation-reference",
-  "scope": "production",
-  "status": "unresolved",
-  "statusReason": "The authenticated pinned GCC execution environment is unavailable in this workspace.",
-  "provenance": {
-    "oracle": {
-      "id": "gcc-driver-16.2.0",
-      "version": "16.2.0",
-      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
-    },
-    "sourceLock": {
-      "path": "source-lock.json",
-      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
-    },
-    "buildRecord": {
-      "path": "build-record.json",
-      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
-      "toolchainImageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "platform": "linux/amd64"
+  "status": "captured",
+  "scope": "real-frontend-dependency-generation",
+  "toolchain": {
+    "image": "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0",
+    "imageConfig": "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f",
+    "baseOf": "oracle/gcc/16.2.0/build-toolchain.Dockerfile",
+    "platform": "linux/amd64",
+    "version": "16.2.0",
+    "target": "x86_64-linux-gnu",
+    "driver": {
+      "path": "/usr/local/bin/gcc",
+      "sha256": "c1ff0a4fe7916ae6f4e18645a0e854077148b3ebb9d30b1e50e9672e8c5a1236"
     },
     "frontend": {
-      "role": "gcc-driver",
-      "path": "artifacts/gcc-driver.stripped",
-      "bytes": 2349296,
-      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
-    }
+      "role": "cc1",
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/cc1",
+      "sha256": "bc1bcbeccfaaf269c1a8c1bb74a0bc4d73bff56a0c6c6dbd4bb248d11f6232a0"
+    },
+    "resourceIncludeDirectory": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+    "includeSearch": "-nostdinc; only staged workspace include roots are searched",
+    "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges"
+  },
+  "capture": {
+    "tool": "scripts/capture-gcc-preprocessing-reference.py",
+    "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results"
   },
   "cases": [
     {
       "id": "dependency-source-c",
-      "status": "unresolved",
-      "arguments": ["-M", "source.c"],
+      "categories": [
+        "M"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-M",
+        "source.c"
+      ],
       "environment": {
         "LC_ALL": "C",
         "SOURCE_DATE_EPOCH": "1786060800",
         "TZ": "UTC"
       },
-      "includeSearch": {
-        "userIncludeDirectories": [],
-        "systemIncludeRoots": "unavailable"
-      },
       "inputs": [
         {
           "path": "source.c",
           "bytes": 29,
-          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
-          "origin": "oracle/gcc/16.2.0/behavior-corpus.json case compile-file"
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
         }
       ],
-      "output": {
-        "kind": "dependency-list",
-        "stream": "stdout",
-        "normalizations": [],
-        "expected": null
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
-      "unresolved": [
-        "reference stdout",
-        "reference stderr",
-        "reference exit code",
-        "authenticated execution receipt"
-      ]
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 19,
+          "sha256": "c329b25b26c83a86335086a013344fdf07bd78b17acd38596b3800b8f41484d6",
+          "base64": "c291cmNlLm86IHNvdXJjZS5jCg==",
+          "text": "source.o: source.c\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-M",
+      "categories": [
+        "M",
+        "system-header"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-isystem",
+        "sys",
+        "-M",
+        "dep.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "dep.c",
+          "bytes": 55,
+          "sha256": "c17da40c54f83314e7bffc6e57675b4042416094c51e48cdd421d045ee878859"
+        },
+        {
+          "path": "dep.h",
+          "bytes": 44,
+          "sha256": "44aeb7312c420af86c4609c43b692d5cfa577ef6093f5eadb194deefaac98f55"
+        },
+        {
+          "path": "nested/inner.h",
+          "bytes": 16,
+          "sha256": "dfd53ab5aa14aa90d0bd93c498a73cdb4eed93be5cbd3c21c2c13f3057ba2b00"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 44,
+          "sha256": "79a0aa758590fac508c617b2123dbd4fd97cb699b22da9973a38330a9c99cb87",
+          "base64": "ZGVwLm86IGRlcC5jIGRlcC5oIG5lc3RlZC9pbm5lci5oIHN5cy9zeXMuaAo=",
+          "text": "dep.o: dep.c dep.h nested/inner.h sys/sys.h\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-MM",
+      "categories": [
+        "MM",
+        "system-header"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-isystem",
+        "sys",
+        "-MM",
+        "dep.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "dep.c",
+          "bytes": 55,
+          "sha256": "c17da40c54f83314e7bffc6e57675b4042416094c51e48cdd421d045ee878859"
+        },
+        {
+          "path": "dep.h",
+          "bytes": 44,
+          "sha256": "44aeb7312c420af86c4609c43b692d5cfa577ef6093f5eadb194deefaac98f55"
+        },
+        {
+          "path": "nested/inner.h",
+          "bytes": 16,
+          "sha256": "dfd53ab5aa14aa90d0bd93c498a73cdb4eed93be5cbd3c21c2c13f3057ba2b00"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 34,
+          "sha256": "de50a2bc421ce0b37570565d9375c6b482d760c02be961dd2dfdc522fe0c99a1",
+          "base64": "ZGVwLm86IGRlcC5jIGRlcC5oIG5lc3RlZC9pbm5lci5oCg==",
+          "text": "dep.o: dep.c dep.h nested/inner.h\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-MD-MF",
+      "categories": [
+        "MD",
+        "MF",
+        "artifacts"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-isystem",
+        "sys",
+        "-E",
+        "-MD",
+        "-MF",
+        "dep.d",
+        "dep.c",
+        "-o",
+        "dep.i"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "dep.c",
+          "bytes": 55,
+          "sha256": "c17da40c54f83314e7bffc6e57675b4042416094c51e48cdd421d045ee878859"
+        },
+        {
+          "path": "dep.h",
+          "bytes": 44,
+          "sha256": "44aeb7312c420af86c4609c43b692d5cfa577ef6093f5eadb194deefaac98f55"
+        },
+        {
+          "path": "nested/inner.h",
+          "bytes": 16,
+          "sha256": "dfd53ab5aa14aa90d0bd93c498a73cdb4eed93be5cbd3c21c2c13f3057ba2b00"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": [
+          {
+            "path": "dep.d",
+            "bytes": 44,
+            "sha256": "79a0aa758590fac508c617b2123dbd4fd97cb699b22da9973a38330a9c99cb87",
+            "base64": "ZGVwLm86IGRlcC5jIGRlcC5oIG5lc3RlZC9pbm5lci5oIHN5cy9zeXMuaAo=",
+            "text": "dep.o: dep.c dep.h nested/inner.h sys/sys.h\n"
+          },
+          {
+            "path": "dep.i",
+            "bytes": 241,
+            "sha256": "6ad53224b7d632d1d78db9fd1b48b6d1ad3a19abcffddf791183526395d19a0e",
+            "base64": "IyAwICJkZXAuYyIKIyAwICI8YnVpbHQtaW4+IgojIDAgIjxjb21tYW5kLWxpbmU+IgojIDEgImRlcC5jIgojIDEgImRlcC5oIiAxCiMgMSAibmVzdGVkL2lubmVyLmgiIDEKIyAyICJkZXAuaCIgMgojIDIgImRlcC5jIiAyCiMgMSAic3lzL3N5cy5oIiAxIDMKIyAzICJkZXAuYyIgMgppbnQgZGVwID0gNyArIAojIDMgImRlcC5jIiAzCiAgICAgICAgICAgICAgIDMwMAojIDMgImRlcC5jIgogICAgICAgICAgICAgICAgICA7Cg==",
+            "text": "# 0 \"dep.c\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n# 1 \"dep.c\"\n# 1 \"dep.h\" 1\n# 1 \"nested/inner.h\" 1\n# 2 \"dep.h\" 2\n# 2 \"dep.c\" 2\n# 1 \"sys/sys.h\" 1 3\n# 3 \"dep.c\" 2\nint dep = 7 + \n# 3 \"dep.c\" 3\n               300\n# 3 \"dep.c\"\n                  ;\n"
+          }
+        ]
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-MT-MP",
+      "categories": [
+        "MM",
+        "MT",
+        "MP"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-isystem",
+        "sys",
+        "-MM",
+        "-MT",
+        "custom target.o",
+        "-MP",
+        "dep.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "dep.c",
+          "bytes": 55,
+          "sha256": "c17da40c54f83314e7bffc6e57675b4042416094c51e48cdd421d045ee878859"
+        },
+        {
+          "path": "dep.h",
+          "bytes": 44,
+          "sha256": "44aeb7312c420af86c4609c43b692d5cfa577ef6093f5eadb194deefaac98f55"
+        },
+        {
+          "path": "nested/inner.h",
+          "bytes": 16,
+          "sha256": "dfd53ab5aa14aa90d0bd93c498a73cdb4eed93be5cbd3c21c2c13f3057ba2b00"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 67,
+          "sha256": "4e7dcb93d396ea388fdc04e7ba7efe5c6a11bf67c75a945fec6947ed3b373069",
+          "base64": "Y3VzdG9tIHRhcmdldC5vOiBkZXAuYyBkZXAuaCBuZXN0ZWQvaW5uZXIuaApkZXAuaDoKbmVzdGVkL2lubmVyLmg6Cg==",
+          "text": "custom target.o: dep.c dep.h nested/inner.h\ndep.h:\nnested/inner.h:\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-MQ",
+      "categories": [
+        "MM",
+        "MQ"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-isystem",
+        "sys",
+        "-MM",
+        "-MQ",
+        "$(obj)/dep.o",
+        "dep.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "dep.c",
+          "bytes": 55,
+          "sha256": "c17da40c54f83314e7bffc6e57675b4042416094c51e48cdd421d045ee878859"
+        },
+        {
+          "path": "dep.h",
+          "bytes": 44,
+          "sha256": "44aeb7312c420af86c4609c43b692d5cfa577ef6093f5eadb194deefaac98f55"
+        },
+        {
+          "path": "nested/inner.h",
+          "bytes": 16,
+          "sha256": "dfd53ab5aa14aa90d0bd93c498a73cdb4eed93be5cbd3c21c2c13f3057ba2b00"
+        },
+        {
+          "path": "sys/sys.h",
+          "bytes": 16,
+          "sha256": "d73510a1a67aa07f235163e32ab16121443f0b76c3975aaa25e10d3144d7007c"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 42,
+          "sha256": "c6c169b47f67ac27f3cdcab12d752f992c35319018916c1f9c654c789e10c5f9",
+          "base64": "JCQob2JqKS9kZXAubzogZGVwLmMgZGVwLmggbmVzdGVkL2lubmVyLmgK",
+          "text": "$$(obj)/dep.o: dep.c dep.h nested/inner.h\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-MG-missing-header",
+      "categories": [
+        "MM",
+        "MG"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-MM",
+        "-MG",
+        "generated.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "generated.c",
+          "bytes": 30,
+          "sha256": "848a0ae7d4a1d1b1f4700cdb0de03dffa5b081923b11778026c9b0230c015135"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 0,
+        "stdout": {
+          "bytes": 37,
+          "sha256": "bce7c631c703bc443d2e34408054e502ad337e817ebd3fc419c1e0909fe421b6",
+          "base64": "Z2VuZXJhdGVkLm86IGdlbmVyYXRlZC5jIGdlbmVyYXRlZC5oCg==",
+          "text": "generated.o: generated.c generated.h\n"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
+    },
+    {
+      "id": "dependency-missing-header",
+      "categories": [
+        "MM",
+        "diagnostic"
+      ],
+      "arguments": [
+        "-nostdinc",
+        "-MM",
+        "generated.c"
+      ],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "inputs": [
+        {
+          "path": "generated.c",
+          "bytes": 30,
+          "sha256": "848a0ae7d4a1d1b1f4700cdb0de03dffa5b081923b11778026c9b0230c015135"
+        }
+      ],
+      "stdin": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "observed": {
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "base64": "",
+          "text": ""
+        },
+        "stderr": {
+          "bytes": 156,
+          "sha256": "16f085d59cb69e394134a2920c67f5dd8c2388772a83e80075e89f2c430178a3",
+          "base64": "Z2VuZXJhdGVkLmM6MToxMDogZmF0YWwgZXJyb3I6IGdlbmVyYXRlZC5oOiBObyBzdWNoIGZpbGUgb3IgZGlyZWN0b3J5CiAgICAxIHwgI2luY2x1ZGUgImdlbmVyYXRlZC5oIgogICAgICB8ICAgICAgICAgIF5+fn5+fn5+fn5+fn4KY29tcGlsYXRpb24gdGVybWluYXRlZC4K",
+          "text": "generated.c:1:10: fatal error: generated.h: No such file or directory\n    1 | #include \"generated.h\"\n      |          ^~~~~~~~~~~~~\ncompilation terminated.\n"
+        },
+        "artifacts": []
+      },
+      "repetitions": 2,
+      "normalizations": []
     }
   ],
   "productionGates": {
-    "pinnedContainerReplay": "unavailable",
-    "independentReferenceRepetition": "unavailable",
-    "reconstructedCandidateComparison": "unavailable"
-  }
+    "reconstructedCandidateComparison": "unavailable",
+    "reason": "These records are the real GCC 16.2.0 frontend reference. Comparing a reconstructed candidate driver against them is downstream work."
+  },
+  "analysisBoundary": "No Ghidra analysis is part of this record; bundled Ghidra isolation and the authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback or analyzeHeadless invocation is introduced."
 }
