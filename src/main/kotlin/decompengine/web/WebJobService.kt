@@ -270,6 +270,7 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+    private val programStructureCache = WebProgramStructureCache()
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
@@ -675,6 +676,20 @@ class WebJobService(
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
         return snapshot
+    }
+
+    /** Recorded model/plan projection of the actual persisted candidate, rechecked after projection. */
+    internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
     }
 
     /** Generation declarations use the same current-candidate and bounded metadata capture boundary. */

@@ -215,6 +215,13 @@ class WebSessionRealRoutesTest {
                 Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/content", accept = bytes, head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
+                Shape("$revision/functions", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/modules", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/modules/core", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/functions/fn_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/globals/global_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/types/type_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/functions/_unaddressable", head = true, status = 404, code = "ENTITY_NOT_FOUND"),
                 Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
             )
             fun get(shape: Shape, cookie: String?, method: String = "GET"): HttpResponse<String> {

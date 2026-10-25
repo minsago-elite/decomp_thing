@@ -306,10 +306,65 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source end line is inconsistent")
 
 
+def check_structure(kind: str, data: dict) -> None:
+    """Recorded program structure: explicit unavailable states, exact selectors and derived evidence classes."""
+    if data["model"]["state"] != data["state"] or data["model"]["stateReason"] != data["stateReason"]:
+        raise ValueError("structure state must restate the program model record state")
+    if len({item["id"] for item in data["capabilities"]}) != len(data["capabilities"]):
+        raise ValueError("structure capabilities repeat a fact family")
+    if kind == "functionInventory":
+        rows, pages = data["items"], [data["page"]]
+    elif kind == "moduleInventory":
+        rows, pages = [], [data["page"]]
+        if (data["totalModules"] is None and data["items"]) or (data["totalModules"] is not None and len(data["items"]) > data["totalModules"]):
+            raise ValueError("module rows exceed the recorded module plan")
+        if any(item["selector"] not in (None, item["moduleId"]) for item in data["items"]):
+            raise ValueError("module selectors must be the recorded module identity")
+    elif kind == "moduleDetail":
+        owned = data["owned"]
+        if (data["module"] is None) != (owned is None):
+            raise ValueError("module detail and owned entities must be recorded together")
+        rows, pages = (owned["items"], [owned["page"]]) if owned else ([], [])
+        if owned and (len(owned["items"]) > owned["total"] or any(item["kind"] != owned["kind"] for item in owned["items"])):
+            raise ValueError("owned entity page disagrees with its kind or total")
+    else:
+        rows, pages = ([data["entity"]] if data["entity"] else []), []
+    if data["state"] != "available" and (rows or data["recoveryAssessment"] != "not-recorded"):
+        raise ValueError("unavailable program records cannot present entities or an assessment")
+    for page in pages:
+        if page["snapshotVersion"] != data["structureVersion"]:
+            raise ValueError("structure pages must be bound to the structure version")
+    for row in rows:
+        if row["selector"] not in (None, row["entityId"]):
+            raise ValueError("entity selectors must be the recorded entity identity")
+        if not row["recorded"]:
+            continue
+        if (row["evidenceState"] == "excluded") != (row["ownership"] == "unowned"):
+            raise ValueError("excluded entities are exactly those the plan assigns to no module")
+        if (row["ownership"] == "owned") != (row["moduleId"] is not None):
+            raise ValueError("an owning module is recorded exactly for owned entities")
+    if kind == "functionInventory" and data["totalFunctions"] is not None:
+        if not len(rows) <= data["matchedFunctions"] <= data["totalFunctions"]:
+            raise ValueError("matched functions must lie within the recorded total")
+    if kind == "entityDetail" and data["entity"]:
+        entity = data["entity"]
+        if (entity["kind"] == "function") != (entity["calls"] is not None):
+            raise ValueError("call references belong only to functions")
+        for references in (entity["calls"], entity["calledBy"], entity["referencedGlobals"], entity["referencedBy"], entity["collisions"]):
+            if references and (len(references["items"]) > references["total"] or any(
+                    item["resolution"] != "recorded" and item["selector"] is not None for item in references["items"])):
+                raise ValueError("unrecorded references cannot carry a selector")
+        if any(text["recorded"] != (text["preview"] is not None) for text in entity["texts"]):
+            raise ValueError("text previews exist exactly for recorded fields")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
+    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail"):
+        check_structure(kind, data)
+        return
     if kind == "validationHistory":
         if data["state"] != "recorded":
             if any(data[key] is not None for key in ("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage")) or data["items"]:
