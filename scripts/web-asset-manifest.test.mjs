@@ -265,7 +265,7 @@ test('shipped assets reject remote resource loads but keep inert namespace strin
     assert.doesNotThrow(() => assertNoRemoteLoads(safe, 'fixture'), safe);
   }
   for (const remote of ['@import url("https://fonts.example.test/a.css");', 'main { background: url(//cdn.example.test/a.png) }',
-    'import("https://cdn.example.test/lib.js")', 'import x from "https://cdn.example.test/x.js"', 'new Worker("https://cdn.example.test/w.js")',
+    'import("https://cdn.example.test/lib.js")', 'import x from "https://cdn.example.test/x.js"', 'import "https://cdn.example.test/side-effect.js";', "import'//cdn.example.test/a.js'", 'new Worker("https://cdn.example.test/w.js")',
     'importScripts("//cdn.example.test/w.js")', '<script src="https://cdn.example.test/a.js"></script>', '<link rel="stylesheet" href="//cdn.example.test/a.css">']) {
     assert.throws(() => assertNoRemoteLoads(remote, 'fixture'), /loads a remote resource/, remote);
   }

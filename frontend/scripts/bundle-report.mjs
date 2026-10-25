@@ -142,6 +142,7 @@ const remoteLoads = [
   /@import\s+(?:url\()?\s*["']?(?:https?:)?\/\//i,
   /\bimport\(\s*["'`](?:https?:)?\/\//i,
   /\bfrom\s*["'`](?:https?:)?\/\//i,
+  /\bimport\s*["'`](?:https?:)?\/\//i,
   /\bnew\s+(?:Shared)?Worker\(\s*["'`](?:https?:)?\/\//i,
   /\bimportScripts\(\s*["'`](?:https?:)?\/\//i,
   /<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
