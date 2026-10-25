@@ -71,6 +71,18 @@
       "id": "native-runtime-selection",
       "path": "native-runtime-selection-v1.json",
       "sha256": "5cfe8f249600c95e14577138881a6f509e848a0c8e3420ed3ea0bec8fdb62520"
+    },
+    {
+      "bytes": 98019,
+      "id": "orchestration-contract",
+      "path": "orchestration-identity-contract.json",
+      "sha256": "2a3f0e837b226d2b823578395614725da6808900e45c16e4617c192ce6441fe1"
+    },
+    {
+      "bytes": 734432,
+      "id": "orchestration-reference",
+      "path": "orchestration-phase-reference.json",
+      "sha256": "41768c5ff120e4f749d02859437b122c223e2cfaea44151c044aeaf5c3bf24d1"
     }
   ],
   "id": "gcc-metadata-v1",

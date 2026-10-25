@@ -37,7 +37,7 @@ class ReferenceCorpusProfileTest {
             assertEquals("e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905", profile.artifact("frontend").sha256)
             assertEquals(41_935_768, profile.artifact("frontend").content.size)
             assertEquals(profile.artifact("frontend").sha256, OracleArtifacts.sha256(profile.artifact("frontend").content))
-            assertEquals(9, profile.inputBindings.size)
+            assertEquals(11, profile.inputBindings.size)
             assertEquals(profile.imageConfigSha256, profile.nativeRuntimeSelection.imageConfigSha256)
             assertEquals("5cfe8f249600c95e14577138881a6f509e848a0c8e3420ed3ea0bec8fdb62520", profile.nativeRuntimeSelection.sha256)
             assertEquals(44, profile.nativeRuntimeSelection.configurationTreeRoots.size)

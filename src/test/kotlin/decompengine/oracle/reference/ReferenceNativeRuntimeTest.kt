@@ -298,6 +298,41 @@ class ReferenceNativeRuntimeTest {
     }
 
     @Test
+    fun `runtime declarations bind literal aliases resolved bytes and original artifacts`(): Unit = Fixture().use { fixture ->
+        LlvmBehaviorNativeOciImageV2.openLayout(fixture.layout).use { image ->
+            val plan = ReferenceNativeRuntime.plan(image, fixture.selection(), fixture.artifacts)
+            val digest = OracleArtifacts.sha256("tool\n".encodeToByteArray())
+            val file = ReferenceRuntimeFileBinding("/bin/absolute", "/usr/bin/tool", 5, digest)
+            val artifact = fixture.artifacts.single()
+            val original = ReferenceRuntimeFileBinding(artifact.guestPath, artifact.guestPath, artifact.bytes, artifact.sha256)
+            ReferenceNativeRuntime.verifyDeclaredFiles(plan, fixture.artifacts, listOf(file, original))
+            for (changed in listOf(file.copy(resolvedPath = "/usr/bin/same-bytes"), file.copy(bytes = 6),
+                file.copy(sha256 = "0".repeat(64)), file.copy(path = "/usr/bin/missing"),
+                file.copy(path = "/usr/bin/../bin/tool"), original.copy(resolvedPath = "/usr/bin/tool"))) {
+                assertFails { ReferenceNativeRuntime.verifyDeclaredFiles(plan, fixture.artifacts, listOf(changed)) }
+            }
+            assertFails { ReferenceNativeRuntime.verifyDeclaredFiles(plan, fixture.artifacts, listOf(file, file)) }
+            assertFails { ReferenceNativeRuntime.verifyDeclaredFiles(plan, emptyList(), listOf(original)) }
+        }
+    }
+
+    @Test
+    fun `declaration resolution cannot traverse an omitted intermediate or private target`(): Unit = Fixture().use { fixture ->
+        val layout = fixture.layout(additional = listOf(
+            Item("etc/omitted-link", TarConstants.LF_SYMLINK, target = "/usr/bin/tool"),
+            Item("usr/bin/through-omitted", TarConstants.LF_SYMLINK, target = "/etc/omitted-link"),
+            Item("usr/bin/cycle", TarConstants.LF_SYMLINK, target = "cycle")))
+        LlvmBehaviorNativeOciImageV2.openLayout(layout).use { image ->
+            val plan = ReferenceNativeRuntime.plan(image, fixture.selection(image.configSha256), fixture.artifacts)
+            val digest = OracleArtifacts.sha256("tool\n".encodeToByteArray())
+            for (path in listOf("/usr/bin/through-omitted", "/usr/bin/cycle", "/etc/runtime-link")) {
+                assertFails { ReferenceNativeRuntime.verifyDeclaredFiles(plan, fixture.artifacts,
+                    listOf(ReferenceRuntimeFileBinding(path, "/usr/bin/tool", 5, digest))) }
+            }
+        }
+    }
+
+    @Test
     fun `real registered pinned image stages without any container execution`() {
         val configured = System.getenv("DECOMP_REFERENCE_NATIVE_REAL_OCI").orEmpty()
         assumeTrue(configured.isNotEmpty(), "set DECOMP_REFERENCE_NATIVE_REAL_OCI for real pinned image staging")

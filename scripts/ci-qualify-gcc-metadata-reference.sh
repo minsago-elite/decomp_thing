@@ -87,6 +87,10 @@ if [[ "$mode" == collect ]]; then
         collect_item 'qualification report' sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0644 \
           "$private/report/qualification.json" "$evidence/qualification.json"
       fi
+      if sudo -n test -f "$private/report/orchestration-declaration.json"; then
+        collect_item 'orchestration declaration' sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0644 \
+          "$private/report/orchestration-declaration.json" "$evidence/orchestration-declaration.json"
+      fi
     else
       collection_errors=$((collection_errors + 1))
       printf '%s\n' 'private record root failed its owner/path checks' >> "$evidence/collection-errors.log"

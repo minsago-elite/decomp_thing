@@ -51,6 +51,14 @@ internal data class ReferenceNativeRuntimeProvisioningEntry(
     val mode: Int,
 )
 
+/** Expected file identity only; this value grants no filesystem or execution authority. */
+internal data class ReferenceRuntimeFileBinding(
+    val path: String,
+    val resolvedPath: String,
+    val bytes: Long,
+    val sha256: String,
+)
+
 /**
  * Materializes the authenticated image's closed Linux tool/library namespace, without executing it.
  * OCI decoding and unprivileged staging confer no execution authority. Only [admit] can produce an
@@ -158,6 +166,72 @@ internal object ReferenceNativeRuntime {
     )
     internal data class PlannedMount(val relative: String, val guest: String, val role: String)
     internal data class Plan(val nodes: List<Node>, val mounts: List<PlannedMount>, val canonicalBytes: ByteArray)
+
+    /** Checks declarations against the measured, selected guest namespace, without granting admission. */
+    internal fun verifyDeclaredFiles(plan: Plan, artifacts: List<ReferenceCorpusArtifact>, bindings: List<ReferenceRuntimeFileBinding>) {
+        require(bindings.size in 1..4096 && bindings.map { it.path }.distinct().size == bindings.size) {
+            "runtime file declarations must be bounded and have distinct literal paths"
+        }
+        val selected = plan.nodes.filter { it.imageEntry != null }.associateBy { it.imageEntry!!.path }
+        fun resolveSelected(path: String): Node {
+            require(MOUNT_PREFIXES.any { path.startsWith("$it/") }) { "declared runtime file is outside the selected mounts" }
+            val remaining = java.util.ArrayDeque(path.drop(1).split('/'))
+            val resolved = ArrayList<String>()
+            var links = 0
+            var current: Node? = null
+            while (remaining.isNotEmpty()) {
+                when (val part = remaining.removeFirst()) {
+                    "", "." -> Unit
+                    ".." -> {
+                        require(resolved.isNotEmpty()) { "declared runtime link escapes the guest root" }
+                        resolved.removeAt(resolved.lastIndex)
+                    }
+                    else -> {
+                        val candidate = "/" + (resolved + part).joinToString("/")
+                        val node = requireNotNull(selected[candidate]) { "declared runtime path is absent from the selected projection: $candidate" }
+                        if (node.kind == "symlink") {
+                            require(++links <= 40) { "declared runtime path exceeds the symlink bound" }
+                            val target = requireNotNull(node.target)
+                            if (target.startsWith('/')) resolved.clear()
+                            target.split('/').asReversed().forEach(remaining::addFirst)
+                        } else {
+                            resolved += part
+                            current = node
+                            require(remaining.isEmpty() || node.kind == "directory") { "declared runtime path traverses a non-directory" }
+                        }
+                    }
+                }
+            }
+            val result = requireNotNull(current)
+            require(result.kind == "regular" && result.imageEntry!!.path == "/" + resolved.joinToString("/")) {
+                "declared runtime path does not resolve to a selected regular file"
+            }
+            return result
+        }
+        bindings.forEach { binding ->
+            listOf(binding.path, binding.resolvedPath).forEach { value ->
+                safeAbsolute(value)
+                require(Path.of(value).normalize().toString() == value && value.none { it.code < 32 || it.code == 127 }) {
+                    "declared runtime file path is not canonical"
+                }
+            }
+            require(binding.bytes in 1..MAXIMUM_FILE_BYTES && binding.sha256.matches(Regex("[0-9a-f]{64}"))) {
+                "declared runtime file identity is invalid"
+            }
+            val artifact = artifacts.singleOrNull { it.guestPath == binding.path }
+            if (artifact != null) {
+                require(binding.resolvedPath == artifact.guestPath && binding.bytes == artifact.bytes && binding.sha256 == artifact.sha256) {
+                    "declared original artifact differs from its authenticated identity"
+                }
+                require(plan.nodes.any { it.artifact === artifact }) { "declared original artifact is absent from the projection" }
+            } else {
+                val actual = resolveSelected(binding.path)
+                require(actual.imageEntry!!.path == binding.resolvedPath && actual.bytes == binding.bytes && actual.sha256 == binding.sha256) {
+                    "declared runtime file differs from the selected image identity"
+                }
+            }
+        }
+    }
 
     internal fun plan(image: LlvmBehaviorNativeOciImageV2.MeasuredImage, selection: ReferenceNativeRuntimeSelection, artifacts: List<ReferenceCorpusArtifact>): Plan {
         val config = selection.imageConfigSha256
@@ -416,6 +490,7 @@ internal class AdmittedReferenceNativeRuntime private constructor(
     private val descriptor: LinuxDescriptor,
     private val root: Path,
     private val rootManifest: String,
+    private val plan: ReferenceNativeRuntime.Plan,
     private val allMounts: List<Pair<String, FullTreeFunctionObservationRuntimeMount>>,
     canonicalBytes: ByteArray,
 ) : AutoCloseable {
@@ -423,6 +498,14 @@ internal class AdmittedReferenceNativeRuntime private constructor(
     val canonicalBytes: ByteArray get() = stored.copyOf()
     val identitySha256: String = OracleArtifacts.sha256(stored)
     private var closed = false
+
+    /** Declaration validation borrows this already-admitted owner and cannot mint another one. */
+    @Synchronized
+    fun verifyDeclaredFiles(bindings: List<ReferenceRuntimeFileBinding>) {
+        requireCurrent("before runtime declaration binding")
+        ReferenceNativeRuntime.verifyDeclaredFiles(plan, profile.originalArtifacts, bindings)
+        requireCurrent("after runtime declaration binding")
+    }
 
     @Synchronized
     fun mounts(batchId: String): List<FullTreeFunctionObservationRuntimeMount> {
@@ -482,7 +565,7 @@ internal class AdmittedReferenceNativeRuntime private constructor(
                         "manifestSha256" to JsonPrimitive(mount.expectedManifestSha256),
                     )) }),
                 )))
-                val retained = AdmittedReferenceNativeRuntime(profile, image, descriptor, root, fullManifest, mounts, bytes)
+                val retained = AdmittedReferenceNativeRuntime(profile, image, descriptor, root, fullManifest, plan, mounts, bytes)
                 retained.requireCurrent("after native runtime admission")
                 descriptor = null
                 return retained
