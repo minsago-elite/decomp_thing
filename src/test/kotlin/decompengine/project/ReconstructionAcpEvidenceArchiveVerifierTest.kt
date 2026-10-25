@@ -486,6 +486,63 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `compiler read failure restores accepted ACP receipt and retains the failed attempt receipt`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "acp-compiler-read-failure-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = createAgentProject(temp.resolve(profile.id), accepted = true, profile = profile)
+                val preservedPaths = listOf(SOURCE_PATH, CHECKPOINT_PATH, EVIDENCE_PATH,
+                    "source_tree_manifest.json", "reports/confidence.json")
+                val before = preservedPaths.associateWith { project.resolve(it).readBytes() }
+                val harness = ArchiveEvidenceHarness(accepted = true, returnValueOverride = 23)
+                val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                    RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")))
+                var candidateSha256: String? = null
+                var candidateReceipt: ByteArray? = null
+                val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+                    override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                        if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) {
+                            assertTrue("return 23;" in project.resolve(SOURCE_PATH).readText())
+                            candidateSha256 = sha256(project.resolve(SOURCE_PATH).readBytes())
+                            candidateReceipt = project.resolve(EVIDENCE_PATH).readBytes()
+                            assertFalse(before.getValue(EVIDENCE_PATH).contentEquals(candidateReceipt))
+                            Files.delete(project.resolve(SOURCE_PATH))
+                        }
+                    }
+                }
+                val failure = assertFailsWith<java.nio.file.NoSuchFileException> {
+                    SourceTreeGenerator.generate(model, project, profile = profile,
+                        reconstructor = BoundedLlmModuleReconstructor(harness,
+                            harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+                        observedBehavior = attributedObservation(stdoutHex = "78"), progress = progress)
+                }
+                assertEquals(project.resolve(SOURCE_PATH).toString(), failure.file)
+                preservedPaths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+                val attemptPath = "reports/modules/parse.attempt.execution.json"
+                val attemptReceipt = project.resolve(attemptPath).readBytes()
+                assertTrue(requireNotNull(candidateReceipt).contentEquals(attemptReceipt))
+                val attempt = Json.parseToJsonElement(project.resolve("reports/modules/parse.attempt.json").readText()).jsonObject
+                assertEquals(JsonPrimitive("validation-failed"), attempt.getValue("status"))
+                assertEquals(JsonPrimitive(candidateSha256), attempt.getValue("candidateSourceSha256"))
+                assertEquals(JsonPrimitive(sha256(before.getValue(SOURCE_PATH))), attempt.getValue("previousAcceptedSourceSha256"))
+                assertEquals(JsonPrimitive(attemptPath), attempt.getValue("executionEvidencePath"))
+                assertEquals(JsonPrimitive(sha256(attemptReceipt)), attempt.getValue("executionEvidenceSha256"))
+                assertEquals(JsonPrimitive("returned-completed"), attempt.getValue("executionTerminalOutcome"))
+                val manifest = SourceTreeManifestReader.read(project, profile)
+                assertEquals(1, ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                    manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile).size)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `rejected ACP revision retains its receipt and restores accepted release evidence`() {
         val temp = createTempDirectory("acp-rejected-revision-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
@@ -961,6 +1018,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     private class ArchiveEvidenceHarness(
         private val accepted: Boolean,
         private val wirePromptOverride: String? = null,
+        private val returnValueOverride: Int? = null,
     ) : AgentHarness {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         private lateinit var requestBinding: AgentExecutionRequestBinding
@@ -987,7 +1045,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             val target = request.accessPolicy.pathRules.single { rule ->
                 decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
             }.path
-            val returnValue = if (accepted) 17 else 0
+            val returnValue = returnValueOverride ?: if (accepted) 17 else 0
             val source = """
                 #include "modules/parse.h"
                 /* fn_0000000000401000 */

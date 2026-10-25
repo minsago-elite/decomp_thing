@@ -172,6 +172,75 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `ordinary compiler read failure restores accepted revision and records failed validation`() {
+        val project = createTempDirectory("source-tree-compiler-read-failure-")
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor())
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val source = project.resolve(paths.first())
+        var candidateSha256: String? = null
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) {
+                    candidateSha256 = sha256(source.readBytes())
+                    assertNotEquals(sha256(before.getValue(paths.first())), candidateSha256)
+                    Files.delete(source)
+                }
+            }
+        }
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val failure = assertFailsWith<java.nio.file.NoSuchFileException> {
+            SourceTreeGenerator.generate(model, project, reconstructor = candidate,
+                observedBehavior = "new candidate input", progress = progress)
+        }
+        assertEquals(source.toString(), failure.file)
+        assertFalse(Thread.currentThread().isInterrupted)
+        paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+        val attempt = Json.parseToJsonElement(project.resolve("reports/modules/parse.attempt.json").readText()).jsonObject
+        assertEquals(JsonPrimitive("validation-failed"), attempt.getValue("status"))
+        assertEquals(JsonPrimitive("module-compilation-failure"), attempt.getValue("kind"))
+        assertEquals(JsonPrimitive(candidateSha256), attempt.getValue("candidateSourceSha256"))
+        assertEquals(JsonPrimitive(sha256(before.getValue(paths.first()))), attempt.getValue("previousAcceptedSourceSha256"))
+        assertEquals(JsonPrimitive(failure.javaClass.name), attempt.getValue("failureType"))
+        assertEquals(JsonNull, attempt.getValue("executionEvidencePath"))
+        assertFalse("compilation" in attempt)
+        SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor {
+            error("accepted revision must remain reusable after compiler read failure")
+        })
+    }
+
+    @Test
+    fun `compiler rollback failure stays fatal and retains original validation failure`() {
+        val project = createTempDirectory("source-tree-compiler-rollback-failure-")
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor())
+        val source = project.resolve("src/modules/parse.c")
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        val beforeCheckpoint = checkpoint.readBytes()
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) {
+                    Files.delete(source)
+                    Files.createDirectory(source)
+                    source.resolve("rollback-obstruction").writeText("keep the directory nonempty")
+                }
+            }
+        }
+        val failure = assertFailsWith<java.io.IOException> {
+            SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(),
+                observedBehavior = "force a new attempt", progress = progress)
+        }
+        assertEquals(1, failure.suppressed.size)
+        assertTrue(failure.suppressed.single() is java.io.IOException)
+        assertTrue(Files.isDirectory(source))
+        assertTrue(beforeCheckpoint.contentEquals(checkpoint.readBytes()))
+        assertFalse(project.resolve("reports/modules/parse.attempt.json").exists())
+    }
+
+    @Test
     fun `compiler cancellation restores accepted revision and remains retryable`() {
         val project = createTempDirectory("source-tree-compiler-cancelled-")
         val originalModel = oneModuleModel()

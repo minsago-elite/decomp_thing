@@ -22,6 +22,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -786,11 +787,27 @@ object SourceTreeGenerator {
                 val issues = assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
-                    progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
                     val validation = try {
+                        progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
                         compilationPolicy.validate(projectDir, module.sourcePath, profile)
                     } catch (failure: Exception) {
-                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) throw failure
+                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) {
+                            try {
+                                val retainedEvidence = restoreAcceptedRevision()
+                                writeValidationFailureReport(attemptPath, module, fingerprint, cacheIdentity,
+                                    sha256(normalizedSource.toByteArray()), previousAccepted, failure, retainedEvidence)
+                                if (previousAccepted != null) selectedReconstructor.reconcileSessionCheckpoint(
+                                    request, false, previousAccepted.sourceSha256,
+                                    executionEvidence?.requestSha256, executionEvidence?.sha256,
+                                )
+                            } catch (restorationFailure: Exception) {
+                                // A failed rollback/retention is itself fatal. Preserve the original
+                                // validation failure without presenting cleanup as successful.
+                                if (restorationFailure !== failure) restorationFailure.addSuppressed(failure)
+                                throw restorationFailure
+                            }
+                            throw failure
+                        }
                         // Restore durable state before reinstating cancellation, since file
                         // operations may otherwise abort immediately on the interrupted thread.
                         Thread.interrupted()
@@ -1363,6 +1380,39 @@ object SourceTreeGenerator {
     private fun executionTextCommitment(value: String): Pair<String, Long> {
         val bytes = receiptCommitmentBytes(value)
         return sha256(bytes) to bytes.size.toLong()
+    }
+
+    private fun writeValidationFailureReport(
+        path: Path,
+        module: PlannedModule,
+        fingerprint: String,
+        reconstructorIdentity: String,
+        candidateSourceSha256: String,
+        previousAccepted: ModuleCheckpoint?,
+        failure: Exception,
+        executionEvidence: PersistedReconstructionExecutionEvidence?,
+    ) {
+        // This is an attempt disposition, not compiler proof. No exit status or pass is
+        // invented when validation fails before returning its typed result.
+        val report = kotlinx.serialization.json.buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put("kind", JsonPrimitive("module-compilation-failure"))
+            put("moduleId", JsonPrimitive(module.id))
+            put("fingerprint", JsonPrimitive(fingerprint))
+            put("reconstructorIdentity", JsonPrimitive(reconstructorIdentity))
+            put("status", JsonPrimitive("validation-failed"))
+            put("candidateSourceSha256", JsonPrimitive(candidateSourceSha256))
+            put("previousAcceptedSourceSha256", previousAccepted?.sourceSha256
+                ?.let(::JsonPrimitive) ?: JsonNull)
+            put("failureType", JsonPrimitive(failure.javaClass.name))
+            put("executionEvidencePath", executionEvidence?.path?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionEvidenceSha256", executionEvidence?.sha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionRequestSha256", executionEvidence?.requestSha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("executionTerminalOutcome", executionEvidence?.terminalOutcome?.let(::JsonPrimitive) ?: JsonNull)
+            put("entityIds", kotlinx.serialization.json.JsonArray(
+                (module.functionIds + module.globalIds).sorted().map(::JsonPrimitive)))
+        }
+        writeAtomically(path, report.toString() + "\n")
     }
 
     private fun writeInterruptionReport(
