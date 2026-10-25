@@ -325,6 +325,33 @@ internal class WebProgramStructurePages(
         ))
     }
 
+    /** The exact committed bytes of one structure record, for download next to the view that cites its digest. */
+    class RecordDownload(val name: String, val sha256: String, val bytes: ByteArray)
+
+    /**
+     * One manifest-committed record of the revision (program model, module plan or confidence report), digest-checked
+     * and pinned to the structure version the browser displayed, so the download is the record that was cited.
+     */
+    fun record(jobId: String, runId: String, revisionId: String, recordId: String, rawQuery: String?): RecordDownload {
+        val query = parse(rawQuery, emptySet(), paged = false)
+        if (query.version == null) invalidFilter()
+        if (recordId !in setOf("program-model", "module-plan", "confidence")) throw WebAccessDenied(404, "RECORD_NOT_FOUND",
+            "The requested structure record is not one this revision view cites.")
+        var download: RecordDownload? = null
+        read(jobId, runId, revisionId) { index, records ->
+            pinned(index, query)
+            val (record, maximum) = when (recordId) {
+                "program-model" -> index.model to WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES
+                "module-plan" -> index.plan to WebProgramStructureBuilder.MAXIMUM_PLAN_BYTES
+                else -> index.confidenceFile?.let { WebStructureRecord(it.path, it.sha256, -1) } to WebConfidenceRecord.MAXIMUM_BYTES
+            }
+            if (record == null) throw WebAccessDenied(404, "RECORD_NOT_RECORDED", "This revision's manifest does not commit the requested record.")
+            download = RecordDownload(record.path.substringAfterLast('/'), record.sha256, records.read(record, maximum))
+            JsonObject(emptyMap())
+        }
+        return checkNotNull(download)
+    }
+
     /**
      * The recorded scorecard of one revision: exact numerators and denominators, recorded values with their
      * reproduction from recorded labels, explicit unmeasured/unknown/partial/failed states and a module page.

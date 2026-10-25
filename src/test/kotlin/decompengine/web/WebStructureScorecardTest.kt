@@ -108,6 +108,29 @@ class WebStructureScorecardTest {
         assertEquals("CONFIDENCE_MALFORMED", card("run_4", "revision_4").getValue("confidence").jsonObject.text("stateReason"))
     }
 
+    @Test fun `cited records download as their exact committed bytes for the displayed version`() {
+        val model = model()
+        val confidence = fixture.confidence(model, plan(), emptySet())
+        fixture.revision("run_1", "revision_1", model, plan(), confidence = confidence)
+        val version = card().text("structureVersion")
+        val record = fixture.pages.record(fixture.jobId, "run_1", "revision_1", "confidence", "structureVersion=$version")
+        assertContentEquals(confidence, record.bytes); assertEquals("confidence.json", record.name); assertEquals(fixture.sha(confidence), record.sha256)
+        assertContentEquals(model.toJson().toByteArray(),
+            fixture.pages.record(fixture.jobId, "run_1", "revision_1", "program-model", "structureVersion=$version").bytes)
+        assertEquals("STRUCTURE_CHANGED", assertFailsWith<WebAccessDenied> {
+            fixture.pages.record(fixture.jobId, "run_1", "revision_1", "confidence", "structureVersion=${"0".repeat(64)}")
+        }.code)
+        assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied> { fixture.pages.record(fixture.jobId, "run_1", "revision_1", "confidence", null) }.code)
+        assertEquals("RECORD_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+            fixture.pages.record(fixture.jobId, "run_1", "revision_1", "manifest", "structureVersion=$version")
+        }.code)
+        fixture.revision("run_2", "revision_2", model, plan(), confidence = null)
+        val other = card("run_2", "revision_2").text("structureVersion")
+        assertEquals("RECORD_NOT_RECORDED", assertFailsWith<WebAccessDenied> {
+            fixture.pages.record(fixture.jobId, "run_2", "revision_2", "confidence", "structureVersion=$other")
+        }.code)
+    }
+
     @Test fun `module rows sort by recorded score with unmeasured rows last and page by cursor`() {
         fixture.revision("run_1", "revision_1", model(), plan())
         val descending = card(query = "sort=score&order=desc&limit=2")

@@ -225,6 +225,8 @@ class WebSessionRealRoutesTest {
                 Shape("$revision/graph?view=calls&focus=fn_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
                 Shape("$revision/graph", head = true, status = 422, code = "VALIDATION_FAILED"),
                 Shape("$revision/scorecard", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/records/confidence?structureVersion=${"0".repeat(64)}", accept = bytes, head = true, status = 404,
+                    code = "REVISION_NOT_FOUND"),
                 Shape("$revision/scorecard-comparison?baselineRunId=${run.runId}&baselineRevisionId=rev_1", head = true, status = 404,
                     code = "REVISION_NOT_FOUND"),
                 Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
