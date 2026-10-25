@@ -108,6 +108,19 @@ class WebStructureScorecardTest {
         assertEquals("CONFIDENCE_MALFORMED", card("run_4", "revision_4").getValue("confidence").jsonObject.text("stateReason"))
     }
 
+    @Test fun `an accepted repair changes current acceptance without contradicting the historical generation outcome`() {
+        val model = model()
+        // The generation accepted nothing; a later repair accepted core in the manifest but kept the generation outcome.
+        fixture.revision("run_1", "revision_1", model, plan(), accepted = setOf("core"), confidence = fixture.confidence(model, plan(), emptySet()))
+        fixture.revision("run_2", "revision_2", model, plan(), confidence = fixture.confidence(model, plan(), emptySet()))
+        val acceptance = card().metric("implementation-acceptance")
+        assertEquals("measured", acceptance.text("state")); assertEquals("1", acceptance.text("numerator")); assertEquals("3", acceptance.text("denominator"))
+        assertEquals("measured", card().metric("generation-completion").text("state"))
+        val delta = compare("run_2", "revision_2", run = "run_1", revision = "revision_1").getValue("metrics").jsonArray.map { it.jsonObject }
+            .single { it.text("id") == "implementation-acceptance" }.getValue("delta").jsonObject
+        assertEquals("computed", delta.text("state")); assertEquals("1", delta.text("numerator"))
+    }
+
     @Test fun `cited records download as their exact committed bytes for the displayed version`() {
         val model = model()
         val confidence = fixture.confidence(model, plan(), emptySet())

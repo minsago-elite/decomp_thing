@@ -287,15 +287,13 @@ internal class WebStructureScorecard(
             val planned = index.planOutcome.state == "available"
             val declaredAccepted = index.modules.count { it.implementationDeclaration == "accepted" }.toLong()
             val generation = confidence.generation
-            metrics += when {
-                !planned -> WebScorecardMetric("implementation-acceptance", "count", "unknown", "PLAN_NOT_AVAILABLE", null, null, null, null,
-                    "manifest", "files[].acceptedImplementation", null)
-                generation != null && (generation.accepted != declaredAccepted || generation.planned != index.modules.size.toLong()) ->
-                    WebScorecardMetric("implementation-acceptance", "count", "failed", "ACCEPTANCE_RECORDS_DISAGREE", null, null,
-                        declaredAccepted.toString(), index.modules.size.toLong(), "manifest", "files[].acceptedImplementation", null)
-                else -> WebScorecardMetric("implementation-acceptance", "count", "measured", null, null, null,
-                    declaredAccepted.toString(), index.modules.size.toLong(), "manifest", "files[].acceptedImplementation", null)
-            }
+            // Current acceptance is the manifest's declaration. The confidence report's generation outcome is the
+            // historical generation population: an accepted repair updates the manifest but not that outcome, so the
+            // two are separate measures and a difference between them is expected, not a disagreement.
+            metrics += if (!planned) WebScorecardMetric("implementation-acceptance", "count", "unknown", "PLAN_NOT_AVAILABLE", null, null,
+                null, null, "manifest", "files[].acceptedImplementation", null)
+            else WebScorecardMetric("implementation-acceptance", "count", "measured", null, null, null,
+                declaredAccepted.toString(), index.modules.size.toLong(), "manifest", "files[].acceptedImplementation", null)
             metrics += when {
                 generation == null -> WebScorecardMetric("generation-completion", "count", "unknown", "GENERATION_EVIDENCE_NOT_RECORDED",
                     null, null, null, null, "confidence", "sourceGenerationBudgetEvidence.outcome.completedModules", null)

@@ -189,8 +189,8 @@ exact numerator and denominator, and its source record and field:
 | Module score (`modules[].score`) | The same over the plan's owned entities | as above; `unknown` when no score is recorded; `failed` when the plan names an unrecorded entity |
 | Calibrated confidence | — / empirical sample count | `unmeasured` (`UNCALIBRATED`) |
 | Assessed recovery | Assessed entities / all entities | `unmeasured` (`UNASSESSED`) |
-| Implementation acceptance | Manifest-declared accepted modules / planned modules | `measured`; `failed` if the confidence report disagrees |
-| Generation completion | Completed / planned modules | `measured`; `partial` when fewer completed; `unknown` when not recorded |
+| Implementation acceptance | Manifest-declared accepted modules / planned modules (current, including accepted repairs) | `measured` |
+| Generation completion | Completed / planned modules of the recorded generation; repairs do not rewrite this historical outcome, so it is not compared with current acceptance | `measured`; `partial` when fewer completed; `unknown` when not recorded |
 | Unresolved recovery, unresolved implementation | Recorded identities / entities | `measured`; `failed` if the manifest disagrees |
 | Excluded entities | Entities the plan assigns to no module / entities | `measured` |
 
