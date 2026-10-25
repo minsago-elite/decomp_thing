@@ -151,3 +151,18 @@ it('states recovery provenance on the new attempt', () => {
   expect(screen.getByText(/resumed a verified checkpoint of/).textContent).toContain('Only accepted project evidence was restored');
   expect(screen.getByRole('link', { name: 'run_prior_0' }).getAttribute('href')).toBe(`/nested/jobs/${jobId}/runs/run_prior_0`);
 });
+
+it('reconciles the parent run when a controls read observes a newer attempt version', async () => {
+  // The page loaded the attempt while running; it finished before the explicit read.
+  const running = { ...failed, state: 'running' as const, version: 'run_version_1', endedAt: null, terminalReason: null };
+  transport.get.mockResolvedValue(controls());
+  const { onChanged, view } = mount(running);
+  fireEvent.click(button('Read available actions'));
+  await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+  expect(screen.queryByRole('button', { name: 'Retry as a new attempt' })).toBeNull();
+  // Run.tsx re-reads the attempt; the fresh version matches and the read actions become usable.
+  view.rerender(<AttemptControls jobId={jobId} runId={runId} basePath="/nested/" session={session} run={failed} onChanged={onChanged} />);
+  expect(screen.getByRole('button', { name: 'Retry as a new attempt' })).toHaveProperty('disabled', false);
+  expect(screen.getByRole('status').textContent).not.toMatch(/attempt changed since/);
+  expect(transport.get).toHaveBeenCalledOnce(); expect(onChanged).toHaveBeenCalledOnce(); expect(transport.post).not.toHaveBeenCalled();
+});

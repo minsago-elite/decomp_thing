@@ -49,11 +49,16 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
   const pendingHere = pending !== null && pending.jobId === jobId && pending.runId === runId;
   const stale = controls !== null && controls.runVersion !== run.version;
 
-  async function readControls(controller: AbortController): Promise<void> {
+  const runVersion = useRef(run.version);
+  runVersion.current = run.version;
+
+  /** A read that observes a newer attempt version asks the parent to re-read the run, so the two converge. */
+  async function readControls(controller: AbortController, reconcile = true): Promise<void> {
     const response = await client.get('attemptControls', `/jobs/${jobId}/runs/${runId}/controls`, { signal: controller.signal });
     if (controller.signal.aborted) return;
     if (response.data.jobId !== jobId || response.data.runId !== runId) throw new ApiClientError('invalid_response');
     setControls(response.data);
+    if (reconcile && response.data.runVersion !== runVersion.current) onChanged();
   }
 
   async function read() {
@@ -104,7 +109,7 @@ export function AttemptControls({ jobId, runId, basePath, session, run, onChange
       } else setStatus(textMessage(result.state === 'cancelled' ? copy.cancelConfirmed : result.state === 'cancelling' || !['completed', 'failed', 'interrupted'].includes(result.state)
         ? copy.cancelRequested : copy.finishedFirst, { runId: result.runId, state: result.state }));
       onChanged();
-      try { await readControls(controller); } catch { /* The outcome stands; a fresh read is explicit. */ }
+      try { await readControls(controller, false); } catch { /* The outcome stands; a fresh read is explicit. */ }
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       if (definite(failure)) forget();
