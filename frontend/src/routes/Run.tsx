@@ -15,6 +15,9 @@ import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
@@ -22,9 +25,10 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, basePath, jobId, runId, session }), [client, basePath, jobId, runId, session]);
-  const [stored, setStored] = useState<{ binding: typeof binding; data: RunData | null; error: string; loading: boolean }>(
+  const [stored, setStored] = useState<{ binding: typeof binding; data: Received<RunData> | null; error: string; loading: boolean }>(
     { binding, data: null, error: '', loading: true });
-  const { data: run, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
+  const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -34,7 +38,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       if (response.data.jobId !== jobId || response.data.runId !== runId) {
         setStored({ binding, data: null, error: copy.theResponseDoesNotBelongToTheRequestedJobAnd, loading: false }); return;
       }
-      setStored({ binding, data: response.data, error: '', loading: false });
+      setStored({ binding, data: receive(response.data), error: '', loading: false });
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
@@ -53,6 +57,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     {error && run && <p>{copy.previousAttemptMetadataMayBeOutdated}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshAttempt}</button>
     {run && <>
+      <MetadataReceipt kind="run" receipt={observation?.receipt} />
       {view !== 'overview' && <dl class="job-facts">
         <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
         <dt>{copy.attemptState}</dt><dd>{run.state}</dd>
