@@ -394,7 +394,7 @@ export const moduleProgressCopy = {
   units: '{completed} of {total} modules',
   'plan-recorded': 'plan recorded', 'build-passed': 'build passed', 'build-failed': 'build failed',
   'candidate-recorded': 'candidate revision recorded, not accepted', accepted: 'accepted revision',
-  currentModule: 'Generating module {module}',
+  lastGeneratedModule: 'Last generated module: {module}. Remaining modules are still generating.',
   plan: 'Recorded module plan', planDigest: 'Plan digest (SHA-256)', planModules: 'Planned modules', planProfile: 'Profile',
   noPlan: 'No module plan was recorded.',
   unresolvedTitle: 'Unresolved modules',

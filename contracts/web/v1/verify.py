@@ -241,7 +241,7 @@ def check_module_progress(data: dict) -> None:
     for item in stages:
         if item["completedUnits"] is not None and item["totalUnits"] is not None and int(item["completedUnits"]) > int(item["totalUnits"]):
             raise ValueError("module progress counted past its total")
-    if data["currentModuleId"] is not None and data["attemptState"] not in ("running", "cancelling"):
+    if data["lastGeneratedModuleId"] is not None and data["attemptState"] not in ("running", "cancelling"):
         raise ValueError("a finished attempt reports a current module")
     unresolved = data["unresolved"]
     if unresolved is not None:

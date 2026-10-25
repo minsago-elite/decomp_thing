@@ -5326,7 +5326,7 @@
             }
           ]
         },
-        "currentModuleId": {
+        "lastGeneratedModuleId": {
           "anyOf": [
             {
               "type": "string",
@@ -5514,7 +5514,7 @@
         "state",
         "stages",
         "plan",
-        "currentModuleId",
+        "lastGeneratedModuleId",
         "unresolved",
         "recovery",
         "limitations"

@@ -31,6 +31,7 @@ it('reads progress only on request and separates every reconstruction stage', as
   expect(transport.get).toHaveBeenCalledWith('moduleProgress',
     `/jobs/${generating.binding.jobId}/runs/run_generating/reports/module-progress`, expect.anything());
   expect(screen.getByText('module_f')).toBeTruthy();
+  expect(screen.getByText(/^Last generated module:/)).toBeTruthy();
   expect(screen.getByText('The attempt is still active; its plan is not yet retained for recovery.')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Refresh module progress' })).toBeTruthy();
 });

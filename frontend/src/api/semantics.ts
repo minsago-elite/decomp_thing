@@ -183,7 +183,7 @@ function checkModuleProgress(progress: ModuleProgress): void {
   if (stages.length > 0) requireValue(stages.every((item, index) => item.stage === MODULE_STAGES[index]));
   requireValue(stages.every((item, index) => index === 0 || item.state !== 'completed' || stages[index - 1]!.state === 'completed'));
   requireValue(stages.every(item => item.completedUnits === null || item.totalUnits === null || BigInt(item.completedUnits) <= BigInt(item.totalUnits)));
-  requireValue(progress.currentModuleId === null || progress.attemptState === 'running' || progress.attemptState === 'cancelling');
+  requireValue(progress.lastGeneratedModuleId === null || progress.attemptState === 'running' || progress.attemptState === 'cancelling');
   if (unresolved !== null) {
     requireValue(unresolved.moduleCount === null ? unresolved.moduleIds.length === 0
       : BigInt(unresolved.moduleIds.length) <= BigInt(unresolved.moduleCount)

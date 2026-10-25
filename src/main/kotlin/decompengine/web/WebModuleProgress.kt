@@ -215,7 +215,9 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
             put("sha256", recorded.sha256); put("moduleCount", recorded.moduleIds.size.toString())
             put("profileId", attempt.configuration?.reconstruction?.profileId?.let(::JsonPrimitive) ?: JsonNull)
         } } ?: JsonNull)
-        put("currentModuleId", progress?.module?.takeIf { running && phase == "modules" }?.let(::JsonPrimitive) ?: JsonNull)
+        // The progress record names a module only after it finished; it is the last generated one while others remain.
+        put("lastGeneratedModuleId", progress?.module?.takeIf { running && !generationFinished(progress) && phase == "modules" }
+            ?.let(::JsonPrimitive) ?: JsonNull)
         put("unresolved", if (!reconstruct) JsonNull else buildJsonObject {
             put("moduleCount", unresolved?.let { JsonPrimitive(it.size.toString()) } ?: JsonNull)
             put("entityCount", summary?.let { JsonPrimitive(it.unresolvedEntityCount.toString()) } ?: JsonNull)

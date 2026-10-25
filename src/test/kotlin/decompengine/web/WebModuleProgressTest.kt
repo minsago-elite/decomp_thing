@@ -41,13 +41,15 @@ class WebModuleProgressTest {
         val planning = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"planning","completed":0,"total":0}""")
         assertEquals("completed", states(planning)["analysis"]); assertEquals("active", states(planning)["planning"])
         val generating = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"modules","completed":1,"total":3,"module":"module_b"}""", plan = true)
-        assertEquals("active", states(generating)["generation"]); assertEquals("module_b", generating.getValue("currentModuleId").jsonPrimitive.content)
+        assertEquals("active", states(generating)["generation"]); assertEquals("module_b", generating.getValue("lastGeneratedModuleId").jsonPrimitive.content)
         val generation = generating.getValue("stages").jsonArray[2].jsonObject
         assertEquals("1" to "3", generation.getValue("completedUnits").jsonPrimitive.content to generation.getValue("totalUnits").jsonPrimitive.content)
         assertEquals("3", generating.getValue("plan").jsonObject.getValue("moduleCount").jsonPrimitive.content)
         // Every module finished generating; the profile build is the active stage.
         val building = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"modules","completed":3,"total":3,"module":"module_c"}""", plan = true)
         assertEquals("completed", states(building)["generation"]); assertEquals("active", states(building)["validation"])
+        // The record names a module after it finishes, so nothing is reported once every module is generated.
+        assertEquals(JsonNull, building.getValue("lastGeneratedModuleId"))
         val candidate = WorkflowCandidate("source_${"e".repeat(64)}", "e".repeat(64))
         val completed = stages(attempt(WorkflowRunState.COMPLETED, candidate = candidate),
             progress = """{"phase":"unresolved","completed":3,"total":3,"unresolvedEntityCount":2}""", summary = SUMMARY, plan = true,
@@ -59,7 +61,7 @@ class WebModuleProgressTest {
         assertEquals("1", unresolved.getValue("moduleCount").jsonPrimitive.content)
         assertEquals(listOf("module_b"), unresolved.getValue("moduleIds").jsonArray.map { it.jsonPrimitive.content })
         assertEquals("2", unresolved.getValue("entityCount").jsonPrimitive.content)
-        assertEquals(JsonNull, completed.getValue("currentModuleId"))
+        assertEquals(JsonNull, completed.getValue("lastGeneratedModuleId"))
         assertEquals("ATTEMPT_COMPLETED", completed.getValue("recovery").jsonObject.getValue("reasonCode").jsonPrimitive.content)
         // A partially rewritten progress record is unknown, never a stage outcome.
         val torn = stages(attempt(WorkflowRunState.RUNNING), progress = """{"phase":"modules","compl""")

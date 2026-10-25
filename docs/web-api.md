@@ -536,7 +536,7 @@ attempts report `state: "not-applicable"` with no stages.
 recorded candidate revision or acceptance), each `pending`, `active`, `completed`, `stopped`
 (active when the attempt ended) or `not-reached`. A later stage never completes before an
 earlier one; a candidate retained after an unfinished build is `stopped` with
-`candidate-recorded`. `plan` carries the recorded plan digest and module count;
+`candidate-recorded`. `lastGeneratedModuleId` names the most recently finished module while others are still generating (the progress record names a module only after it finishes); `plan` carries the recorded plan digest and module count;
 `unresolved` lists up to 100 planned modules the generation record reports as unresolved,
 with the total and the archive's unresolved entity count.
 
