@@ -547,8 +547,10 @@ jobs:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
+          RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
@@ -570,6 +572,13 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-rendering-parity
+          path: |
+            build/exporter-rendering-v16/native/equality-*/baseline-unoptimized/reports
+            build/exporter-rendering-v16/native/equality-*/candidate-pure/reports
 
   archival-ghidra:
     needs: frontend

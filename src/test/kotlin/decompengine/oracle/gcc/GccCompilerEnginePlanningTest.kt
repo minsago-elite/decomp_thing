@@ -76,7 +76,7 @@ class GccCompilerEnginePlanningTest {
         val failure = assertFailsWith<GccCompilerEnginePlanningException> {
             service.plan(suite(bytes), "cc1", input, output)
         }
-        assertTrue(failure.message.orEmpty().contains("exporter version 13 requires program model schema 4"))
+        assertTrue(failure.message.orEmpty().contains("exporter version 17 requires program model schema 4"))
         assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
     }
 
@@ -292,7 +292,7 @@ class GccCompilerEnginePlanningTest {
             sourceRevision = "78d4ac73dd391005b895a6148cd9831e28e1208b",
             analysis = GccCompilerEngineAnalysisToolchain(
                 exporterId = "decompengine-ghidra-program-model",
-                exporterVersion = 13,
+                exporterVersion = 17,
                 exporterSha256 = SHA_E,
                 exporterMode = "planning",
                 ghidraVersion = "12.1.3",

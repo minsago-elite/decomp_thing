@@ -1,0 +1,95 @@
+{
+  "populationDefinition": "aliases whose stripped availability is surviving in the authenticated function oracle, looked up at the oracle RVA",
+  "productionVerified": false,
+  "provenance": {
+    "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "exporterSha256": "854b7635c28dcb226e0fbe24b879c2f377c6b682496131254a985270dfc4fd29",
+    "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "imageBase": "0x400000",
+    "outputTreeSha256": "9204d728b59eee67a0a1e0234f5cfd43bb23363c4205410c6e0a661edbef2e57",
+    "programModel": {
+      "functionCount": 3384,
+      "sha256": "0c6814473ef9e05d5b9f77c3fea837bc16e0812c4bb0c2e273bd5d695736f379"
+    },
+    "qualification": {
+      "complete": false,
+      "limitation": "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open",
+      "provider": "gcc-driver-live-full-export-capture-v1",
+      "releaseEligible": false,
+      "scored": false
+    },
+    "receiptLineageSha256": "d74f6e5c58a94c3f36ad3c29f03cd00d41493412086cee3b40db4d1c03dc58c5",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "strippedInputSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+  },
+  "reportId": "gcc-driver-surviving-symbol-identity-v1",
+  "schemaVersion": 1,
+  "summary": {
+    "exact": 6,
+    "identityRecovery": {
+      "denominator": 6,
+      "numerator": 6,
+      "value": 1.0
+    },
+    "missing": 0,
+    "name-mismatch": 0,
+    "population": 6
+  },
+  "symbols": [
+    {
+      "name": "_obstack_begin",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb7d2",
+      "outcome": "exact",
+      "recoveredName": "_obstack_begin",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb7d2"
+    },
+    {
+      "name": "_obstack_begin_1",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb7ed",
+      "outcome": "exact",
+      "recoveredName": "_obstack_begin_1",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb7ed"
+    },
+    {
+      "name": "_obstack_newchunk",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb80c",
+      "outcome": "exact",
+      "recoveredName": "_obstack_newchunk",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb80c"
+    },
+    {
+      "name": "_obstack_allocated_p",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb900",
+      "outcome": "exact",
+      "recoveredName": "_obstack_allocated_p",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb900"
+    },
+    {
+      "name": "_obstack_free",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb92d",
+      "outcome": "exact",
+      "recoveredName": "_obstack_free",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb92d"
+    },
+    {
+      "name": "_obstack_memory_used",
+      "oracleExcluded": false,
+      "oracleId": "function-rva-0xeb9ac",
+      "outcome": "exact",
+      "recoveredName": "_obstack_memory_used",
+      "recoveredStatus": "recovered",
+      "rva": "0xeb9ac"
+    }
+  ],
+  "twin": "stripped"
+}
