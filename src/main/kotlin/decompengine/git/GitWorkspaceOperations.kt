@@ -121,6 +121,8 @@ internal object GitWorkspaceMutations {
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */
     fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>) {
+        // A truncated status can hide staged files beyond its bound; never commit an unreviewable index.
+        if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; the staged set cannot be confirmed.")
         if (observation.status.entries.any { it.conflict != null }) refuse("CONFLICTED", "Resolve conflicted files before committing.")
         val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(record.worktreeId) }.toSet()
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
@@ -133,16 +135,21 @@ internal object GitWorkspaceMutations {
         }
     }
 
+    /** Paths go through NUL-separated standard input, so no selection size meets the argv bound. */
+    private fun pathspecs(paths: List<String>): ByteArray = paths.joinToString("") { "$it\u0000" }.toByteArray(Charsets.UTF_8)
+    private val FROM_STDIN = listOf("--pathspec-from-file=-", "--pathspec-file-nul")
+
     fun stage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>) {
-        runner.run(GitInvocation("add", listOf("--") + entries.map { checkNotNull(it.path.exact) }, gitDir = gitDir, workTree = workTree,
-            limits = COMMIT_LIMITS))
+        runner.run(GitInvocation("add", FROM_STDIN, gitDir = gitDir, workTree = workTree,
+            input = pathspecs(entries.map { checkNotNull(it.path.exact) }), limits = COMMIT_LIMITS))
     }
 
     fun unstage(runner: GitCommandRunner, gitDir: Path, workTree: Path, entries: List<GitStatusEntry>, unborn: Boolean) {
-        val paths = entries.flatMap { listOfNotNull(it.originalPath?.exact, it.path.exact) }.distinct()
-        if (unborn) runner.run(GitInvocation("rm", listOf("--cached", "-q", "--") + paths, gitDir = gitDir, workTree = workTree, limits = COMMIT_LIMITS))
-        else runner.run(GitInvocation("reset", listOf("-q", "HEAD", "--") + paths, gitDir = gitDir, workTree = workTree,
-            allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))
+        val paths = pathspecs(entries.flatMap { listOfNotNull(it.originalPath?.exact, it.path.exact) }.distinct())
+        if (unborn) runner.run(GitInvocation("rm", listOf("--cached", "-q") + FROM_STDIN, gitDir = gitDir, workTree = workTree,
+            input = paths, limits = COMMIT_LIMITS))
+        else runner.run(GitInvocation("reset", listOf("-q") + FROM_STDIN + "HEAD", gitDir = gitDir, workTree = workTree,
+            input = paths, allowedExitCodes = setOf(0, 1), limits = COMMIT_LIMITS))
     }
 
     /**

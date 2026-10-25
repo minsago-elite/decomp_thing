@@ -145,6 +145,33 @@ class GitWorkspaceMutationsTest {
             "rev-list", "--count", "HEAD").trim().toInt())
     }
 
+    @Test fun `large rename selections unstage through bounded stdin and incomplete status never commits`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val (initial, guards) = service.guards(repositoryId)
+        service.run(repositoryId, GitStageRequest(initial.record.worktreeId, guards, initial.ids { it.untracked }, true), "stage_key_0000020")
+        val (staged, stagedGuards) = service.guards(repositoryId)
+        service.run(repositoryId, GitCommitRequest(staged.record.worktreeId, stagedGuards, staged.ids { it.staged != GitIndexChange.NONE }, "base"), "commit_key_000020")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val workTree = f.store.resolve("$jobId/git/repositories/$repositoryId/worktree")
+        fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+        (1..140).forEach { Files.writeString(workTree.resolve("old-$it.c"), "int unique_value_$it = $it; /* padding to keep renames detectable */\n") }
+        raw("add", "-A"); raw("commit", "-q", "-m", "files to rename")
+        (1..140).forEach { raw("mv", "old-$it.c", "new-$it.c") }
+        val (renamed, renameGuards) = service.guards(repositoryId)
+        val selection = renamed.ids { it.staged == GitIndexChange.RENAMED }.take(200)
+        assertEquals(140, selection.size)
+        val unstaged = service.run(repositoryId, GitStageRequest(renamed.record.worktreeId, renameGuards, selection, false), "unstage_key_00020")
+        assertEquals(GitOperationState.COMPLETED, unstaged.state, unstaged.message)
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.none { it.staged != GitIndexChange.NONE })
+        // A truncated observation can never confirm a staged set.
+        val (view, _) = service.guards(repositoryId)
+        val incomplete = view.observation.copy(status = view.observation.status.copy(complete = false))
+        assertEquals("STATUS_INCOMPLETE", assertFailsWith<GitOperationRefusal> {
+            GitWorkspaceMutations.requireStagedSet(view.record, incomplete, listOf("file_" + "0".repeat(32)))
+        }.code)
+    }
+
     @Test fun `an external edit between admission and execution fails the operation instead of committing it`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()
