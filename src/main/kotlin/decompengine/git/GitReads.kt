@@ -124,6 +124,20 @@ data class GitPatch(val text: String, val truncated: Boolean, val binary: Boolea
 data class GitRefEntry(val name: String, val objectId: String, val peeledObjectId: String?)
 
 /**
+ * One page of refs with the listing anchors around it: [anchorBefore] digests every ref that
+ * precedes the page and [anchorThrough] every ref through its end. A continuation names the
+ * anchor it read through, so a ref created, deleted or moved before it cannot shift a page.
+ */
+data class GitRefsPage(val entries: List<GitRefEntry>, val more: Boolean, val anchorBefore: String, val anchorThrough: String) {
+    companion object {
+        fun anchor(entries: List<GitRefEntry>): String = GitStorage.sha256(buildString {
+            append("git-refs-listing-v1\n")
+            entries.forEach { append(it.name).append('\u0000').append(it.objectId).append('\u0000').append(it.peeledObjectId ?: "").append('\n') }
+        }).take(32)
+    }
+}
+
+/**
  * Bounded, NUL-delimited reads of a managed repository (#574, #575). Every command disables
  * external diff tools and textconv, never resolves submodules, and passes paths after `--` as
  * literal pathspecs. Output limits produce explicit incompleteness rather than silent truncation.
@@ -363,7 +377,11 @@ object GitReads {
     }
 
     /** Branches and tags with peeled tag targets, at most [limit] after [skip]. */
-    fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, skip: Int, limit: Int): Pair<List<GitRefEntry>, Boolean> {
+    fun refs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, skip: Int, limit: Int): Pair<List<GitRefEntry>, Boolean> =
+        refsPage(runner, gitDir, format, skip, limit).let { it.entries to it.more }
+
+    /** [refs] with the anchors of the listing before and through the page. */
+    fun refsPage(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, skip: Int, limit: Int): GitRefsPage {
         require(skip in 0..100_000 && limit in 1..200)
         val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)%00%(*objectname)",
             "--count=${skip + limit + 1}", "refs/heads", "refs/tags"), gitDir = gitDir, limits = LIMITS))
@@ -374,7 +392,8 @@ object GitReads {
             }
             GitRefEntry(parts[1], format.requireObjectId(parts[0]), parts[2].takeIf { it.isNotEmpty() }?.let(format::requireObjectId))
         }.toList()
-        val page = entries.drop(skip)
-        return page.take(limit) to (page.size > limit)
+        val page = entries.drop(skip).take(limit)
+        return GitRefsPage(page, entries.size > skip + limit, GitRefsPage.anchor(entries.take(skip)),
+            GitRefsPage.anchor(entries.take(skip + page.size)))
     }
 }

@@ -407,12 +407,12 @@ class ManagedGitRepositories(
         }
     }
 
-    fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, Pair<List<GitRefEntry>, Boolean>> {
+    fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, GitRefsPage> {
         val runner = requireRunner()
         val located = locate(jobId, repositoryId)
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
-            located.record to GitReads.refs(runner, located.gitDir, located.record.objectFormat, skip, limit)
+            located.record to GitReads.refsPage(runner, located.gitDir, located.record.objectFormat, skip, limit)
         }
     }
 
@@ -646,7 +646,7 @@ class ManagedGitRepositories(
             if (operations.any { !it.state.terminal }) {
                 throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is still running for this job.")
             }
-            if (operations.size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
+            if (retireTerminalWorkspace(jobId, operations).size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
             refusing { validate(runner, located, request) }
@@ -813,8 +813,10 @@ class ManagedGitRepositories(
             GitOperationAction.WORKTREE_REMOVE -> {
                 if (located.primary) GitRefOperations.refuse("WORKTREE_PRIMARY", "The primary work tree cannot be removed.")
                 requireNoLease(located)
-                if (relevant(observation).isNotEmpty()) GitRefOperations.refuse("WORKTREE_DIRTY",
-                    "The work tree has uncommitted or untracked files. Commit or move them first; nothing is force-removed.")
+                // Ignored files count too: `git worktree remove` deletes them without --force,
+                // and they are often experiment output. An incomplete status is never clean.
+                if (observation.status.entries.isNotEmpty() || !observation.status.complete) GitRefOperations.refuse("WORKTREE_DIRTY",
+                    "The work tree has uncommitted, untracked or ignored local files. Commit or move them first; nothing is force-removed.")
                 val head = observation.head
                 if (head.state == GitHeadState.DETACHED) {
                     val unmerged = GitRefOperations.unmergedCount(runner, located.commonDir, checkNotNull(head.objectId), null)
@@ -1194,6 +1196,25 @@ class ManagedGitRepositories(
     private fun persist(directory: Path, operation: GitOperationRecord) {
         val operations = GitStorage.directories(directory, "operations")
         GitStorage.replaceAtomically(operations.resolve("${operation.operationId}.json"), encode(operation).toByteArray())
+    }
+
+    /**
+     * Routine work-tree operations must not use up the job's record quota. When the next
+     * admission would reach it, the oldest terminal work-tree records are retired so that the
+     * newest `MAX_OPERATIONS - 1` stay replayable by their keys. Initialization and import
+     * records are never retired. A retired key that is sent again is admitted as a new request,
+     * and its reviewed guards then refuse it unless the state it was reviewed against still
+     * holds.
+     */
+    private fun retireTerminalWorkspace(jobId: String, operations: List<GitOperationRecord>): List<GitOperationRecord> {
+        val excess = operations.size - (MAX_OPERATIONS - 1)
+        if (excess <= 0) return operations
+        val directory = root.resolve(jobId).resolve("git").resolve("operations")
+        // A recovery-required record awaits an operator and keeps its staging tree; it is never retired.
+        val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED }
+            .sortedBy { it.createdAt }.take(excess)
+        retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
+        return operations - retired.toSet()
     }
 
     private fun operations(jobId: String): List<GitOperationRecord> {

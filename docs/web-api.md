@@ -750,7 +750,9 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
   render content. Abbreviated object IDs are rejected with 422.
 - `refs` (`gitRefs`) pages through branches and tags with exact and peeled object IDs, stable
-  `refId`s and the branch HEAD currently names.
+  `refId`s and the branch HEAD currently names. Its cursor carries a digest of every ref listed
+  before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
+  `409 REF_CHANGED` instead of repeating or skipping an entry.
 
 Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
 and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from
@@ -770,6 +772,15 @@ and never contain a path or pathspec. `If-Match` must name the guarded `worktree
 `Idempotency-Key` is required. Keyed replay returns the original operation. The response is
 `202 operation`, already terminal for most local actions, with the durable operation at
 `Location`.
+
+Routine work-tree operations never use up the job's operation quota. When an admission would
+reach it, the oldest terminal work-tree records are retired, and the newest 63 stay replayable by
+their keys. Initialization, import and `recovery-required` records are never retired. If a retired key is sent again,
+it is admitted as a new request, and its guards refuse it unless the reviewed state still holds.
+
+A path can have two status records with one file identity: a staged deletion and an untracked
+replacement. The server then resolves each selection against the record that the action applies
+to: the deletion for `git.unstage` and the replacement for `git.stage`.
 
 The server checks guards and selection twice: at admission under the job lock, and again by the
 single operation executor immediately before Git runs. A race with another tab, a worker or an
@@ -836,7 +847,7 @@ staging and committing.
 | `git.branch.delete` | `refId`, `expectedObjectId` | `update-ref -d` with the expected tip. Refused with `BRANCH_CURRENT` when any work tree has it checked out, `REF_CHANGED` when it moved, or `BRANCH_UNMERGED` (with a count) when commits are reachable only from it. Never forced. |
 | `git.tag` | `name`, `targetObjectId` | A lightweight tag with no timestamps, created only if absent (`409 TAG_EXISTS`); existing tags are never overwritten |
 | `git.worktree.add` | `startObjectId`, `branchName` or null, `runId` or null | `git worktree add` under the repository's private `worktrees/<worktreeId>`. At most four linked work trees, a checkout-size bound, and an optional owning attempt that must belong to the job. The new identity is the operation's `worktreeId`. |
-| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted or untracked file, or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
+| `git.worktree.remove` | none | Removes a linked work tree. Refused with `WORKTREE_PRIMARY`, `ACTIVE_RUN` while its owner runs, `WORKTREE_DIRTY` for any uncommitted, untracked or ignored local file (Git would delete ignored files), or `WORKTREE_UNMERGED` for detached commits that no branch or tag reaches. Uses `git worktree remove` without `--force`. |
 
 Leases: the primary work tree is leased to every active workflow attempt of the job, and a linked
 work tree to the attempt that owns it. While a lease is held, switch and removal answer `409

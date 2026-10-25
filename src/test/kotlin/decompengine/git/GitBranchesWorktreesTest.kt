@@ -154,6 +154,11 @@ class GitBranchesWorktreesTest {
         Files.writeString(path.resolve("scratch.c"), "int scratch;\n")
         refused("WORKTREE_DIRTY", GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second))
         Files.delete(path.resolve("scratch.c"))
+        // Ignored local files (experiment output) are never deleted with the work tree either.
+        Files.writeString(path.resolve("result.log"), "experiment output\n")
+        refused("WORKTREE_DIRTY", GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second))
+        assertEquals("experiment output\n", Files.readString(path.resolve("result.log")))
+        Files.delete(path.resolve("result.log"))
         val linkedGit = f.gitDir().resolve("worktrees/$linked")
         f.raw("checkout", "-q", "--detach", worktree = path, gitDir = linkedGit)
         Files.writeString(path.resolve("src/extra.c"), "int extra = 2;\n")
