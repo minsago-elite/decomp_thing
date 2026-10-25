@@ -8,10 +8,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Test-only history construction. Production code never commits through this helper; it uses a
  * fixed identity, no user configuration and disabled hooks so fixture setup cannot observe the
- * developer machine. Every root lives under the Gradle-provided temporary directory.
+ * developer machine. Every root lives under the project's build directory, never the system tmp.
  */
 internal class GitTestRepositories : AutoCloseable {
-    val root: Path = Files.createTempDirectory("git adapter ünïcode ")
+    val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "git adapter ünïcode ")
     private val home: Path = Files.createDirectory(root.resolve("fixture-home"))
     val environment: GitEnvironment = GitEnvironment.prepare(root.resolve("runtime"))
     val runner: GitCommandRunner = (GitRuntime.detect() as GitAvailability.Available).runner(environment)
@@ -24,6 +24,8 @@ internal class GitTestRepositories : AutoCloseable {
                 builder.environment().putAll(mapOf(
                     "PATH" to (System.getenv("PATH") ?: "/usr/bin:/bin"), "HOME" to home.toString(), "LC_ALL" to "C",
                     "GIT_CONFIG_NOSYSTEM" to "1", "GIT_CONFIG_GLOBAL" to "/dev/null", "GIT_TERMINAL_PROMPT" to "0",
+                    // Fixtures live under the project's build directory; never discover the project repository.
+                    "GIT_CEILING_DIRECTORIES" to root.toString(),
                     "GIT_AUTHOR_NAME" to "Fixture Author", "GIT_AUTHOR_EMAIL" to "fixture@example.invalid",
                     "GIT_COMMITTER_NAME" to "Fixture Committer", "GIT_COMMITTER_EMAIL" to "fixture@example.invalid",
                     "GIT_AUTHOR_DATE" to "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE" to "2026-01-01T00:00:00Z",
