@@ -46,7 +46,7 @@
       "moduleCount": "12",
       "profileId": "generated-c-make-v1"
     },
-    "currentModuleId": "module_f",
+    "lastGeneratedModuleId": "module_f",
     "unresolved": {
       "moduleCount": null,
       "entityCount": null,

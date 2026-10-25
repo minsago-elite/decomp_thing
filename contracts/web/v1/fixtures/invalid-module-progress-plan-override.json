@@ -56,7 +56,7 @@
         "module_a"
       ]
     },
-    "currentModuleId": "module_f",
+    "lastGeneratedModuleId": "module_f",
     "unresolved": {
       "moduleCount": null,
       "entityCount": null,

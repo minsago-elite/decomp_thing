@@ -56,7 +56,7 @@ export function ModuleProgress({ jobId, runId, basePath }: { jobId: string; runI
       <p>{message(copy.source, { version: <code>{progress.attemptVersion}</code> })}</p>
       {progress.state === 'not-recorded' && <p>{copy.notRecorded}</p>}
       {progress.stages.length > 0 && <ol aria-label={copy.stages}>{progress.stages.map(item => <Stage key={item.stage} item={item} />)}</ol>}
-      {progress.currentModuleId && <p>{message(copy.currentModule, { module: <code>{progress.currentModuleId}</code> })}</p>}
+      {progress.lastGeneratedModuleId && <p>{message(copy.lastGeneratedModule, { module: <code>{progress.lastGeneratedModuleId}</code> })}</p>}
       <h3>{copy.plan}</h3>
       {progress.plan ? <dl class="job-facts">
         <dt>{copy.planDigest}</dt><dd><code>{progress.plan.sha256}</code></dd>

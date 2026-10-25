@@ -53,7 +53,7 @@
       "moduleCount": "12",
       "profileId": "generated-c-make-v1"
     },
-    "currentModuleId": null,
+    "lastGeneratedModuleId": null,
     "unresolved": {
       "moduleCount": "2",
       "entityCount": "3",

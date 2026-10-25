@@ -49,7 +49,7 @@
       }
     ],
     "plan": null,
-    "currentModuleId": null,
+    "lastGeneratedModuleId": null,
     "unresolved": null,
     "recovery": null,
     "limitations": [
