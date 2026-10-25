@@ -13,6 +13,10 @@ import { beginSourceHighlight } from './highlightOperation';
 import type { HighlightResult } from './highlightOperation';
 import { sourceHighlightRuntime } from './highlightRuntime';
 
+import { receive } from '../shared/receiptTime';
+import type { Received } from '../shared/receiptTime';
+import { MetadataReceipt } from '../shared/MetadataReceipt';
+
 /** One deliberately opened range. Highlighting separately requires an explicit local action. */
 export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin }: {
   selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin;
@@ -23,7 +27,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   const [refresh, setRefresh] = useState(0);
   const key = [selected.jobId, selected.runId, selected.revisionId, selected.fileId, metadata.metadataVersion,
     metadata.sourceSha256, metadata.item.sha256, position.offset, position.line, maximum, refresh].join('/');
-  const [read, setRead] = useState<SourceReadState<SourceChunk>>({ key, state: 'loading' });
+  const [read, setRead] = useState<SourceReadState<Received<SourceChunk>>>({ key, state: 'loading' });
   const [page, setPage] = useState({ key, start: 0 });
   const start = page.key === key ? page.start : 0;
   const [copied, setCopied] = useState<SourceReadState<null> | null>(null);
@@ -43,11 +47,12 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
     };
   }, [copyKey]);
   useEffect(() => () => { stopCopy.current?.(); stopCopy.current = null; }, [copyKey]);
-  useEffect(() => beginSourceRead(key, async signal => bindSourceChunk(
+  useEffect(() => beginSourceRead(key, async signal => receive(bindSourceChunk(
     (await client.get('sourceChunk', sourceChunkRoute(selected, metadata, position, maximum), { signal })).data,
-    selected, metadata, position, maximum), setRead), [client, key]);
+    selected, metadata, position, maximum)), setRead), [client, key]);
   const current = currentSourceRead(read, key);
-  const chunk = current.state === 'ready' ? current.value : null;
+  const observation = current.state === 'ready' ? current.value : null;
+  const chunk = observation?.value;
   const view = chunk ? sourceWindow(chunk, start) : null;
   const loading = current.state === 'loading';
   const copying = copied?.key === copyKey ? copied : null;
@@ -62,6 +67,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
     {loading && <p role="status">{copy.loadingRange}</p>}
     {current.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {chunk && view && <>
+      <MetadataReceipt kind="range" receipt={observation?.receipt} />
       <p role="status">{message(copy.byteRange, { offset: chunk.offsetBytes, length: chunk.lengthBytes, size: chunk.sizeBytes })}</p>
       <p>{chunk.completeFile ? copy.completeRange : copy.partialRange}</p>
       {chunk.representation === 'hex' ? <p>{copy.hexFallback[chunk.fallbackReason!]}</p>
