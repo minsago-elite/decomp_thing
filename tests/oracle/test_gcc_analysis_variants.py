@@ -22,6 +22,7 @@ class AnalysisVariantComparisonTest(unittest.TestCase):
         self.owner = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(self.owner.cleanup)
         self.root = Path(self.owner.name)
+        self.manifest_path = MANIFEST
         self.manifest = json.loads(MANIFEST.read_bytes())
         self.sha = self.manifest["artifacts"]["stripped"]["sha256"]
         loads = self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"]
@@ -44,8 +45,12 @@ class AnalysisVariantComparisonTest(unittest.TestCase):
         return path
 
     def compare(self, **extra):
-        return compare_variants(manifest_path=MANIFEST, baseline_path=self.baseline,
+        return compare_variants(manifest_path=self.manifest_path, baseline_path=self.baseline,
                                 variant_paths={"no-switch": self.variant}, **extra)
+
+    def write_manifest(self):
+        self.manifest_path = self.root / "manifest.json"
+        self.manifest_path.write_text(json.dumps(self.manifest))
 
     def mutate(self, field, value):
         document = json.loads(self.variant.read_bytes())
@@ -96,8 +101,8 @@ class AnalysisVariantComparisonTest(unittest.TestCase):
                 with self.assertRaisesRegex(ScoringError, "language/compiler"):
                     self.compare()
 
-    def test_noncanonical_duplicate_unsorted_and_outside_entries_refused(self):
-        for entries in (["0x00"], [self.start, self.start], [self.start + 1, self.start], [self.base - 1]):
+    def test_noncanonical_duplicate_unsorted_and_overflow_entries_refused(self):
+        for entries in (["0x00"], [self.start, self.start], [self.start + 1, self.start], [1 << 64]):
             with self.subTest(entries=entries):
                 if isinstance(entries[0], int):
                     self.variant = self.write_census("no-switch", entries)
@@ -106,6 +111,87 @@ class AnalysisVariantComparisonTest(unittest.TestCase):
                     self.mutate("entryCount", len(entries))
                 with self.assertRaises(ScoringError):
                     self.compare()
+
+    def test_complete_populations_partition_non_executable_and_unknown_without_losing_deltas(self):
+        self.baseline = self.write_census("baseline", [self.base, self.start, self.start + 16])
+        self.variant = self.write_census("no-switch", [0, self.base, self.start + 16, (1 << 64) - 1])
+        result = self.compare()
+        baseline, variant = result["baseline"], result["variants"]["no-switch"]
+        self.assertEqual({"executableCount": 2, "nonExecutableEntries": [hex(self.base)],
+                          "unknownEntries": []}, baseline["entryClassification"])
+        self.assertEqual({"executableCount": 1, "nonExecutableEntries": [hex(self.base)],
+                          "unknownEntries": ["0x0", "0xffffffffffffffff"]}, variant["entryClassification"])
+        self.assertEqual(["0x0", "0xffffffffffffffff"], variant["addedEntries"])
+        self.assertEqual(variant["addedEntries"], variant["addedEntryClassification"]["unknownEntries"])
+        self.assertEqual([hex(self.start)], variant["removedEntries"])
+        self.assertEqual(1, variant["removedEntryClassification"]["executableCount"])
+        for record in (baseline, variant):
+            groups = record["entryClassification"]
+            self.assertEqual(record["entryCount"], groups["executableCount"]
+                             + len(groups["nonExecutableEntries"]) + len(groups["unknownEntries"]))
+        self.assertEqual("unavailable", result["reviewedAccuracy"]["status"])
+        self.assertFalse(result["releaseEligible"])
+
+    def test_retained_run_outlier_population_and_equal_count_lean_swap_regression(self):
+        # Addresses observed in run 40206482749; only the executable baseline is synthetic.
+        outside = [x for x in range(0x2de5000, 0x2de5941, 8) if x != 0x2de5510]
+        added = [0x956fe9, 0x9570dd, 0x9571d1, 0x9572c5, 0x9598f4, 0x959928,
+                 0x95994f, 0x959976, 0x9599a0, 0x9599ca, 0x9599f4, 0x959a1e,
+                 0x9ded58, 0x1123354, 0x127d961, 0x127daf7, 0x127dbb4,
+                 0x1f98f0e, 0x1f98fbb, 0x1f99042, 0x1f99096, 0x1f990ea, 0x1f9913a]
+        baseline = [self.start, *outside]
+        self.baseline = self.write_census("baseline", baseline)
+        variants = {
+            "no-call-convention": self.write_census("no-call-convention", baseline),
+            "no-switch": self.write_census("no-switch", sorted(baseline + added)),
+            "no-switch-no-call-convention": self.write_census("no-switch-no-call-convention", sorted(baseline + added)),
+            "lean": self.write_census("lean", sorted((set(baseline) | set(added) | {0x127f539}) - {0x2de5208})),
+        }
+        result = compare_variants(manifest_path=MANIFEST, baseline_path=self.baseline, variant_paths=variants)
+        self.assertEqual(296, len(result["baseline"]["entryClassification"]["unknownEntries"]))
+        no_switch, lean = result["variants"]["no-switch"], result["variants"]["lean"]
+        self.assertEqual([], result["variants"]["no-call-convention"]["addedEntries"])
+        self.assertEqual([], result["variants"]["no-call-convention"]["removedEntries"])
+        self.assertEqual(no_switch["addedEntries"], result["variants"]["no-switch-no-call-convention"]["addedEntries"])
+        self.assertEqual(23, len(no_switch["addedEntries"]))
+        self.assertEqual([], no_switch["removedEntries"])
+        self.assertEqual(no_switch["entryCount"], lean["entryCount"])
+        self.assertNotEqual(no_switch["entriesSha256"], lean["entriesSha256"])
+        self.assertEqual(24, len(lean["addedEntries"]))
+        self.assertEqual(["0x2de5208"], lean["removedEntries"])
+        self.assertEqual(lean["removedEntries"], lean["removedEntryClassification"]["unknownEntries"])
+        self.assertEqual(295, len(lean["entryClassification"]["unknownEntries"]))
+        self.assertEqual(report_bytes(result), report_bytes(compare_variants(
+            manifest_path=MANIFEST, baseline_path=self.baseline, variant_paths=variants)))
+
+    def test_overlapping_load_ranges_are_unknown_even_when_both_executable(self):
+        for flags in (4, 5):
+            with self.subTest(flags=flags):
+                self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"].append({
+                    "typeName": "PT_LOAD", "virtualAddress": self.start, "memorySize": 1, "flags": flags,
+                })
+                self.write_manifest()
+                result = self.compare()
+                self.assertEqual([hex(self.start)], result["baseline"]["entryClassification"]["unknownEntries"])
+                self.assertEqual(1, result["baseline"]["entryClassification"]["executableCount"])
+                self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"].pop()
+
+    def test_invalid_or_excessive_load_ranges_refused_before_classification(self):
+        for field, value in (("virtualAddress", -1), ("virtualAddress", True), ("virtualAddress", 1 << 64),
+                             ("memorySize", -1), ("memorySize", 1 << 64), ("memorySize", (1 << 64) - 1),
+                             ("flags", True), ("flags", 8)):
+            with self.subTest(field=field, value=value):
+                segment = {"typeName": "PT_LOAD", "virtualAddress": self.start, "memorySize": 1, "flags": 5}
+                segment[field] = value
+                self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"].append(segment)
+                self.write_manifest()
+                with self.assertRaisesRegex(ScoringError, "classification range|JSON integer magnitude"):
+                    self.compare()
+                self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"].pop()
+        self.manifest_path = MANIFEST
+        with patch("oracle.gcc.compare_analysis_variants.MAX_LOAD_RANGES", 1):
+            with self.assertRaisesRegex(ScoringError, "ranges exceed"):
+                self.compare()
 
     def test_digest_count_boolean_and_unknown_schema_fields_refused(self):
         for field, value in (("entryCount", 1), ("entryCount", True), ("entriesSha256", "0" * 64),
@@ -178,6 +264,30 @@ class AnalysisVariantComparisonTest(unittest.TestCase):
         with patch("oracle.gcc.compare_analysis_variants._verified_artifact_manifest_snapshot", side_effect=ScoringError("authentication failed")):
             with self.assertRaisesRegex(ScoringError, "authentication failed"):
                 self.compare(rich_artifact_path=self.root / "full", stripped_artifact_path=self.root / "stripped")
+
+    def test_non_executable_unknown_and_ambiguous_entries_cannot_gain_physical_membership(self):
+        unknown = 0x2de5208
+        self.baseline = self.write_census("baseline", [self.start])
+        self.variant = self.write_census("no-switch", [self.base, self.start, unknown])
+        self.manifest["artifacts"]["stripped"]["elf"]["programHeaders"].append({
+            "typeName": "PT_LOAD", "virtualAddress": self.start, "memorySize": 1, "flags": 5,
+        })
+        self.write_manifest()
+        manager = MagicMock()
+        snapshot = manager.__enter__.return_value
+        snapshot.manifest_payload = self.manifest_path.read_bytes()
+        snapshot.manifest = self.manifest
+        snapshot.artifact_paths = {"rich": self.root / "verified-full"}
+        reference = {"elfImageBase": hex(self.base), "functions": [
+            {"rva": hex(x - self.base), "sources": ["symbol"]} for x in (self.base, self.start, unknown)]}
+        with patch("oracle.gcc.compare_analysis_variants._verified_artifact_manifest_snapshot", return_value=manager), \
+             patch("oracle.physical_function_starts.collect_physical_function_starts", return_value=reference):
+            result = self.compare(rich_artifact_path=self.root / "full", stripped_artifact_path=self.root / "stripped")
+        variant = result["variants"]["no-switch"]
+        self.assertEqual([hex(self.base), hex(unknown)], variant["addedEntries"])
+        self.assertEqual([], variant["addedEntriesInPhysicalReference"])
+        self.assertEqual(0, result["baseline"]["entriesInPhysicalReference"])
+        self.assertEqual(3, len(result["physicalReference"]["functions"]))
 
     def test_cli_publishes_complete_report_without_overwriting_prior_evidence(self):
         output = self.root / "comparison.json"

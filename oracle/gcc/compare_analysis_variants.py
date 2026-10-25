@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from oracle.function_recovery import ScoringError, _decode_json, _read_regular_snapshot
 from oracle.function_recovery_profile import (
@@ -18,6 +18,7 @@ DEFAULT_MANIFEST = Path(__file__).resolve().parent / "16.2.0/cc1-oracle-manifest
 MAX_CENSUS_BYTES = 32 * 1024 * 1024
 MAX_ENTRIES = 1_000_000
 MAX_REPORT_BYTES = 64 * 1024 * 1024
+MAX_LOAD_RANGES = 256
 VARIANTS = {
     "baseline": (),
     "no-switch": ("Decompiler Switch Analysis",),
@@ -42,6 +43,43 @@ def _address(value: Any) -> int:
 def _snapshot(path: Path, label: str, limit: int) -> tuple[dict, dict]:
     payload = _read_regular_snapshot(path, label, limit)
     return _decode_json(payload, label), {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def _load_ranges(manifest: dict) -> tuple[tuple[int, int, bool], ...]:
+    """Read bounded virtual PT_LOAD extents, without claiming file-backed bytes."""
+    ranges = []
+    for segment in manifest["artifacts"]["stripped"]["elf"]["programHeaders"]:
+        if segment["typeName"] != "PT_LOAD":
+            continue
+        start, size, flags = segment["virtualAddress"], segment["memorySize"], segment["flags"]
+        if (type(start) is not int or type(size) is not int or type(flags) is not int
+                or not 0 <= start < 1 << 64 or not 0 <= size < 1 << 64
+                or start + size > 1 << 64 or not 0 <= flags <= 7):
+            raise ScoringError("invalid manifest PT_LOAD classification range")
+        if size:
+            if len(ranges) == MAX_LOAD_RANGES:
+                raise ScoringError("manifest PT_LOAD classification ranges exceed their bound")
+            ranges.append((start, start + size, bool(flags & 1)))
+    return tuple(ranges)
+
+
+def _entry_disposition(address: int, ranges: tuple[tuple[int, int, bool], ...]) -> str:
+    matches = [executable for start, end, executable in ranges if start <= address < end]
+    # Overlapping mappings and addresses outside all loads stay unresolved.
+    if len(matches) != 1:
+        return "unknown"
+    return "executable" if matches[0] else "nonExecutable"
+
+
+def _classify_entries(entries: Iterable[int], ranges: tuple[tuple[int, int, bool], ...]) -> dict:
+    result = {"executableCount": 0, "nonExecutableEntries": [], "unknownEntries": []}
+    for address in sorted(entries):
+        disposition = _entry_disposition(address, ranges)
+        if disposition == "executable":
+            result["executableCount"] += 1
+        else:
+            result[disposition + "Entries"].append(hex(address))
+    return result
 
 
 def load_census(path: Path, *, variant: str, artifact: Any) -> tuple[dict, dict, tuple[int, ...]]:
@@ -73,9 +111,6 @@ def load_census(path: Path, *, variant: str, artifact: Any) -> tuple[dict, dict,
         address = _address(text)
         if decoded and address <= decoded[-1]:
             raise ScoringError("census entries must be sorted and unique")
-        rva = address - artifact.elf_image_base
-        if not any(span.start <= rva < span.end_exclusive for span in artifact.executable_ranges):
-            raise ScoringError("census entry is outside executable manifest ranges")
         decoded.append(address)
         hasher.update((text + "\n").encode("ascii"))
     if hasher.hexdigest() != digest:
@@ -98,6 +133,7 @@ def compare_variants(
     if (rich_artifact_path is None) != (stripped_artifact_path is None):
         raise ScoringError("both ELF twins are required for physical reference verification")
     manifest, manifest_record = _snapshot(manifest_path, "cc1 manifest", 16 * 1024 * 1024)
+    load_ranges = _load_ranges(manifest)
     artifact = _artifact_metadata_from_manifest(manifest, "stripped")
     baseline, baseline_record, baseline_entries = load_census(baseline_path, variant="baseline", artifact=artifact)
     baseline_set = set(baseline_entries)
@@ -107,12 +143,16 @@ def compare_variants(
         if any(census[field] != baseline[field] for field in ("languageId", "compilerSpecId")):
             raise ScoringError("census language/compiler selection differs between variants")
         recovered = set(entries)
+        added, removed = recovered - baseline_set, baseline_set - recovered
         variants[name] = {
             "census": record, "entryCount": len(entries), "entriesSha256": census["entriesSha256"],
             "disabledAnalyzers": census["disabledAnalyzers"],
-            "addedEntries": [hex(x) for x in sorted(recovered - baseline_set)],
-            "removedEntries": [hex(x) for x in sorted(baseline_set - recovered)],
+            "addedEntries": [hex(x) for x in sorted(added)],
+            "removedEntries": [hex(x) for x in sorted(removed)],
             "unchangedEntries": len(recovered & baseline_set),
+            "entryClassification": _classify_entries(entries, load_ranges),
+            "addedEntryClassification": _classify_entries(added, load_ranges),
+            "removedEntryClassification": _classify_entries(removed, load_ranges),
         }
     report = {
         "schemaVersion": 1, "kind": "gcc-analyzer-entry-comparison-v1", "authority": "diagnostic-only",
@@ -120,7 +160,9 @@ def compare_variants(
         "reviewedAccuracy": {"status": "unavailable", "reason": "no authenticated reviewed cc1 source-function oracle"},
         "inputVerification": "manifest-metadata-only", "manifest": manifest_record,
         "inputSha256": artifact.input_sha256, "imageBase": hex(artifact.elf_image_base),
-        "baseline": {"census": baseline_record, "entryCount": len(baseline_entries), "entriesSha256": baseline["entriesSha256"]},
+        "entryClassificationBasis": "manifest PT_LOAD virtual memory extents; overlapping or unmapped addresses are unknown; no semantic identity or accuracy authority",
+        "baseline": {"census": baseline_record, "entryCount": len(baseline_entries), "entriesSha256": baseline["entriesSha256"],
+                     "entryClassification": _classify_entries(baseline_entries, load_ranges)},
         "variants": variants,
     }
     if rich_artifact_path is not None:
@@ -136,6 +178,9 @@ def compare_variants(
         if _address(reference["elfImageBase"]) != artifact.elf_image_base:
             raise ScoringError("physical reference image base differs from recovered census")
         physical = {_address(item["rva"]) + artifact.elf_image_base for item in reference["functions"]}
+        # A raw non-executable/unknown observation cannot acquire membership authority
+        # from a coinciding physical address, and remains in the complete raw deltas.
+        physical = {address for address in physical if _entry_disposition(address, load_ranges) == "executable"}
         report["inputVerification"] = "manifest-and-elf-twins-verified"
         report["physicalReference"] = reference
         report["physicalReference"]["authority"] = "diagnostic-physical-starts-with-no-policy-exclusions"

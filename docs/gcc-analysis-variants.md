@@ -29,6 +29,18 @@ raw physical starts, their symbol/DWARF origins, and scan/omission counts with
 explicit bounds. It annotates which added/removed entries occur in that raw
 physical population. There are no name-based or policy exclusions.
 
+Every census entry remains in its raw population and applicable added/removed
+list, including addresses outside executable ranges. Each population and delta
+also has an `entryClassification`: an `executableCount`, complete
+`nonExecutableEntries` list, and complete `unknownEntries` list. These three
+categories partition the raw population. Classification uses the manifest's
+`PT_LOAD` virtual memory extents (`p_memsz`), not an assumption of file-backed
+instruction bytes. An address covered by exactly one load is executable or
+non-executable according to `PF_X`; unmapped addresses and overlapping loads
+remain unknown. Neither non-executable nor unknown entries receive physical
+reference membership annotations or accuracy credit. No external-function or
+synthetic-function identity is inferred from these addresses.
+
 These raw physical facts are **not a reviewed source-function oracle**. The report
 always records `reviewedAccuracy.status: unavailable`, `releaseEligible: false`,
 and `productionProfileSelected: false`. Compiler-generated physical starts remain
@@ -56,9 +68,21 @@ and checked manifest metadata are compared; the result explicitly says
 `inputVerification: manifest-metadata-only` and supplies no physical reference.
 Every report retains the byte length and SHA-256 of the exact census/manifest
 snapshots read. Crossed inputs, bases, language/compiler selections, option sets,
-unsorted or duplicate addresses, mismatched counts/digests and out-of-executable
-entries are refused. Replaying unchanged bytes is deterministic. Existing output
-is never overwritten.
+unsorted or duplicate addresses, and mismatched counts/digests are refused.
+Out-of-executable entries are retained and classified, not rejected or removed.
+Replaying unchanged bytes is deterministic. Existing output is never overwritten.
+
+The five captures from run
+[40206482749](https://github.com/minsago-elite/decomp_thing/actions/runs/40206482749)
+at `d5cd6a7148bb57dbc276cf5d460c62518471cb43` exposed the need for this distinction:
+baseline/no-call-convention contain 50,856 entries, including 296 outside all
+manifest loads; no-switch/combined contain 50,879, adding 23 executable entries.
+Lean also has 50,879 entries, but adds 24 executable entries and removes unknown
+entry `0x2de5208`. A count alone would conceal that difference. The captures and
+their original digests remain unchanged when replayed with classification.
+Their diagnostic auto-analysis timings are not full-export resource receipts;
+reviewed accuracy and the original 1,800-second/16-GiB qualification remain
+unavailable from this evidence.
 
 ## Historical evidence limitation
 
