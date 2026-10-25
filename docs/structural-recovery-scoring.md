@@ -234,41 +234,22 @@ substitute for independently recovered evidence.
 
 ### Live model provenance and selected boundary admission
 
-The installed `gcc-engine-full-export driver` path now extends the same
-`StructuralProductionReplayContract` with a scoped live admission. After the
-contained exporter stops, the coordinator freezes its descriptor-captured model
-and authenticates the fixed input, exporter, bundled runtime, loader, target,
-image base and linked operation receipts. A second contained JVM receives that
-read-only model and the independently pinned function oracle. The oracle is
-introduced only after recovery has finished; the recovery worker never sees it.
-The replay JVM computes and independently regenerates the selected-twin boundary
-observation within the remaining operation deadline, at most five minutes and
-four GiB, under the existing isolated launcher. The coordinator proves its
-processes and cgroup absent, captures its exact outputs through owned descriptors,
-and compares the observation with the independent host replay.
+The fixed adapter registry accepts an owned, contained replay of a frozen
+recovered model and independently pinned function oracle. The oracle is
+introduced only after recovery finishes. Admission binds the exact model,
+input, exporter, runtime, loader, target and operation receipts; it also requires
+independently verified worker absence and descriptor-captured replay outputs.
 
-Only this live coordinator can construct the operation accepted by the fixed
-registry. It yields an opaque `VerifiedStructuralInputsV1` for model provenance
-and function boundaries. `scoreSelectedBoundary` accepts that capability without
-a replacement model argument. Interface, call, global and type requests refuse;
-full structural assessment and calibrated confidence remain unavailable until
-their independent truth and identity relations are admitted. Fixture transcripts,
-stored JSON receipts and recomputed hash strings cannot create this capability.
+The resulting opaque `VerifiedStructuralInputsV1` admits only model provenance
+and function boundaries. `scoreSelectedBoundary` consumes that capability
+without replacement model or report arguments.
 
-Driver result schema v3 binds `structural-boundary-production-score.json` by path,
-size and digest, and is committed only after the evidence files. The score keeps
-the complete observation and exporter/replay provenance. Its `productionVerified`
-and `scored` fields apply only to the explicit admitted domains; full-result
-`scored`, `complete` and `releaseEligible` remain false. Existing cc1 results keep
-schema v2. The new scope does not replace the original full structural replay,
-accuracy thresholds, ABI population, calibration or release requirements.
-
-The installed-driver qualification is selected by the existing
-`qualify:driver-full-export` Actions label. It retains the score, frozen model,
-original export lineage, second-worker request, attachment, execution, capture
-and metadata, verifies the measured bounds and all digest joins, and independently
-replays the boundary observation. Ordinary component tests use explicit authored
-operation fixtures and do not establish that live qualification.
+Interface, call, global and type requests refuse until their independent truth
+and identity relations are admitted. Whole-result scoring, calibrated confidence,
+completeness and release eligibility remain unavailable. Fixture transcripts,
+stored JSON receipts and recomputed hashes cannot create the live capability.
+Adapter commands, result bindings and hosted qualification belong in the
+corresponding adapter documentation.
 
 ## Determinism and resource limits
 
