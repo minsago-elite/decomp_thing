@@ -73,7 +73,8 @@ const runtimeSchema = structuredClone(schema);
 delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
 // Response kinds decoded only inside one lazily loaded route. Definitions that only they reach ship with
 // that route's chunk, keeping the shell entry within its budget; decode.ts refuses them until registered.
-const lazyGroups = { structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail'] };
+const lazyGroups = { structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail', 'structureNeighborhood',
+  'structureScorecard', 'scorecardComparison'] };
 const kindOf = (variant) => variant.properties?.kind?.const;
 const lazyKinds = new Set(Object.values(lazyGroups).flat());
 for (const kind of lazyKinds) if (!responses.includes(kind)) throw Error(`Unknown lazy response kind: ${kind}`);

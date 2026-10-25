@@ -1573,22 +1573,15 @@ object SourceTreeGenerator {
         plannerComplexity: PlannerComplexity,
         generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
     ): String {
-        fun score(status: RecoveryStatus) = when (status) {
-            RecoveryStatus.RECOVERED -> 1.0
-            RecoveryStatus.PARTIAL -> 0.6
-            RecoveryStatus.SYNTHETIC -> 0.25
-            RecoveryStatus.FAILED -> 0.0
-        }
         val functionStatuses = model.functions.associate { it.id to it.status }
         val globalStatuses = model.globals.associate { it.id to it.status }
         val typeStatuses = model.types.associate { it.id to it.status }
         val moduleScores = plan.modules.map { module ->
-            val statuses = module.functionIds.map(functionStatuses::getValue) +
-                module.globalIds.map(globalStatuses::getValue) + module.typeIds.map(typeStatuses::getValue)
-            module.id to if (statuses.isEmpty()) 0.0 else statuses.map(::score).average()
+            module.id to StructuralRecoveryScore.render(module.functionIds.map(functionStatuses::getValue) +
+                module.globalIds.map(globalStatuses::getValue) + module.typeIds.map(typeStatuses::getValue))
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
-        val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
+        val projectScore = StructuralRecoveryScore.render(allStatuses)
         val unresolvedOutput = ReconstructionAdapters.resolve(profile).requiresUnresolvedOutput(profile)
         val unresolvedRecovery = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
             model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
@@ -1604,12 +1597,12 @@ object SourceTreeGenerator {
             append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
             append("\n  \"scoreInterpretation\": ").append(HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()).append(',')
             append("\n  \"recoveryAssessment\": ").append(model.unassessedRecoveryAssessment()).append(',')
-            append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
+            append("\n  \"projectScore\": ").append(projectScore).append(',')
             append("\n  \"modules\": [")
             append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
                 val module = moduleById.getValue(id)
                 val owned = (module.functionIds + module.globalIds + module.typeIds).toSet()
-                "\n    {\"id\":\"${id.jsonEscape()}\",\"score\":${"%.4f".format(java.util.Locale.ROOT, value)}," +
+                "\n    {\"id\":\"${id.jsonEscape()}\",\"score\":$value," +
                     "\"unresolvedRecoveryEntityIds\":${idsJson(owned.filter { it in unresolvedRecoverySet })}," +
                     "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}," +
                     "\"revisionEvidence\":${moduleRevisionEvidence.getValue(id)}}"

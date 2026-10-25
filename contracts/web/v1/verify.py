@@ -327,8 +327,10 @@ def check_structure(kind: str, data: dict) -> None:
         rows, pages = (owned["items"], [owned["page"]]) if owned else ([], [])
         if owned and (len(owned["items"]) > owned["total"] or any(item["kind"] != owned["kind"] for item in owned["items"])):
             raise ValueError("owned entity page disagrees with its kind or total")
-    else:
+    elif kind == "entityDetail":
         rows, pages = ([data["entity"]] if data["entity"] else []), []
+    else:
+        rows, pages = [], []
     if data["state"] != "available" and (rows or data["recoveryAssessment"] != "not-recorded"):
         raise ValueError("unavailable program records cannot present entities or an assessment")
     for page in pages:
@@ -358,12 +360,98 @@ def check_structure(kind: str, data: dict) -> None:
             raise ValueError("text previews exist exactly for recorded fields")
 
 
+def check_neighborhood(data: dict) -> None:
+    """Bounded graphs: edges join included nodes, and a complete neighborhood omits nothing."""
+    neighborhood = data["neighborhood"]
+    if neighborhood is None:
+        return
+    nodes, edges, completeness = neighborhood["nodes"], neighborhood["edges"], neighborhood["completeness"]
+    if [node["index"] for node in nodes] != list(range(len(nodes))) or nodes[0]["depth"] != 0:
+        raise ValueError("graph nodes must be numbered in discovery order from the focus")
+    if any(node["selector"] not in (None, node.get("entityId", node.get("moduleId"))) for node in nodes):
+        raise ValueError("graph selectors must be the recorded identity")
+    for edge in edges:
+        if edge["source"] >= len(nodes) or edge["target"] >= len(nodes):
+            raise ValueError("graph edges must join included nodes")
+        if (edge["resolution"] == "no-record") != (nodes[edge["target"]]["kind"] == "unrecorded-function"):
+            raise ValueError("only edges to unrecorded targets lack a record")
+    for node in nodes:
+        for direction, side in (("outgoing", "source"), ("incoming", "target")):
+            shown = sum(1 for edge in edges if edge[side] == node["index"])
+            if node[direction]["shown"] != shown or shown > node[direction]["total"]:
+                raise ValueError("graph node degrees disagree with the included edges")
+    reasons = completeness["reasons"]
+    if (completeness["state"] == "complete") != (not reasons):
+        raise ValueError("a truncated neighborhood must name its limit")
+    totals = [completeness[key] for key in ("reachableNodes", "reachableEdges", "omittedNodes", "omittedEdges", "edgesBeyondDepth", "filteredEdges")]
+    if ("VISIT_LIMIT" in reasons) != any(value is None for value in totals) or ("VISIT_LIMIT" in reasons and any(value is not None for value in totals)):
+        raise ValueError("unknown totals are reported exactly when exploration stopped at its bound")
+    if completeness["reachableNodes"] is not None:
+        if completeness["omittedNodes"] != completeness["reachableNodes"] - len(nodes) or completeness["omittedEdges"] != completeness["reachableEdges"] - len(edges):
+            raise ValueError("omitted counts must equal the reachable totals less the included items")
+        if completeness["state"] == "complete" and (completeness["omittedNodes"] or completeness["omittedEdges"]):
+            raise ValueError("a complete neighborhood cannot omit nodes or edges")
+
+
+def check_measure(measure: dict, unit: str) -> None:
+    """Only measured results carry a measurement; other states never present a value."""
+    if measure["state"] == "measured":
+        if measure["numerator"] is None or measure["denominator"] is None or (unit == "ratio" and measure["value"] is None):
+            raise ValueError("a measured result states its numerator, denominator and recorded value")
+    elif measure["value"] is not None and not (measure["state"] in ("unmeasured", "failed") and unit == "ratio"):
+        raise ValueError("an unmeasured or unknown result cannot present a value")
+    if measure["state"] != "measured" and measure["reason"] is None:
+        raise ValueError("a result that is not measured must state why")
+
+
+def check_scorecard(data: dict) -> None:
+    card = data["scorecard"]
+    if card is None:
+        return
+    for metric in card["metrics"] + [item["metric"] for item in card["modules"]["items"]]:
+        check_measure(metric, metric["unit"])
+        if metric["state"] == "unmeasured" and metric["value"] is not None and metric["reason"] != "EMPTY_POPULATION":
+            raise ValueError("only an empty population keeps its recorded placeholder value")
+    if card["modules"]["page"]["snapshotVersion"] != data["structureVersion"]:
+        raise ValueError("scorecard pages must be bound to the structure version")
+
+
+def check_comparison(data: dict) -> None:
+    state = data["compatibility"]["state"]
+    blocked = any(check["blocking"] and check["state"] != "match" for check in data["compatibility"]["checks"])
+    if (state == "incompatible") != (blocked and state != "unavailable"):
+        raise ValueError("compatibility must follow the blocking identity checks")
+    if state == "unavailable" and data["metrics"]:
+        raise ValueError("an unavailable scorecard cannot be compared")
+    rows = [(item["current"], item["baseline"], item["delta"], item["unit"]) for item in data["metrics"]] + [
+        (item["current"], item["baseline"], item["delta"], "ratio") for item in data["modules"]["items"]]
+    for current, baseline, delta, unit in rows:
+        for measure in (current, baseline):
+            if measure is not None:
+                check_measure(measure, unit)
+        computed = delta["state"] == "computed"
+        if computed and (state != "compatible" or current is None or baseline is None
+                         or current["state"] != "measured" or baseline["state"] != "measured"):
+            raise ValueError("deltas are computed only between measured results of compatible attempts")
+        if state != "compatible" and delta["state"] == "not-comparable" and current is not None and baseline is not None:
+            raise ValueError("an incompatible baseline withholds its deltas")
+        if not computed and any(delta[key] is not None for key in ("value", "numerator", "denominator")):
+            raise ValueError("a delta that is not computed cannot present a difference")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail"):
+    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail", "structureNeighborhood", "structureScorecard"):
         check_structure(kind, data)
+        if kind == "structureNeighborhood":
+            check_neighborhood(data)
+        if kind == "structureScorecard":
+            check_scorecard(data)
+        return
+    if kind == "scorecardComparison":
+        check_comparison(data)
         return
     if kind == "validationHistory":
         if data["state"] != "recorded":

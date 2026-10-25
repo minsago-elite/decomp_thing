@@ -837,6 +837,74 @@
     {
       "file": "fixtures/invalid-entity-detail-unavailable-entity.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/scorecard-comparison-incompatible.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/scorecard-comparison.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-calls.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-modules.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-truncated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-scorecard-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-scorecard.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-unavailable-graph.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-edge-endpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-complete-with-omissions.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-unrecorded-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-measured-without-denominator.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unmeasured-value.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unavailable-scorecard.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-incompatible-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unmeasured-delta.json",
+      "valid": false
     }
   ]
 }

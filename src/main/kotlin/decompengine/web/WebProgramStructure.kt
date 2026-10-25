@@ -141,6 +141,13 @@ internal class WebProgramStructureIndex(
     val sourceFileIds: Map<String, String>,
     val sharedInterfacePath: String?,
     val unknownPlanReferences: Int,
+    /** Manifest facts the scorecard joins: the reconstruction profile and the committed confidence record. */
+    val profileId: String = "",
+    val profileSha256: String = "",
+    val confidenceFile: GeneratedFileEvidence? = null,
+    val confidenceDeclared: Boolean = false,
+    val manifestUnresolvedEntities: Int = 0,
+    val manifestUnresolvedImplementations: Int = 0,
 ) {
     val structureVersion: String = revisionSourceDigest(listOf("program-structure-v1", metadataVersion,
         model?.sha256 ?: "-", plan?.sha256 ?: "-", outcome.state, planOutcome.state).joinToString("\n"))
@@ -158,6 +165,13 @@ internal class WebProgramStructureIndex(
 
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
+
+    /** Relationship adjacency, built on the first neighborhood read of this projection and retained with it. */
+    val callGraph: WebProgramGraph by lazy { WebProgramGraph.calls(this) }
+    val moduleGraph: WebProgramGraph by lazy { WebProgramGraph.modules(this) }
+
+    /** The confidence-record scorecard, parsed on first use; the record is committed by this projection's manifest. */
+    @Volatile var scorecard: WebStructureScorecard? = null
 }
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
@@ -243,7 +257,10 @@ internal object WebProgramStructureBuilder {
             planOutcome: WebStructureOutcome = WebStructureOutcome("not-recorded", "MODEL_UNAVAILABLE"), plan: WebStructureRecord? = null,
             tables: List<WebStructureTable> = emptyList(), modules: List<WebStructureModule> = emptyList(), unknown: Int = 0) =
             WebProgramStructureIndex(ref, snapshot.manifestSha256, snapshot.descriptorSha256, manifest.inputSha256,
-                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown)
+                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown,
+                manifest.profileId, manifest.profileSha256, evidenceFile(profile, manifest, "confidence-evidence"),
+                declaredPath(profile, "confidence-evidence") != null, manifest.unresolvedEntityIds.size,
+                manifest.unresolvedImplementationIds.size)
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
             ?: return result(WebStructureOutcome("not-recorded",
                 if (declaredPath(profile, "program-model-evidence") == null) "PROFILE_DECLARES_NO_MODEL" else "MODEL_NOT_RECORDED"))
@@ -552,4 +569,5 @@ internal class WebProgramStructureCache(private val capacity: Int = 2) {
 
     @Synchronized fun get(key: Key): WebProgramStructureIndex? = entries[key]
     @Synchronized fun put(key: Key, value: WebProgramStructureIndex) { entries[key] = value }
+    @Synchronized internal fun retained(): List<WebProgramStructureIndex> = entries.values.toList()
 }
