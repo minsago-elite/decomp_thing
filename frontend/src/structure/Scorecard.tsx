@@ -301,7 +301,14 @@ export default function Scorecard({ selected, basePath, search }: { selected: So
   const card = data?.scorecard ?? null;
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
   const [sort, setSort] = useState(query.sort); const [order, setOrder] = useState(query.order);
-  return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary} onRefresh={refresh}>
+  // Inventory links stay outside the read gate; refreshing a pinned or paged view reads the current first page.
+  return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary}
+    onRefresh={() => {
+      if (!query.version && !query.cursor) { refresh(); return; }
+      const next = { ...query }; delete next.version; delete next.cursor; route(next);
+    }}
+    navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{structureCopy.browseFunctions}</a>{' '}
+      <a href={structureListPath(basePath, selected, 'modules')}>{structureCopy.browseModules}</a></p>}>
     {data && <>
       <h2>{copy.record}</h2>
       <p role={data.confidence.state === 'available' ? undefined : 'alert'}>{copy.recordStates[data.confidence.state]}

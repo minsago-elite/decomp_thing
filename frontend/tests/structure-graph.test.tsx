@@ -8,6 +8,7 @@ import { graphCopy as copy } from '../src/copy/graph';
 import { structureCopy } from '../src/copy/structure';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
+import { ApiClientError } from '../src/api/errors';
 import { graphLocation, graphPath } from '../src/graph/query';
 import { layoutGraph } from '../src/graph/layout';
 import type { LayoutWorker } from '../src/graph/layoutOperation';
@@ -142,6 +143,21 @@ it('states truncation with exact omitted counts and refuses an unavailable graph
     render(<App basePath="/nested" session={auth} />);
     await screen.findByText(copy.graphStates['not-recorded'], { exact: false });
     expect(screen.queryByRole('table', { name: copy.nodesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('keeps inventory navigation after a changed pinned neighborhood and refreshes to current records', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((_kind, path) => path.includes('structureVersion=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' })) : Promise.resolve({ data: calls }));
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2&structureVersion=${'8'.repeat(64)}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.getByRole('link', { name: structureCopy.returnFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByRole('table', { name: copy.nodesTitle });
+    expect(location.search).toBe('?view=calls&focus=fn_0000000000401000&depth=2');
   } finally { auth.dispose(); }
 });
 

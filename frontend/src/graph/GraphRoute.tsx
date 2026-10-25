@@ -79,10 +79,12 @@ export default function GraphRoute({ selected, basePath, search, runtime = graph
     return data;
   });
   const data = read.state === 'ready' ? read.value : null;
-  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} boundary={copy.boundary} onRefresh={refresh}>
+  // The inventory link stays outside the read gate, and refreshing a pinned view reads the current records.
+  return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} boundary={copy.boundary}
+    onRefresh={() => { if (version) location.route(graphPath(basePath, selected, query)); else refresh(); }}
+    navigation={<p><a href={structureListPath(basePath, selected, query.view === 'calls' ? 'functions' : 'modules')}>
+      {query.view === 'calls' ? structureCopy.returnFunctions : structureCopy.returnModules}</a></p>}>
     {data && <>
-      <p><a href={structureListPath(basePath, selected, query.view === 'calls' ? 'functions' : 'modules')}>
-        {query.view === 'calls' ? structureCopy.returnFunctions : structureCopy.returnModules}</a></p>
       <h2>{copy.views[query.view]}: <bdi>{data.neighborhood?.nodes[0] && 'name' in data.neighborhood.nodes[0]
         ? data.neighborhood.nodes[0].name ?? query.focus : query.focus}</bdi></h2>
       <Controls key={search} query={query} onApply={next => location.route(graphPath(basePath, selected, next, version))} />

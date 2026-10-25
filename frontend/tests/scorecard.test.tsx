@@ -7,6 +7,8 @@ import type { Bootstrap, Run, Runs, ScorecardComparison, StructureScorecard } fr
 import { scorecardCopy as copy } from '../src/copy/scorecard';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
+import { ApiClientError } from '../src/api/errors';
+import { structureCopy } from '../src/copy/structure';
 import { scorecardLocation, scorecardSearch } from '../src/structure/Scorecard';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
@@ -122,6 +124,23 @@ it('lists older attempts on request instead of treating the newest page as every
     expect(transport.get).toHaveBeenCalledWith('runs', `/jobs/${selected.jobId}/runs?limit=50&cursor=${cursor}`, expect.anything());
     expect(within(select).getAllByRole('option').map(option => option.getAttribute('value'))).toEqual(['', 'run_1/revision_1']);
     expect(screen.queryByRole('button', { name: copy.showOlderAttempts })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('keeps inventory navigation after a changed pinned scorecard and refreshes to current records', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => kind === 'structureScorecard' && path.includes('structureVersion=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' }))
+    : Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run : kind === 'runs' ? runs : comparison }));
+  history.replaceState(null, '', `${revision}/scorecard?sort=score&structureVersion=${'8'.repeat(64)}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.getByRole('link', { name: structureCopy.browseFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+    expect(screen.getByRole('link', { name: structureCopy.browseModules }).getAttribute('href')).toBe(`${revision}/modules`);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    expect(location.search).toBe('?sort=score');
   } finally { auth.dispose(); }
 });
 
