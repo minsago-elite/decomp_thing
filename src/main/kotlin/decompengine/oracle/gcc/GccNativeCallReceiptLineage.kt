@@ -11,8 +11,9 @@ internal object GccNativeCallReceiptLineage {
         val intentBytes = operation.intentBytes
         val intent = OracleJson.parseCanonical(intentBytes).jsonObject
         require(intent.string("provider") == "gcc-bundled-operation-intent-v5" && intent.long("schemaVersion") == 5L &&
-            intent.string("engineId") == "cc1" && intent.string("runKind") == "fresh-control") {
-            "native observation lineage requires the pinned fresh cc1 v5 intent"
+            intent.string("engineId") in setOf("cc1", "driver") &&
+            intent.string("engineId") == operation.snapshot.target.engineId && intent.string("runKind") == "fresh-control") {
+            "native observation lineage requires the matching pinned fresh cc1 or driver v5 intent"
         }
         val operationId = intent.digest("operationId")
         val intentDigest = OracleArtifacts.sha256(intentBytes)
@@ -23,7 +24,9 @@ internal object GccNativeCallReceiptLineage {
         val profile = intent.getValue("plannerProfile").jsonObject
         require(profile.digest("profileSha256") == operation.snapshot.target.profileSha256)
         val cli = intent.getValue("cliInvocation").jsonObject
-        require(cli.getValue("argv").jsonArray.first().jsonPrimitive.content == "gcc-engine-native-calls")
+        val argv = cli.getValue("argv").jsonArray
+        require(argv.size >= 3 && argv[0] == JsonPrimitive("gcc-engine-native-calls") &&
+            argv[1] == intent.getValue("engineId")) { "native CLI selection differs from its pinned capture target" }
         val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }
         fun artifact(role: String, bytes: Long, digest: String) {
             val item = artifacts.single { it.string("role") == role }

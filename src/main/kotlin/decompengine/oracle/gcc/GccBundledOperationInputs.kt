@@ -20,7 +20,10 @@ internal data class GccBundledNativeCallTargetEvidenceV1(
     val imageBase: ULong, val languageId: String, val compilerSpecId: String,
     val defaultAddressSpace: GccBundledNativeCallAddressSpaceIdentityV1,
     val executableRanges: List<FullTreeElfExecutableRange>,
-)
+    val engineId: String = "cc1",
+) {
+    init { require(engineId in setOf("cc1", "driver")) { "native call target must be cc1 or driver" } }
+}
 
 internal class GccBundledOperationInputs private constructor(
     private val deploymentReference: GccKotlinBootClasspathReference,
@@ -50,9 +53,9 @@ internal class GccBundledOperationInputs private constructor(
         checkpoint()
         val binary = guards.single { (name, _) -> name == "bundled operation artifact engine-binary" }.second
         require(binary.size == pinned.strippedBinary.bytes && binary.authenticatedSha256 == pinned.strippedBinary.sha256) {
-            "native call target input differs from the independently pinned cc1"
+            "native call target input differs from the independently pinned ${pinned.engineId}"
         }
-        val layout = FullTreeElfLayout.scanLayout(binary, "native-call pinned cc1", checkpoint = { checkpoint() })
+        val layout = FullTreeElfLayout.scanLayout(binary, "native-call pinned ${pinned.engineId}", checkpoint = { checkpoint() })
         require(layout.elfClass == 2 && layout.byteOrder == 1 && layout.machine == pinned.targetAbi.machine &&
             layout.osAbi == pinned.targetAbi.osAbi && layout.elfType == pinned.targetAbi.elfType &&
             layout.imageBase == pinned.imageBase &&
@@ -60,13 +63,13 @@ internal class GccBundledOperationInputs private constructor(
                 pinned.executableRanges.map { it.startRva to it.endExclusiveRva }) {
             "native call target ELF layout differs from the independently pinned profile"
         }
-        // The pinned cc1 is ET_EXEC with image base 0x400000. No ET_DYN loader rebasing is inferred.
+        // Both pinned targets are ET_EXEC at 0x400000. No ET_DYN loader rebasing is inferred.
         require(layout.elfType == "ET_EXEC" && layout.imageBase == 0x400000UL)
         val result = GccBundledNativeCallTargetEvidenceV1(profile.suite.profileSha256, profile.suite.target,
             binary.authenticatedSha256, binary.size, layout.imageBase,
             pinned.targetAbi.ghidraLanguage, pinned.targetAbi.ghidraCompilerSpec,
             GccBundledNativeCallAddressSpaceIdentityV1("ram", 1, 64, 1, false, false),
-            java.util.List.copyOf(layout.executableRanges))
+            java.util.List.copyOf(layout.executableRanges), pinned.engineId)
         checkpoint()
         verify("after native-call target derivation")
         return result
@@ -181,7 +184,7 @@ internal class GccBundledOperationInputs private constructor(
                     }
                     FullTreeFunctionObservationClassPathEntry(entry.path, entry.sha256)
                 }
-                val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded, intent.budgets)
+                val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded, intent.budgets, selectedEngineId = intent.engineId)
                 retained = bundle
                 val inputs = GccBundledOperationInputs(
                     reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
