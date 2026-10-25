@@ -391,6 +391,35 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `production options declare no resume and retry a failed repair from its recorded revision`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("recover.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines, acceptTestOnly = true)).use { service ->
+            service.initializeExistingStorage()
+            fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
+            val reconstructed = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "recover_reconstruct_01").attempt
+            engines.repairBody = { error("inert repair failure") }
+            val failed = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
+                "agent-acp"), "recover_repair_first_1").attempt
+            assertEquals(WorkflowRunState.FAILED, failed.state)
+            val controls = service.attemptControls(job.id, failed.runId)
+            assertNull(controls.retryReason, "retry of a recorded candidate input was refused")
+            assertEquals("RESUME_UNSUPPORTED", controls.resumeReason)
+            assertEquals("RESUME_UNSUPPORTED", assertFailsWith<WebJobServiceException> {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RESUME, failed.inputRevisionId, "recover_resume_refused")
+            }.code)
+            engines.repairBody = { project -> acceptRepairGraph(project) }
+            val retried = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                failed.inputRevisionId, "recover_retry_repair_1").attempt
+            assertEquals(failed.runId, retried.previousRunId); assertEquals("agent-acp", retried.harnessCapabilityId)
+            assertEquals(WorkflowRunState.COMPLETED, retried.state); assertNotNull(retried.acceptedRevision)
+            // The retry copied the selected revision afresh; the failed attempt's evidence and the input stay untouched.
+            assertEquals("base", store.runReportsDirectory(job.id, reconstructed.runId).resolve("source-tree/code.c").readText())
+        }
+    }
+
+    @Test
     fun `an input that already validates publishes its accepted root baseline`() = withRoot { root ->
         for (acceptTestOnly in listOf(true, false)) {
             val store = JobStore(root.resolve("jobs-$acceptTestOnly")); val job = store.createFromUpload("baseline.elf", elfFixture())

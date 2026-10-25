@@ -427,6 +427,13 @@ reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
 `artifactSha256` = graph digest). The service records it once, rechecking the
 persisted candidate, versions and that the attempt is still the latest.
 
+Production options declare no checkpoint policy yet, so `POST R/recover` and
+`GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
+fresh linked attempt with the predecessor's own option and limits. A repair retry
+re-resolves the predecessor's recorded input revision (accepted or completed
+candidate) and copies its retained source afresh; if that revision is no longer
+retained, retry is refused with `INPUT_UNVERIFIED`.
+
 Startup recovery keeps its existing transitions and then reconciles. Queued
 attempts become `interrupted` with no `startedAt`: they never executed. Active
 attempts become `interrupted` with their `startedAt` and partial evidence. Neither

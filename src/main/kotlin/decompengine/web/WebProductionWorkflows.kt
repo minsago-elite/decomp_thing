@@ -126,6 +126,9 @@ private fun <T> unwrap(result: BoundedWorkflowResult<T>): BoundedWorkflowResult<
 
 internal class ExploreWorkflowAdapter(private val engines: WebWorkflowEngines, private val executor: BoundedWorkflowExecutor) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.EXPLORE
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = WebWorkflowDefaults.EXPLORE
     override val limitsAdjustable = true
     override val requirements = setOf(WebWorkflowRequirement.SANDBOX)
@@ -156,6 +159,9 @@ internal class ReconstructWorkflowAdapter(
 ) : DurableWebWorkflowAdapter {
     private val agent = mode == WebReconstructionMode.AGENT
     override val workflow = WorkflowKind.RECONSTRUCT
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = if (agent) WebWorkflowDefaults.RECONSTRUCT_AGENT else WebWorkflowDefaults.RECONSTRUCT_EVIDENCE
     override val limitsAdjustable = true
     override val requirements = if (agent) setOf(WebWorkflowRequirement.GHIDRA, WebWorkflowRequirement.AGENT_HARNESS)
@@ -213,6 +219,9 @@ internal class RepairWorkflowAdapter(
     private val acceptTestOnlyPublication: Boolean = false,
 ) : DurableWebWorkflowAdapter {
     override val workflow = WorkflowKind.REPAIR
+    // No production checkpoint policy yet (no agent-session journal reconciliation), so POST R/recover
+    // reports resume as RESUME_UNSUPPORTED; an explicit retry always starts a fresh linked attempt.
+    override val checkpoints: DurableWebWorkflowCheckpointPolicy? = null
     override val limits = WebWorkflowDefaults.REPAIR
     // The tool-call ceiling is structural (iterations times the per-invocation agent limit), so it is fixed.
     override val limitsAdjustable = false
