@@ -16,6 +16,29 @@ const ROLES = {
 const role = (path) => path === 'Makefile' ? 'build' : path.startsWith('include/') ? 'header'
   : path.startsWith('src/modules/') ? 'module' : 'evidence';
 
+const CRC = Array.from({ length: 256 }, (_, n) => {
+  let value = n;
+  for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) value = CRC[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
+}
+/** One stored entry: a well-formed ZIP whose payload is not this tree, so the real verifier must refuse it. */
+function storedZip(name, content) {
+  const fileName = Buffer.from(name); const data = Buffer.from(content); const crc = crc32(data);
+  const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(fileName.length, 26);
+  const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+  central.writeUInt32LE(crc, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(fileName.length, 28);
+  const centralOffset = local.length + fileName.length + data.length;
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + fileName.length, 12); end.writeUInt32LE(centralOffset, 16);
+  return Buffer.concat([local, fileName, data, central, fileName, end]);
+}
+
 const core = (changed) => Array.from({ length: 30 }, (_, index) => {
   if (index === 1) return '/* </pre><script>globalThis.__sourceExecuted = true</script> <img src=x onerror="globalThis.__sourceExecuted = true"> */';
   if (index === 4) return 'int core(void) { return DECOMP_VALUE; }';
@@ -100,7 +123,10 @@ export async function seedSources(root) {
   for (const [name, bytes] of Object.entries({ 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) })) {
     await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
   }
-  return { jobId, directory, trees, candidates };
+  // An incomplete archive for the head attempt: present, digest-identified, and never verifiable.
+  const archive = storedZip('Makefile', trees.run_source_b.Makefile);
+  await fs.writeFile(join(directory, 'reports', 'runs', 'run_source_b', 'source-tree.zip'), archive, { flag: 'wx', mode: 0o600 });
+  return { jobId, directory, trees, candidates, archiveSha256: sha256(archive) };
 }
 
 async function press(cdp, tab, key = 'Enter') {
@@ -236,9 +262,27 @@ export async function qualifySources({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `!!document.querySelector('[aria-label="Source range content"]')`, 'historical preview');
   assert.ok(await evaluate(tab, `document.querySelector('[aria-label="Source range content"]').textContent.includes('original_line')`));
   assert.ok(tab.requests.every((request) => ['GET', 'HEAD'].includes(request.method)), 'Source browsing must not mutate');
+
+  // The archive panel identifies the archive before download and only an explicit operation can label it.
+  await cdp.call('Page.navigate', { url: `${browserOrigin}${head}/sources/root` }, tab.sessionId);
+  await ready(tab, `(${listing}).length === 5`, 'root before archive status');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('It is not the application JAR that runs this workbench.')`));
+  assert.equal(tab.requests.filter((request) => request.url.endsWith('/source-archive')).length, 0, 'Archive status must wait for an explicit action');
+  await activate(cdp, ready, tab, 'button', 'Show source archive status');
+  await ready(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState === 'not-verified'`, 'unverified archive status');
+  assert.ok(await evaluate(tab, `document.querySelector('[aria-label="Source archive identity"]').textContent.includes(${JSON.stringify(fixture.archiveSha256)})`));
+  assert.ok(await evaluate(tab, `[...document.querySelectorAll('a[download]')].some(a => a.textContent === 'Download the source archive (ZIP, not verified)')`));
+  await activate(cdp, ready, tab, 'button', 'Verify archive integrity');
+  await ready(tab, `document.querySelector('[data-archive-state]')?.dataset.archiveState === 'failed'`, 'refused archive verification', 40_000);
+  assert.ok(await evaluate(tab, `document.activeElement?.dataset.archiveState === 'failed'`), 'Focus must move to the new verification result');
+  assert.equal(await evaluate(tab, `[...document.querySelectorAll('a[download]')].some(a => a.textContent.startsWith('Download the verified'))`), false);
+  const mutations = tab.requests.filter((request) => !['GET', 'HEAD'].includes(request.method));
+  assert.deepEqual(mutations.map((request) => [request.method, new URL(request.url).pathname]),
+    [['POST', `/nested/api/v1/jobs/${fixture.jobId}/runs/run_source_b/revisions/revision_source_b/archive-verifications`]]);
   assert.deepEqual(tab.exceptions, []);
   return { directoryKeyboardNavigation: true, opaqueLinks: true, manifestOnlyEntries: ['reports/confidence.json', 'UNRESOLVED.md'],
     emptyDirectoriesExplained: true, markupInert: true, lineLinkReload: true, hexFallback: 'invalid-utf8',
     workerAsset: workerAsset.path, workerExitedAfterAnswer: true, workerTerminatedOnLeave: true,
-    diff: { statuses: 5, parentSuggested: true, patchDownload: true, narrowViewport: 320, historicalBase: true }, mutationRequests: 0 };
+    diff: { statuses: 5, parentSuggested: true, patchDownload: true, narrowViewport: 320, historicalBase: true },
+    archive: { explicitStatusRead: true, digestShown: true, verification: 'failed', verifiedLabelWithheld: true }, mutationRequests: 1 };
 }

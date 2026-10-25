@@ -1,0 +1,7 @@
+{
+  "apiVersion": 1,
+  "kind": "archiveVerificationRequest",
+  "data": {
+    "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

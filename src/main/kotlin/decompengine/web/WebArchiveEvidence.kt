@@ -24,6 +24,8 @@ internal data class WebArchiveSnapshot(
     val sha256: String,
     val source: SourceTreeView,
     val manifestDocument: JsonObject,
+    /** Digest of the payload's own build contract, the descriptor that binds the candidate's source digest. */
+    val contractSha256: String,
 )
 
 internal class WebArchiveEvidence(private val store: JobStore, private val sources: WebSourceEvidence,
@@ -63,6 +65,8 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 throw IllegalArgumentException("source archive ZIP is truncated", failure)
             }
             val relatives = paths.map { extractedRoot.relativize(it).toString().replace('\\', '/') }.toSet()
+            // Repository metadata never belongs to the deterministic source payload.
+            require(relatives.none { relative -> relative.split('/').any { it == ".git" } }) { "archive payload contains repository metadata" }
             require(relatives == inventory.filterValues { it.isRegularFile }.keys) {
                 "archive payload does not match the complete current source-tree inventory"
             }
@@ -94,7 +98,8 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             requireSame(executable, readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
             requireSame(identity(archive), readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES))
-            return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)
+            return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument,
+                contractSnapshot.sha256)
         } finally {
             LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
                 deletePrivateTreeContents(directory, AcpRuntimeClosureLimits(maximumUserOwnedFileBytes = MAXIMUM_CLEANUP_BYTES, maximumDepth = 64))

@@ -44,6 +44,8 @@ const responses: Record<string, () => unknown> = {
   sourceSearch: () => bound('source-search-complete', selected),
   sourceDiff: () => { const document = bound('source-diff-page', selected); (document.data.page as { limit: number }).limit = 50; return document; },
   sourceFileDiff: () => bound('source-file-diff-text', selected),
+  sourceArchive: () => ({ data: { ...(JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/source-archive-stale.json'), 'utf8')
+    .replaceAll('job_1', jobId).replaceAll('"/api/v1/', '"/nested/api/v1/')) as Fixture).data, binding: selected } }),
   sourceCatalog: () => bound('source-catalog', { jobId, runId, revisionId: null }),
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
@@ -123,6 +125,17 @@ for (const [name, path, rendered] of privateRoutes) {
     expect(await violations()).toEqual([]);
   });
 }
+
+it('has no automated WCAG A/AA violations with the source archive panel open', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`);
+  render(<App basePath="/nested" session={auth} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Show source archive status' }));
+  await screen.findByText('Not verified: the archive changed since its last verification.');
+  await settle();
+  expect(document.querySelector('main [role="alert"]')).toBeNull();
+  expect(await violations()).toEqual([]);
+}, 15000);
 
 it('has no automated WCAG A/AA violations on the public shell without a session', async () => {
   history.replaceState(null, '', '/nested/');

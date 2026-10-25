@@ -1,0 +1,41 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceArchive",
+  "requestId": "request_archive_1",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "archive": {
+      "state": "present",
+      "artifactId": "archive_11111111111111111111111111111111_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sizeBytes": "4096",
+      "contentHref": "/api/v1/jobs/job_1/artifacts/archive_11111111111111111111111111111111_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/content",
+      "mediaType": "application/zip"
+    },
+    "verification": {
+      "authority": "archive-verifier",
+      "state": "verified",
+      "operationId": "operation_1",
+      "verifiedAt": "2026-10-25T12:00:00Z",
+      "failureCode": null,
+      "previousVerifiedSha256": null
+    },
+    "build": {
+      "state": "recorded",
+      "contractSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "executableSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "executableBytes": "16384"
+    },
+    "acceptance": "not-evaluated",
+    "git": {
+      "state": "unavailable",
+      "reason": "not-recorded"
+    }
+  }
+}

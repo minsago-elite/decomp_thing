@@ -6087,6 +6087,500 @@
           }
         }
       ]
+    },
+    "sourceArchive": {
+      "type": "object",
+      "description": "Revision-bound source archive status. A verified label never implies compilation, behavior or acceptance.",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "archive": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "present",
+                "missing",
+                "too-large"
+              ]
+            },
+            "artifactId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sizeBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "contentHref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mediaType": {
+              "const": "application/zip"
+            }
+          },
+          "required": [
+            "state",
+            "artifactId",
+            "sha256",
+            "sizeBytes",
+            "contentHref",
+            "mediaType"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "present"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "artifactId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "sha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "sizeBytes": {
+                    "$ref": "#/definitions/uint64"
+                  },
+                  "contentHref": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "artifactId": {
+                    "type": "null"
+                  },
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "sizeBytes": {
+                    "type": "null"
+                  },
+                  "contentHref": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "verification": {
+          "type": "object",
+          "description": "Derived only from a completed archive-verifier operation for this exact digest and revision metadata.",
+          "properties": {
+            "authority": {
+              "const": "archive-verifier"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "not-verified",
+                "running",
+                "verified",
+                "failed",
+                "stale",
+                "missing",
+                "too-large"
+              ]
+            },
+            "operationId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "verifiedAt": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/instant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "failureCode": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ARCHIVE_INVALID",
+                    "ARCHIVE_CHANGED",
+                    "REVISION_MISMATCH",
+                    "REVISION_UNAVAILABLE",
+                    "ARCHIVE_UNAVAILABLE",
+                    "SERVER_STOPPING"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previousVerifiedSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "authority",
+            "state",
+            "operationId",
+            "verifiedAt",
+            "failureCode",
+            "previousVerifiedSha256"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "verified"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "verifiedAt": {
+                    "$ref": "#/definitions/instant"
+                  },
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "verifiedAt": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "failed"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "$ref": "#/definitions/id"
+                  },
+                  "failureCode": {
+                    "enum": [
+                      "ARCHIVE_INVALID",
+                      "ARCHIVE_CHANGED",
+                      "REVISION_MISMATCH",
+                      "REVISION_UNAVAILABLE",
+                      "ARCHIVE_UNAVAILABLE",
+                      "SERVER_STOPPING"
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "failureCode": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "stale"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "$ref": "#/definitions/sha256"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "previousVerifiedSha256": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "not-verified",
+                      "missing",
+                      "too-large",
+                      "stale"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "operationId": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "build": {
+          "type": "object",
+          "description": "The reconstruction's recorded build contract; never a build performed by this read.",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "recorded",
+                "not-recorded"
+              ]
+            },
+            "contractSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableSha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executableBytes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/uint64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "contractSha256",
+            "executableSha256",
+            "executableBytes"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "recorded"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "contractSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableSha256": {
+                    "$ref": "#/definitions/sha256"
+                  },
+                  "executableBytes": {
+                    "$ref": "#/definitions/uint64"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "executableSha256": {
+                    "type": "null"
+                  },
+                  "executableBytes": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "acceptance": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "not-evaluated"
+          ]
+        },
+        "git": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not-recorded",
+                    "not-configured"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "const": "mapped"
+                },
+                "mapping": {
+                  "$ref": "#/definitions/gitMapping"
+                },
+                "dirty": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "mapping",
+                "dirty"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "sourceSha256",
+        "metadataVersion",
+        "archive",
+        "verification",
+        "build",
+        "acceptance",
+        "git"
+      ],
+      "additionalProperties": false
+    },
+    "archiveVerificationRequest": {
+      "type": "object",
+      "description": "The exact archive digest the caller displayed; a different current archive is refused.",
+      "properties": {
+        "archiveSha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      },
+      "required": [
+        "archiveSha256"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -6921,6 +7415,50 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceArchive"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceArchive"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "archiveVerificationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/archiveVerificationRequest"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false

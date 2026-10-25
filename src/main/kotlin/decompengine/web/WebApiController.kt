@@ -22,7 +22,8 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
-) {
+    archiveEvidence: WebArchiveEvidence? = null,
+) : AutoCloseable {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
     // The build hash is stable across restarts; this identity belongs to one listener lifetime.
@@ -50,6 +51,13 @@ internal class WebApiController(
     })
     private val artifactStore = WebJobArtifactStore(jobs)
     private val artifactCatalog = WebArtifactCatalog(artifactStore)
+    private val sourceArchives = archiveEvidence?.let { evidence ->
+        WebSourceArchives(jobs::readRevisionSources, jobs::getAttempt, artifactStore, { job, run ->
+            try { jobs.readArtifact(job, "reports/runs/$run/source-tree/reports/build_contract.json", 1_048_576).bytes }
+            catch (failure: Exception) { if (failure is InterruptedException) throw failure; null }
+        }, { job, run, digest -> evidence.read(job, digest, "reports/runs/$run") },
+            java.util.concurrent.Executors.newSingleThreadExecutor { task -> Thread(task, "decomp-archive-verifier").apply { isDaemon = true } }, clock)
+    }
     private val artifactContent = WebArtifactContent(artifactStore)
     internal val artifactDownloads = WebArtifactDownloads()
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
@@ -62,7 +70,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-diff(?:/(?:file|patch))?|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts(?:/[^/]+(?:/content)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-diff(?:/(?:file|patch))?|source-archive|archive-verifications(?:/[^/]+)?|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel)?)?|jobs/[^/]+/artifacts(?:/[^/]+(?:/content)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -243,6 +251,34 @@ internal class WebApiController(
                     val patch = revisionSourceDiffs.patch(parts[1], parts[3], parts[5], exchange.requestURI.rawQuery)
                     sendWebAttachment(exchange, patch.bytes, patch.fileName, patch.headers)
                 }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-archive")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "sourceArchive", archives().status(assets.basePath, parts[1], parts[3], parts[5]))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications")) && exchange.requestMethod == "POST" -> {
+                    access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST"))
+                    requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
+                    val key = singleUploadHeader(exchange, "Idempotency-Key")
+                    if (key == null || !key.matches(Regex("[A-Za-z0-9_-]{16,128}"))) {
+                        throw WebAccessDenied(400, "INVALID_IDEMPOTENCY_KEY", "Archive verification requires one 16–128 character idempotency key.")
+                    }
+                    if (exchange.requestHeaders.keys.any { it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Archive verification binds the displayed digest in its body, not in conditional headers.")
+                    }
+                    val parts = resource.split('/')
+                    val started = archives().start(parts[1], parts[3], parts[5], readArchiveVerificationRequest(exchange), key)
+                    exchange.responseHeaders.set("Location", "${prefix}jobs/${parts[1]}/runs/${parts[3]}/revisions/${parts[5]}/archive-verifications/${started.record.operationId}")
+                    if (started.replayed) exchange.responseHeaders.set("Idempotency-Replayed", "true")
+                    sendWebApiResponse(exchange, 202, "operation", webArchiveOperation(started.record))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications/[^/]+")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "operation", webArchiveOperation(archives().operation(parts[1], parts[3], parts[5], parts[7])))
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireJsonAccept(exchange)
@@ -421,6 +457,11 @@ internal class WebApiController(
         }
     }
 
+    private fun archives(): WebSourceArchives = sourceArchives
+        ?: throw WebAccessDenied(503, "ARCHIVE_VERIFICATION_UNAVAILABLE", "Source archive verification is unavailable in this server.")
+
+    override fun close() { sourceArchives?.close() }
+
     private fun singleUploadHeader(exchange: HttpExchange, name: String): String? {
         val values = exchange.requestHeaders[name] ?: return null
         if (values.size != 1 || values.single().length > 256) throw WebAccessDenied(400, "INVALID_HEADER", "An upload header is duplicated or too long.")
@@ -461,4 +502,17 @@ private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName
             exchange.responseBody.use { it.write(bytes) }
         }
     } finally { exchange.close() }
+}
+
+/** Strict bounded `archiveVerificationRequest` body: the one archive digest the caller displayed. */
+private fun readArchiveVerificationRequest(exchange: HttpExchange): String {
+    val bytes = exchange.requestBody.use { it.readNBytes(1025) }
+    if (bytes.size > 1024) throw WebAccessDenied(413, "BODY_TOO_LARGE", "The archive verification request exceeds its 1024-byte limit.")
+    val value = try { decompengine.oracle.core.OracleJson.parse(bytes, decompengine.oracle.core.StrictJsonLimits(1024, 1024, 4, 8, 128, 512, 8)) }
+        catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The archive verification request must be bounded strict JSON.") }
+    fun invalid(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED", "Archive verification accepts only one canonical archiveSha256.")
+    // HTTP carries the validated request data only, as for the other JSON mutations.
+    val data = value as? JsonObject ?: invalid()
+    if (data.keys != setOf("archiveSha256")) invalid()
+    return (data["archiveSha256"] as? JsonPrimitive)?.takeIf { it.isString && it.content.matches(Regex("[a-f0-9]{64}")) }?.content ?: invalid()
 }

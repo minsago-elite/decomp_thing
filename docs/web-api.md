@@ -173,7 +173,9 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
 | `GET`, `HEAD J/artifacts`, `J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
-| `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-archive` | `200 sourceArchive` | Revision, recorded build, acceptance, archive digest, verification state and Git mapping before download; #554, #556 |
+| `POST R/revisions/{revisionId}/archive-verifications` | `202 operation`, `Location` | Strict `archiveVerificationRequest` with the displayed digest, session/Origin/CSRF, `Idempotency-Key`; no binary execution; replaces the reserved `V/archive-verifications`; #555 |
+| `GET`, `HEAD R/revisions/{revisionId}/archive-verifications/{operationId}` | `200 operation` | `archive.verify` operation state for this listener; #555 |
 | `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; #200/#202 |
 | `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
 | `POST J/repositories` | `202 operation` | Explicit init/attach/clone, validated configuration; #201/#209 |
@@ -969,6 +971,62 @@ empty file: no line changes, so a unified diff cannot recreate it and `patchAvai
 false. In every case both complete files
 remain available through their own content routes. Comparisons are presentation
 evidence: they do not verify compilation, behavior or accepted reconstruction.
+
+### Source archive status and explicit verification
+
+The generated **source archive** (`source-tree.zip` of one attempt) is a ZIP of the reconstructed
+source tree for independent extraction and rebuild. It is unrelated to the **application JAR**
+that contains the server and this SPA; neither is ever substituted for the other.
+
+`GET R/revisions/V/source-archive` reports, before any download:
+
+- `binding`, `sourceSha256` and `metadataVersion` of the exact persisted candidate;
+- `archive`: `present` with its observed SHA-256, size, catalog `artifactId` and digest-bound
+  `contentHref` (the streamed artifact route), or `missing`/`too-large` (over the 64 MiB verifier
+  limit) with no link;
+- `build`: the reconstruction's recorded build contract digest and recorded executable digest and
+  size (`recorded`), or `not-recorded`. The read never builds anything;
+- `acceptance`: `accepted` only when the attempt's accepted revision is this revision;
+- `git`: `{"state": "unavailable", "reason": "not-recorded"}` until the #205 provenance envelope
+  records a commit. The `mapped` form carries the shared `gitMapping` and `dirty: true|false|null`.
+  Repository metadata (`.git`) is never part of the archive payload; the verifier refuses it;
+- `verification` with `authority: "archive-verifier"`.
+
+`verification.state` is `verified` only when a completed `archive.verify` operation checked
+exactly the current archive digest and revision metadata. That operation uses the existing
+authoritative `WebArchiveEvidence` verifier. The ZIP must extract within its entry, size and depth
+limits, and its payload must equal the current source tree with no `.git` component. The tree
+files must match the manifest, and the recorded build contract must still match the retained
+executable. In addition, the archive's own build contract must be the descriptor that binds this
+candidate's source digest. Nothing is compiled or executed, so `verified` never means successful
+compilation or behavioral fidelity.
+
+The other states are `not-verified`, `running`, `failed` (with `failureCode`), `missing`,
+`too-large` and `stale`. `stale` means a different archive file now replaces a verified one; its
+`previousVerifiedSha256` is reported, and the label is never transferred. The old digest-bound link
+then refuses the new bytes with `409 ARCHIVE_CHANGED`.
+
+`POST R/revisions/V/archive-verifications` takes `{"archiveSha256": "<displayed digest>"}` under the
+JSON mutation boundary (session, Origin, `X-CSRF-Token`) with a 16–128 character `Idempotency-Key`.
+A current archive with a different digest is `409 ARCHIVE_CHANGED`; no archive is
+`404 ARCHIVE_NOT_FOUND`. A replayed key returns the original operation with
+`Idempotency-Replayed: true`. The same key with another intent is `409 IDEMPOTENCY_CONFLICT`. A
+verification already queued or running for the same archive and metadata is returned instead of
+starting a second one. At most two run at once (`429 ARCHIVE_VERIFICATION_BUSY`), on one background
+worker. The `202 operation` has `action: "archive.verify"` and null repository, worktree and result
+object. Its `Location` names `archive-verifications/{operationId}`, which reports `queued`,
+`running`, `completed` (verified), `failed` (with a fixed message) or `interrupted`.
+
+Operation records and verified labels live in memory for the listener lifetime, at most 256
+records. After a restart every archive reads as not verified until it is verified again.
+
+The SPA shows this panel on the root directory of each revision. Status is read only after an
+explicit action. The panel lists revision, recorded build, acceptance, digest, size and Git mapping
+before the download link, which is labelled verified or not verified. Verifying is a separate button
+that polls only its own operation (at most 120 one-second reads) and then rereads the status. A real
+HTTP test packages a generated tree, verifies it and downloads the exact bytes. It extracts them with
+an independent ZIP reader, rebuilds them to the recorded executable digest, and shows that truncated,
+replaced, tree-mismatched and `.git`-carrying archives never receive the verified label.
 
 ## Attempt artifact catalog and streamed downloads
 

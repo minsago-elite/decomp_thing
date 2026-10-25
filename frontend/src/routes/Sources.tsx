@@ -18,6 +18,7 @@ import { sourcePosition } from '../sources/viewer';
 import { SourceSearch } from '../sources/SourceSearch';
 import { sourceSearchPath } from '../sources/search';
 import { SourceDiff, SourceFileDiff } from '../sources/SourceDiff';
+import { SourceArchive } from '../sources/SourceArchive';
 import { sourceDiffPath, sourceDiffSelection, sourceFileDiffSelection } from '../sources/diff';
 
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
@@ -32,7 +33,7 @@ function Context({ selected, sourceSha256 }: { selected: SourceSelection; source
   </dl>;
 }
 
-function Directory({ selected, basePath, pin, search, historyEntry }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry }) {
+function Directory({ selected, basePath, pin, search, historyEntry, session }: { selected: DirectorySelection; basePath: string; pin: SourceSnapshotPin | null; search: string; historyEntry: SourceHistoryEntry; session: Pick<BrowserSession, 'csrf'> }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -115,6 +116,7 @@ function Directory({ selected, basePath, pin, search, historyEntry }: { selected
         }
       }}>{copy.next}</button>
     </nav>
+    {selected.directoryId === 'root' && <SourceArchive selected={selected} basePath={basePath} session={session} />}
   </>;
 }
 
@@ -277,7 +279,7 @@ export default function Sources({ jobId, runId, revisionId, directoryId, fileId,
           ? <SourceSearch key={`${state.generation}/${jobId}/${runId}/${revisionId}/${rawSearch}`} selected={selected} basePath={basePath} search={rawSearch} />
           : resource === 'directory'
           ? <Directory key={`${state.generation}/${jobId}/${runId}/${revisionId}/${directoryId ?? ''}/${pin?.sourceSha256}/${pin?.metadataVersion}`}
-              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} />
+              selected={{ ...selected, directoryId: directoryId ?? '' }} basePath={basePath} pin={pin} search={search} historyEntry={historyEntry} session={session} />
           : <File key={`${state.generation}/${jobId}/${runId}/${revisionId}/${fileId ?? ''}`}
               selected={{ ...selected, fileId: fileId ?? '' }} basePath={basePath} runtime={state.runtime} search={search} pin={pin} historyEntry={historyEntry} />
         : <p>{copy.connect}</p>}

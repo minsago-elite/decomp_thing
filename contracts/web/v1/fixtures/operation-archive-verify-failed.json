@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "operation",
+  "requestId": "request_archive_5",
+  "data": {
+    "operationId": "operation_1",
+    "jobId": "job_1",
+    "repositoryId": null,
+    "worktreeId": null,
+    "action": "archive.verify",
+    "state": "failed",
+    "version": "version_2",
+    "createdAt": "2026-10-25T12:00:00Z",
+    "endedAt": "2026-10-25T12:00:01Z",
+    "resultObjectId": null,
+    "recoveryRequired": false,
+    "message": "The archive is incomplete, malformed, or its payload differs from the current source tree or build contract."
+  }
+}

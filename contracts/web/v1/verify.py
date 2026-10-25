@@ -429,6 +429,23 @@ def check_catalog_artifact(item: dict) -> None:
         raise ValueError("only revision-bound source metadata can be verified against a revision commitment")
 
 
+def check_source_archive(data: dict) -> None:
+    archive, verification = data["archive"], data["verification"]
+    if archive["state"] == "present":
+        if not re.fullmatch(r"archive_[a-f0-9]{32}_" + re.escape(archive["sha256"]), archive["artifactId"]):
+            raise ValueError("source archive identity does not bind its digest")
+        check_artifact_href({"binding": data["binding"], "artifactId": archive["artifactId"], "contentHref": archive["contentHref"]})
+    if (archive["state"] == "present") != (verification["state"] not in ("missing", "too-large")) or \
+            (archive["state"] != "present" and verification["state"] != archive["state"]):
+        raise ValueError("source archive verification state disagrees with the retained archive")
+    if verification["state"] == "stale" and verification["previousVerifiedSha256"] == archive["sha256"]:
+        raise ValueError("a stale verification names a different archive")
+    if data["git"]["state"] == "mapped":
+        mapping = data["git"]["mapping"]
+        if mapping["revisionId"] != data["binding"]["revisionId"] or mapping["sourceSha256"] != data["sourceSha256"]:
+            raise ValueError("Git mapping belongs to another revision")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -487,6 +504,11 @@ def check_semantics(document: dict) -> None:
         check_source_diff(data)
     elif kind == "sourceFileDiff":
         check_source_file_diff(data)
+    elif kind == "sourceArchive":
+        check_source_archive(data)
+    elif kind == "operation" and data["action"] == "archive.verify":
+        if data["repositoryId"] is not None or data["worktreeId"] is not None or data["resultObjectId"] is not None:
+            raise ValueError("archive verification has no repository, worktree or Git result object")
     elif kind == "artifact":
         check_catalog_artifact(data)
     elif kind == "artifacts":

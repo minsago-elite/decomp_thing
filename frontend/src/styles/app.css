@@ -365,6 +365,10 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .source-diff-marker { padding: .4rem 0; font-family: ui-monospace, monospace; font-weight: 650; }
 .source-diff-omitted, .source-diff-truncated { color: var(--muted); font-style: italic; }
 .source-diff-header { margin-block: .5rem 0; }
+.source-archive { margin-block: 2rem 1rem; padding-block-start: 1rem; border-block-start: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.archive-verification { border-inline-start: .4rem solid var(--focus); padding: .5rem 1rem; background: var(--surface); }
+.archive-verification-verified { border-inline-start-color: var(--accent); }
+.archive-verification-failed, .archive-verification-stale { border-inline-start-color: var(--danger); }
 .artifact-catalog { min-width: 0; overflow-wrap: anywhere; }
 .artifact-catalog nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
 .artifact-inventory-checked { border-inline-start: .3rem solid var(--accent); padding-inline-start: .5rem; }

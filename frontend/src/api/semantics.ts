@@ -1,4 +1,4 @@
-import type { Artifact, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, ContractDocument, Page, RevisionDirectory, Run, SourceArchive, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -270,6 +270,23 @@ export function checkSourceFileDiff(data: SourceFileDiff): void {
   }
 }
 
+/** Mirrors verify.py: the download is this job's digest-bound archive and states agree with the retained file. */
+export function checkSourceArchive(data: SourceArchive, basePath = '/'): void {
+  const { archive, verification } = data;
+  if (archive.state === 'present') {
+    requireValue(new RegExp(`^archive_[a-f0-9]{32}_${archive.sha256}$`).test(archive.artifactId!));
+    try {
+      validateResourceHref(basePath, archive.contentHref!, { kind: 'artifact-content', jobId: data.binding.jobId, artifactId: archive.artifactId! });
+    } catch { throw new ApiClientError('invalid_response'); }
+  }
+  requireValue((archive.state === 'present') === (verification.state !== 'missing' && verification.state !== 'too-large'));
+  requireValue(archive.state === 'present' || verification.state === archive.state);
+  requireValue(verification.state !== 'stale' || verification.previousVerifiedSha256 !== archive.sha256);
+  if (data.git.state === 'mapped') {
+    requireValue(data.git.mapping.revisionId === data.binding.revisionId && data.git.mapping.sourceSha256 === data.sourceSha256);
+  }
+}
+
 export function checkSourceSearch(data: SourceSearch): void {
   const { page, limits, scope, progress, query, items } = data;
   requireValue(page.snapshotVersion === data.metadataVersion && page.limit === limits.maxResults && items.length <= page.limit);
@@ -377,6 +394,17 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'sourceFileDiff':
       checkSourceFileDiff(document.data);
       break;
+    case 'sourceArchive':
+      checkSourceArchive(document.data, basePath);
+      break;
+    case 'operation': {
+      // Mirrors verify.py: archive verification has no repository, worktree or result object.
+      const operation = document.data;
+      if (operation.action === 'archive.verify') {
+        requireValue(operation.repositoryId === null && operation.worktreeId === null && operation.resultObjectId === null);
+      }
+      break;
+    }
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;
       requireValue(item.displayName.split('/').every(part => part.length <= 255 && isDirectoryLabel(part)));

@@ -967,20 +967,84 @@
       "valid": false
     },
     {
-      "file": "fixtures/source-file-diff-empty-added.json",
+      "file": "fixtures/source-archive-verified.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-stale.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-git-mapped.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/operation-archive-verify-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/archive-verification-request.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-archive-verified-without-operation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-missing-verified.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-stale-without-previous.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-failed-without-code.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-foreign-download.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-download-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-git-path.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-build-without-executable.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-operation-archive-verify-object.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-archive-verification-request-digest.json",
+      "valid": false
     },
     {
       "file": "fixtures/invalid-source-file-diff-empty-patch.json",
       "valid": false
     },
     {
-      "file": "fixtures/source-diff-content-kind.json",
+      "file": "fixtures/source-file-diff-empty-added.json",
       "valid": true
     },
     {
       "file": "fixtures/invalid-source-diff-unchanged-modified.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-content-kind.json",
+      "valid": true
     }
   ]
 }

@@ -217,6 +217,8 @@ class WebSessionRealRoutesTest {
                     head = true, status = 404, code = "REVISION_NOT_FOUND"),
                 Shape("$revision/source-diff/patch?baseRunId=run_1&baseRevisionId=revision_1&headFileId=file_0_${"a".repeat(64)}",
                     accept = bytes, head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-archive", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/archive-verifications/operation_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
                 Shape("$revision/source-directories/dir_1",head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
                 Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
