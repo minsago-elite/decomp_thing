@@ -25,9 +25,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-provider: basic
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
