@@ -47,7 +47,8 @@ internal fun webWorkflowCapabilities(adapters: List<DurableWebWorkflowAdapter>, 
         val (state, reason, message) = when {
             adapter.requirements.isNotEmpty() && prerequisites == null -> Triple("unknown", readiness.reasonCode ?: "PROBE_FAILED",
                 "Runtime prerequisites could not be determined, so this workflow's availability is unknown. Refresh readiness to check again.")
-            unmet != null -> Triple("unavailable", unmet.reasonCode, unmet.message)
+            // An unchecked prerequisite (passive page load) is unknown, never supported.
+            unmet != null -> Triple(if (unmet.unknown) "unknown" else "unavailable", unmet.reasonCode, unmet.message)
             else -> Triple("supported", null, "Every prerequisite this workflow declares was present at the last readiness check.")
         }
         capability(webWorkflowCapabilityId(adapter), state, reason, message, listOf(adapter.workflow),
@@ -151,4 +152,22 @@ private fun capability(id: String, state: String, reason: String?, message: Stri
         put("maxOutputBytes", value.maxOutputBytes.toString()); put("maxToolCalls", value.maxToolCalls.toString())
     } } ?: JsonNull)
     put("launch", launch ?: JsonNull)
+}
+
+/**
+ * Prerequisites for one start request. Starting is an explicit operator action: when the selected
+ * option needs the sandbox, its other prerequisites hold and the passive snapshot left the helpers
+ * unchecked, this runs the bounded helper check now. No agent is needed for options that do not
+ * contact one, and an unregistered option keeps the passive facts for the service to refuse.
+ */
+internal fun webAdmissionPrerequisites(
+    adapters: List<DurableWebWorkflowAdapter>, request: decompengine.jobs.NewWorkflowAttempt,
+    passive: WebWorkflowPrerequisites?, inspectSandbox: () -> WebPrerequisite,
+): WebWorkflowPrerequisites? {
+    val facts = passive ?: return null
+    val adapter = adapters.firstOrNull { it.workflow == request.workflow && it.harnessCapabilityId == request.harnessCapabilityId }
+        ?: return facts
+    if (WebWorkflowRequirement.SANDBOX !in adapter.requirements || !facts.sandbox.unknown) return facts
+    if (facts.copy(sandbox = WebPrerequisite.AVAILABLE).unmet(adapter.requirements, adapter.launch?.harness) != null) return facts
+    return facts.copy(sandbox = inspectSandbox())
 }

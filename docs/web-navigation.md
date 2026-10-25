@@ -470,3 +470,42 @@ explicit. New route/client bindings abort and reject obsolete responses.
 This is an event-window foundation. Log ranges, task/session/revision evidence
 destinations, complete workspace addressing and physical scroll/focus/selection
 qualification remain with their existing open acceptance criteria.
+
+
+## First source observation in history
+
+An initially unpinned source directory or file replaces its current history entry
+with the accepted source and metadata commitments before publishing metadata.
+The raw directory cursor or file byte/line query is preserved. This replacement
+adds no history step and does not itself repeat the metadata request. Links to
+parents, files, directories and later pages carry that same pin.
+
+Back/Forward and reload read the requested observation again under the current
+session. A changed metadata or source commitment shows the existing expired
+snapshot recovery without replacing the pin or displaying a newer observation.
+The URI pin contains public identities only; it does not cache authenticated
+responses or establish content verification. Runtime preview limits still apply.
+
+Publication checks the current client/request binding and complete source URI,
+including departures before the router renders. A late callback cannot pin a
+new route or revive an entry whose installed pin was removed. The inert metadata
+and history controls do not qualify physical browser scroll/selection restoration
+or the remaining workspace navigation acceptance criteria.
+
+Position-only file navigation reuses already accepted metadata only for the same
+client, file and explicit snapshot pin. A pending read discarded during a URI
+transition is restarted for the new entry; it cannot strand the view in loading.
+This reuse neither retains metadata across authentication generations nor adds
+content reads, and explicit refresh still requires a new metadata request.
+
+Native fragments participate in source-entry ownership. Fragment and history
+listeners retire pending reads even when the router leaves a skip link to the
+browser. Pin installation preserves the current fragment; a departed callback
+cannot erase it. Fragment-only entries share the already installed public pin,
+including while the router still carries the initial unpinned query.
+
+The first navigation from an automatically pinned file to a pinned byte/line
+range retains its accepted metadata under the same authenticated client. Reuse
+compares the exact job/run/revision/file and both commitments plus refresh
+generation. A different pin needs a new read and cannot display the old metadata;
+preview opening remains bound to the observation the user explicitly opened.

@@ -44,3 +44,12 @@ export function reportedCapabilityFacts(capability: Pick<Capability, 'agentContr
   }
   return facts;
 }
+
+/** Reasons the server resolves itself when a start is submitted; page loads never run these checks. */
+const CHECKED_AT_START = new Set(['SANDBOX_HELPER_UNCHECKED']);
+
+/** A launch option can be chosen when supported, or when its only open question is checked at start. */
+export function launchStartable(capability: Pick<Capability, 'state' | 'reasonCode'>): boolean {
+  return capability.state === 'supported'
+    || (capability.state === 'unknown' && capability.reasonCode !== null && CHECKED_AT_START.has(capability.reasonCode));
+}

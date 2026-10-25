@@ -30,7 +30,9 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
-    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { readiness().prerequisites }
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { request ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val runPages = WebRunPages { jobId ->
@@ -388,7 +390,8 @@ internal class WebApiController(
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
-    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot().status)
+    // Passive on page load: helper checks fold in only from a recent explicit operator inspection.
+    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
 
     private fun harnessCapability(readiness: WebHarnessReadiness): JsonObject {
         return buildJsonObject {

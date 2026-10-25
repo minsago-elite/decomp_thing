@@ -3,7 +3,7 @@ import type { Capability, Workflow } from '../api/generated';
 import { jobCopy as copy } from '../copy/job';
 import type { RuntimeSnapshot } from '../session/session';
 import { message } from '../shared/messages';
-import { reportedCapabilityFacts } from './capabilityFacts';
+import { launchStartable, reportedCapabilityFacts } from './capabilityFacts';
 
 const workflows = ['explore', 'reconstruct', 'build', 'validate', 'repair'] as const;
 const labels = {
@@ -54,7 +54,7 @@ export function WorkflowAvailability({ runtime }: { runtime: RuntimeSnapshot }) 
         return <li key={workflow}>
           <h4>{labels[workflow]}</h4>
           <p><strong>{launchable.length === 0 ? copy.startUnavailable
-            : launchable.some(capability => capability.state === 'supported') ? copy.startReady : copy.startNotReady}</strong></p>
+            : launchable.some(launchStartable) ? copy.startReady : copy.startNotReady}</strong></p>
           {capabilities.length === 0 ? <p>{copy.noCapabilityForThisWorkflow}</p> : <ul>
             {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} />)}
           </ul>}

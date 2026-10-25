@@ -14,7 +14,7 @@ internal class WebWorkflowStartController(
     private val jobMutations: WebJobMutationBoundary,
     private val basePath: String,
     // Fresh readiness for admission; read before the service monitor so a slow probe never holds it.
-    private val prerequisites: () -> WebWorkflowPrerequisites? = { WebWorkflowPrerequisites.UNCHECKED },
+    private val prerequisites: (NewWorkflowAttempt) -> WebWorkflowPrerequisites? = { WebWorkflowPrerequisites.UNCHECKED },
 ) {
     fun handle(exchange: HttpExchange, jobId: String) {
         val mutation = jobMutations.authorizeDurableStart(exchange)
@@ -40,7 +40,7 @@ internal class WebWorkflowStartController(
             throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Only If-Match is supported for workflow starts.")
         }
         val request = readStart(exchange)
-        val readiness = prerequisites()
+        val readiness = prerequisites(request)
         val result = try { mutation.request(jobId, match.removeSurrounding("\""), request, key, readiness) }
         catch (failure: WebJobServiceException) {
             when (failure.code) {

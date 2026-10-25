@@ -5578,11 +5578,35 @@ internal fun describeObservationCgroupSelectionFailure(failure: Throwable): Stri
         "cgroupSelectionMissingErrno=${captured?.errno == LinuxFilesystemSyscalls.ENOENT}"
 }
 
-private enum class ObservationUnitMutationTargetState {
+internal enum class ObservationUnitMutationTargetState {
     SAME,
     ABSENT,
+    UNRESOLVED,
     REPLACED,
 }
+
+/**
+ * A missing path during an otherwise authenticated reselection proves neither absence nor
+ * replacement. This state grants no name mutation; cleanup must still prove absence separately
+ * within its original deadline. Other failures retain the replacement refusal.
+ */
+internal fun observationCgroupSelectionFailureState(failure: Throwable): ObservationUnitMutationTargetState {
+    val missingReselection = failure is FullTreeFunctionObservationIsolationException &&
+        failure.message == "cannot reselect the descriptor-pinned isolated cgroup" &&
+        (failure.cause as? decompengine.acp.LinuxSyscallException)?.errno == LinuxFilesystemSyscalls.ENOENT
+    return if (missingReselection) ObservationUnitMutationTargetState.UNRESOLVED
+    else ObservationUnitMutationTargetState.REPLACED
+}
+
+/** A command decision only: neither false state establishes the caller's final absence proof. */
+internal fun observationSystemdCleanupMutationPermitted(state: ObservationUnitMutationTargetState): Boolean =
+    when (state) {
+        ObservationUnitMutationTargetState.SAME -> true
+        ObservationUnitMutationTargetState.ABSENT,
+        ObservationUnitMutationTargetState.UNRESOLVED -> false
+        ObservationUnitMutationTargetState.REPLACED ->
+            isolationFail("isolated cleanup refused a replacement systemd invocation")
+    }
 
 private class ObservationSystemdController(
     private val inspector: PinnedSecurityExecutable,
@@ -5683,12 +5707,7 @@ private class ObservationSystemdController(
                 runGuardedObservationSystemdCleanupFallback(
                     unitName = unitName,
                     beforeCommand = {
-                        when (observeTarget()) {
-                            ObservationUnitMutationTargetState.SAME -> true
-                            ObservationUnitMutationTargetState.ABSENT -> false
-                            ObservationUnitMutationTargetState.REPLACED ->
-                                isolationFail("isolated cleanup refused a replacement systemd invocation")
-                        }
+                        observationSystemdCleanupMutationPermitted(observeTarget())
                     },
                     command = { arguments, allowedExitCodes ->
                         systemctl(arguments, allowedExitCodes)
@@ -5744,6 +5763,7 @@ private class ObservationSystemdController(
             ObservationUnitMutationTargetState.ABSENT ->
                 isolationFail("isolated systemd target disappeared before $action")
 
+            ObservationUnitMutationTargetState.UNRESOLVED,
             ObservationUnitMutationTargetState.REPLACED ->
                 isolationFail("isolated systemd target was replaced before $action")
         }
@@ -7057,8 +7077,9 @@ private class ManagedObservationUnit(
 
     /**
      * Authenticates the retained invocation and descriptor-selected cgroup immediately before a
-     * unit-name mutation. ABSENT permits only pidfd backstops; REPLACED must fail without touching
-     * the deterministic name. The check/command interval assumes cooperative same-UID peers.
+     * unit-name mutation. ABSENT and UNRESOLVED permit only pidfd backstops while cleanup waits
+     * for its independent absence proof; REPLACED must fail without touching the deterministic
+     * name. The check/command interval assumes cooperative same-UID peers.
      */
     private fun observeUnitMutationTarget(): ObservationUnitMutationTargetState {
         lastCleanupTargetDiagnostic = null
@@ -7105,7 +7126,7 @@ private class ManagedObservationUnit(
                         "$it; ${describeObservationCgroupSelectionFailure(failure)}"
                     }
                 }
-                ObservationUnitMutationTargetState.REPLACED
+                observationCgroupSelectionFailureState(failure)
             },
         )
     }
