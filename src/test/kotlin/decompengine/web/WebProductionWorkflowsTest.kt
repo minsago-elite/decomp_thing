@@ -85,6 +85,71 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `time limits are rechecked when a body finishes between samples`() = withRoot { root ->
+        val engines = FakeEngines()
+        engines.exploreBody = { Thread.sleep(100) }
+        // The default 250 ms poll never samples while this body runs.
+        val sparse = BoundedWorkflowExecutor()
+        val wall = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("wall"),
+            WorkflowExecutionLimits(10uL, 10uL, 1_048_576uL, 0uL)))
+        assertLimitExhausted(wall)
+        val idle = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("idle"),
+            WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL)))
+        assertLimitExhausted(idle)
+        // Output written before returning is activity of unknown time, so it cannot prove idleness.
+        engines.exploreBody = { reports -> Thread.sleep(100); reports.resolve("exploration.json").writeText("{}") }
+        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("active"),
+            WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL))))
+    }
+
+    @Test
+    fun `tool calls are distinct per agent invocation and reconciled with returned usage`() = withRoot { root ->
+        val engines = FakeEngines()
+        engines.reconstructBody = { reports, _, progress ->
+            // Two module invocations reuse the same tool-call identity; each is a separate call.
+            repeat(2) { module ->
+                val task = progress.beginTask("module-$module", request(root))
+                task.event(AgentToolEvent(0, "tool-1", "inert tool", AgentToolStatus.IN_PROGRESS))
+                task.event(AgentToolEvent(1, "tool-1", "inert tool", AgentToolStatus.SUCCEEDED))
+                // The second invocation reports more calls than it streamed.
+                if (module == 1) task.complete(decompengine.agent.AgentExecutionReceipt(
+                    decompengine.agent.AgentExecutionRequestBinding(decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+                    decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                        decompengine.agent.AgentStopReason.COMPLETED, usage = decompengine.agent.AgentUsage(inputTokens = 7, toolCalls = 4)))))
+            }
+            writeSourceTree(reports.resolve("source-tree"), "base")
+        }
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("counted"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
+        assertEquals(5uL, completed.usage?.toolCalls); assertEquals(7uL, completed.usage?.inputTokens)
+        assertLimitExhausted(agent.execute(context(root, root.resolve("bounded"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 4uL))))
+    }
+
+    @Test
+    fun `repair stays unavailable until the production repair validator is qualified`() = withRoot { root ->
+        assertFalse(decompengine.project.LinuxGeneratedCRepairValidationBoundary.productionQualified())
+        val ready = WebPrerequisite.AVAILABLE
+        val prerequisites = WebWorkflowPrerequisites(ready, ready, ready, WebHarnessReadinessProjector.probeEnvironment(emptyMap(),
+            root.resolve("bwrap"), root.resolve("timeout"), { true }, { true }).prerequisites!!.repairValidator)
+        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", prerequisites.repairValidator.reasonCode)
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), WebHarnessReadiness("supported", null, "ready", prerequisites))
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+        assertEquals("unavailable", reported.getValue("workflow-repair-agent").getValue("state").jsonPrimitive.content)
+        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", reported.getValue("workflow-repair-agent").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals("supported", reported.getValue("workflow-reconstruct-agent").getValue("state").jsonPrimitive.content)
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("validator.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR,
+                    "source_any", "agent-acp"), "repair_validator_closed", prerequisites)
+            }
+        }
+        assertEquals(0, engines.calls.get())
+    }
+
+    @Test
     fun `caller interruption stops the child first and propagates for cancellation mapping`() = withRoot { root ->
         val engines = FakeEngines()
         val started = CountDownLatch(1); val childStopped = AtomicBoolean(); val observed = AtomicReference<Throwable>()

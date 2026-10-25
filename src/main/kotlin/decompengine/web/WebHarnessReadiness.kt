@@ -28,11 +28,13 @@ internal data class WebWorkflowPrerequisites(
     val agent: WebPrerequisite,
     val sandbox: WebPrerequisite,
     val ghidra: WebPrerequisite,
+    /** The secure repair runtime's contained candidate validator; part of no harness readiness. */
+    val repairValidator: WebPrerequisite = WebPrerequisite.AVAILABLE,
 ) {
     /** Agent first: its configuration is the most specific operator action. */
     fun unmet(requirements: Set<WebWorkflowRequirement>): WebPrerequisite? = listOf(
         WebWorkflowRequirement.AGENT_HARNESS to agent, WebWorkflowRequirement.SANDBOX to sandbox,
-        WebWorkflowRequirement.GHIDRA to ghidra,
+        WebWorkflowRequirement.GHIDRA to ghidra, WebWorkflowRequirement.REPAIR_VALIDATOR to repairValidator,
     ).firstOrNull { (requirement, fact) -> requirement in requirements && !fact.available }?.second
 
     companion object {
@@ -157,6 +159,7 @@ internal class WebHarnessReadinessProjector(
             timeoutHelper: Path = TIMEOUT,
             jsonStatusSupported: (Path) -> Boolean = BwrapCapability::jsonStatusSupported,
             ghidraPresent: () -> Boolean = ::bundledGhidraPresent,
+            repairValidatorQualified: () -> Boolean = decompengine.project.LinuxGeneratedCRepairValidationBoundary::productionQualified,
         ): WebHarnessReadiness {
             val agent = agentPrerequisite(environment)
             val sandbox = if (!Files.isExecutable(bubblewrap) || !Files.isExecutable(timeoutHelper) || !jsonStatusSupported(bubblewrap)) {
@@ -165,7 +168,11 @@ internal class WebHarnessReadinessProjector(
             val ghidra = if (!ghidraPresent()) {
                 WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present; reinstall the complete application.")
             } else WebPrerequisite.AVAILABLE
-            val prerequisites = WebWorkflowPrerequisites(agent, sandbox, ghidra)
+            // The production repair validator refuses every candidate until its qualification gate opens.
+            val repairValidator = if (repairValidatorQualified()) WebPrerequisite.AVAILABLE
+                else WebPrerequisite(false, "REPAIR_VALIDATOR_UNQUALIFIED",
+                    "The contained repair validator is not yet qualified for production use, so repair cannot run on this server.")
+            val prerequisites = WebWorkflowPrerequisites(agent, sandbox, ghidra, repairValidator)
             // Harness readiness keeps its established precedence: harness, sandbox, then Ghidra.
             val first = listOf(agent, sandbox, ghidra).firstOrNull { !it.available }
                 ?: return WebHarnessReadiness("supported", null, "An agent harness, sandbox helpers and bundled Ghidra are available.", prerequisites)

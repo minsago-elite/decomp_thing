@@ -353,9 +353,12 @@ runtime there, so the selected revision's evidence is never modified.
 Every adapter runs its body on an owned child thread and enforces the attempt's
 recorded limits: wall-clock time, idle time (no new output or agent progress),
 the byte total of the attempt's own report directory and, where metered, agent
-tool calls (distinct tool-call identities reported by agent progress). A breach
-or cancellation interrupts the child, which stops its process trees, and the
-adapter does not return while the child is alive. Breaches record
+tool calls (identities are distinct within each agent invocation and summed across
+invocations; a returned receipt reporting more calls raises the count). Limits are
+checked again when a body finishes between samples. A breach or cancellation
+interrupts the child, which kills and awaits its helper process trees (including
+exploration's angr and strings helpers), and the adapter does not return while the
+child is alive. Breaches record
 `LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
 `PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
 iterations, each one agent invocation bounded at 256 tool calls), so its limits
@@ -425,7 +428,10 @@ policy (`none`, `accepted-optional` or `recorded-required`) and whether its
 defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
 reported exactly for options that contact an agent. `supported` means every
 declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
-harness) was present at the last readiness probe; a missing prerequisite is
+harness and, for repair, a production-qualified contained repair validator) was
+present at the last readiness probe. Until the secure repair runtime's validator
+qualification gate opens, repair reports `REPAIR_VALIDATOR_UNQUALIFIED` and is
+refused at admission. A missing prerequisite is
 `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
 `validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
