@@ -1150,7 +1150,26 @@ transport failure, read the current status and require a fresh explicit operator
 automatically replay the POST. Shutdown closes admission, publishes cancellation immediately and
 waits for the owned callback cleanup while preserving the shutdown caller's interrupt status.
 
-Passive bootstrap never starts the agent. Its `harness` capability reports configuration, sandbox-helper and bundled-Ghidra presence, and folds in only the fixed `status` of the last explicit inspection: `failed` demotes a configured harness to `unavailable`/`AGENT_PREFLIGHT_FAILED`; any other status leaves it `supported` with a message that agent readiness is unproven (or, for `ready`, that the last inspection started the agent). It does not establish that any job can start work.
+Passive bootstrap never starts an agent or a helper probe. It reads configuration, helper-file
+metadata and bundled-Ghidra presence. Missing or invalid prerequisites remain unavailable; a valid
+configuration with no fresh helper observation is `unknown` with reason
+`SANDBOX_HELPER_UNCHECKED`. Use the explicit `POST /api/v1/agent/preflight` inspect action to check
+the configured agent and, after successful agent initialization, the existing bounded helper
+prerequisite. A `ready` agent-preflight result describes agent initialization; helper readiness is
+reported separately by bootstrap.
+
+Configuration metadata and explicit helper observations retain the original ten-second cache
+lifetime. A helper observation can supply `supported` only while it is fresh and its configuration
+identity and helper metadata match the current projection. Expiry returns to `unknown`; it never
+automatically runs another inspection. Configuration/helper identities stay internal and never
+appear in either public JSON document. The helper observation neither reads nor seeds the native
+execution capability cache and grants no workflow or admission authority.
+
+A failed inspection belonging to the current configuration demotes a configured harness to
+`unavailable`/`AGENT_PREFLIGHT_FAILED`. A `ready` inspection for that same configuration can report
+that the agent started, but a result for another configuration cannot make that claim. Missing,
+running, cancelled or mismatched agent observations leave agent readiness unproven. These fields
+do not establish that any job can start work; unavailable workflow adapters remain unavailable.
 
 ## Implemented progress-pin policy endpoint
 
