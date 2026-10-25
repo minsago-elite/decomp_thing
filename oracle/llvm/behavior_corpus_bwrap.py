@@ -4,7 +4,8 @@ The supplemental corpus ``22.1.6/behavior-corpus-bwrap-v1.json`` expresses the i
 ``bubblewrap-hosted-v1`` produced-program observation as ordinary corpus data for the program-neutral
 runner in ``oracle.behavior_corpus_bwrap``: the same locked Clang, the same reviewed ``_start``
 fixture, the same pinned argv, limits, compile diagnostic and single temporary-object normalization,
-plus the reviewed normalized program digest and the backend's aggregate process and storage bounds.
+plus the reviewed normalized program digest and the explicitly versioned v2 process, kernel-storage
+and syscall policies. The original standalone v1 profile keeps its own execution evidence.
 It neither reuses nor replaces the historical OCI corpus ``22.1.6/behavior-corpus.json``. It grants no
 candidate, Kotlin-runtime, effectiveness or release authority.
 """
@@ -22,6 +23,8 @@ from oracle.behavior_corpus import BehaviorCorpusError, _read_regular_snapshot, 
 from oracle.behavior_corpus_bwrap import (
     BACKEND,
     BASE_ARGV,
+    STORAGE_POLICY_ID,
+    storage_filter_identity,
     MAX_REPORT_BYTES,
     blob,
     load_corpus,
@@ -37,12 +40,12 @@ from oracle.llvm.produced_program_bwrap import (
     COMPILE_STDERR,
     EXPECTED_EXIT,
     LIMITS,
-    PROFILE_ID,
     TEMP_OBJECT,
     TEMP_OBJECT_NORMAL,
 )
 
 CORPUS_ID = "clang-22-1-6-produced-program-bwrap-v1"
+GENERIC_PROFILE_ID = "bubblewrap-hosted-v2"
 CORPUS_PATH = PROFILE / "behavior-corpus-bwrap-v1.json"
 NORMALIZATION_ID = "clang-temporary-object"
 # SHA-256 of the produced program after its one temporary-object name is normalized. It was identical
@@ -63,7 +66,9 @@ def build_corpus() -> dict[str, Any]:
         "executable": dict(CLANG),
         "sandbox": {
             "backend": BACKEND,
-            "profile": PROFILE_ID,
+            "profile": GENERIC_PROFILE_ID,
+            "storagePolicy": STORAGE_POLICY_ID,
+            "syscallPolicy": storage_filter_identity(62),
             "baseArgv": list(BASE_ARGV),
             "executablePath": "/oracle/clang",
             "workspacePath": "/work",

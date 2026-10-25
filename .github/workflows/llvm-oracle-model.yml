@@ -222,7 +222,10 @@ jobs:
             tests.oracle.test_gcc_oracle_artifacts \
             tests.oracle.test_function_recovery_oracle_generation \
             tests.oracle.test_behavior_corpus \
-            tests.oracle.test_behavior_corpus_bwrap -v
+            tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_loader \
+            tests.oracle.test_behavior_storage_lease \
+            tests.oracle.test_behavior_corpus_bwrap_seccomp -v
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -841,7 +844,12 @@ jobs:
       - name: Run generic bubblewrap corpus backend controls, including live aggregate-bound controls
         env:
           BEHAVIOR_CORPUS_BWRAP_LIVE: "1"
-        run: python3 -B -m unittest tests.oracle.test_behavior_corpus_bwrap -v
+        run: |
+          python3 -B -m unittest \
+            tests.oracle.test_behavior_corpus_bwrap \
+            tests.oracle.test_behavior_corpus_bwrap_loader \
+            tests.oracle.test_behavior_storage_lease \
+            tests.oracle.test_behavior_corpus_bwrap_seccomp -v
       - name: Run the supplemental bubblewrap behavior corpus through the generic backend
         env:
           HOME: ${{ github.workspace }}/build/issue97-bwrap/home

@@ -173,6 +173,12 @@ sandbox backend (`sandbox.backend: "bubblewrap-v1"`) beside the OCI backend in `
 only from the locked issue97 constants by `oracle/llvm/behavior_corpus_bwrap.py` and must equal its `build_corpus()`
 byte for byte. The historical OCI `behavior-corpus.json` and its evidence are unchanged.
 
+The generic runtime profile is now `bubblewrap-hosted-v2`. Its canonical corpus and retained report bind
+`storagePolicy: private-tmpfs-v1`, the exact `bounded-file-storage-v1` architecture-specific BPF digest and the
+nested-user-namespace restriction in `baseArgv`. Earlier v1 live observations retain their original source/corpus
+identity; they do not qualify this revised profile. The filesystem quota limits writable file storage, while
+`RLIMIT_AS` limits each process's address space; neither is presented as a cgroup total-memory measurement.
+
 **Corpus contract.** Each case declares its argv, inputs, exact compile exit/stdout/stderr, its artifacts (path, mode,
 named normalizations and the **reviewed normalized SHA-256**) and optionally one artifact to execute with its exact
 exit/stdout/stderr. Replay compares every repetition's normalized artifact with the corpus digest, so it
@@ -186,12 +192,20 @@ limit, or when one command's declared argv and environment exceed 256 KiB.
 
 - `limits.processes`: `RLIMIT_NPROC` is set to this user's current task count plus `processes` before bubblewrap
   creates its user namespace. Linux (≥ 5.14) charges that limit per user namespace and checks every ancestor, so the
-  sandbox cannot raise the user's task total by more than `processes`. Aggregate memory is therefore bounded by
-  `processes` × the address-space limit. The backend refuses to run as root, which the limit exempts.
-- `limits.writableBytes` / `limits.writableEntries`: the sandbox root is remounted read-only and has no `/dev`, so
-  the only writable storage is the case workspace and `/tmp`, both host directories. A monitor walks both every
-  10 ms while the process runs, and kills it once their recursive entry count or allocated bytes exceed the quota. An
-  unreadable directory also counts as a violation. Overshoot is limited to what can be written in one polling interval.
+  sandbox cannot raise the user's task total by more than `processes`. The private storage namespace is created
+  under the same task ceiling; setting it only after namespace entry would leave an ancestor allowance uncapped.
+  The backend refuses to run as root, which the limit exempts.
+- `limits.writableBytes` / `limits.writableEntries`: the workspace and `/tmp` share one private tmpfs. The kernel
+  enforces its byte and inode quotas, including open-unlinked files. Byte capacity rounds down to whole pages; exactly
+  three additional inodes cover the filesystem root and the two fixed directories. A short-lived unprivileged setup
+  child creates private user/mount namespaces, and the parent retains their descriptors through collection. Only the
+  sandbox-launch child enters them; namespace descriptors close before target execution. The host mountpoint remains
+  empty, and there is no ordinary-directory fallback. A polling walk supplies additional diagnostics, not quota authority.
+  Nested user namespaces are disabled, and a fixed architecture-checked seccomp filter refuses anonymous memfd and
+  System V shared-memory allocation, so subjects cannot replace the bounded mount or allocate uncharged file storage.
+- Shared-library discovery runs the independently identified host loader inside a bounded, read-only bubblewrap probe.
+  The subject cannot select a host interpreter to execute. The probe exposes only system library roots, the loader cache
+  and the staged ELF; returned library paths must stay in those roots. No subject code runs directly on the host.
 - The spawned command is checked against `ARG_MAX` before it starts. Host metadata (tools and loader closure) must
   fit a fixed 1 MiB reserve of the report.
 
@@ -206,9 +220,11 @@ python3 -B -m oracle.llvm.behavior_corpus_bwrap --verify-pair \
 python3 -B -m oracle.llvm.behavior_corpus_bwrap --write-corpus   # regenerate the committed corpus
 ```
 
-Offline controls: `python3 -B -m unittest tests.oracle.test_behavior_corpus_bwrap`. With
+Offline controls: `python3 -B -m unittest tests.oracle.test_behavior_corpus_bwrap tests.oracle.test_behavior_corpus_bwrap_loader tests.oracle.test_behavior_storage_lease`. With
 `BEHAVIOR_CORPUS_BWRAP_LIVE=1` (and `/usr/bin/bwrap` plus a host C compiler, otherwise the run fails rather than
 skips), the same module also runs an adversarial helper under the real kernel. That helper shows that an entry flood
-and a byte flood are killed live by the quota, a fork flood is capped, and the root is read-only with no `/dev`. The
+and byte floods (including open-unlinked files) receive kernel `ENOSPC`, a fork flood is capped, and the root is
+read-only with no `/dev`. Separate lease controls prove shared capacity, inode accounting, descriptor cleanup and
+namespace isolation. Nested-user-namespace and anonymous-storage controls reject attempts to bypass the mount quota. The
 hosted `produced-program-bwrap-observation` dispatch job runs these live controls, the corpus live and its offline
 replay. The authority limits of the standalone profile apply unchanged.

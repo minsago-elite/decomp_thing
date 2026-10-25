@@ -16,14 +16,16 @@ as well:
   and checked against every ancestor, so the sandbox cannot raise this user's task total by more
   than ``processes``; aggregate memory is therefore at most ``processes`` times the address-space
   limit. The backend refuses to run as root, for whom the limit is not enforced.
-* The sandbox root is remounted read-only and no ``/dev`` is mounted. The only writable storage is
-  two host directories, the workspace and ``/tmp``; a monitor walks both while the process runs and
-  kills it once their recursive entry count or allocated bytes exceed ``limits.writableEntries`` or
-  ``limits.writableBytes``. Overshoot is limited to what can be written in one polling interval.
+* The sandbox root is remounted read-only and no ``/dev`` is mounted. The workspace and ``/tmp``
+  share one private kernel tmpfs with hard byte and inode quotas. Retained namespace/root handles
+  preserve ownership through artifact collection; open-unlinked files remain charged. A polling
+  walk is supplementary diagnostics, never the storage authority.
 
 Each case compiles inside a sandbox that binds only the executable under test, its declared host
 tools and their recorded shared-library closure, then optionally runs one produced static ELF
-artifact in a second sandbox whose read-only root contains nothing but that artifact.
+artifact in a second sandbox whose read-only root contains nothing but that artifact. Loader
+inspection also runs in a bounded read-only sandbox using the independently identified host
+loader; an input-selected interpreter is never executed on the host.
 
 Nothing here names a particular program: the executable, its argv, its inputs, the produced
 artifact, its normalized digest and the expected observations all come from the corpus.
@@ -71,8 +73,13 @@ from oracle.behavior_corpus import (
     _write_exclusive,
 )
 
+from oracle.behavior_corpus_bwrap_loader import loader_probe_plan, validate_probe_libraries
+from oracle.behavior_storage_lease import BoundedStorageLease
+from oracle.behavior_corpus_bwrap_seccomp import POLICY_ID, anonymous_storage_filter, storage_filter_bytes
+
 BACKEND = "bubblewrap-v1"
-BASE_ARGV = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]
+STORAGE_POLICY_ID = "private-tmpfs-v1"
+BASE_ARGV = ["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]
 LIMIT_BOUNDS = {
     "wallSeconds": (1, 600),
     "cpuSeconds": (1, 600),
@@ -170,6 +177,13 @@ def _validate_limits(value: Any, path: str) -> dict[str, int]:
     return record
 
 
+def storage_filter_identity(elf_machine: int) -> dict[str, str]:
+    machine = {62: "x86_64", 183: "aarch64"}.get(elf_machine)
+    if machine is None:
+        raise BehaviorCorpusError("storage syscall policy requires a supported native ELF machine")
+    return {"id": POLICY_ID, "sha256": _sha(storage_filter_bytes(machine))}
+
+
 def _validate_sandbox(value: Any, path: str) -> dict[str, Any]:
     sandbox = _object(
         value,
@@ -183,6 +197,8 @@ def _validate_sandbox(value: Any, path: str) -> dict[str, Any]:
             "programPath",
             "executeElfMachine",
             "hostTools",
+            "storagePolicy",
+            "syscallPolicy",
         },
     )
     if sandbox["backend"] != BACKEND:
@@ -194,6 +210,10 @@ def _validate_sandbox(value: Any, path: str) -> dict[str, Any]:
     for name in ("executablePath", "workspacePath", "programPath"):
         sandbox_paths.append(_absolute_path(sandbox[name], f"{path}.{name}"))
     _integer(sandbox["executeElfMachine"], f"{path}.executeElfMachine", minimum=1, maximum=0xFFFF)
+    if sandbox["storagePolicy"] != STORAGE_POLICY_ID:
+        raise BehaviorCorpusError(f"{path}.storagePolicy differs from the kernel-quota contract")
+    if sandbox["syscallPolicy"] != storage_filter_identity(sandbox["executeElfMachine"]):
+        raise BehaviorCorpusError(f"{path}.syscallPolicy differs from the exact native filter")
     tools = _array(sandbox["hostTools"], f"{path}.hostTools", maximum=MAX_HOST_TOOLS)
     names = []
     for index, raw in enumerate(tools):
@@ -557,43 +577,21 @@ def parse_ld_list(output: str, maximum: int) -> list[str]:
     return paths
 
 
-def elf_interpreter(binary: Path) -> str:
-    with binary.open("rb") as handle:
-        header = handle.read(4096)
-    if len(header) < 64 or header[:7] != b"\x7fELF\x02\x01\x01":
-        raise BehaviorCorpusError(f"{binary.name} is not an ELF64 little-endian executable")
-    phoff, = struct.unpack_from("<Q", header, 32)
-    phsize, phcount = struct.unpack_from("<HH", header, 54)
-    for index in range(min(phcount, 64)):
-        if phsize < 56 or phoff + (index + 1) * phsize > len(header):
-            break
-        typ, _, offset, _, _, size, _, _ = struct.unpack_from("<IIQQQQQQ", header, phoff + index * phsize)
-        if typ == 3:
-            if size > 4096:
-                break
-            with binary.open("rb") as handle:
-                handle.seek(offset)
-                text = handle.read(size)
-            return text.split(b"\0", 1)[0].decode("ascii")
-    raise BehaviorCorpusError(f"{binary.name} has no ELF interpreter")
-
-
-def _closure(binary: Path, maximum: int) -> list[str]:
-    interpreter = elf_interpreter(binary)
-    result = subprocess.run(
-        [interpreter, "--list", os.fspath(binary)],
-        env={},
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=HOST_PROBE_SECONDS,
-        check=False,
+def _closure(
+    binary: Path, maximum: int, *, bwrap: Path, scratch: Path, limits: Mapping[str, int]
+) -> list[str]:
+    # ELF-controlled loader inputs are inspected only inside the ordinary bounded sandbox.
+    # In particular, PT_INTERP never becomes a command executed on the host.
+    plan = loader_probe_plan(binary, bwrap, BASE_ARGV)
+    probe_limits = dict(limits, wallSeconds=HOST_PROBE_SECONDS, cpuSeconds=HOST_PROBE_SECONDS,
+                        streamBytes=MAX_CLOSURE_LISTING_BYTES)
+    code, stdout, stderr, _ = _run_sandboxed(
+        plan.command, scratch, probe_limits, limits["compileAddressSpaceBytes"], artifacts=False
     )
-    if result.returncode != 0 or len(result.stdout) > MAX_CLOSURE_LISTING_BYTES:
-        raise BehaviorCorpusError(f"cannot resolve the shared-library closure of {binary.name}")
-    paths = parse_ld_list(result.stdout.decode("utf-8", "replace"), maximum)
-    if interpreter not in paths:
-        paths.append(interpreter)
-    return paths
+    if code != 0 or stderr:
+        raise BehaviorCorpusError(f"cannot resolve the contained shared-library closure of {binary.name}")
+    paths = parse_ld_list(stdout.decode("utf-8", "strict"), maximum)
+    return validate_probe_libraries(plan, paths, maximum)
 
 
 def _file_identity(path: str) -> dict[str, Any]:
@@ -700,11 +698,10 @@ def _limit_setter(limits: Mapping[str, int], address_space: int, tasks: int, *, 
 
 
 def writable_usage_violation(directories: Sequence[Path], limits: Mapping[str, int]) -> str | None:
-    """Walk every writable directory once; describe the first quota violation, if any.
+    """Supplementary diagnostics; BoundedStorageLease enforces the actual kernel quota.
 
-    The walk stops as soon as the entry quota is exceeded, so its cost is bounded by the quota
-    rather than by whatever the sandboxed process created. An unreadable directory is a violation:
-    the monitor must be able to see everything it bounds.
+    This bounded walk can reject unreadable or excessive apparent-size populations early. It
+    cannot see open-unlinked files and is deliberately not used as storage authority.
     """
     entries = 0
     allocated = 0
@@ -744,6 +741,7 @@ def _run_sandboxed(
     *,
     artifacts: bool,
     writable: Sequence[Path] = (),
+    storage: BoundedStorageLease | None = None,
 ) -> tuple[int, bytes, bytes, int]:
     """One bounded process: wall-clock group kill, live storage quota, bounded streams, no environment."""
     if os.getuid() == 0 or os.geteuid() == 0:
@@ -758,16 +756,27 @@ def _run_sandboxed(
     started = time.monotonic()
     deadline = started + limits["wallSeconds"]
     violation = None
-    with out_path.open("xb") as out, err_path.open("xb") as err:
+    apply_limits = _limit_setter(limits, address_space, tasks, artifacts=artifacts)
+
+    def prepare_child() -> None:
+        if storage is not None:
+            storage.enter_namespace()
+        apply_limits()
+
+    with anonymous_storage_filter(scratch) as filter_fd, out_path.open("xb") as out, err_path.open("xb") as err:
+        filtered_command = [command[0], "--seccomp", str(filter_fd), *command[1:]]
+        if _command_bytes(filtered_command) > maximum:
+            raise BehaviorCorpusError(f"sandbox command exceeds its {maximum}-byte argument bound")
         process = subprocess.Popen(
-            list(command),
+            filtered_command,
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=err,
             env={},
             close_fds=True,
             start_new_session=True,
-            preexec_fn=_limit_setter(limits, address_space, tasks, artifacts=artifacts),
+            pass_fds=(filter_fd, *(storage.pass_fds if storage is not None else ())),
+            preexec_fn=prepare_child,
         )
         try:
             while True:
@@ -816,8 +825,8 @@ def _compile_command(
     temporary: Path,
     arguments: Sequence[str],
 ) -> list[str]:
-    # No /dev, and a read-only root: the workspace and /tmp, both monitored host directories,
-    # are the only writable storage.
+    # No /dev, and a read-only root: the workspace and /tmp
+    # share the only writable filesystem, the retained kernel-quota tmpfs.
     sandbox = corpus["sandbox"]
     command = _base(bwrap) + ["--proc", "/proc", "--bind", os.fspath(temporary), "/tmp"]
     command += ["--ro-bind", os.fspath(executable), sandbox["executablePath"]]
@@ -954,6 +963,8 @@ def run_corpus(
     if _decode_json(corpus_payload, "bubblewrap behavior corpus") != validated or corpus_payload != corpus_json_bytes(validated):
         raise BehaviorCorpusError("corpus payload does not encode the validated corpus canonically")
     limits = validated["limits"]
+    if _ELF_MACHINES.get(platform.machine()) != validated["sandbox"]["executeElfMachine"]:
+        raise BehaviorCorpusError("host architecture differs from the declared execution and syscall profile")
     normalizations = _validate_normalizations(validated["artifactNormalizations"], "corpus.artifactNormalizations")
     # Only the hashed bytes are trusted; they are restaged 0o755 inside the private root, so the
     # source file's own mode (artifact downloads drop the executable bit) is irrelevant.
@@ -975,9 +986,13 @@ def run_corpus(
         staged = root / "executable"
         _write_exclusive(staged, executable_bytes, 0o755)
         os.chmod(staged, 0o755)
-        library_set = set(_closure(staged, limits["closureLibraries"]))
+        probe_scratch = root / "loader-probe"
+        probe_scratch.mkdir(mode=0o700)
+        library_set = set(_closure(staged, limits["closureLibraries"], bwrap=bwrap,
+                                   scratch=probe_scratch, limits=limits))
         for tool in tools:
-            library_set.update(_closure(Path(tool["realPath"]), limits["closureLibraries"]))
+            library_set.update(_closure(Path(tool["realPath"]), limits["closureLibraries"], bwrap=bwrap,
+                                        scratch=probe_scratch, limits=limits))
         libraries = sorted(library_set)
         library_identities = [_file_identity(path) for path in libraries]
         metadata = {"host": host, "hostTools": tools, "libraries": library_identities}
@@ -988,26 +1003,33 @@ def run_corpus(
             for repetition in range(case["repetitions"]):
                 label = f"case {case['id']} run {repetition}"
                 run_root = root / f"case{case_index}-run{repetition}"
-                workspace, temporary, scratch = run_root / "work", run_root / "tmp", run_root / "scratch"
-                for path in (run_root, workspace, temporary, scratch):
-                    path.mkdir(mode=0o700)
-                for item in case["inputs"]:
-                    target = workspace / item["path"]
-                    _write_exclusive(target, base64.b64decode(item["base64"]), 0o600)
-                    os.chmod(target, int(item["mode"], 8))
-                code, stdout, stderr, wall = _run_sandboxed(
-                    _compile_command(
-                        bwrap, validated, staged, tools, libraries, workspace, temporary, case["arguments"]
-                    ),
-                    scratch,
-                    limits,
-                    limits["compileAddressSpaceBytes"],
-                    artifacts=True,
-                    writable=(workspace, temporary),
-                )
-                _check_streams(f"{label} compile", code, stdout, stderr, case["expected"])
-                compile_observation = _observation(code, stdout, stderr, wall)
-                collected = _collect_workspace(workspace, case, limits, normalizations, label)
+                run_root.mkdir(mode=0o700)
+                scratch = run_root / "scratch"
+                scratch.mkdir(mode=0o700)
+                # A kernel-owned shared tmpfs enforces both quotas even when files are
+                # unlinked while open. The parent retains ownership through collection.
+                with BoundedStorageLease(run_root, limits["writableBytes"], limits["writableEntries"],
+                                         processes=limits["processes"]) as storage:
+                    workspace, temporary = storage.workspace, storage.temporary
+                    for item in case["inputs"]:
+                        target = workspace / item["path"]
+                        _write_exclusive(target, base64.b64decode(item["base64"]), 0o600)
+                        os.chmod(target, int(item["mode"], 8))
+                    code, stdout, stderr, wall = _run_sandboxed(
+                        _compile_command(
+                            bwrap, validated, staged, tools, libraries, storage.sandbox_workspace,
+                            storage.sandbox_temporary, case["arguments"]
+                        ),
+                        scratch,
+                        limits,
+                        limits["compileAddressSpaceBytes"],
+                        artifacts=True,
+                        writable=(workspace, temporary),
+                        storage=storage,
+                    )
+                    _check_streams(f"{label} compile", code, stdout, stderr, case["expected"])
+                    compile_observation = _observation(code, stdout, stderr, wall)
+                    collected = _collect_workspace(workspace, case, limits, normalizations, label)
                 execution = None
                 if case["execute"] is not None:
                     execute = case["execute"]

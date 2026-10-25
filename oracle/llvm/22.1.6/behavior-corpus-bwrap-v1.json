@@ -104,6 +104,8 @@
     "backend": "bubblewrap-v1",
     "baseArgv": [
       "--unshare-all",
+      "--unshare-user",
+      "--disable-userns",
       "--die-with-parent",
       "--new-session",
       "--cap-drop",
@@ -119,8 +121,13 @@
         "sandboxPath": "/usr/bin/ld"
       }
     ],
-    "profile": "bubblewrap-hosted-v1",
+    "profile": "bubblewrap-hosted-v2",
     "programPath": "/oracle/program",
+    "storagePolicy": "private-tmpfs-v1",
+    "syscallPolicy": {
+      "id": "bounded-file-storage-v1",
+      "sha256": "c96cd1a3e4937542a3f6b376511509f694444bceac6b193ddb4eb7ef973fd89b"
+    },
     "workspacePath": "/work"
   },
   "schemaVersion": 1,

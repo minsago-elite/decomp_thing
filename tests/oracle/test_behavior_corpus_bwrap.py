@@ -1,7 +1,7 @@
 """Offline controls for the generic ``bubblewrap-v1`` behavior corpus backend (issue #97).
 
-Nothing here launches bubblewrap or Clang: reports are synthesized from the committed corpus and a
-static amd64 ELF that is only inspected, never executed.
+Offline reports are synthesized from the committed corpus and a static amd64 ELF.
+Explicitly opted-in live controls execute a bounded authored adversary under bubblewrap.
 """
 from __future__ import annotations
 
@@ -310,6 +310,15 @@ class CorpusValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(BehaviorCorpusError, message):
             backend.validate_corpus(corpus)
 
+    def test_storage_and_syscall_policy_substitutions_are_rejected(self) -> None:
+        for field, value in (("storagePolicy", "polling-only"),
+                             ("syscallPolicy", {"id": "bounded-file-storage-v1", "sha256": "0" * 64})):
+            with self.subTest(field=field):
+                corpus = adapter.build_corpus()
+                corpus["sandbox"][field] = value
+                with self.assertRaises(BehaviorCorpusError):
+                    backend.validate_corpus(corpus)
+
     def test_other_backend_is_rejected(self) -> None:
         self.assert_corpus_rejected(lambda c: c["sandbox"].update(backend="oci-v1"), "backend must be")
 
@@ -450,6 +459,14 @@ class SandboxConstructionTests(unittest.TestCase):
                          ["--ro-bind", "/r/p", "/oracle/program", "--remount-ro", "/", "--chdir", "/",
                           "/oracle/program", "a"])
 
+    def test_host_architecture_is_bound_before_any_subject_or_process_access(self) -> None:
+        with mock.patch.object(backend.platform, "machine", return_value="aarch64"), \
+                mock.patch.object(backend.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(BehaviorCorpusError, "host architecture"):
+                backend.run_corpus(adapter.build_corpus(), Path("/nonexistent/subject"),
+                                   bwrap=Path("/usr/bin/bwrap"), temporary_root=Path("/nonexistent/root"))
+        popen.assert_not_called()
+
     def test_root_is_refused(self) -> None:
         with mock.patch.object(backend.os, "getuid", return_value=0), \
                 self.assertRaisesRegex(BehaviorCorpusError, "must not run as root"):
@@ -524,7 +541,12 @@ class WritableQuotaTests(unittest.TestCase):
 
 
 ADVERSARY_SOURCE = r"""
+#define _GNU_SOURCE
 #include <errno.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -532,26 +554,47 @@ ADVERSARY_SOURCE = r"""
 #include <unistd.h>
 
 static int entries(void) {
+    int count = 0;
     char path[64];
-    for (int i = 0; i < 100000; i++) {
-        snprintf(path, sizeof path, "d%d", i);
-        if (mkdir(path, 0755) != 0 || chdir(path) != 0) break;
+    for (; count < 128; count++) {
+        snprintf(path, sizeof path, "d%d", count);
+        if (mkdir(path, 0755) != 0) break;
+        if (chdir(path) != 0) return 3;
     }
-    sleep(30);
+    int bounded = count < 128 && errno == ENOSPC;
+    for (int i = count - 1; i >= 0; i--) {
+        if (chdir("..") != 0) return 4;
+        snprintf(path, sizeof path, "d%d", i);
+        if (rmdir(path) != 0) return 5;
+    }
+    puts(bounded ? "bounded entries" : "unbounded entries");
     return 0;
 }
 
-static int bytes(void) {
+static int bytes(int remove_names) {
     static char chunk[1024 * 1024];
+    int descriptors[16], count = 0, bounded = 0;
     char path[64];
     memset(chunk, 'x', sizeof chunk);
-    for (int i = 0; i < 32; i++) {
-        snprintf(path, sizeof path, "/tmp/f%d", i);
+    for (; count < 16; count++) {
+        snprintf(path, sizeof path, "/tmp/f%d", count);
         int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (fd < 0 || write(fd, chunk, sizeof chunk) != (ssize_t)sizeof chunk) break;
-        close(fd);
+        if (fd < 0) { bounded = errno == ENOSPC; break; }
+        descriptors[count] = fd;
+        if (remove_names && unlink(path) != 0) return 6;
+        ssize_t written = write(fd, chunk, sizeof chunk);
+        if (written < (ssize_t)sizeof chunk) {
+            // A short write at the quota boundary must be followed by ENOSPC.
+            bounded = written < 0 ? errno == ENOSPC : write(fd, chunk, 1) < 0 && errno == ENOSPC;
+            count++;
+            break;
+        }
     }
-    sleep(30);
+    for (int i = 0; i < count; i++) {
+        close(descriptors[i]);
+        if (!remove_names) { snprintf(path, sizeof path, "/tmp/f%d", i); unlink(path); }
+    }
+    puts(bounded ? "bounded bytes" : "unbounded bytes");
     return 0;
 }
 
@@ -573,12 +616,33 @@ static int readonly(void) {
     return 0;
 }
 
+
+static int nested_namespaces(void) {
+    int result = unshare(CLONE_NEWUSER);
+    puts(result < 0 && (errno == EPERM || errno == ENOSPC) ? "blocked namespaces" : "unblocked namespaces");
+    return 0;
+}
+
+static int anonymous_storage(void) {
+    int descriptor = syscall(SYS_memfd_create, "escape", 0);
+    int memfd_blocked = descriptor < 0 && errno == EPERM;
+    if (descriptor >= 0) close(descriptor);
+    int segment = shmget(IPC_PRIVATE, 128 * 1024, IPC_CREAT | 0600);
+    int sysv_blocked = segment < 0 && errno == EPERM;
+    if (segment >= 0) shmctl(segment, IPC_RMID, 0);
+    puts(memfd_blocked && sysv_blocked ? "blocked anonymous storage" : "unblocked anonymous storage");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     if (!strcmp(argv[1], "entries")) return entries();
-    if (!strcmp(argv[1], "bytes")) return bytes();
+    if (!strcmp(argv[1], "bytes")) return bytes(0);
+    if (!strcmp(argv[1], "unlinked")) return bytes(1);
     if (!strcmp(argv[1], "forks")) return forks();
     if (!strcmp(argv[1], "readonly")) return readonly();
+    if (!strcmp(argv[1], "namespaces")) return nested_namespaces();
+    if (!strcmp(argv[1], "anonymous")) return anonymous_storage();
     return 2;
 }
 """
@@ -627,12 +691,15 @@ class LiveAggregateBoundTests(unittest.TestCase):
                 "programPath": "/oracle/program",
                 "executeElfMachine": 62,
                 "hostTools": [],
+                "storagePolicy": backend.STORAGE_POLICY_ID,
+                "syscallPolicy": backend.storage_filter_identity(62),
             },
             "environment": {},
             "limits": {
                 "wallSeconds": 10, "cpuSeconds": 10, "streamBytes": 4096, "artifactBytes": 1024 * 1024 + 4096,
                 "compileAddressSpaceBytes": 1024 ** 3, "executeAddressSpaceBytes": 64 * 1024 * 1024,
-                "openFiles": 64, "closureLibraries": 64, "workspaceEntries": 2, "processes": 8,
+                "openFiles": 64, "closureLibraries": 64, "workspaceEntries": 2,
+                "processes": 8 if mode == "forks" else 32,
                 "writableBytes": 4 * 1024 * 1024, "writableEntries": 64,
             },
             "artifactNormalizations": [],
@@ -652,14 +719,25 @@ class LiveAggregateBoundTests(unittest.TestCase):
         return backend.run_corpus(self.corpus(mode, stdout), self.executable, bwrap=self.BWRAP,
                                   temporary_root=self.root)
 
-    def test_entry_flood_is_killed_live(self) -> None:
-        # The adversary sleeps past the wall limit after flooding, so only a live kill names the quota.
-        with self.assertRaisesRegex(BehaviorCorpusError, "exceeded the writable entry quota of 64"):
-            self.run_mode("entries")
+    def test_entry_flood_is_capped_by_the_kernel(self) -> None:
+        report = self.run_mode("entries", b"bounded entries\n")
+        self.assertEqual(report["summary"]["passed"], 1)
 
-    def test_byte_flood_in_tmp_is_killed_live(self) -> None:
-        with self.assertRaisesRegex(BehaviorCorpusError, "exceeded the writable byte quota of 4194304"):
-            self.run_mode("bytes")
+    def test_byte_flood_in_tmp_is_capped_by_the_kernel(self) -> None:
+        report = self.run_mode("bytes", b"bounded bytes\n")
+        self.assertEqual(report["summary"]["passed"], 1)
+
+    def test_open_unlinked_byte_flood_is_capped_by_the_kernel(self) -> None:
+        report = self.run_mode("unlinked", b"bounded bytes\n")
+        self.assertEqual(report["summary"]["passed"], 1)
+
+    def test_nested_user_namespace_cannot_replace_the_quota_mount(self) -> None:
+        report = self.run_mode("namespaces", b"blocked namespaces\n")
+        self.assertEqual(report["summary"]["passed"], 1)
+
+    def test_anonymous_storage_cannot_bypass_the_filesystem_quota(self) -> None:
+        report = self.run_mode("anonymous", b"blocked anonymous storage\n")
+        self.assertEqual(report["summary"]["passed"], 1)
 
     def test_fork_flood_is_capped_by_the_aggregate_task_limit(self) -> None:
         report = self.run_mode("forks", b"capped\n")
