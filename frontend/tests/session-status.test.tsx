@@ -159,3 +159,25 @@ it('offers no request control when the bootstrap fragment could not be removed',
   expect(gateway.bootstrap).not.toHaveBeenCalled();
   expect(gateway.exchange).not.toHaveBeenCalled();
 });
+
+it('keeps the connected session in header chrome and every other state in the page notice', async () => {
+  const data = { ...structuredClone(sample.data), sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = {
+    exchange: vi.fn(() => Promise.resolve({ csrfToken: data.csrfToken, expiresAt: data.sessionExpiresAt })),
+    bootstrap: vi.fn(() => Promise.resolve(data)),
+    logout: vi.fn(() => Promise.resolve()),
+  };
+  const session = createBrowserSession(gateway, '/');
+  sessions.push(session);
+  render(<>
+    <header data-testid="header"><SessionStatus session={session} placement="header" /></header>
+    <div data-testid="page"><SessionStatus session={session} placement="page" /></div>
+  </>);
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  expect(screen.getByTestId('header').textContent).toContain('Local session connected');
+  expect(screen.getByTestId('page').textContent).toBe('');
+  await act(async () => { await session.logout(); });
+  expect(screen.getByTestId('header').textContent).toBe('');
+  expect(screen.getByTestId('page').textContent).toContain('signed out');
+  expect(screen.getAllByRole('button').map(button => button.textContent)).not.toContain('Sign out');
+});
