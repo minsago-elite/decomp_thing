@@ -39,6 +39,8 @@ let entries: unknown[];
 let historyPages: Record<string, { entries: unknown[]; nextCursor: string | null }>;
 let listing: unknown[];
 let paged: boolean;
+let provenanceFails = false;
+let jobFails = false;
 
 function status(dirty: boolean) {
   return { repositoryId, worktreeId, repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
@@ -52,7 +54,8 @@ let historyGate: Promise<void> | null = null;
 function serve(kind: string, path: string): Promise<unknown> {
   if (historyGate && path.includes('/history?cursor=')) { const gate = historyGate; historyGate = null; return gate.then(() => serve(kind, path)); }
   const [route = '', query = ''] = path.split('?');
-  const data = (() => {
+  let data: unknown;
+  try { data = (() => {
     if (route === `/jobs/${jobId}/repositories`) return { jobId, repositories: listing, operations: [] };
     if (route === `${base}/status`) {
       const cursor = new URLSearchParams(query).get('cursor');
@@ -91,6 +94,8 @@ function serve(kind: string, path: string): Promise<unknown> {
           newObjectId: other, oldMode: '100644', newMode: '100644', binary: false, additions: 1, deletions: 1, newSizeBytes: 12 }],
         patch: { fileId: params.get('file'), text: '@@ -1 +1 @@\n-int a;\n+int b;\n', truncated: false, binary: false } };
     }
+    if (route === `${base}/provenance/${older}` && provenanceFails) throw new ApiClientError('http_error', { status: 422 });
+    if (route === `/jobs/${jobId}` && jobFails) throw new ApiClientError('timeout');
     if (route === `${base}/provenance/${older}`) return { repositoryId, objectId: older, objectFormat: 'sha1', committedAt: '2026-10-25T00:00:00Z',
       subject: 'Record candidate', refNames: ['refs/tags/v1'], mapping, worktreeDirtyAtCommit: false,
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
@@ -98,7 +103,7 @@ function serve(kind: string, path: string): Promise<unknown> {
     if (route === `/jobs/${jobId}`) return { jobId, version: 'job_v3' };
     if (route.startsWith(`/jobs/${jobId}/repositories/`) && route.includes('/operations/')) return operation('completed', 'git.attach').data;
     throw new Error(`unexpected ${kind} ${path}`);
-  })();
+  })(); } catch (failure: unknown) { return Promise.reject(failure instanceof Error ? failure : new Error(String(failure))); }
   return Promise.resolve({ data });
 }
 
@@ -107,6 +112,8 @@ beforeEach(() => {
   transport.get.mockImplementation(serve);
   listing = [repository];
   paged = false;
+  provenanceFails = false;
+  jobFails = false;
   entries = [entry('file_s', 'src/util.c', 'modified', 'modified'), entry('file_u', 'src/new.c', 'none', 'none', true)];
   historyPages = { first: { entries: [commitSummary(head, 'Work in progress', false)], nextCursor: 'page2' },
     page2: { entries: [commitSummary(older, 'Record candidate', true)], nextCursor: null } };
@@ -280,4 +287,30 @@ it('lists every file of an inspected commit and drops an older-history page that
   open();
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(screen.queryByText('Record candidate')).toBeNull();
+});
+
+it('requests each older history page once and keeps changed files visible when provenance is unavailable', async () => {
+  provenanceFails = true;
+  mount();
+  const olderButton = await screen.findByRole('button', { name: 'Older commits' });
+  fireEvent.click(olderButton); fireEvent.click(olderButton);
+  expect(await screen.findByText('Record candidate')).toBeTruthy();
+  expect(screen.getAllByText('Record candidate')).toHaveLength(1);
+  expect(transport.get.mock.calls.filter(call => String(call[1]).includes('/history?cursor=page2'))).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  expect(await screen.findByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText(/provenance and source export of this commit are unavailable/)).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  expect(screen.getByLabelText('Tag name')).toBeTruthy();
+});
+
+it('reports a failed job read during import instead of stopping silently', async () => {
+  listing = [];
+  jobFails = true;
+  mount();
+  fireEvent.input(await screen.findByLabelText('Repository name'), { target: { value: 'local' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Import repository' }));
+  expect(await screen.findByText(/The server refused Import repository/)).toBeTruthy();
+  expect(transport.post).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Import repository' })).toHaveProperty('disabled', false);
 });

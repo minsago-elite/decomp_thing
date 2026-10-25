@@ -65,7 +65,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [worktree, setWorktree] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
-  const [commit, setCommit] = useState<{ diff: GitDiff; provenance: GitProvenance } | null>(null);
+  const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string } | null>(null);
+  const olderPending = useRef(false);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
   // Each status read or work-tree change starts a new diff generation; late diff responses are dropped.
@@ -194,27 +195,36 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     const generation = diffGeneration.current;
     try {
       const path = `${base}/diff?scope=commit&commit=${objectId}&limit=200`;
-      const [first, provenance] = await Promise.all([client.get('gitDiff', path), client.get('gitProvenance', `${base}/provenance/${objectId}`)]);
+      // Provenance builds the export, which has its own bound; a failure there must not hide the changed files.
+      const provenanceRead = client.get('gitProvenance', `${base}/provenance/${objectId}`).then(result => ({ data: result.data, error: '' }),
+        (failure: unknown) => ({ data: null, error: withApiFailureReference(copy.provenanceUnavailable, failure) }));
+      const first = await client.get('gitDiff', path);
       let page = first.data;
       const files = [...page.files];
       for (let pages = 1; page.nextCursor && pages < MAX_STATUS_PAGES; pages++) {
         page = (await client.get('gitDiff', `${path}&cursor=${page.nextCursor}`)).data;
         files.push(...page.files);
       }
+      const provenance = await provenanceRead;
       if (generation !== diffGeneration.current) return;
-      setCommit({ diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data });
+      setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data,
+        provenanceError: provenance.error });
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
   /** Older history pages belong to the history they continue; a response for an earlier read is dropped. */
   async function older(cursor: string) {
-    if (!base || !loaded?.history) return;
+    if (!base || !loaded?.history || olderPending.current) return;
+    olderPending.current = true;
     const generation = diffGeneration.current;
     try {
       const page = (await client.get('gitHistory', `${base}/history?cursor=${cursor}&limit=20${query ? `&${query}` : ''}`)).data;
       if (generation !== diffGeneration.current) return;
-      setLoaded(previous => previous?.history ? { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } } : previous);
+      // Append only to the history this page continues; a duplicate or stale page is dropped.
+      setLoaded(previous => previous?.history && previous.history.nextCursor === cursor
+        ? { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } } : previous);
     } catch (failure: unknown) { setStatus(withApiFailureReference(copy.historyChanged, failure)); }
+    finally { olderPending.current = false; }
   }
 
   function toggle(id: string) {
@@ -250,10 +260,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <h3 id="git-import-title">{copy.importTitle}</h3>
       {importing?.state === 'supported' ? <ImportForm disabled={busy} onImport={async name => {
         const csrfToken = session.csrf();
-        const job = (await client.get('job', `/jobs/${jobId}`)).data;
         if (!csrfToken) { setStatus(copy.reconnect); return; }
         setBusy(true);
         try {
+          const job = (await client.get('job', `/jobs/${jobId}`)).data;
           let operation = (await client.post('operation', `/jobs/${jobId}/repositories`, 'gitRepositoryAttachRequest',
             { action: 'git.attach', sourceName: name }, { csrfToken, ifMatch: `"${job.version}"`, idempotencyKey: crypto.randomUUID() })).data;
           for (let poll = 0; !terminal.has(operation.state) && poll < 600; poll++) {
@@ -346,16 +356,18 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </li>)}</ol> : <p>{copy.noHistory}</p>}
         {loaded.history?.nextCursor && <button type="button" disabled={busy} onClick={() => { void older(loaded.history?.nextCursor ?? ''); }}>{copy.olderHistory}</button>}
         {commit && <section aria-labelledby="git-commit-title">
-          <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.provenance.objectId) })}</h4>
+          <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.objectId) })}</h4>
           <ul>{commit.diff.files.map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary ? ' (binary)' : ''}</li>)}</ul>
           {!commit.diff.complete && <p role="alert">{copy.commitIncomplete}</p>}
           <h5>{copy.provenance}</h5>
-          <p>{textMessage(copy.exportDigest, { sha: commit.provenance.export.sha256 })}</p>
-          <p>{commit.provenance.export.verification === 'tree-blob-ids-match' ? copy.exportVerified : copy.exportMismatch}</p>
-          {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
-          <a href={apiPath(basePath, `${base}/exports/${commit.provenance.objectId}`)} download="">{copy.downloadExport}</a>
+          {commit.provenance ? <>
+            <p>{textMessage(copy.exportDigest, { sha: commit.provenance.export.sha256 })}</p>
+            <p>{commit.provenance.export.verification === 'tree-blob-ids-match' ? copy.exportVerified : copy.exportMismatch}</p>
+            {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
+            <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)} download="">{copy.downloadExport}</a>
+          </> : <p role="alert">{commit.provenanceError}</p>}
           <NameForm label={copy.tagName} action={copy.tagAction} disabled={!writable} onSubmit={name => act('gitTagRequest', copy.tagAction, guarded =>
-            ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.provenance.objectId }))} />
+            ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.objectId }))} />
         </section>}
       </section>
       <section aria-labelledby="git-branches-title">

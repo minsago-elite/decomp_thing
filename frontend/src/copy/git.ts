@@ -67,6 +67,7 @@ export const gitCopy = {
   commitDetail: 'Commit {object}',
   commitIncomplete: 'This commit changes more files than the workbench lists; the list above is incomplete.',
   provenance: 'Provenance',
+  provenanceUnavailable: 'The provenance and source export of this commit are unavailable, for example because its tree exceeds the export bound. Its changed files are listed above.',
   exportDigest: 'Source export SHA-256: {sha}',
   exportVerified: 'Export verified against the commit tree’s blob IDs.',
   exportMismatch: 'Export verification failed.',
