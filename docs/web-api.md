@@ -559,6 +559,12 @@ The patterns never match C/C++ sources, headers, CMake or Make descriptions, REA
 `source_tree_manifest.json`. `GitTrackingPolicy` holds the same list, and its tests check both
 directions against real `git check-ignore` results.
 
+`info/exclude` only makes excluded files look ignored. Git gives a `.gitignore` in source content
+higher precedence, so a pattern such as `!secret.key` would re-include a credential. The policy is
+therefore enforced on its own terms. `GitTrackingPolicy.excluded` evaluates paths with
+`check-ignore --no-index` in a server-owned scratch repository whose only ignore source is the
+policy, so no repository file can override it. Staging refuses any path it excludes.
+
 ### Server-owned Git adapter
 
 The `decompengine.git` adapter uses the system `git` executable, not a library (#570). Git is an

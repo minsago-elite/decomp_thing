@@ -48,4 +48,50 @@ object GitTrackingPolicy {
             category.patterns.forEach { append(it).append('\n') }
         }
     }
+
+    private val policyLock = Any()
+    private const val BATCH = 200
+
+    /**
+     * Paths this policy excludes, decided independently of the repository. In a managed repository
+     * `info/exclude` only makes excluded files appear ignored, and a `.gitignore` in source content
+     * outranks it (`!secret.key` would re-include a credential). The decision is therefore made in a
+     * server-owned scratch repository whose only ignore source is this policy, with `--no-index`, so
+     * nothing a repository contains can override it. Staging enforces this result.
+     */
+    fun excluded(runner: GitCommandRunner, paths: Collection<String>): Set<String> {
+        if (paths.isEmpty()) return emptySet()
+        val (gitDir, workTree) = policyRepository(runner)
+        val excluded = HashSet<String>()
+        fun check(batch: List<String>) = runner.run(GitInvocation("check-ignore", listOf("--no-index", "--") + batch, gitDir = gitDir,
+            workTree = workTree, allowedExitCodes = setOf(0, 1),
+            limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 4 * 1024 * 1024, 16 * 1024)))
+        // Plain names are matched in batches by their exact output lines; names Git would quote are
+        // decided one at a time by exit status, so no output parsing can confuse two names.
+        val (plain, quoted) = paths.distinct().partition { path -> path.all { it.code in 0x20..0x7e && it != '"' && it != '\\' } }
+        for (batch in plain.chunked(BATCH)) {
+            val inputs = batch.toSet()
+            check(batch).text.lineSequence().filterTo(excluded) { it in inputs }
+        }
+        for (path in quoted) if (check(listOf(path)).exitCode == 0) excluded += path
+        return excluded
+    }
+
+    private fun policyRepository(runner: GitCommandRunner): Pair<java.nio.file.Path, java.nio.file.Path> = synchronized(policyLock) {
+        val root = runner.environment.root.resolve("policy-$VERSION")
+        val gitDir = root.resolve("repository.git")
+        val workTree = root.resolve("empty")
+        val exclude = gitDir.resolve("info").resolve("exclude")
+        val ready = java.nio.file.Files.isRegularFile(exclude, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
+            java.nio.file.Files.readString(exclude) == excludeFile()
+        if (!ready) {
+            java.nio.file.Files.createDirectories(workTree)
+            if (!java.nio.file.Files.exists(gitDir.resolve("HEAD"), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                runner.run(GitInvocation("init", listOf("--quiet", "--bare", gitDir.toString())))
+            }
+            java.nio.file.Files.createDirectories(exclude.parent)
+            java.nio.file.Files.writeString(exclude, excludeFile())
+        }
+        gitDir to workTree
+    }
 }

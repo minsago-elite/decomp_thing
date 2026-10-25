@@ -144,6 +144,23 @@ class GitAdapterTest {
             "job-runtime-state", "private-transcripts", "native-build-output", "transient-evidence")))
     }
 
+    @Test fun `repository ignore files cannot re-include policy exclusions`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("negated")
+        Files.writeString(workTree.resolve(".gitignore"), "!secret.key\n!*.elf\n!/build/\n")
+        Files.writeString(workTree.resolve("secret.key"), "PRIVATE")
+        Files.writeString(workTree.resolve("input.elf"), "ELF")
+        Files.writeString(workTree.resolve("main.c"), "int main;\n")
+        // Git itself lets the in-tree negation win over info/exclude ...
+        val untracked = f.runner.run(GitInvocation("status", listOf("--porcelain=v1", "-z", "--untracked-files=all"),
+            gitDir = gitDir, workTree = workTree)).text
+        assertTrue(untracked.contains("?? secret.key"))
+        // ... so the policy decision is made where only the policy applies.
+        val paths = listOf("secret.key", "input.elf", "build/main.o", "src/deep/.env", "main.c", ".gitignore", "src/build/rules.c")
+        assertEquals(setOf("secret.key", "input.elf", "build/main.o", "src/deep/.env"), GitTrackingPolicy.excluded(f.runner, paths))
+        assertEquals(setOf("-rf.key", "new\nline.key", "ünï.pem"),
+            GitTrackingPolicy.excluded(f.runner, (1..450).map { "src/file$it.c" } + listOf("-rf.key", "new\nline.key", "ünï.pem", "quote\".c")))
+    }
+
     @Test fun `system and global configuration never reach a managed repository command`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, _) = f.managed("scopes")
         val scopes = f.runner.run(GitInvocation("config", listOf("--list", "--show-scope"), gitDir = gitDir)).text
