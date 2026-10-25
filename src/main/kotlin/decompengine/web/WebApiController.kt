@@ -260,7 +260,8 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
                     val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
-                        catch (_: JobStoreException) { null }
+                        // Missing, linked, nonregular and oversized report files are an unknown report, not a server fault.
+                        catch (_: JobStoreException) { null } catch (_: IllegalArgumentException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
                     sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
                 }

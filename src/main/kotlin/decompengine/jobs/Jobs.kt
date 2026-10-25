@@ -278,7 +278,7 @@ class JobStore internal constructor(
             }
         ) { "artifact path must be a canonical report path" }
         return try {
-            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
+            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
         } catch (_: IOException) {
             throw JobStoreException("artifact is unavailable or its path changed")
         }
@@ -300,7 +300,7 @@ class JobStore internal constructor(
         decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
         require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
         return try {
-            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
+            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes).requireSingleName("source input")
         } catch (_: IOException) {
             throw JobStoreException("source input is unavailable or its path changed")
         }
@@ -507,6 +507,15 @@ class JobStore internal constructor(
         val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
         const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
+}
+
+/**
+ * A second name can be a hard link created inside the job tree to bytes owned elsewhere. Descriptor
+ * pinning contains the path, not the inode, so browser-readable job files must have exactly one name.
+ */
+private fun StableRegularFile.requireSingleName(kind: String): StableRegularFile {
+    if (identity.linkCount != 1) throw JobStoreException("$kind has more than one filesystem name")
+    return this
 }
 
 fun ElfMetadata.toJson(): JsonObject = buildJsonObject {
