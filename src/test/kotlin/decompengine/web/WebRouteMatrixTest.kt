@@ -169,7 +169,12 @@ class WebRouteMatrixTest {
                 assertEquals("no-store", read.header("Cache-Control"), label)
                 assertEquals("nosniff", read.header("X-Content-Type-Options"), label)
                 assertTrue(read.header("X-Request-ID")?.matches(Regex("[0-9a-f-]{36}")) == true, label)
-                if (spec.media == JSON) assertEnvelope(read, expected.kindOrCode, label)
+                if (spec.media == JSON) {
+                    assertEnvelope(read, expected.kindOrCode, label)
+                    // A stream or byte row names no JSON document; its JSON fallback is documented on its own row.
+                    assertTrue(route.documents.isEmpty() || expected.kindOrCode in route.documents,
+                        "$label returns ${expected.kindOrCode}, documented ${route.documents}")
+                }
             } else expectError(read, expected.status, expected.kindOrCode, "$label fixture")
             if ("HEAD" in spec.methods) {
                 val head = call(server, "HEAD", path, session.cookie + mapOf("Accept" to accept))
@@ -340,7 +345,8 @@ class WebRouteMatrixTest {
         val base = "http://127.0.0.1:${upload.serverPort}"
     }
 
-    private data class DocumentedRoute(val method: String, val template: String)
+    /** [documents] are the success kinds the row names, e.g. `200 runs`, `200 run`. */
+    private data class DocumentedRoute(val method: String, val template: String, val documents: Set<String>)
 
     private fun withServer(block: (Server, Fixture) -> Unit) {
         val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
@@ -469,6 +475,7 @@ class WebRouteMatrixTest {
             }
             return table("## HTTP route matrix", "Method and route").flatMap { cells ->
                 val pending = mutableListOf<String>()
+                val documents = Regex("`[0-9]{3} ([A-Za-z]+)`").findAll(cells[1]).map { it.groupValues[1] }.toSet()
                 Regex("`([^`]+)`").findAll(cells[0]).map { it.groupValues[1].trim() }.flatMap { token ->
                     val words = token.split(' ')
                     if (words.size == 1 && words[0].matches(Regex("[A-Z]+"))) { pending += words[0]; emptySequence() }
@@ -480,7 +487,7 @@ class WebRouteMatrixTest {
                         check(path.startsWith("/api/v1/")) { "route matrix entry is not under /api/v1/: ${cells[0]}" }
                         val methods = pending + words[0]
                         pending.clear()
-                        methods.flatMap { method -> alternatives(path).map { DocumentedRoute(method, it) } }.asSequence()
+                        methods.flatMap { method -> alternatives(path).map { DocumentedRoute(method, it, documents) } }.asSequence()
                     }
                 }.toList()
             }.distinct()

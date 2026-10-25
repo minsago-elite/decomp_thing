@@ -197,6 +197,26 @@ job filters are bounded display-name search (256 characters), exact known status
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
 
+### Route matrix qualification
+
+`WebRouteMatrixTest` parses the table above and probes every documented method and route through
+the real SPA listener. Foreign `Origin`, cross-site `Sec-Fetch-Site` and forwarding headers are
+refused before route selection; private routes require a session and mutations the exact Origin,
+JSON or multipart media type and CSRF token. A `405` lists every live method of the resource in
+`Allow`, HEAD matches its GET status without a body, and wrong `Accept`, unknown queries and
+out-of-range page limits are typed refusals. Every JSON body, including each error, validates
+against `contract.schema.json`, and the route's success kind must be one the row names. Contract
+request fixtures and malformed bodies are refused without changing stored bytes. A documented row
+without a live matrix entry is reserved and must stay an authenticated `404 NOT_FOUND`; enabling it
+requires adding its live methods and fixture outcome to the matrix. `verify.py` checks that every
+success document named here is a schema kind or one of the reserved collection documents. Each
+documented error status is produced by the matrix or owned by a named suite; `501` and `504` are
+reserved and not emitted by the current producer, whose request deadline closes the exchange.
+
+An exploration report whose file is missing, linked, nonregular, multiply named or over its byte
+bound is an `unknown` report without an artifact descriptor, and its download is `404`. Browser
+readable job artifacts and selected source inputs must have exactly one filesystem name.
+
 ## Errors, deadlines and concurrent mutations
 
 The workflow-start transport accepts only the `workflowStart` data object (not
