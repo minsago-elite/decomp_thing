@@ -7,14 +7,15 @@ captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py
 
 ## Execution environment
 
-Preprocessing and dependency-generation cases run the installed
+Preprocessing, dependency-generation and phase-orchestration cases run the installed
 `/usr/local/bin/gcc` and its `cc1`. All metadata cases run the oracle driver
 described below instead. Every case runs inside the pinned
 official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
-read-only root filesystem, no capabilities and `no-new-privileges`; it sees only
-a fresh per-case workspace. Preprocessing and dependency cases pass `-nostdinc`
+read-only root filesystem, no capabilities and `no-new-privileges`. Host access
+is restricted to a fresh per-case workspace and declared read-only oracle artifact
+mounts. Preprocessing and dependency cases pass `-nostdinc`
 so only staged include roots are searched, and `LC_ALL=C`, `TZ=UTC` and `SOURCE_DATE_EPOCH=1786060800` are
 fixed. The script verifies the image config digest and records the driver and
 `cc1` hashes, version and target triple.
