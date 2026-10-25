@@ -18,6 +18,7 @@ import decompengine.project.ArchivalReconstructionService
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.repair.ModuleRevisionStatus
 import decompengine.repair.RepairPublicationMode
+import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairHistoryReadStatus
 import decompengine.repair.RepairHistorySnapshot
 import decompengine.repair.RepairRunStatus
@@ -257,7 +258,8 @@ internal class RepairWorkflowAdapter(
     override val limits = WebWorkflowDefaults.REPAIR
     // The tool-call ceiling is structural (iterations times the per-invocation agent limit), so it is fixed.
     override val limitsAdjustable = false
-    override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.AGENT_HARNESS)
+    override val requirements = setOf(WebWorkflowRequirement.SANDBOX, WebWorkflowRequirement.AGENT_HARNESS,
+        WebWorkflowRequirement.REPAIR_VALIDATOR)
     override val input = DurableWebWorkflowInput.RECORDED_REQUIRED
     override val launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
         requiredTools = listOf("sandbox", "agent-harness", "c-toolchain"), harness = harness)
@@ -294,7 +296,9 @@ private val DIGEST = Regex("[0-9a-f]{64}")
 /** The source digest of one recorded graph node, when its identity and digest are disclosed. */
 private fun nodeSource(snapshot: RepairHistorySnapshot, identity: decompengine.repair.RepairRecordedIdentity?): String? {
     if (identity == null || identity.rawIdentityWithheld || !identity.value.matches(GRAPH_IDENTITY)) return null
-    return snapshot.attempts.singleOrNull { it.identity == identity }?.sourceRevisionSha256?.takeIf { it.matches(DIGEST) }
+    val source = snapshot.attempts.singleOrNull { it.identity == identity }?.sourceRevisionSha256
+        ?: snapshot.acceptedBaseline?.takeIf { it.identity == identity }?.sourceRevisionSha256
+    return source?.takeIf { it.matches(DIGEST) }
 }
 
 /**
@@ -305,8 +309,14 @@ private fun acceptedHead(snapshot: RepairHistorySnapshot, attemptStartedMillis: 
     val head = snapshot.fullyAcceptedHead ?: return null
     val started = attemptStartedMillis ?: return null
     if (snapshot.runs.none { it.status == RepairRunStatus.FULLY_ACCEPTED && it.acceptedHead == head && it.startedEpochMillis >= started }) return null
+    if (head.rawIdentityWithheld || !head.value.matches(GRAPH_IDENTITY)) return null
+    // A baseline that already validated is the accepted root itself; it has no iteration entry.
+    snapshot.acceptedBaseline?.takeIf { it.identity == head }?.let { baseline ->
+        if (!allowTestOnly && baseline.assurance != RepairValidationAssurance.STRICT_CONTAINED) return null
+        return head.value to (baseline.sourceRevisionSha256.takeIf { it.matches(DIGEST) } ?: return null)
+    }
     val node = snapshot.attempts.singleOrNull { it.identity == head } ?: return null
-    if (node.status !in setOf(ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.ROOT)) return null
+    if (node.status != ModuleRevisionStatus.ACCEPTED) return null
     if (!allowTestOnly && node.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE) return null
     return head.value to (nodeSource(snapshot, head) ?: return null)
 }

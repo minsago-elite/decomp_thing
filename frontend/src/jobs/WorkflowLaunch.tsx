@@ -8,6 +8,7 @@ import { jobCopy } from '../copy/job';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { message, textMessage } from '../shared/messages';
+import { launchStartable } from './capabilityFacts';
 
 type LaunchOption = Capability & { launch: Launch; limits: ExecutionLimits };
 type LimitKey = keyof ExecutionLimits;
@@ -76,29 +77,46 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
 
 interface Revision { id: string; label: string }
 
-function useRevisions(basePath: string, job: Job, needed: boolean): { revisions: Revision[] | null; failed: boolean } {
+/** The store retains at most 1024 attempts, so six 200-row pages always reach the oldest one. */
+const MAXIMUM_REVISION_PAGES = 6;
+
+function useRevisions(basePath: string, job: Job, needed: boolean): {
+  revisions: Revision[] | null; failed: boolean; retry: () => void;
+} {
   const { client } = usePrivateTransport(basePath);
   const [state, setState] = useState<{ key: string; revisions: Revision[] | null; failed: boolean } | null>(null);
-  const key = `${job.jobId}/${job.version}`;
+  const [attempt, setAttempt] = useState(0);
+  const key = `${job.jobId}/${job.version}/${attempt}`;
   useEffect(() => {
     if (!needed) return;
     const controller = new AbortController();
     setState({ key, revisions: null, failed: false });
-    void client.get('runs', `/jobs/${job.jobId}/runs`, { signal: controller.signal }).then(response => {
-      if (controller.signal.aborted) return;
+    void (async () => {
       const revisions: Revision[] = [];
       if (job.acceptedRevisionId) revisions.push({ id: job.acceptedRevisionId, label: textMessage(copy.inputAcceptedRevision, { revision: job.acceptedRevisionId }) });
-      for (const run of response.data.items) {
-        if (run.jobId !== job.jobId) throw new Error('binding');
-        if (run.state === 'completed' && run.resultRevisionId && !revisions.some(item => item.id === run.resultRevisionId)) {
-          revisions.push({ id: run.resultRevisionId, label: textMessage(copy.inputCandidateRevision, { revision: run.resultRevisionId, run: run.runId }) });
+      // Follow every continuation: a candidate outside the newest page is still a valid repair input.
+      let cursor: string | null = null;
+      for (let page = 0; page < MAXIMUM_REVISION_PAGES; page += 1) {
+        const query = new URLSearchParams({ limit: '200' });
+        if (cursor) query.set('cursor', cursor);
+        const response = await client.get('runs', `/jobs/${job.jobId}/runs?${query}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (response.data.jobId !== job.jobId) throw new ApiClientError('invalid_response');
+        for (const run of response.data.items) {
+          if (run.jobId !== job.jobId) throw new ApiClientError('invalid_response');
+          if (run.state === 'completed' && run.resultRevisionId && !revisions.some(item => item.id === run.resultRevisionId)) {
+            revisions.push({ id: run.resultRevisionId, label: textMessage(copy.inputCandidateRevision, { revision: run.resultRevisionId, run: run.runId }) });
+          }
         }
+        cursor = response.data.page.nextCursor;
+        if (!cursor) { setState({ key, revisions, failed: false }); return; }
       }
-      setState({ key, revisions, failed: false });
-    }).catch(() => { if (!controller.signal.aborted) setState({ key, revisions: null, failed: true }); });
+      throw new ApiClientError('invalid_response'); // More pages than the store can retain.
+    })().catch(() => { if (!controller.signal.aborted) setState({ key, revisions: null, failed: true }); });
     return () => { controller.abort(); };
-  }, [client, job.jobId, job.version, job.acceptedRevisionId, key, needed]);
-  return state?.key === key ? state : { revisions: null, failed: false };
+  }, [client, job.jobId, job.acceptedRevisionId, key, needed]);
+  const current = state?.key === key ? state : { revisions: null, failed: false };
+  return { ...current, retry: () => { setAttempt(value => value + 1); } };
 }
 
 function HarnessFactList({ harness }: { harness: HarnessFacts }) {
@@ -153,7 +171,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const { client } = usePrivateTransport(basePath);
   const options = useMemo(() => launchOptions(runtime), [runtime]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = options.find(option => option.id === selectedId && option.state === 'supported') ?? null;
+  const selected = options.find(option => option.id === selectedId && launchStartable(option)) ?? null;
   const [limits, setLimits] = useState<Record<LimitKey, string> | null>(null);
   const [inputRevisionId, setInputRevisionId] = useState<string>('');
   const [pending, setPending] = useState(false);
@@ -162,7 +180,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const [startedPath, setStartedPath] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
   const jobBusy = job.status === 'queued' || job.status === 'running';
-  const { revisions, failed: revisionsFailed } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
+  const { revisions, failed: revisionsFailed, retry: retryRevisions } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
     || selected?.launch.input === 'accepted-optional');
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
 
@@ -224,13 +242,14 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
         <legend>{copy.workflowOption}</legend>
         {options.map(option => {
           const id = `launch-${option.id}`;
-          const ready = option.state === 'supported';
+          const ready = launchStartable(option);
           return <div class="launch-option" key={option.id}>
             <input type="radio" name="workflow-option" id={id} value={option.id} disabled={!ready}
               checked={selected?.id === option.id} aria-describedby={`${id}-facts`} onChange={() => { choose(option); }} />
             <label for={id}>{textMessage(copy.optionLabel, { workflow: workflowLabels[option.workflows[0]!], mode: modeLabel(option.launch) })}</label>
             <div id={`${id}-facts`} class="launch-facts">
               <p>{message(copy.optionState, { state: <code>{option.state}</code> })}</p>
+              {ready && option.state !== 'supported' && <p>{copy.checkedAtStart}</p>}
               {!ready && <p>{option.message ? textMessage(copy.optionUnavailable, { reason: option.message }) : copy.optionUnavailableWithoutReason}
                 {option.reasonCode && <> <code>{option.reasonCode}</code></>}</p>}
               <Requirement option={option} basePath={basePath} />
@@ -245,7 +264,10 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
         {selected.launch.input === 'none' ? <p>{copy.inputNone}</p> : <>
           {selected.launch.input === 'recorded-required' && <p id="launch-input-help">{copy.inputRequired}</p>}
           {revisions === null && !revisionsFailed && <p role="status">{copy.loadingRevisions}</p>}
-          {revisionsFailed && <p role="alert">{copy.revisionsUnavailable}</p>}
+          {revisionsFailed && <>
+            <p role="alert">{copy.revisionsUnavailable}</p>
+            <button type="button" onClick={retryRevisions}>{copy.retryRevisions}</button>
+          </>}
           {revisions !== null && selected.launch.input === 'recorded-required' && revisions.length === 0 && <p>{copy.noRecordedRevisions}</p>}
           {revisions !== null && (revisions.length > 0 || selected.launch.input === 'accepted-optional') && <>
             <label for="launch-input">{copy.inputRevision}</label>

@@ -85,6 +85,131 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `time limits are rechecked when a body finishes between samples`() = withRoot { root ->
+        val engines = FakeEngines()
+        engines.exploreBody = { Thread.sleep(100) }
+        // The default 250 ms poll never samples while this body runs.
+        val sparse = BoundedWorkflowExecutor()
+        val wall = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("wall"),
+            WorkflowExecutionLimits(10uL, 10uL, 1_048_576uL, 0uL)))
+        assertLimitExhausted(wall)
+        val idle = ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("idle"),
+            WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL)))
+        assertLimitExhausted(idle)
+        // Output written before returning is activity of unknown time, so it cannot prove idleness.
+        engines.exploreBody = { reports -> Thread.sleep(100); reports.resolve("exploration.json").writeText("{}") }
+        assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, sparse).execute(context(root, root.resolve("active"),
+            WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL))))
+    }
+
+    @Test
+    fun `tool calls are distinct per agent invocation and reconciled with returned usage`() = withRoot { root ->
+        val engines = FakeEngines()
+        engines.reconstructBody = { reports, _, progress ->
+            // Two module invocations reuse the same tool-call identity; each is a separate call.
+            repeat(2) { module ->
+                val task = progress.beginTask("module-$module", request(root))
+                task.event(AgentToolEvent(0, "tool-1", "inert tool", AgentToolStatus.IN_PROGRESS))
+                task.event(AgentToolEvent(1, "tool-1", "inert tool", AgentToolStatus.SUCCEEDED))
+                // The second invocation reports more calls than it streamed.
+                if (module == 1) task.complete(decompengine.agent.AgentExecutionReceipt(
+                    decompengine.agent.AgentExecutionRequestBinding(decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION, "a".repeat(64), "b".repeat(64)),
+                    decompengine.agent.AgentExecutionOutcome.Returned(decompengine.agent.AgentExecutionResult(
+                        decompengine.agent.AgentStopReason.COMPLETED, usage = decompengine.agent.AgentUsage(inputTokens = 7, toolCalls = 4)))))
+            }
+            writeSourceTree(reports.resolve("source-tree"), "base")
+        }
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.ACP, emptyList())
+        val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("counted"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
+        assertEquals(5uL, completed.usage?.toolCalls); assertEquals(7uL, completed.usage?.inputTokens)
+        assertLimitExhausted(agent.execute(context(root, root.resolve("bounded"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 4uL))))
+    }
+
+    @Test
+    fun `repair stays unavailable until the production repair validator is qualified`() = withRoot { root ->
+        assertFalse(decompengine.project.LinuxGeneratedCRepairValidationBoundary.productionQualified())
+        val ready = WebPrerequisite.AVAILABLE
+        val prerequisites = WebWorkflowPrerequisites(ready, ready, ready, WebHarnessReadinessProjector.probeEnvironment(emptyMap(),
+            root.resolve("bwrap"), root.resolve("timeout"), { true }, { true }).prerequisites!!.repairValidator)
+        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", prerequisites.repairValidator.reasonCode)
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), WebHarnessReadiness("supported", null, "ready", prerequisites = prerequisites))
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+        assertEquals("unavailable", reported.getValue("workflow-repair-agent-acp").getValue("state").jsonPrimitive.content)
+        assertEquals("REPAIR_VALIDATOR_UNQUALIFIED", reported.getValue("workflow-repair-agent-acp").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals("supported", reported.getValue("workflow-reconstruct-agent-acp").getValue("state").jsonPrimitive.content)
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("validator.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR,
+                    "source_any", "agent-acp"), "repair_validator_closed", prerequisites)
+            }
+        }
+        assertEquals(0, engines.calls.get())
+    }
+
+    @Test
+    fun `passive bootstrap facts leave helper-dependent options unknown until an explicit inspection`() = withRoot { root ->
+        val bwrap = root.resolve("bwrap").also { Files.createFile(it).toFile().setExecutable(true) }
+        val timeout = root.resolve("timeout").also { Files.createFile(it).toFile().setExecutable(true) }
+        // No agent configured: page load reads file metadata only and launches no helper.
+        val passive = WebHarnessReadinessProjector.passiveReadiness(emptyMap(), bwrap, timeout, { true })
+        val facts = assertNotNull(passive.prerequisites)
+        assertTrue(facts.sandbox.unknown); assertEquals("SANDBOX_HELPER_UNCHECKED", facts.sandbox.reasonCode)
+        assertTrue(facts.ghidra.available)
+        val reported = webWorkflowCapabilities(adapters(FakeEngines()), passive).associateBy { it.getValue("id").jsonPrimitive.content }
+        fun state(id: String) = reported.getValue(id).getValue("state").jsonPrimitive.content to
+            reported.getValue(id)["reasonCode"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
+        assertEquals("unknown" to "SANDBOX_HELPER_UNCHECKED", state("workflow-explore-tools"))
+        assertEquals("supported" to null, state("workflow-reconstruct-evidence-only"))
+        assertEquals("unavailable" to "HARNESS_NOT_CONFIGURED", state("workflow-reconstruct-agent-acp"))
+        val store = JobStore(root.resolve("jobs")); val job = store.createFromUpload("passive.elf", elfFixture())
+        val engines = FakeEngines()
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val explore = NewWorkflowAttempt(WorkflowKind.EXPLORE, WebWorkflowDefaults.EXPLORE)
+            val refused = assertFailsWith<WebJobServiceException> {
+                service.requestDurableStart(job.id, version(service, job.id), explore, "explore_unchecked_helpers", facts)
+            }
+            assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", refused.code)
+            assertTrue(refused.message.orEmpty().contains("checked when this workflow starts"))
+            assertEquals(0, engines.calls.get())
+            // The HTTP start runs the bounded helper check itself; no agent or prior preflight is needed.
+            val inspections = AtomicInteger()
+            val admitted = webAdmissionPrerequisites(adapters(engines), explore, facts) { inspections.incrementAndGet(); WebPrerequisite.AVAILABLE }
+            assertEquals(1, inspections.get())
+            assertEquals(WorkflowRunState.COMPLETED, service.requestDurableStart(job.id, version(service, job.id), explore,
+                "explore_inspected_helpers", admitted).attempt.state)
+            // A failed check refuses with its own reason and starts nothing.
+            val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "The sandbox helpers required to run analyzed binaries are not available.")
+            val failed = assertFailsWith<WebJobServiceException> {
+                service.requestDurableStart(job.id, version(service, job.id), explore, "explore_helper_check_fail",
+                    webAdmissionPrerequisites(adapters(engines), explore, facts) { missing })
+            }
+            assertEquals("WORKFLOW_PREREQUISITE_UNAVAILABLE", failed.code); assertTrue(failed.message.orEmpty().contains("not available"))
+            assertEquals(1, engines.calls.get())
+            // Options that do not need the sandbox, or that already miss another prerequisite, never run the check.
+            val evidence = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY)
+            val repair = NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, "source_any", "agent-acp")
+            for (request in listOf(evidence, repair)) assertEquals(facts, webAdmissionPrerequisites(adapters(engines), request, facts) { error("checked") })
+            assertNull(webAdmissionPrerequisites(adapters(engines), explore, null) { error("checked") })
+        }
+        // The projector's admission check is bounded and independent of any agent configuration.
+        val projector = WebHarnessReadinessProjector(probe = { passive }, sandboxProbe = { WebPrerequisite.AVAILABLE })
+        val hung = WebHarnessReadinessProjector(probe = { passive }, timeoutMillis = 100,
+            sandboxProbe = { Thread.sleep(10_000); WebPrerequisite.AVAILABLE })
+        try {
+            assertTrue(projector.inspectSandbox().available)
+            assertEquals("PROBE_TIMEOUT", hung.inspectSandbox().reasonCode)
+        } finally { projector.close(); hung.close() }
+        // The execution-capable check is the explicit path; its result makes helpers available.
+        val checked = WebHarnessReadinessProjector.probeEnvironment(mapOf("ACP_HARNESS" to "legacy-openai",
+            "BASE_URL" to "https://example.invalid/v1", "API_KEY" to "legacy-key", "MODEL" to "legacy-model"), bwrap, timeout, { true }, { true })
+        assertTrue(assertNotNull(checked.prerequisites).sandbox.available)
+    }
+
+    @Test
     fun `caller interruption stops the child first and propagates for cancellation mapping`() = withRoot { root ->
         val engines = FakeEngines()
         val started = CountDownLatch(1); val childStopped = AtomicBoolean(); val observed = AtomicReference<Throwable>()
@@ -166,7 +291,7 @@ class WebProductionWorkflowsTest {
     fun `capabilities report each option, its prerequisites and unimplemented workflows without paths`() {
         val adapters = adapters(FakeEngines())
         val readiness = WebHarnessReadiness("unavailable", "HARNESS_NOT_CONFIGURED", "No agent harness is configured.",
-            WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
+            prerequisites = WebWorkflowPrerequisites(WebPrerequisite(false, "HARNESS_NOT_CONFIGURED", "No agent harness is configured."),
                 WebPrerequisite.AVAILABLE, WebPrerequisite(false, "GHIDRA_MISSING", "The bundled Ghidra distribution is not present.")))
         val reported = webWorkflowCapabilities(adapters, readiness).associateBy { it.getValue("id").jsonPrimitive.content }
         assertEquals(setOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-agent-builtin",
@@ -256,6 +381,30 @@ class WebProductionWorkflowsTest {
             assertEquals(WorkflowRunState.COMPLETED, repaired.state); assertNotNull(repaired.candidate)
             assertNull(repaired.acceptedRevision); assertTrue(repaired.publicationPending)
             assertNull(service.presentation(job.id).snapshot!!.acceptedRevision)
+        }
+    }
+
+    @Test
+    fun `an input that already validates publishes its accepted root baseline`() = withRoot { root ->
+        for (acceptTestOnly in listOf(true, false)) {
+            val store = JobStore(root.resolve("jobs-$acceptTestOnly")); val job = store.createFromUpload("baseline.elf", elfFixture())
+            val engines = FakeEngines().apply { repairBody = { project -> acceptRepairBaseline(project) } }
+            service(store, adapters(engines, acceptTestOnly)).use { service ->
+                service.initializeExistingStorage()
+                fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
+                val reconstructed = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "baseline_reconstruct_01").attempt
+                val repaired = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
+                    "agent-acp"), "baseline_repair_start_01").attempt
+                assertEquals(WorkflowRunState.COMPLETED, repaired.state)
+                val history = readProjectRecordedRepairHistory(store.runReportsDirectory(job.id, repaired.runId).resolve("source-tree"))
+                val baseline = assertNotNull(history.snapshot?.acceptedBaseline, "the accepted root was not projected")
+                assertEquals(WorkflowCandidate(webSourceRevisionId(baseline.sourceRevisionSha256), baseline.sourceRevisionSha256), repaired.candidate)
+                if (acceptTestOnly) {
+                    val accepted = assertNotNull(repaired.acceptedRevision)
+                    assertEquals(baseline.identity.value, accepted.graphNodeId)
+                } else assertNull(repaired.acceptedRevision, "a test-only baseline proof became release acceptance")
+            }
         }
     }
 
@@ -358,7 +507,7 @@ class WebProductionWorkflowsTest {
             ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, WebAgentHarness.LEGACY_OPENAI, emptyList()),
             RepairWorkflowAdapter(engines, FAST, WebAgentHarness.LEGACY_OPENAI))
         val prerequisites = harnessPrerequisites(acp = ACP_PROVENANCE, legacy = LEGACY_PROVENANCE)
-        val reported = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites))
+        val reported = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites = prerequisites))
             .associateBy { it.getValue("id").jsonPrimitive.content }
         fun harness(id: String) = reported.getValue(id).getValue("launch").jsonObject.getValue("harness").jsonObject
         assertEquals("acp", harness("workflow-reconstruct-agent-acp").getValue("kind").jsonPrimitive.content)
@@ -472,6 +621,7 @@ class WebProductionWorkflowsTest {
         var reconstructBody: (Path, WebReconstructionMode, AgentWorkflowProgress) -> Unit = { reports, mode, _ ->
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
+        var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
         override fun explore(binary: Path, reportsDirectory: Path) { calls.incrementAndGet(); exploreBody(reportsDirectory) }
         val harnesses = mutableListOf<WebAdmittedHarness?>()
         /** The descriptor the inert "factory" resolves at execution; null leaves the admitted one unchecked. */
@@ -485,7 +635,7 @@ class WebProductionWorkflowsTest {
         override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus {
             calls.incrementAndGet(); harnesses += harness; check(harness.selector == "acp")
             resolvedDescriptor?.let { harness.requireResolved(it) }
-            acceptRepairGraph(project); return RepairRunStatus.FULLY_ACCEPTED
+            repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
         }
     }
 
@@ -537,7 +687,7 @@ class WebProductionWorkflowsTest {
                 if (legacy != null) put(WebAgentHarness.LEGACY_OPENAI, facts(legacy, true))
             }
             return WebWorkflowPrerequisites(harnesses.values.single { it.selected }.prerequisite, WebPrerequisite.AVAILABLE,
-                WebPrerequisite.AVAILABLE, harnesses)
+                WebPrerequisite.AVAILABLE, harnesses = harnesses)
         }
 
         fun baseSha(): String = sha256("base".toByteArray())
@@ -565,6 +715,19 @@ class WebProductionWorkflowsTest {
                     repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256, state.indexSha256, corpus.sha256,
                     sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()), sha256("runtime".toByteArray()),
                     sha256("evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS))
+            }
+        }
+
+        /** Records a FULLY_ACCEPTED run whose accepted head is the unchanged root, as a validated baseline does. */
+        fun acceptRepairBaseline(project: Path) {
+            ModuleRevisionGraph.open(project, PROFILE).use { graph ->
+                graph.enableRunContract(); graph.retainRegressionInputs(INPUTS); graph.beginRun(2, 60_000)
+                graph.bindOriginalBinary(sha256("reference".toByteArray())); graph.bindExpectedObservations(sha256("expected".toByteArray()))
+                val state = graph.snapshot
+                graph.acceptAssessedBaseline(RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources()), state.profileSha256,
+                    state.indexSha256, graph.retainedRegressionCorpus().sha256, sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()),
+                    sha256("runtime".toByteArray()), sha256("evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS),
+                    RepairEvidence("valid", "inert baseline"))
             }
         }
 

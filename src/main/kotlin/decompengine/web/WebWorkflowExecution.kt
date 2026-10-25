@@ -31,7 +31,6 @@ internal class WorkflowExecutionMeter(
     private val maximumEntries: Int = 250_000,
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
-    private val toolCallIds = HashSet<String>()
     private val toolCalls = AtomicLong()
     private val inputTokens = AtomicLong(-1)
     private val outputTokens = AtomicLong(-1)
@@ -42,23 +41,41 @@ internal class WorkflowExecutionMeter(
     fun lastActivityNanos(): Long = lastActivity.get()
     fun toolCalls(): Long = toolCalls.get()
 
-    fun observe(event: AgentExecutionEvent) {
-        activity()
-        if (event is AgentToolEvent) synchronized(toolCallIds) {
-            // A bounded identity set; beyond it each event is counted, which can only over-count.
-            if (toolCallIds.size >= 100_000 || toolCallIds.add(event.toolCallId)) toolCalls.incrementAndGet()
+    /**
+     * One agent invocation. Tool-call identities are unique only within an invocation, so each one
+     * deduplicates its own updates and adds its distinct calls to the attempt total. A returned
+     * receipt that reports more calls than were observed raises the total to that report.
+     */
+    inner class Invocation internal constructor() {
+        private val identities = HashSet<String>()
+        private var counted = 0L
+
+        fun observe(event: AgentExecutionEvent) {
+            activity()
+            if (event is AgentToolEvent) synchronized(this) {
+                // A bounded identity set; beyond it each event is counted, which can only over-count.
+                if (identities.size >= 100_000 || identities.add(event.toolCallId)) count(1)
+            }
+        }
+
+        fun receipt(receipt: AgentExecutionReceipt) {
+            activity()
+            val usage = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result?.usage ?: return
+            synchronized(this) { usage.toolCalls?.toLong()?.let { reported -> if (reported > counted) count(reported - counted) } }
+            fun add(target: AtomicLong, value: Long?) {
+                if (value == null) return
+                target.updateAndGet { current -> val base = maxOf(current, 0); if (Long.MAX_VALUE - base < value) Long.MAX_VALUE else base + value }
+            }
+            add(inputTokens, usage.inputTokens); add(outputTokens, usage.outputTokens); add(cachedInputTokens, usage.cachedInputTokens)
+        }
+
+        private fun count(calls: Long) {
+            counted += calls
+            toolCalls.updateAndGet { if (Long.MAX_VALUE - it < calls) Long.MAX_VALUE else it + calls }
         }
     }
 
-    fun receipt(receipt: AgentExecutionReceipt) {
-        activity()
-        val usage = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result?.usage ?: return
-        fun add(target: AtomicLong, value: Long?) {
-            if (value == null) return
-            target.updateAndGet { current -> val base = maxOf(current, 0); if (Long.MAX_VALUE - base < value) Long.MAX_VALUE else base + value }
-        }
-        add(inputTokens, usage.inputTokens); add(outputTokens, usage.outputTokens); add(cachedInputTokens, usage.cachedInputTokens)
-    }
+    fun invocation(): Invocation = Invocation()
 
     /** Exact retained bytes, or null when the bounded walk could not complete (treated as exhausted). */
     fun outputBytes(): Long? {
@@ -110,9 +127,13 @@ internal class MeteredWorkflowProgress(
     }
     override fun runState(observation: AgentWorkflowRunObservation) { meter.activity(); delegate.runState(observation) }
 
-    private fun metered(task: AgentTaskProgress) = object : AgentTaskProgress {
-        override fun event(event: AgentExecutionEvent) { meter.observe(event); task.event(event) }
-        override fun complete(receipt: AgentExecutionReceipt) { meter.receipt(receipt); task.complete(receipt) }
+    // Each task is one agent invocation with its own tool-call identity space.
+    private fun metered(task: AgentTaskProgress): AgentTaskProgress {
+        val invocation = meter.invocation()
+        return object : AgentTaskProgress {
+            override fun event(event: AgentExecutionEvent) { invocation.observe(event); task.event(event) }
+            override fun complete(receipt: AgentExecutionReceipt) { invocation.receipt(receipt); task.complete(receipt) }
+        }
     }
 }
 
@@ -143,9 +164,9 @@ internal class BoundedWorkflowExecutor(
             result = try { BoundedWorkflowResult.Returned(body()) } catch (failure: Throwable) { BoundedWorkflowResult.Threw(failure) }
         }, "decomp-web-workflow-child").apply { isDaemon = true }
         meter.activity()
+        var lastOutput: Long? = meter.outputBytes()
         child.start()
         var exhausted: WorkflowLimitExhaustion? = null
-        var lastOutput: Long? = null
         var nextOutputCheck = started
         try {
             while (child.isAlive) {
@@ -171,14 +192,23 @@ internal class BoundedWorkflowExecutor(
             throw interrupted
         }
         if (exhausted != null) stop(child)
-        val wall = TimeUnit.NANOSECONDS.toMillis(nanoTime() - started)
-        // A body that finished after a breach was observed still exceeded its declared bound.
+        val finishedAt = nanoTime()
+        val wall = TimeUnit.NANOSECONDS.toMillis(finishedAt - started)
+        // A body that finished between samples is still held to every declared bound.
         val finished = exhausted?.let { BoundedWorkflowResult.Exhausted(it) } ?: checkNotNull(result)
-        val final = if (finished is BoundedWorkflowResult.Returned && meter.toolCallsMetered &&
-            meter.toolCalls().toULong() > limits.maxToolCalls) BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.TOOL_CALLS)
-        else if (finished is BoundedWorkflowResult.Returned && meter.outputBytes().let { it == null || it.toULong() > limits.maxOutputBytes })
-            BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.OUTPUT_BYTES)
-        else finished
+        val final = if (finished !is BoundedWorkflowResult.Returned) finished else {
+            val output = meter.outputBytes()
+            when {
+                elapsed(finishedAt, started) > limits.wallClockMs -> BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.WALL_CLOCK)
+                meter.toolCallsMetered && meter.toolCalls().toULong() > limits.maxToolCalls ->
+                    BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.TOOL_CALLS)
+                output == null || output.toULong() > limits.maxOutputBytes -> BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.OUTPUT_BYTES)
+                // Output written since the last sample is activity of unknown time, so it cannot prove idleness.
+                output == lastOutput && elapsed(finishedAt, meter.lastActivityNanos()) > limits.idleMs ->
+                    BoundedWorkflowResult.Exhausted(WorkflowLimitExhaustion.IDLE)
+                else -> finished
+            }
+        }
         return final to meter.usage(wall)
     }
 

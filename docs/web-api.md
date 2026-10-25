@@ -353,9 +353,12 @@ runtime there, so the selected revision's evidence is never modified.
 Every adapter runs its body on an owned child thread and enforces the attempt's
 recorded limits: wall-clock time, idle time (no new output or agent progress),
 the byte total of the attempt's own report directory and, where metered, agent
-tool calls (distinct tool-call identities reported by agent progress). A breach
-or cancellation interrupts the child, which stops its process trees, and the
-adapter does not return while the child is alive. Breaches record
+tool calls (identities are distinct within each agent invocation and summed across
+invocations; a returned receipt reporting more calls raises the count). Limits are
+checked again when a body finishes between samples. A breach or cancellation
+interrupts the child, which kills and awaits its helper process trees (including
+exploration's angr and strings helpers), and the adapter does not return while the
+child is alive. Breaches record
 `LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
 `PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
 iterations, each one agent invocation bounded at 256 tool calls), so its limits
@@ -369,7 +372,10 @@ one identifier can never name different sources. A candidate is never
 acceptance. After a repair attempt completes, and while the service still owns
 it, a read-only attestation reads the canonical repair graph: only a fully
 accepted head bound to a fully accepted run that began within this attempt, and
-published for release (test-only publication is refused), yields an acceptance
+published for release (test-only publication is refused), yields an acceptance. An
+input that already validates is accepted as the graph root without a repair
+iteration; its source digest and proof assurance come from the graph's recorded
+acceptance proof, and only a strictly contained proof is release-eligible. The result is an acceptance
 reference (`graphNodeId` = head, `artifactId` = `repair-graph`,
 `artifactSha256` = graph digest). The service records it once, rechecking the
 persisted candidate, versions and that the attempt is still the latest.
@@ -427,8 +433,23 @@ policy (`none`, `accepted-optional` or `recorded-required`) and whether its
 defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
 reported exactly for options that contact an agent. `supported` means every
 declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
-harness) was present at the last readiness probe; a missing prerequisite is
-`unavailable` with its fixed reason code, and a probe that did not finish makes
+harness and, for repair, a production-qualified contained repair validator) was
+established by the current readiness observation. Workflow prerequisites follow the
+same passive rule as harness readiness: a page load reads configuration and file
+metadata only (helper executability, bundled Ghidra presence) and launches no
+helper. Options that execute the binary therefore report `unknown` with
+`SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
+explicit agent preflight already checked the helpers. Starting a workflow is itself
+an explicit operator action: when the selected option needs the sandbox, its other
+prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
+bounded helper check (at most five seconds) before admission; a keyed replay still
+returns its recorded run whatever the check reports. It needs no configured agent and no prior
+preflight. Only a failed or timed-out check refuses the start, with
+`503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
+Evidence-only reconstruction needs only Ghidra presence. Until the secure repair
+runtime's validator qualification gate opens, repair reports
+`REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
+is `unavailable` with its fixed reason code, and a probe that did not finish makes
 the option `unknown`. Workflows without a production adapter (`build`,
 `validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
 other capability has `launch: null`. Launch facts describe adapters; admission
@@ -955,8 +976,10 @@ introduced by those controls.
 The job overview renders a start form from the last authenticated bootstrap. It lists
 only capabilities with `launch` facts and exactly one workflow; every option shows its
 reported state and reason, whether it runs the uploaded binary or contacts the configured
-agent (with its contract version), and the tools it requires. Options that are not
-`supported` stay visible but cannot be selected, and nothing is preselected: a harness or
+agent (with its contract version), and the tools it requires. An `unknown` option whose
+reason is `SANDBOX_HELPER_UNCHECKED` can be chosen, with a note that the server checks the
+helpers when the start is submitted; no preflight is asked for. Every other option that is
+not `supported` stays visible but cannot be selected, and nothing is preselected: a harness or
 evidence-only reconstruction is always an explicit choice, and evidence-only shows its
 limitations. Settings start from the server-approved defaults. Adjustable limits accept
 whole decimal values no larger than each default (positive for time and output, and an
@@ -1150,7 +1173,26 @@ transport failure, read the current status and require a fresh explicit operator
 automatically replay the POST. Shutdown closes admission, publishes cancellation immediately and
 waits for the owned callback cleanup while preserving the shutdown caller's interrupt status.
 
-Passive bootstrap never starts the agent. Its `harness` capability reports configuration, sandbox-helper and bundled-Ghidra presence, and folds in only the fixed `status` of the last explicit inspection: `failed` demotes a configured harness to `unavailable`/`AGENT_PREFLIGHT_FAILED`; any other status leaves it `supported` with a message that agent readiness is unproven (or, for `ready`, that the last inspection started the agent). It does not establish that any job can start work.
+Passive bootstrap never starts an agent or a helper probe. It reads configuration, helper-file
+metadata and bundled-Ghidra presence. Missing or invalid prerequisites remain unavailable; a valid
+configuration with no fresh helper observation is `unknown` with reason
+`SANDBOX_HELPER_UNCHECKED`. Use the explicit `POST /api/v1/agent/preflight` inspect action to check
+the configured agent and, after successful agent initialization, the existing bounded helper
+prerequisite. A `ready` agent-preflight result describes agent initialization; helper readiness is
+reported separately by bootstrap.
+
+Configuration metadata and explicit helper observations retain the original ten-second cache
+lifetime. A helper observation can supply `supported` only while it is fresh and its configuration
+identity and helper metadata match the current projection. Expiry returns to `unknown`; it never
+automatically runs another inspection. Configuration/helper identities stay internal and never
+appear in either public JSON document. The helper observation neither reads nor seeds the native
+execution capability cache and grants no workflow or admission authority.
+
+A failed inspection belonging to the current configuration demotes a configured harness to
+`unavailable`/`AGENT_PREFLIGHT_FAILED`. A `ready` inspection for that same configuration can report
+that the agent started, but a result for another configuration cannot make that claim. Missing,
+running, cancelled or mismatched agent observations leave agent readiness unproven. These fields
+do not establish that any job can start work; unavailable workflow adapters remain unavailable.
 
 ## Implemented progress-pin policy endpoint
 
