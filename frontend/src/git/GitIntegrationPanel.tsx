@@ -38,9 +38,14 @@ export function GitIntegrationPanel({ remotes, conflicts, writable, readDivergen
 
   async function save(resolution: 'ours' | 'theirs' | 'base' | 'text') {
     if (!detail) return;
-    const done = await onAction({ kind: 'gitConflictSaveRequest', fileId: detail.file.fileId, expectedSha256: detail.currentSha256,
+    const reviewed = detail;
+    // The shown file is stale from the moment a save is sent: nothing can be marked reviewed at the
+    // old digest, and the file is read again (on failure too) before it can be.
+    setDetail(null);
+    setReviewed(previous => { const next = { ...previous }; delete next[reviewed.file.fileId]; return next; });
+    await onAction({ kind: 'gitConflictSaveRequest', fileId: reviewed.file.fileId, expectedSha256: reviewed.currentSha256,
       resolution, content: resolution === 'text' ? draft : null });
-    if (done) await open(detail.file.fileId);
+    await open(reviewed.file.fileId);
   }
 
   return <section aria-labelledby="git-integration-title">

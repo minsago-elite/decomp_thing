@@ -43,6 +43,7 @@ let remoteList: unknown[];
 let operationReads: unknown[];
 let pushState: { fastForward: boolean; unconfirmed: string | null };
 let conflictState: { repositoryId: string; worktreeId: string; mergeInProgress: boolean; integration: unknown; files: { fileId: string; path: string }[] };
+let conflictReads = 0;
 
 function status(dirty: boolean) {
   return { repositoryId, worktreeId, repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
@@ -105,7 +106,7 @@ function serve(kind: string, path: string): Promise<unknown> {
       unconfirmedPushOperationId: pushState.unconfirmed };
     if (route === `${base}/conflicts/file_conflict`) return { repositoryId, worktreeId, file: conflictState.files[0],
       base: 'int a;\n', ours: 'int a = 1;\n', theirs: 'int a = 2;\n', current: '<<<<<<< ours\nint a = 1;\n=======\nint a = 2;\n>>>>>>> theirs\n',
-      currentSha256: 'c'.repeat(64), currentSizeBytes: '60', supported: true, reason: null };
+      currentSha256: (conflictReads++ === 0 ? 'c' : 'd').repeat(64), currentSizeBytes: '60', supported: true, reason: null };
     if (route === `${base}/divergence`) return { repositoryId, worktreeId, localRefName: 'refs/heads/main', localObjectId: head,
       trackingRefId: 'ref_origin_main', trackingRefName: 'refs/remotes/origin/main', trackingObjectId: other, remoteId: 'remote_1',
       fetchedAt: null, remoteState: 'unknown', ahead: '1', behind: '2', mergeBaseObjectId: older, mergeInProgress: false, strategies: [
@@ -131,6 +132,7 @@ beforeEach(() => {
   operationReads = [];
   pushState = { fastForward: true, unconfirmed: null };
   conflictState = { repositoryId, worktreeId, mergeInProgress: false, integration: null, files: [] };
+  conflictReads = 0;
   remoteList = [{ remoteId: 'remote_1', name: 'origin', transport: 'https', display: 'https://git.example.org/team/project.git',
     credential: 'configured', allowed: true, fetchedAt: null, fetchOperationId: null,
     trackingRefs: [{ refId: 'ref_origin_main', name: 'refs/remotes/origin/main', objectId: other }] }];
@@ -365,10 +367,13 @@ it('resolves a conflict with a concurrency token, stages only reviewed files and
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitConflictSaveRequest', expect.objectContaining({ action: 'git.conflict.save',
     fileId: 'file_conflict', expectedSha256: 'c'.repeat(64), resolution: 'theirs', content: null })]);
-  fireEvent.click(await screen.findByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
+  // The checkbox is enabled again only once the saved file has been read back.
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' })).toHaveProperty('disabled', false));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
   fireEvent.click(screen.getByRole('button', { name: 'Stage reviewed resolutions' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
-  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ action: 'git.conflict.complete', files: [{ fileId: 'file_conflict', sha256: 'c'.repeat(64) }] });
+  // Marked at the digest read after the save, never at the pre-save one.
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ action: 'git.conflict.complete', files: [{ fileId: 'file_conflict', sha256: 'd'.repeat(64) }] });
   fireEvent.click(screen.getByRole('button', { name: 'Abort merge' }));
   await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
   expect(transport.post.mock.calls[2]?.[3]).toMatchObject({ action: 'git.merge.abort' });
