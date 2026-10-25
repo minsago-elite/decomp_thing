@@ -424,7 +424,7 @@ def mutate(state, action):
     if state["mode"] != READY:
         fail("restore the current fixture mode before another mutation")
     if action.startswith("missing-"):
-        replacement = {"nodev": "dev", "nosuid": "suid", "noexec": "exec", "noatime": "relatime"}[action[8:]]
+        replacement = {"nodev": "dev", "nosuid": "suid", "noexec": "exec", "noatime": "atime,relatime"}[action[8:]]
         run("mount", ["-o", "remount," + BASE_OPTIONS.replace(action[8:], replacement), PATHS["scratch"]])
     elif action == "readonly":
         run("mount", ["-o", "remount," + BASE_OPTIONS.replace("rw,", "ro,"), PATHS["scratch"]])
