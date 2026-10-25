@@ -339,6 +339,46 @@ class WebProgramStructureTest {
         assertEquals(422, assertFailsWith<WebAccessDenied> { revision.pages.entity(WebStructureKind.TYPE, jobId, runId, revisionId, "x", "limit=1") }.status)
     }
 
+    @Test fun `long multi-byte names keep entity details and owned pages within the browser response limit`() {
+        val name = { index: Int -> "名".repeat(WebProgramStructureBuilder.MAXIMUM_IDENTIFIER_CHARACTERS - 8) + index }
+        val peers = (0 until 100).map { 0x401000uL + it.toULong() * 16uL }
+        val hubAddress = 0x500000uL
+        val globals = (0 until 60).map { RecoveredGlobal("global_$it", name(1000 + it), 0x600000uL + it.toULong() * 8uL, "int") }
+        val functions = peers.mapIndexed { index, address ->
+            RecoveredFunction(stableFunctionId(address), name(index), address, "void f(void)", null, calls = setOf(stableFunctionId(hubAddress)))
+        } + RecoveredFunction(stableFunctionId(hubAddress), "hub", hubAddress, "void hub(void)", null,
+            calls = peers.map(::stableFunctionId).toSet(), referencedGlobals = globals.map { it.id }.toSet())
+        val revision = Revision(model(functions, globals), plan(planned("core", functions.map { it.id }, globals.map { it.id })), listOf("core"))
+        fun bytes(value: JsonObject) = value.toString().toByteArray(Charsets.UTF_8).size
+
+        val detail = revision.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, stableFunctionId(hubAddress), null)
+        assertContract("entityDetail", detail)
+        assertTrue(bytes(detail) < 1_048_576, "entity detail bytes ${bytes(detail)}")
+        val entity = detail.getValue("entity").jsonObject
+        for (field in listOf("calls", "calledBy", "referencedGlobals")) {
+            val references = entity.getValue(field).jsonObject
+            assertEquals(if (field == "referencedGlobals") 60 else 100, references.getValue("total").jsonPrimitive.int, field)
+            assertTrue(references.items().size <= 50, field)
+        }
+        assertTrue(listOf("calls", "calledBy", "referencedGlobals").sumOf { entity.getValue(it).jsonObject.items().size } < 150,
+            "some reference list was shortened to fit")
+
+        var cursor: String? = null
+        var pages = 0
+        val seen = mutableListOf<String>()
+        do {
+            val page = revision.pages.module("owner", jobId, runId, revisionId, "core", "kind=functions&limit=200" + (cursor?.let { "&cursor=$it" } ?: ""))
+            assertContract("moduleDetail", page)
+            assertTrue(bytes(page) < 1_048_576, "owned page bytes ${bytes(page)}")
+            val owned = page.getValue("owned").jsonObject
+            seen += owned.items().map { it.text("entityId")!! }
+            cursor = next(owned)
+            pages++
+        } while (cursor != null)
+        assertEquals(functions.map { it.id }, seen)
+        assertTrue(pages > 1, "a 200-row owned page must split by bytes")
+    }
+
     @Test fun `historical schema one models remain extraction labels without an assessment`() {
         val revision = Revision(model(functions.take(1), schema = 1), plan(planned("core", listOf("fn_0000000000401000"))), listOf("core"))
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)

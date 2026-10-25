@@ -174,10 +174,15 @@ internal class WebProgramStructurePages(
                     WebStructureKind.TYPE -> module.typeIds
                 }
                 val start = if (ids.isEmpty()) { if (query.cursor != null) invalidCursor(); 0 } else offset(owner, route, index, query, ids.size)
-                val items = ids.subList(start, minOf(ids.size, start + query.limit)).map { id ->
-                    table.index[id]?.let { entityItem(index, table, it) } ?: buildJsonObject {
+                val items = ArrayList<JsonObject>(query.limit)
+                var bytes = 0
+                for (id in ids.subList(start, minOf(ids.size, start + query.limit))) {
+                    val item = table.index[id]?.let { entityItem(index, table, it) } ?: buildJsonObject {
                         put("kind", kind.wire); put("entityId", id); put("selector", JsonNull); put("recorded", false)
                     }
+                    val size = utf8Bytes(item) + 1
+                    if (items.isNotEmpty() && bytes + size > MAXIMUM_ITEM_BYTES) break
+                    bytes += size; items += item
                 }
                 put("owned", buildJsonObject {
                     put("kind", kind.wire); put("total", ids.size); put("items", JsonArray(items))
@@ -197,7 +202,7 @@ internal class WebProgramStructurePages(
                 val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
                 val fields = readWebStructureEntity(readModel(), table.offsets[row])
-                put("entity", JsonObject(entityItem(index, table, row) + detail(index, table, row, fields)))
+                put("entity", fitDetail(JsonObject(entityItem(index, table, row) + detail(index, table, row, fields))))
             }.let(::JsonObject)
         }
     }
@@ -250,6 +255,26 @@ internal class WebProgramStructurePages(
         put("selector", table.ids[row].takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
         put("name", table.names[row]?.let(::JsonPrimitive) ?: JsonNull); put("resolution", "recorded")
     }
+
+    /**
+     * Item-count bounds alone do not bound bytes: long multi-byte names can exceed the browser's 1 MiB response
+     * limit. Halve the largest reference list until the detail fits, keeping every recorded total.
+     */
+    private fun fitDetail(entity: JsonObject): JsonObject {
+        val lists = listOf("calls", "calledBy", "referencedGlobals", "referencedBy", "collisions", "strings")
+        var current = entity
+        while (utf8Bytes(current) > MAXIMUM_ITEM_BYTES) {
+            val largest = lists.mapNotNull { key -> (current[key] as? JsonObject)?.let { key to it } }
+                .filter { it.second.getValue("items").jsonArray.isNotEmpty() }
+                .maxByOrNull { utf8Bytes(it.second) } ?: break
+            val items = largest.second.getValue("items").jsonArray
+            current = JsonObject(current + (largest.first to JsonObject(largest.second + ("items" to JsonArray(items.take(items.size / 2))))))
+        }
+        check(utf8Bytes(current) <= MAXIMUM_ITEM_BYTES) { "Entity detail exceeds its response budget." }
+        return current
+    }
+
+    private fun utf8Bytes(value: JsonElement): Int = value.toString().toByteArray(Charsets.UTF_8).size
 
     private fun <T> bounded(values: List<T>, limit: Int, render: (T) -> JsonElement): JsonObject = buildJsonObject {
         put("total", values.size); put("items", JsonArray(values.take(limit).map(render)))
