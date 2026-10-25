@@ -247,8 +247,9 @@ export function checkSourceDiff(data: SourceDiff): void {
   requireValue(items.length <= page.limit && items.length <= data.totalChanged);
   for (const item of items) {
     if (item.status === 'renamed') requireValue(item.baseFile!.sha256 === item.headFile!.sha256);
+    // A declared content-kind change of identical bytes is a modification too.
     if (item.status === 'modified') requireValue(item.baseFile!.displayName === item.headFile!.displayName
-      && item.baseFile!.sha256 !== item.headFile!.sha256);
+      && (item.baseFile!.sha256 !== item.headFile!.sha256 || item.baseFile!.declaredUtf8Text !== item.headFile!.declaredUtf8Text));
   }
 }
 

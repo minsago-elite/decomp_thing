@@ -296,8 +296,9 @@ def check_source_diff(data: dict) -> None:
         if item["status"] == "renamed" and item["baseFile"]["sha256"] != item["headFile"]["sha256"]:
             raise ValueError("source diff renames require identical recorded digests")
         if item["status"] == "modified" and (item["baseFile"]["displayName"] != item["headFile"]["displayName"]
-                                             or item["baseFile"]["sha256"] == item["headFile"]["sha256"]):
-            raise ValueError("source diff modification must keep its path and change its digest")
+                                             or (item["baseFile"]["sha256"] == item["headFile"]["sha256"]
+                                                 and item["baseFile"]["declaredUtf8Text"] == item["headFile"]["declaredUtf8Text"])):
+            raise ValueError("source diff modification must keep its path and change its digest or declared content kind")
 
 
 def check_source_file_diff(data: dict) -> None:

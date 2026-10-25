@@ -130,7 +130,10 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
     <p>{copy.diffBoundary}</p>
     <p><a href={sourceDiffPath(basePath, selected)}>{copy.diffChooseAnother}</a> <a href={sourceDirectoryPath(basePath, selected)}>{copy.diffBrowseHead}</a></p>
     <h2 id="source-diff-results" ref={heading} tabIndex={-1}>{copy.diffChanged}</h2>
-    <button type="button" disabled={current?.state === 'loading'} onClick={() => { moveFocus.current = true; setRefresh(value => value + 1); }}>{copy.diffRefresh}</button>
+    {/* An expired continuation cannot be refreshed in place; refreshing restarts from the first page. */}
+    <button type="button" disabled={current?.state === 'loading'} onClick={() => {
+      if (cursor !== null) go(null); else { moveFocus.current = true; setRefresh(value => value + 1); }
+    }}>{copy.diffRefresh}</button>
     {current?.state === 'loading' && <p role="status">{copy.diffLoading}</p>}
     {current?.state === 'failed' && <p role="alert">{sourceReadMessage(current.failure)}</p>}
     {data && <>

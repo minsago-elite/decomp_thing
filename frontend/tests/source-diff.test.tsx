@@ -165,3 +165,20 @@ it('explains an added empty file without offering a patch that could not recreat
   await screen.findByText(/An empty file was added or removed/u);
   expect(screen.queryByRole('link', { name: 'Download the complete unified diff' })).toBeNull();
 });
+
+it('accepts a modification that changes only the declared content kind', () => {
+  const page = fixture('source-diff-content-kind', 'sourceDiff').data;
+  page.page.limit = 50;
+  expect(bindSourceDiff(page, selected, base)).toBe(page);
+});
+
+it('restarts an expired continuation from the first page when the comparison is refreshed', async () => {
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify({ apiVersion: 1, kind: 'error', requestId: 'request_expired',
+    error: { code: 'CURSOR_EXPIRED', message: 'A compared revision changed.', retryable: false, retryAfterMs: null, details: [] } }),
+  { status: 410, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_expired' } })));
+  const cursor = `${'a'.repeat(64)}_3_${'b'.repeat(32)}`;
+  mount('list', `?baseRunId=run_1&baseRevisionId=revision_1&cursor=${cursor}`);
+  await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh comparison' }));
+  await waitFor(() => { expect(location.search).toBe('?baseRunId=run_1&baseRevisionId=revision_1'); });
+});
