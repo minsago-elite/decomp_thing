@@ -1165,16 +1165,9 @@ class AcpAgentHarness(
             operation = operation,
         )
     } catch (failure: JsonRpcException) {
-        throw AgentExecutionException(
-            AgentFailure(
-                AgentFailureKind.PROTOCOL,
-                "ACP session preference setter was rejected",
-                details = buildMap {
-                    put("preference", kind)
-                    index?.let { put("preferenceIndex", it.toString()) }
-                    put("rpcCode", failure.code.toString())
-                },
-            ),
+        throw sessionPreferenceSetterFailure(
+            kind, index, configuration.environment.values.map { it.value },
+            configuration.sessionPreferences.privateIdentifiers(), rpcCode = failure.code.toString(),
         )
     } catch (_: AcpExpectedError) {
         throw safeSessionPreferenceSetterFailure(kind, index)
@@ -1185,15 +1178,9 @@ class AcpAgentHarness(
     private fun safeSessionPreferenceSetterFailure(
         kind: String,
         index: Int?,
-    ): AgentExecutionException = AgentExecutionException(
-        AgentFailure(
-            AgentFailureKind.PROTOCOL,
-            "ACP session preference setter returned an invalid response",
-            details = buildMap {
-                put("preference", kind)
-                index?.let { put("preferenceIndex", it.toString()) }
-            },
-        ),
+    ): AgentExecutionException = sessionPreferenceSetterFailure(
+        kind, index, configuration.environment.values.map { it.value },
+        configuration.sessionPreferences.privateIdentifiers(),
     )
 
     @OptIn(UnstableApi::class)

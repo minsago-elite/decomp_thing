@@ -154,10 +154,11 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
         </a>
         <span class="build-label">{copy.earlyPreview}</span>
         <DisplayPreferences />
+        {session && <SessionStatus session={session} placement="header" />}
       </header>
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
       <ConnectionNotice />
-      {session && <SessionStatus session={session} />}
+      {session && <SessionStatus session={session} placement="page" />}
       <div class="app-layout">
         <nav class="app-nav" aria-label={copy.mainNavigation} ref={navigation} onKeyDown={event => {
           if (narrowNavigation && navigationOpen && event.key === 'Escape') {

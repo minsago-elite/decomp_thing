@@ -21,6 +21,11 @@ internal object WebRecordedModuleProvenance {
     const val MAXIMUM_BYTES = 16 * 1024 * 1024
     private val MODULE_ID = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
     private val DECIMAL = Regex("0|[1-9][0-9]{0,18}")
+    private val SIGNED_INT = Regex("0|-?[1-9][0-9]{0,9}")
+    private val SHA256 = Regex("[0-9a-f]{64}")
+    private val COMPILATION_OUTCOMES = setOf(
+        "passed", "failed", "failed-to-start", "timed-out", "output-limit-exceeded", "source-changed",
+    )
     private val LIMITS = StrictJsonLimits(
         maximumInputBytes = MAXIMUM_BYTES, maximumCanonicalBytes = MAXIMUM_BYTES,
         maximumDepth = 32, maximumNodes = 1_000_000,
@@ -111,7 +116,59 @@ internal object WebRecordedModuleProvenance {
             put("planSha256", files.plan.sha256); put("generationEvidenceSha256", files.generation.sha256)
             put("promptCharacters", characters?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
             put("promptBudgetCharacters", maximum?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
+            recordedValidation(profile, manifest, module.id, selected, revision)?.let { put("validation", it) }
         }
+    }
+
+    /** Join the declared checkpoint commitment without reading its private payload. */
+    private fun recordedValidation(profile: ReconstructionProfile, manifest: SourceTreeManifest, moduleId: String,
+        selected: WebRevisionSourceFile, revision: JsonObject): JsonObject? = try {
+        val path = profile.layout.declaration("module-evidence").materialize(mapOf("module" to moduleId))
+        val checkpoint = manifest.files.singleOrNull { it.path == path }
+        if (checkpoint == null || ProjectFileRole.EVIDENCE !in checkpoint.roles ||
+            ProjectFileRole.BUILD_INPUT in checkpoint.roles || checkpoint.contentKind != ProjectContentKind.UTF8_TEXT ||
+            revision.text("checkpointPath") != path || !SHA256.matches(checkpoint.sha256) ||
+            revision.text("checkpointSha256") != checkpoint.sha256) null
+        else buildJsonObject {
+            put("authority", "reported-module-validation")
+            put("checkpointSha256", checkpoint.sha256)
+            put("compilation", recordedCompilation(profile, selected, revision["compilation"]) ?: JsonNull)
+        }
+    } catch (failure: Exception) {
+        if (failure is CancellationException || failure is InterruptedException) throw failure
+        null
+    }
+
+    /** Only closed, source-bound compiler facts escape; commands and diagnostic text stay private. */
+    private fun recordedCompilation(profile: ReconstructionProfile, selected: WebRevisionSourceFile,
+        value: JsonElement?): JsonObject? = try {
+        val compilation = value as? JsonObject
+        if (compilation == null) null else {
+            require(compilation.text("sourceSha256") == selected.evidence.sha256)
+            val outcome = compilation.text("outcome")
+            require(outcome in COMPILATION_OUTCOMES)
+            val code = compilation["returnCode"]
+            val returnCode = if (code === JsonNull) null else {
+                val primitive = code as? JsonPrimitive ?: error("Compilation code is unavailable.")
+                require(!primitive.isString && SIGNED_INT.matches(primitive.content))
+                requireNotNull(primitive.intOrNull)
+            }
+            require(outcome != "passed" || returnCode == 0)
+            require(outcome != "failed-to-start" || returnCode == null)
+            require(selected.evidence.acceptedImplementation != true || outcome == "passed")
+            val diagnosticsSha256 = compilation.text("diagnosticsSha256")
+            require(SHA256.matches(diagnosticsSha256))
+            val diagnosticsBytes = compilation.number("diagnosticsBytes")
+            require(diagnosticsBytes <= profile.budgets.buildMaximumOutputBytes)
+            buildJsonObject {
+                put("sourceSha256", selected.evidence.sha256); put("outcome", outcome)
+                put("returnCode", returnCode?.let(::JsonPrimitive) ?: JsonNull)
+                put("diagnosticsSha256", diagnosticsSha256); put("diagnosticsBytes", diagnosticsBytes.toString())
+            }
+        }
+    } catch (failure: Exception) {
+        if (failure is CancellationException || failure is InterruptedException) throw failure
+        null
     }
 
     private fun JsonObject.objectField(name: String): JsonObject =
