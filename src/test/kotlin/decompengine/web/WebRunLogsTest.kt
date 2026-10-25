@@ -83,6 +83,13 @@ class WebRunLogsTest {
         assertTrue(limitedWindow.getValue("byteLimited").jsonPrimitive.boolean)
         assertTrue(limited.toString().toByteArray().size < 300 * 1024)
         assertTrue(limitedWindow.getValue("lineCount").jsonPrimitive.int in 1 until 500)
+        // A byte-limited tail still ends at the final line instead of stopping partway through its window.
+        val newest = logs.range(jobId, run, wide, false, logs.parseQuery("tail=true&limit=200"), now)
+        val newestWindow = newest.getValue("range").jsonObject
+        assertEquals("500", newest.getValue("lines").jsonArray.last().jsonObject.getValue("number").jsonPrimitive.content)
+        assertFalse(newestWindow.getValue("truncatedAfter").jsonPrimitive.boolean)
+        assertTrue(newestWindow.getValue("byteLimited").jsonPrimitive.boolean)
+        assertEquals(500 - newestWindow.getValue("lineCount").jsonPrimitive.int + 1, newestWindow.getValue("firstLine").jsonPrimitive.int)
 
         val missing = logs.range(jobId, run, null, false, logs.parseQuery(null), now)
         assertEquals("missing", missing.getValue("state").jsonPrimitive.content); assertFalse("lines" in missing)

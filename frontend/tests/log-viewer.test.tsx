@@ -129,11 +129,43 @@ describe('log viewer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search the whole log' }));
     expect(await screen.findByText(/Whole-log literal search for “a\+\(b”: 1 matching lines/)).toBeTruthy();
     expect(transport.get.mock.calls[1]![1]).toContain('search=a%2B%28b');
-    transport.get.mockResolvedValueOnce({ data: range(1, 500, 1000) });
+    transport.get.mockResolvedValueOnce({ data: range(32, 500, 1000) });
     fireEvent.click(screen.getByRole('button', { name: 'Go to line 42' }));
-    expect(await screen.findByText(/Showing lines 1–500 of 1000/)).toBeTruthy();
-    expect(transport.get.mock.calls[2]![1]).toContain('fromLine=1&limit=500');
+    expect(await screen.findByText(/Showing lines 32–531 of 1000/)).toBeTruthy();
+    expect(transport.get.mock.calls[2]![1]).toContain('fromLine=32&limit=500');
     expect(screen.getByText('line 42')).toBeTruthy();
+  });
+
+  it('keeps a missing log refreshable and follows it until the build publishes one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { jobId, runId, logId, source, readAt, redactionPolicy } = fixture;
+    const missing = { jobId, runId, logId, source, readAt, redactionPolicy, attempt: running, state: 'missing', maximumBytes: '8388608' };
+    transport.get.mockResolvedValueOnce({ data: missing }).mockResolvedValueOnce({ data: missing });
+    mount(); await flush();
+    expect(screen.getByText('This attempt has no recorded build log yet.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' })); await flush();
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    transport.get.mockResolvedValueOnce({ data: range(1, 3, 3, { attempt: running }) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
+    expect(transport.get.mock.calls[2]![1]).toContain('tail=true');
+    expect(screen.getByText(/Showing lines 1–3 of 3/)).toBeTruthy();
+  });
+
+  it('keeps the reader position when they scroll away while a follow read is in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    transport.get.mockResolvedValueOnce({ data: range(1, 500, 500, { attempt: running }) });
+    mount(); await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+    let finish: (value: unknown) => void = () => undefined;
+    transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    const viewport = screen.getByRole('region', { name: 'Build log lines' });
+    viewport.scrollTop = 0; fireEvent.scroll(viewport);
+    finish({ data: range(501, 2, 502, { attempt: running }) }); await flush();
+    expect(screen.getByText(/Showing lines 1–502 of 502/)).toBeTruthy();
+    expect(viewport.scrollTop).toBe(0);
+    expect(screen.getByText('Following paused because you scrolled away. Resume to continue.')).toBeTruthy();
   });
 
   it('explains a missing or oversized log instead of rendering lines', async () => {

@@ -43,8 +43,13 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const bufferRef = useRef<LogBuffer | null>(null);
   const pendingScroll = useRef<'end' | bigint | null>(null);
   const mounted = useRef(true);
+  const [attemptState, setAttemptState] = useState<string | null>(null);
+  const followRef = useRef<Follow>('off');
+  followRef.current = follow;
 
-  const read = useCallback(async (parameters: Record<string, string>, keep: 'start' | 'end'): Promise<AvailableLog | null> => {
+  /** `scroll` is decided when the response arrives, so a reader who paused meanwhile keeps their position. */
+  const read = useCallback(async (parameters: Record<string, string>, keep: 'start' | 'end',
+    scroll?: () => 'end' | bigint | null): Promise<AvailableLog | null> => {
     const controller = new AbortController();
     requests.current.add(controller);
     try {
@@ -52,12 +57,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
       if (controller.signal.aborted || !mounted.current) return null;
       if (data.jobId !== jobId || data.runId !== runId) throw new ApiClientError('invalid_response');
       setError('');
+      setAttemptState(data.attempt.state);
       if (data.state !== 'available') {
         bufferRef.current = null; setBuffer(null);
         setStatus(data.state === 'oversized' ? { state: 'oversized', limit: data.maximumBytes } : { state: 'missing' });
         return null;
       }
       const merged = mergeLogRange(bufferRef.current, data, keep);
+      if (scroll) pendingScroll.current = scroll();
       bufferRef.current = merged.buffer; setBuffer(merged.buffer);
       setNotice(merged.replaced ? copy.replaced : merged.released > 0 ? textMessage(copy.released, { count: merged.released }) : '');
       setStatus({ state: 'ready' });
@@ -74,8 +81,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   useEffect(() => {
     mounted.current = true;
     const active = requests.current;
-    pendingScroll.current = 'end';
-    void read({ tail: 'true', limit: '200' }, 'end');
+    void read({ tail: 'true', limit: '200' }, 'end', () => 'end');
     return () => {
       mounted.current = false;
       for (const controller of active) controller.abort();
@@ -85,14 +91,15 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     };
   }, [read]);
 
-  const ended = buffer ? terminal.has(buffer.meta.attempt.state) : false;
+  const ended = attemptState !== null && terminal.has(attemptState);
   useEffect(() => {
-    if (follow !== 'on' || !availability.visible || !availability.online || status.state !== 'ready' || ended) return;
+    // A missing log is followed too: the build publishes it only when it finishes.
+    if (follow !== 'on' || !availability.visible || !availability.online || (status.state !== 'ready' && status.state !== 'missing') || ended) return;
     let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       timer = undefined;
       const current = bufferRef.current;
-      pendingScroll.current = 'end';
-      void read(current ? { fromLine: String(lastLine(current) + 1n), limit: String(LOG_PAGE_LINES) } : { tail: 'true', limit: '200' }, 'end');
+      void read(current ? { fromLine: String(lastLine(current) + 1n), limit: String(LOG_PAGE_LINES) } : { tail: 'true', limit: '200' }, 'end',
+        () => followRef.current === 'on' ? 'end' : null);
     }, FOLLOW_INTERVAL_MS);
     return () => { if (timer !== undefined) clearTimeout(timer); };
   }, [follow, availability.visible, availability.online, status.state, ended, buffer, read]);
@@ -115,13 +122,18 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     setScrollTop(element.scrollTop);
     // Auto-follow stops as soon as the reader moves away from the newest lines.
     const fromEnd = displayed.length * LOG_ROW_PX - (element.scrollTop + LOG_VIEWPORT_PX);
-    if (follow === 'on' && fromEnd > LOG_ROW_PX) setFollow('scrolled');
+    if (follow === 'on' && fromEnd > LOG_ROW_PX) {
+      pendingScroll.current = null;
+      followRef.current = 'scrolled';
+      setFollow('scrolled');
+    }
   };
   const goToLine = (line: bigint) => {
     setFollow('off'); setFind('');
-    pendingScroll.current = line;
-    const from = line > 100n ? line - 100n : 1n;
-    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'start');
+    followRef.current = 'off';
+    // Little leading context: even maximal lines keep the target inside one byte-budgeted response.
+    const from = line > 10n ? line - 10n : 1n;
+    void read({ fromLine: String(from), limit: String(LOG_PAGE_LINES) }, 'start', () => line);
   };
 
   const rows = visibleWindow(scrollTop, LOG_VIEWPORT_PX, LOG_ROW_PX, displayed.length);
@@ -130,7 +142,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
     <h2 id="log-title">{copy.title}</h2>
     <p>{displayMessage(copy.boundary, { policy: <code>web-log-v1</code> })}</p>
     {status.state === 'loading' && <p role="status">{copy.loading}</p>}
-    {status.state === 'missing' && <p role="status">{copy.missing}</p>}
+    {status.state === 'missing' && <>
+      <p role="status">{copy.missing}</p>
+      <div class="job-actions">
+        <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
+        {!ended && <button type="button" onClick={() => setFollow(value => value === 'on' ? 'off' : 'on')}>{follow === 'on' ? copy.pause : copy.follow}</button>}
+      </div>
+      {follow === 'on' && !ended && <p>{copy.waitingForLog}</p>}
+    </>}
     {status.state === 'oversized' && <p role="status">{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
     {buffer && meta && <>
@@ -150,7 +169,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
         <button type="button" disabled={lastLine(buffer) >= buffer.totalLines} onClick={() => {
           void read({ fromLine: String(lastLine(buffer) + 1n), limit: String(LOG_PAGE_LINES) }, 'end');
         }}>{copy.loadLater}</button>
-        <button type="button" onClick={() => { pendingScroll.current = 'end'; void read({ tail: 'true', limit: '200' }, 'end'); }}>{copy.newest}</button>
+        <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.newest}</button>
         {!ended && <button type="button" onClick={() => {
           if (follow === 'on') { setFollow('off'); return; }
           pendingScroll.current = 'end'; setFind(''); setFollow('on');

@@ -100,21 +100,34 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         put("sourceSha256", capture.sha256); put("totalBytes", capture.totalBytes.toString()); put("totalLines", capture.totalLines.toString())
         put("redactedLines", capture.redactedLines.toString())
         val total = capture.totalLines
-        // A position just past the end is an empty, current range: callers can follow without repeating lines.
-        val first = if (query.tail) maxOf(1L, total - query.limit + 1) else minOf(requireNotNull(query.fromLine), total + 1)
+        fun size(line: Line) = line.text.toByteArray(Charsets.UTF_8).size + 64
         var bytes = 0
-        val selected = mutableListOf<Line>()
-        var index = first
-        while (index <= total && selected.size < query.limit) {
-            val line = capture.line((index - 1).toInt())
-            val size = line.text.toByteArray(Charsets.UTF_8).size + 64
-            if (selected.isNotEmpty() && bytes + size > MAXIMUM_RESPONSE_TEXT_BYTES) break
-            bytes += size; selected += line; index += 1
+        val selected = ArrayDeque<Line>()
+        val first: Long
+        if (query.tail) {
+            // Spend the byte budget backward from the final line, so the newest lines are always included.
+            var index = total
+            while (index >= 1 && selected.size < query.limit) {
+                val line = capture.line((index - 1).toInt())
+                if (selected.isNotEmpty() && bytes + size(line) > MAXIMUM_RESPONSE_TEXT_BYTES) break
+                bytes += size(line); selected.addFirst(line); index -= 1
+            }
+            first = index + 1
+        } else {
+            // A position just past the end is an empty, current range: callers can follow without repeating lines.
+            first = minOf(requireNotNull(query.fromLine), total + 1)
+            var index = first
+            while (index <= total && selected.size < query.limit) {
+                val line = capture.line((index - 1).toInt())
+                if (selected.isNotEmpty() && bytes + size(line) > MAXIMUM_RESPONSE_TEXT_BYTES) break
+                bytes += size(line); selected.addLast(line); index += 1
+            }
         }
+        val budgetStopped = selected.size < query.limit && if (query.tail) first > 1 else first + selected.size - 1 < total
         put("range", buildJsonObject {
             put("firstLine", first.toString()); put("lineCount", selected.size.toString())
             put("truncatedBefore", first > 1); put("truncatedAfter", first + selected.size - 1 < total)
-            put("byteLimited", selected.size < query.limit && first + selected.size - 1 < total)
+            put("byteLimited", budgetStopped)
         })
         put("lines", buildJsonArray { selected.forEach { add(lineJson(it)) } })
         put("search", query.search?.let { search(capture, it) } ?: JsonNull)
