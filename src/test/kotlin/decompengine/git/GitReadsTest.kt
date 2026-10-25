@@ -223,6 +223,28 @@ class GitReadsTest {
         assertTrue(patch.text.contains("new file mode 120000") && patch.text.contains("+target.c"), patch.text)
     }
 
+    @Test fun `a cached removal is one entry and a conflicted file shows its combined patch`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("combined")
+        f.write(workTree, "a.c", "int a;\n"); f.write(workTree, "shared.c", "int shared = 0;\n")
+        f.commitAll(gitDir, workTree, "base")
+        f.raw(gitDir, workTree, "rm", "-q", "--cached", "--", "a.c")
+        val removed = GitReads.status(f.runner, gitDir, workTree).entries.filter { it.path.exact == "a.c" }
+        assertEquals(1, removed.size, "one identity per path")
+        assertEquals(GitIndexChange.DELETED, removed.single().staged)
+        assertTrue(removed.single().untracked)
+        f.raw(gitDir, workTree, "add", "--", "a.c")
+        f.raw(gitDir, workTree, "switch", "-q", "-c", "other")
+        f.write(workTree, "shared.c", "int shared = 2;\n"); f.raw(gitDir, workTree, "commit", "-q", "-am", "other")
+        f.raw(gitDir, workTree, "switch", "-q", "trunk")
+        f.write(workTree, "shared.c", "int shared = 1;\n"); f.raw(gitDir, workTree, "commit", "-q", "-am", "ours")
+        f.raw(gitDir, workTree, "merge", "-q", "other", expect = 1)
+        val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
+        val conflicted = unstaged.files.single { it.path.exact == "shared.c" }
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, conflicted)
+        assertTrue(patch.text.startsWith("diff --cc shared.c"), patch.text)
+        assertTrue(patch.text.contains("int shared = 1;") && patch.text.contains("int shared = 2;"), patch.text)
+    }
+
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("unborn")
         f.write(workTree, "first.c", "int first;\n")

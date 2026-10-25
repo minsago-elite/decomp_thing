@@ -752,6 +752,16 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
   `409 REF_CHANGED` instead of repeating or skipping an entry.
 
+A path has exactly one status entry. After `git rm --cached`, Git reports both a staged deletion
+and an untracked record for the file, and these are merged into one entry with
+`staged: "deleted"` and `untracked: true`. The patch for a selected file is the section that
+belongs to its record:
+
+- a type change keeps both its deletion and addition sections;
+- an unresolved conflict returns Git's combined `diff --cc` section;
+- a metadata-only rename or mode change is matched by its header, quoted as Git quotes unusual
+  names.
+
 Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
 and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from
 its bytes. Identity is the opaque `fileId`, derived from the exact bytes and the work tree, so
