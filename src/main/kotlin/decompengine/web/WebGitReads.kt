@@ -122,7 +122,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         // the version plus every listed path and state, so any change to the listing ends the walk.
         val anchor = "status_v_" + decompengine.git.GitStorage.sha256(buildString {
             append(version).append('\n')
-            entries.forEach { append(it.path.fileId(view.record.worktreeId)).append(it.ignored).append(it.untracked).append(it.staged).append(it.unstaged).append('\n') }
+            entries.forEach { append(it.path.fileId(view.worktreeId)).append(it.ignored).append(it.untracked).append(it.staged).append(it.unstaged).append('\n') }
         }).take(32)
         val offset = anchoredOffset(cursor, anchor)
         val counts = buildJsonObject {
