@@ -35,9 +35,12 @@ ORCHESTRATION_RECORD = ORACLE / "orchestration-phase-reference.json"
 ORACLE_MANIFEST = ORACLE / "oracle-manifest.json"
 BUILD_RECORD = ORACLE / "build-record.json"
 ORACLE_DRIVER = ORACLE / "artifacts/gcc-driver.stripped"
+RUNTIME_PROBE = ROOT / "oracle/gcc/reference_runtime_probe.py"
+RUNTIME_PROBE_BYTES = RUNTIME_PROBE.read_bytes()
 IMAGE = "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0"
 IMAGE_CONFIG = "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f"
 ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
+PROGRAM_ENVIRONMENT = {**ENVIRONMENT, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 WORKDIR = "/w"
 TIMEOUT_SECONDS = 60
 ANALYSIS_BOUNDARY = (
@@ -356,7 +359,7 @@ def normalize_temporaries(data: bytes) -> bytes:
     return TEMPORARY_NAME.sub(replace, data)
 
 
-def phase_commands(text: str) -> list[dict]:
+def phase_commands(text: str, *, strict: bool = False) -> list[dict]:
     commands = []
     for line in text.splitlines():
         if not line.startswith(" "):
@@ -370,11 +373,15 @@ def phase_commands(text: str) -> list[dict]:
         try:
             argv = shlex.split(line)
         except ValueError:
+            if strict:
+                raise SystemExit(f"unparseable reference phase command: {line}")
             continue
         if not argv:
             continue
         tool = PurePosixPath(argv[0]).name
         if tool not in PHASE_TOOLS:
+            if strict:
+                raise SystemExit(f"undeclared reference phase command: {argv[0]}")
             continue
         phase = "preprocess" if tool == "cc1" and "-E" in argv else PHASE_TOOLS[tool]
         commands.append({"phase": phase, "tool": argv[0], "argv": argv, "stdoutPipedToNextPhase": piped})
@@ -388,23 +395,75 @@ def run_gcc(runtime: str, scratch: Path, spec: dict, label: str, extra: list[str
     return workspace, run_container(runtime, workspace, ["gcc", *extra, *spec["arguments"]], b"")
 
 
-def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int) -> dict:
+def inspect_runtime(runtime: str, workspace: Path, paths: list[str]) -> dict:
+    result = run_container(runtime, workspace,
+                           ["python3", "-B", "-c", RUNTIME_PROBE_BYTES.decode(), *paths], b"",
+                           workspace_read_only=True)
+    if result.returncode or result.stderr:
+        raise SystemExit(f"reference runtime inspection failed: {result.stderr.decode(errors='replace')}")
+    return json.loads(result.stdout)
+
+
+def validate_phase_tools(phases: list[dict], identities: dict) -> None:
+    allowed = {entry["path"] for entry in identities.values()}
+    allowed.update(entry["invokedAs"] for entry in identities.values() if "invokedAs" in entry)
+    for phase in phases:
+        if phase["tool"] not in allowed:
+            raise SystemExit(f"reference phase path is not admitted: {phase['tool']}")
+
+
+def execute_reference_program(runtime: str, workspace: Path, path: str, closure: dict) -> subprocess.CompletedProcess:
+    # The producer has exited; this separate execution sees the entire workspace read-only.
+    # Recheck the measured executable, loader and libraries before the fixed invocation.
+    script = (
+        "import base64,hashlib,json,subprocess,sys; from pathlib import Path\n"
+        "record=json.loads(sys.argv[1]); target=sys.argv[2]\n"
+        "if target!=record['elf']['path']: raise SystemExit('runtime target does not match measured executable')\n"
+        "entries=[record['elf'],*record['libraries']]\n"
+        "if record['interpreter']: entries.append(record['interpreter'])\n"
+        "for entry in entries:\n"
+        " p=Path(entry['path']); resolved=p.resolve(strict=True); data=resolved.read_bytes()\n"
+        " if str(resolved)!=entry['resolvedPath'] or len(data)!=entry['bytes'] or hashlib.sha256(data).hexdigest()!=entry['sha256']: raise SystemExit('runtime input changed: '+entry['path'])\n"
+        "result=subprocess.run([target],env=json.loads(sys.argv[3]),capture_output=True,timeout=15,check=False)\n"
+        "print(json.dumps({'exitCode':result.returncode,'stdoutBase64':base64.b64encode(result.stdout).decode(),'stderrBase64':base64.b64encode(result.stderr).decode()}))\n"
+    )
+    result = run_container(runtime, workspace,
+                           ["python3", "-B", "-c", script, json.dumps(closure), path, json.dumps(PROGRAM_ENVIRONMENT)],
+                           b"", workspace_read_only=True)
+    if result.returncode or result.stderr:
+        raise SystemExit(f"reference program guard or launcher failed: {result.stderr.decode(errors='replace')}")
+    observed = json.loads(result.stdout)
+    if set(observed) != {"exitCode", "stdoutBase64", "stderrBase64"} or type(observed["exitCode"]) is not int:
+        raise SystemExit("invalid reference program launcher response")
+    return subprocess.CompletedProcess([path], observed["exitCode"],
+                                       base64.b64decode(observed["stdoutBase64"], validate=True),
+                                       base64.b64decode(observed["stderrBase64"], validate=True))
+
+
+def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int, phase_tools: dict) -> dict:
+    if spec not in ORCHESTRATION_CASES:
+        raise SystemExit("orchestration invocation is outside the fixed reference inventory")
     _, plan = run_gcc(runtime, scratch, spec, f"plan-{attempt}", ["-###"])
-    _, trace = run_gcc(runtime, scratch, spec, f"trace-{attempt}", ["-v"])
-    workspace, result = run_gcc(runtime, scratch, spec, f"run-{attempt}", [])
     plan_stderr = normalize_temporaries(plan.stderr)
+    planned = phase_commands(plan_stderr.decode("utf-8", "backslashreplace"), strict=True)
+    validate_phase_tools(planned, phase_tools)
+    _, trace = run_gcc(runtime, scratch, spec, f"trace-{attempt}", ["-v"])
     trace_stderr = normalize_temporaries(trace.stderr)
+    traced = phase_commands(trace_stderr.decode("utf-8", "backslashreplace"))
+    validate_phase_tools(traced, phase_tools)
+    workspace, result = run_gcc(runtime, scratch, spec, f"run-{attempt}", [])
     observed = {
         "plan": {
             "exitCode": plan.returncode,
             "stderr": stream(plan_stderr),
-            "phases": phase_commands(plan_stderr.decode("utf-8", "backslashreplace")),
+            "phases": planned,
         },
         "executedPhases": {
             "source": "commands echoed by `gcc -v` before each phase runs; a failing phase stops later ones",
             "exitCode": trace.returncode,
             "stderrSha256": digest(trace_stderr),
-            "phases": phase_commands(trace_stderr.decode("utf-8", "backslashreplace")),
+            "stderr": stream(trace_stderr),
+            "phases": traced,
         },
         "execution": {
             "exitCode": result.returncode,
@@ -414,9 +473,15 @@ def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int) -> dict:
         },
     }
     if spec["program"]:
-        program = run_container(runtime, workspace, [f"./{spec['program']}"], b"")
+        if result.returncode:
+            raise SystemExit(f"{spec['id']}: linked reference program was not produced successfully")
+        path = f"{WORKDIR}/{spec['program']}"
+        closure = inspect_runtime(runtime, workspace, [path])[path]
+        program = execute_reference_program(runtime, workspace, path, closure)
         observed["programBehavior"] = {
             "program": spec["program"],
+            "invocation": {"argv": [path], "cwd": WORKDIR, "environment": PROGRAM_ENVIRONMENT},
+            "runtime": closure,
             "exitCode": program.returncode,
             "stdout": stream(program.stdout),
             "stderr": stream(program.stderr),
@@ -424,9 +489,9 @@ def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int) -> dict:
     return observed
 
 
-def capture_orchestration_case(runtime: str, scratch: Path, spec: dict) -> dict:
-    first = orchestrate(runtime, scratch, spec, 1)
-    second = orchestrate(runtime, scratch, spec, 2)
+def capture_orchestration_case(runtime: str, scratch: Path, spec: dict, phase_tools: dict) -> dict:
+    first = orchestrate(runtime, scratch, spec, 1, phase_tools)
+    second = orchestrate(runtime, scratch, spec, 2, phase_tools)
     if first != second:
         raise SystemExit(f"{spec['id']}: independent repetition differs")
     return {
@@ -572,9 +637,24 @@ def stream(data: bytes) -> dict:
     }
 
 
+def authenticate_image(runtime: str) -> str:
+    inspect = subprocess.run(
+        [runtime, "image", "inspect", "--format", "{{.Id}}", IMAGE],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    image_id = inspect.stdout.strip()
+    if not image_id.startswith("sha256:"):
+        image_id = f"sha256:{image_id}"
+    if image_id != IMAGE_CONFIG:
+        raise SystemExit(f"image config {image_id} does not match pinned {IMAGE_CONFIG}")
+    return image_id
+
+
 def run_container(
-    runtime: str, workspace: Path, arguments: list[str], stdin: bytes, mounts: tuple = ()
+    runtime: str, workspace: Path, arguments: list[str], stdin: bytes, mounts: tuple = (),
+    *, workspace_read_only: bool = False,
 ) -> subprocess.CompletedProcess:
+    authenticate_image(runtime)
     command = [
         runtime, "run", "--rm", "-i",
         "--platform", "linux/amd64",
@@ -587,7 +667,7 @@ def run_container(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pull", "never",
-        "-v", f"{workspace}:{WORKDIR}",
+        "-v", f"{workspace}:{WORKDIR}" + (":ro" if workspace_read_only else ""),
         "-w", WORKDIR,
     ]
     for source, target in mounts:
@@ -711,14 +791,6 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
     lines = result.stdout.decode().splitlines()
     version, machine, driver, cc1, include = lines[:5]
     hashes = {path: sha for sha, path in (line.split(maxsplit=1) for line in lines[5:])}
-    inspect = subprocess.run(
-        [runtime, "image", "inspect", "--format", "{{.Id}}", IMAGE], capture_output=True, text=True, check=True
-    )
-    image_id = inspect.stdout.strip()
-    if not image_id.startswith("sha256:"):
-        image_id = f"sha256:{image_id}"
-    if image_id != IMAGE_CONFIG:
-        raise SystemExit(f"image config {image_id} does not match pinned {IMAGE_CONFIG}")
     return {
         "image": IMAGE,
         "imageConfig": IMAGE_CONFIG,
@@ -743,7 +815,9 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
     preprocessing = [capture_case(runtime, scratch, spec) for spec in PREPROCESSING_CASES]
     dependency = [capture_case(runtime, scratch, spec) for spec in DEPENDENCY_CASES]
     phase_tools = phase_tool_identities(runtime, scratch)
-    orchestration_cases = [capture_orchestration_case(runtime, scratch, spec) for spec in ORCHESTRATION_CASES]
+    phase_runtime = inspect_runtime(runtime, scratch / "phase-identity",
+                                    [identity["driver"]["path"], *[item["path"] for item in phase_tools.values()]])
+    orchestration_cases = [capture_orchestration_case(runtime, scratch, spec, phase_tools) for spec in ORCHESTRATION_CASES]
     capture = {
         "tool": "scripts/capture-gcc-preprocessing-reference.py",
         "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results",
@@ -813,7 +887,19 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
             "id": "gcc-16-2-0-orchestration-phase-reference",
             "status": "captured",
             "scope": "real-driver-phase-orchestration",
-            "toolchain": {**identity, "includeSearch": "default system include search", "phaseTools": phase_tools},
+            "toolchain": {**identity, "includeSearch": "default system include search", "phaseTools": phase_tools,
+                          "runtimeClosure": phase_runtime},
+            "referenceInvocationPolicy": {
+                "imageAuthentication": "the exact pinned image config is verified before every container invocation",
+                "driver": identity["driver"],
+                "cases": "only the exact versioned arguments and staged input bytes listed in cases are admitted",
+                "modes": [["-###"], ["-v"], []],
+                "phaseTools": "unknown or malformed planned commands are rejected; each parsed planned or verbose phase path must match a declared phaseTools path or its explicit invokedAs name",
+                "producedPrograms": "only the named output of a successful reference case; executable, interpreter and library bytes are rechecked before exec in a read-only workspace with only the fixed environment and PATH",
+                "runtimeProbe": {"path": "oracle/gcc/reference_runtime_probe.py", "sha256": digest(RUNTIME_PROBE_BYTES)},
+                "runtimeScope": "ELF interpreter and transitive startup libraries from the pinned loader --list; the linker plugin is inspected separately; kernel vDSO is identified by name, not image-owned bytes",
+                "executionEvidence": "GCC plans and verbose transcripts are reference observations, not independent exec receipts; candidate enforcement and authenticated Kotlin-owned consumption remain required",
+            },
             "capture": {
                 **capture,
                 "runsPerRepetition": (

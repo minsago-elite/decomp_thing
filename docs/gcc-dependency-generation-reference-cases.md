@@ -79,6 +79,36 @@ Each phase records its `argv` without the driver's trailing ` |` pipeline
 connector; `stdoutPipedToNextPhase` says whether its output feeds the next
 phase. These cases do not pass `-nostdinc`.
 
+Every container invocation first verifies the pinned image config, including
+identity queries. The orchestration reference accepts only its fixed case
+arguments and staged inputs. Unknown or malformed planned commands fail the
+capture, and parsed phase executable paths must match the declared tool paths
+or explicit `PATH` names. The complete verbose transcript is retained so its
+reported phase observations can be independently parsed.
+
+`toolchain.runtimeClosure` records the ELF bytes, interpreter, resolved loader
+and transitive startup libraries for the driver and each phase tool, including
+the linker plugin. The probe uses the pinned image's `readelf` and glibc loader
+in `--list` mode; inspected programs are not started by the probe. Unexpected
+interpreters, RPATH/RUNPATH, unresolved libraries and libraries outside image
+roots fail capture. The kernel-provided vDSO is identified by name, not by an
+image file hash. This inventory describes startup loading, not arbitrary later
+`dlopen` activity.
+
+Each produced executable has its own runtime closure tied to the captured
+artifact hash. Execution uses a separate container with the workspace mounted
+read-only; the launcher rechecks executable, interpreter and library bytes,
+then starts only the declared output with the retained exact argv, cwd and
+cleared environment. Launcher failure aborts capture, separately from a valid
+nonzero program exit. Both repetitions must retain identical runtime identities
+and behavior. The reference policy and probe source digest are recorded beside
+the cases.
+
+These checks establish the reference invocation contract. GCC's verbose report
+does not independently observe internal `collect2` to `ld` execution or plugin
+loading. Authenticated Kotlin-owned phase receipts and enforcement for an
+untrusted reconstructed candidate remain required by issues #53, #136 and #712.
+
 ## Reproduction
 
 ```sh

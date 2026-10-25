@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import runpy
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -31,6 +32,14 @@ class PhaseCommandTest(unittest.TestCase):
         self.assertEqual(phase["argv"][-1], "|")
         self.assertFalse(phase["stdoutPipedToNextPhase"])
 
+    def test_closed_plan_rejects_unknown_or_malformed_commands(self):
+        for command in (' /w/undeclared-tool source.c\n', f' {CC1} "unclosed\n'):
+            with self.assertRaises(SystemExit):
+                phase_commands(command, strict=True)
+
+    def test_verbose_parser_preserves_non_command_diagnostics(self):
+        self.assertEqual(phase_commands(' /usr/local/include\n  int invalid = ;\n'), [])
+
     def test_checked_in_record_has_no_pipeline_marker_in_argv(self):
         record = json.loads(ORCHESTRATION_RECORD.read_text())
         piped = set()
@@ -50,6 +59,7 @@ class ContainerSandboxTest(unittest.TestCase):
     def test_driver_temporaries_get_a_writable_tmp_on_every_runtime(self):
         for runtime in ("docker", "podman"):
             with mock.patch("subprocess.run") as run:
+                run.return_value.stdout = CAPTURE["IMAGE_CONFIG"]
                 run_container(runtime, Path("/workspace"), ["gcc", "-c", "source.c"], b"")
             command = run.call_args.args[0]
             self.assertIn("--read-only", command)
@@ -57,10 +67,57 @@ class ContainerSandboxTest(unittest.TestCase):
             self.assertEqual(command[index + 1], "/tmp")
             self.assertLess(index, command.index(CAPTURE["IMAGE"]))
 
+    def test_image_mismatch_prevents_any_execution(self):
+        result = subprocess.CompletedProcess([], 0, stdout="sha256:" + "0" * 64, stderr="")
+        with mock.patch("subprocess.run", return_value=result) as run:
+            with self.assertRaisesRegex(SystemExit, "does not match pinned"):
+                run_container("podman", Path("/workspace"), ["gcc", "--version"], b"")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1:3], ["image", "inspect"])
+
+    def test_image_authentication_precedes_run_and_readonly_program_mount(self):
+        with mock.patch("subprocess.run") as run:
+            run.return_value.stdout = CAPTURE["IMAGE_CONFIG"]
+            run_container("podman", Path("/workspace"), ["/w/prog"], b"", workspace_read_only=True)
+        self.assertEqual(run.call_args_list[0].args[0][1:3], ["image", "inspect"])
+        self.assertIn("/workspace:/w:ro", run.call_args_list[1].args[0])
+
+    def test_phase_basename_does_not_admit_an_unrelated_tool_path(self):
+        identities = {"compile": {"path": CC1}}
+        with self.assertRaisesRegex(SystemExit, "not admitted"):
+            CAPTURE["validate_phase_tools"](
+                [{"tool": "/w/cc1", "phase": "compile", "argv": ["/w/cc1"]}], identities)
+        CAPTURE["validate_phase_tools"]([{"tool": CC1}], identities)
+
     def test_records_name_driver_temporaries_only_under_tmp(self):
         text = ORCHESTRATION_RECORD.read_text()
         self.assertNotRegex(text, r"\./cc[A-Za-z0-9]{6}")
         self.assertNotRegex(text, r"/tmp/cc[A-Za-z0-9]{6}")
+
+    def test_produced_programs_bind_loader_libc_and_exact_output(self):
+        record = json.loads(ORCHESTRATION_RECORD.read_text())
+        for case in record["cases"]:
+            observed = case["observed"]
+            if "programBehavior" not in observed:
+                continue
+            program = observed["programBehavior"]
+            closure = program["runtime"]
+            artifact = next(a for a in observed["execution"]["artifacts"] if a["path"] == program["program"])
+            self.assertEqual(closure["elf"]["sha256"], artifact["sha256"])
+            self.assertEqual(closure["elf"]["bytes"], artifact["bytes"])
+            self.assertEqual(closure["interpreter"]["path"], "/lib64/ld-linux-x86-64.so.2")
+            self.assertIn("libc.so.6", [library["name"] for library in closure["libraries"]])
+
+    def test_complete_verbose_transcripts_are_retained(self):
+        record = json.loads(ORCHESTRATION_RECORD.read_text())
+        for case in record["cases"]:
+            trace = case["observed"]["executedPhases"]
+            self.assertEqual(trace["stderr"]["sha256"], trace["stderrSha256"])
+
+    def test_phase_runtime_closures_bind_declared_tool_identities(self):
+        toolchain = json.loads(ORCHESTRATION_RECORD.read_text())["toolchain"]
+        for identity in [toolchain["driver"], *toolchain["phaseTools"].values()]:
+            self.assertEqual(toolchain["runtimeClosure"][identity["path"]]["elf"]["sha256"], identity["sha256"])
 
 
 if __name__ == "__main__":
