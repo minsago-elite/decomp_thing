@@ -1380,6 +1380,90 @@ class GccProductionFullExportQualificationTest {
         }
     }
 
+    private fun qualifyNativeStructuralReplay(result: JsonObject, output: Path, captured: Path,
+        profile: GccDriverStructuralInputsV1, intent: JsonObject) {
+        fun retain(name: String, maximum: Int = MAXIMUM_RECEIPT_BYTES): ByteArray =
+            readStable(output.resolve(name), maximum).also { publish(captured.resolve(name), it) }
+        assertEquals("unavailable-pending-population-and-external-composition", result.requiredText("callAuthority"))
+        assertEquals(output.resolve(GccBundledNativeStructuralEvidenceV1.BINDING_NAME),
+            Path.of(result.requiredText("structuralReplayBinding")))
+        val bindingBytes = retain(GccBundledNativeStructuralEvidenceV1.BINDING_NAME)
+        assertEquals(result.requiredText("structuralReplayBindingSha256"), OracleArtifacts.sha256(bindingBytes))
+        val binding = OracleJson.parseCanonical(bindingBytes).jsonObject
+        for (field in listOf("scored", "complete", "releaseEligible", "negativeCompleteness")) {
+            assertFalse(binding.getValue(field).jsonPrimitive.boolean)
+        }
+        assertEquals(result.requiredText("nativeBindingSha256"), binding.requiredText("nativeBindingSha256"))
+        assertEquals(result.requiredText("nativeObservationsSha256"), binding.requiredText("nativeObservationsSha256"))
+        assertEquals(result.requiredText("programModelSha256"), binding.requiredText("programModelSha256"))
+        val scoreBytes = retain(GccBundledNativeStructuralEvidenceV1.BOUNDARY_NAME, 64 * 1024 * 1024)
+        assertEquals(output.resolve(GccBundledNativeStructuralEvidenceV1.BOUNDARY_NAME), Path.of(result.requiredText("selectedBoundaryScore")))
+        assertEquals(result.requiredText("selectedBoundaryScoreSha256"), OracleArtifacts.sha256(scoreBytes))
+        assertEquals(binding.requiredText("selectedBoundaryScoreSha256"), OracleArtifacts.sha256(scoreBytes))
+        val score = OracleJson.parseCanonical(scoreBytes, TREE_MANIFEST_LIMITS).jsonObject
+        assertTrue(score.getValue("productionVerified").jsonPrimitive.boolean)
+        assertEquals(result.requiredText("programModelSha256"), score.requiredText("programModelSha256"))
+        assertEquals(setOf("model-provenance", "function-boundaries", "surviving-symbol-identities"),
+            score.getValue("admittedDomains").jsonArray.map { it.jsonPrimitive.content }.toSet())
+        assertTrue("calls" in score.getValue("unavailableDomains").jsonArray.map { it.jsonPrimitive.content })
+        val modelBinding = retain(GccBundledNativeStructuralEvidenceV1.MODEL_BINDING_NAME)
+        assertEquals(binding.requiredText("modelBindingSha256"), OracleArtifacts.sha256(modelBinding))
+        assertEquals(score.requiredText("fullExportBindingSha256"), OracleArtifacts.sha256(modelBinding))
+        val observation = retain(GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME, 64 * 1024 * 1024)
+        val boundary = retain(GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME)
+        assertEquals(binding.requiredText("boundaryObservationSha256"), OracleArtifacts.sha256(observation))
+        GccDriverStructuralBoundaryEvidenceV1.verifyRetained(profile, modelBinding,
+            readStable(captured.resolve("program_model.json"), Math.toIntExact(MAXIMUM_MODEL_BYTES)), observation, boundary)
+        val boundaryFiles = mapOf("structural-replay-request.json" to "replayRequestSha256",
+            "structural-replay-attachment.json" to "replayAttachmentSha256",
+            "structural-replay-execution.json" to "replayExecutionSha256",
+            "structural-replay-output.json" to "replayMetadataSha256",
+            "structural-replay-capture.json" to "replayCaptureSha256")
+        for ((file, digest) in boundaryFiles) assertEquals(score.requiredText(digest), OracleArtifacts.sha256(retain(file)))
+        retain("structural-replay-start-authorized.json")
+        val producerFiles = mapOf("independent-machine-call-request.json" to "producerRequestSha256",
+            "independent-machine-call-attachment.json" to "producerAttachmentSha256",
+            "independent-machine-call-execution.json" to "producerExecutionSha256",
+            "independent-machine-call-capture.json" to "producerCaptureSha256")
+        val producer = producerFiles.mapValues { (file, digest) -> retain(file).also {
+            assertEquals(binding.requiredText(digest), OracleArtifacts.sha256(it))
+        } }
+        val start = OracleJson.parseCanonical(retain("independent-machine-call-start-authorized.json")).jsonObject
+        assertEquals(binding.requiredText("nativeBindingSha256"), start.requiredText("nativeBindingSha256"))
+        assertEquals(binding.requiredText("selectedBoundaryScoreSha256"), start.requiredText("selectedBoundaryScoreSha256"))
+        val request = decompengine.oracle.machinecalls.IndependentMachineCallRequestV1.parse(
+            producer.getValue("independent-machine-call-request.json"))
+        assertEquals(profile.fullBinary.sha256, request.richFile.sha256)
+        assertEquals(profile.fullBinary.bytes, request.richFile.bytes)
+        assertEquals(profile.artifactManifestSha256, request.manifestSha256)
+        assertEquals(GccDriverStructuralBoundaryEvidenceV1.FUNCTION_ORACLE_SHA256, request.canonicalOracle.sha256)
+        val artifacts = intent.getValue("artifacts").jsonArray.map { it.jsonObject }.associateBy { it.requiredText("role") }
+        assertEquals(artifacts.getValue("ghidra-bridge-jar").requiredText("sha256"), request.runtime.bridgeSha256)
+        assertEquals(artifacts.getValue("ghidra-archive").requiredText("sha256"), request.runtime.archiveSha256)
+        val reportBytes = retain(GccBundledMachineCallReplayOutputCapture.REPORT_NAME, request.limits.maximumOutputBytes)
+        assertEquals(output.resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME),
+            Path.of(result.requiredText("independentMachineCallReport")))
+        assertEquals(result.requiredText("independentMachineCallReportSha256"), OracleArtifacts.sha256(reportBytes))
+        assertEquals(binding.requiredText("producerReportSha256"), OracleArtifacts.sha256(reportBytes))
+        val report = OracleJson.parseCanonical(reportBytes,
+            decompengine.oracle.machinecalls.IndependentMachineCallsV1.outputLimits(request.limits)).jsonObject
+        decompengine.oracle.machinecalls.IndependentMachineCallReportV1.validateWorker(report,
+            binding.requiredText("producerRequestSha256"), request)
+        assertTrue(report.getValue("calls").jsonArray.isNotEmpty())
+        for (prefix in listOf("structural-replay", "independent-machine-call")) {
+            val execution = OracleJson.parseCanonical(readStable(output.resolve("$prefix-execution.json"), MAXIMUM_RECEIPT_BYTES)).jsonObject
+            val attachmentBytes = readStable(output.resolve("$prefix-attachment.json"), MAXIMUM_RECEIPT_BYTES)
+            val attachment = OracleJson.parseCanonical(attachmentBytes).jsonObject
+            assertEquals(OracleArtifacts.sha256(attachmentBytes), execution.requiredText("attachmentSha256"))
+            assertEquals(attachment.requiredText("requestSha256"), execution.requiredText("requestSha256"))
+            assertEquals(0L, execution.getValue("childExitCode").jsonPrimitive.long)
+            for (field in listOf("unitAbsent", "cgroupAbsent", "processesAbsent")) assertTrue(execution.getValue(field).jsonPrimitive.boolean)
+            val resources = attachment.getValue("resources").jsonObject
+            assertTrue(resources.getValue("maximumResidentBytes").jsonPrimitive.long <= 4L * 1024 * 1024 * 1024)
+            assertTrue(resources.getValue("wallClockMillis").jsonPrimitive.long <= 300_000)
+        }
+    }
+
     @Test
     fun `live selected GCC native call observations retain profile-bound capture evidence`() {
         assumeTrue(
@@ -1440,8 +1524,8 @@ class GccProductionFullExportQualificationTest {
 
             val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
             val result = OracleJson.parseCanonical(resultBytes).jsonObject
-            assertEquals("gcc-bundled-cli-native-call-result-v1", result.requiredText("provider"))
-            assertEquals(1L, result.getValue("schemaVersion").jsonPrimitive.long)
+            assertEquals("gcc-bundled-cli-native-call-result-v${if (engine == "driver") 2 else 1}", result.requiredText("provider"))
+            assertEquals(if (engine == "driver") 2L else 1L, result.getValue("schemaVersion").jsonPrimitive.long)
             assertFalse(result.getValue("complete").jsonPrimitive.boolean)
             assertFalse(result.getValue("scored").jsonPrimitive.boolean)
             assertFalse(result.getValue("releaseEligible").jsonPrimitive.boolean)
@@ -1580,6 +1664,7 @@ class GccProductionFullExportQualificationTest {
             assertTrue(populationBytes.contentEquals(OracleJson.canonicalBytes(replayPopulation())),
                 "independent complete native stream replays differ")
             publish(captured.resolve("native-population-replay.json"), populationBytes)
+            if (engine == "driver") qualifyNativeStructuralReplay(result, output, captured, selectedProfile, retainedIntent)
             val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
             publish(captured.resolve("result.json"), resultBytes)
             publish(captured.resolve("native-call-observation-binding.json"), bindingBytes)
@@ -1614,7 +1699,9 @@ class GccProductionFullExportQualificationTest {
                 "complete" to JsonPrimitive(false),
                 "scored" to JsonPrimitive(false),
                 "releaseEligible" to JsonPrimitive(false),
-                "limitation" to JsonPrimitive("live contained raw native-call collection and deterministic complete byte replay only; independent producer regeneration, oracle identity mapping and call scoring remain open"),
+                "limitation" to JsonPrimitive(if (engine == "driver")
+                    "live native capture, exact paired-model boundary admission and contained independent positive producer; call population, external composition and call scoring remain unavailable"
+                    else "live contained raw native-call collection and deterministic complete byte replay only; independent producer regeneration, oracle identity mapping and call scoring remain open"),
             ))
             publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
             println("Retained unscored live $engine native-call evidence at $captured ($observationsBytes observation bytes)")
