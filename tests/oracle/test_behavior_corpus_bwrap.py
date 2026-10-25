@@ -671,7 +671,8 @@ class LiveAggregateBoundTests(unittest.TestCase):
         source = cls.root / "adversary.c"
         source.write_text(ADVERSARY_SOURCE)
         cls.executable = cls.root / "adversary"
-        subprocess.run([compiler, "-O1", "-o", os.fspath(cls.executable), os.fspath(source)], check=True)
+        subprocess.run([compiler, "-O1", "-o", os.fspath(cls.executable), os.fspath(source)],
+                       env={**os.environ, "TMPDIR": os.fspath(cls.root)}, check=True, timeout=30)
         cls.payload = cls.executable.read_bytes()
 
     @classmethod
