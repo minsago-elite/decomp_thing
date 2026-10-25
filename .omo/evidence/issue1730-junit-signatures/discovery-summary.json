@@ -129,5 +129,6 @@
   "junitXmlSha256": "3e74033716fddfcd9d40bd8d00b83518d3106953ad6dceeb779587f6b89e0cc8",
   "schemaVersion": 1,
   "sourceHead": "de238fd3bf897eef9bac857b85a5dc2a54bc67d1",
-  "taskRoutesSha256": "5781fb1670a1d486b5a3504e4ee992d4dd4e6f7fa7f01ea2d10453a6fd3e2e33"
+  "taskRoutesCaptureSha256": "5781fb1670a1d486b5a3504e4ee992d4dd4e6f7fa7f01ea2d10453a6fd3e2e33",
+  "taskRoutesSha256": "dfcab36bf5da946e27a5b9d24ab4779e64949949328693edb35234c47bfe49e0"
 }
