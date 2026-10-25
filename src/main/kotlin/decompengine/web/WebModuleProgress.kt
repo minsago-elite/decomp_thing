@@ -42,8 +42,10 @@ internal fun WebJobService.readModuleProgress(jobId: String, runId: String): Web
     val progress = read("reconstruction_progress.json", MODULE_PROGRESS_SMALL_BYTES)
     val capture = WebModuleProgressCapture(attempt, progress, read("reconstruction.json", MODULE_PROGRESS_SMALL_BYTES),
         read("source-tree/reports/module_plan.json", MODULE_PROGRESS_EVIDENCE_BYTES),
-        // Per-module outcomes exist only after generation; avoid the large read while modules are still generating.
-        if (parsedProgress(progress)?.phase in setOf("complete", "unresolved")) read("source-tree/reports/confidence.json", MODULE_PROGRESS_EVIDENCE_BYTES) else null)
+        // Per-module outcomes are written when generation finishes, before the build; skip the large read only
+        // while an active attempt is still generating modules.
+        if (generationFinished(parsedProgress(progress)) || attempt.state.terminal)
+            read("source-tree/reports/confidence.json", MODULE_PROGRESS_EVIDENCE_BYTES) else null)
     if (getAttempt(jobId, runId).version != attempt.version)
         throw WebAccessDenied(409, "REPORT_CHANGED", "The attempt changed during this read. Refresh its module progress.")
     return capture
@@ -77,6 +79,10 @@ private fun parsedProgress(bytes: ByteArray?): ReportedProgress? {
     if (completed > total) return null
     return ReportedProgress(phase, completed, total, root.text("module")?.takeIf(MODULE_ID::matches))
 }
+
+/** Generation finished once every planned module is generated, even if the later build never completes. */
+private fun generationFinished(progress: ReportedProgress?): Boolean = progress != null &&
+    (progress.phase in setOf("complete", "unresolved") || progress.phase == "modules" && progress.total > 0 && progress.completed == progress.total)
 
 private fun parsedSummary(bytes: ByteArray?): ReportedSummary? {
     val root = parse(bytes, SMALL) ?: return null
@@ -162,11 +168,12 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
     val phase = progress?.phase
 
     fun ended(reached: Boolean) = when { queued -> "pending"; running -> if (reached) "active" else "pending"; reached -> "stopped"; else -> "not-reached" }
-    val analysisDone = progress != null || plan != null
-    val planningDone = phase in setOf("modules", "complete", "unresolved") || plan != null && phase != "planning"
-    val generationDone = phase in setOf("complete", "unresolved") || summary != null ||
-        (phase == "modules" && progress != null && progress.total > 0 && progress.completed == progress.total)
+    // Evidence that a later stage finished establishes every earlier one. Reports are captured separately and may
+    // be missing, oversized or from different moments, so the stages are reconciled into one ordered sequence.
     val validationDone = summary != null
+    val generationDone = validationDone || generationFinished(progress)
+    val planningDone = generationDone || phase == "modules" || plan != null && phase != "planning"
+    val analysisDone = planningDone || progress != null || plan != null
     val published = attempt.candidate != null || attempt.acceptedRevision != null
     fun stage(name: String, done: Boolean, previousDone: Boolean, completed: Long? = null, total: Long? = null, outcome: String? = null) = buildJsonObject {
         put("stage", name)
@@ -178,7 +185,8 @@ internal fun webModuleProgress(jobId: String, capture: WebModuleProgressCapture,
     val stages = if (!reconstruct) emptyList() else listOf(
         stage("analysis", analysisDone, true),
         stage("planning", planningDone, analysisDone, outcome = if (plan != null) "plan-recorded" else null),
-        stage("generation", generationDone, planningDone, progress?.completed ?: summary?.moduleCount, progress?.total ?: summary?.moduleCount),
+        // The final summary outranks a progress record captured at another moment.
+        stage("generation", generationDone, planningDone, summary?.moduleCount ?: progress?.completed, summary?.moduleCount ?: progress?.total),
         stage("validation", validationDone, generationDone, outcome = summary?.let { if (it.buildExitCode == 0L) "build-passed" else "build-failed" }),
         // A candidate retained after an unfinished build is recorded, but its publication never completed.
         stage("publication", published && validationDone, validationDone || published, outcome = when {
