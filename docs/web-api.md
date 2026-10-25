@@ -785,12 +785,13 @@ and never contain a path or pathspec. `If-Match` must name the guarded `worktree
 
 Routine work-tree operations never use up the job's operation quota. When an admission would
 reach it, the oldest terminal work-tree records are retired, and the newest 63 stay replayable by
-their keys. Initialization, import and `recovery-required` records are never retired. If a retired key is sent again,
-it is admitted as a new request, and its guards refuse it unless the reviewed state still holds.
+their keys. Initialization, import and `recovery-required` records are never retired. If a
+retired key is sent again, it is admitted as a new request, and its guards refuse it unless the
+reviewed state still holds.
 
-A path can have two status records with one file identity: a staged deletion and an untracked
-replacement. The server then resolves each selection against the record that the action applies
-to: the deletion for `git.unstage` and the replacement for `git.stage`.
+After `git rm --cached`, a path is both staged for deletion and untracked, in one status entry.
+Selecting that entry for `git.unstage` unstages the deletion, and selecting it for `git.stage`
+stages the replacement.
 
 The server checks guards and selection twice: at admission under the job lock, and again by the
 single operation executor immediately before Git runs. A race with another tab, a worker or an
