@@ -726,7 +726,11 @@ class WebJobService(
         val candidate = attempt.candidate?.takeIf { it.revisionId == revisionId && attempt.endedAt != null } ?: unavailable()
         val directory = try { store.runReportsDirectory(jobId, runId).resolve("source-tree") } catch (_: Exception) { unavailable() }
         if (!java.nio.file.Files.isDirectory(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) unavailable()
-        return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256)
+        // Canonical build-input commitments, cross-checked with the manifest and build contract digest.
+        val sources = try { readRevisionSources(jobId, runId, revisionId) } catch (_: Exception) { unavailable() }
+        if (sources.reference.sourceSha256 != candidate.sourceSha256) unavailable()
+        val commitments = sources.files.associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, it.sizeBytes) }
+        return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256, commitments)
     }
 
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */

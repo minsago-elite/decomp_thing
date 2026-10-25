@@ -30,7 +30,7 @@ class ManagedGitRepositoriesTest {
             if (job != jobId || run != "run_1" || revision != "revision_1") {
                 throw ManagedGitException("SOURCE_REVISION_UNAVAILABLE", "The selected source snapshot is unavailable.")
             }
-            GitSourceSnapshot(snapshot, run, revision, "a".repeat(64))
+            GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), commitments)
         }
 
         init {
@@ -43,6 +43,12 @@ class ManagedGitRepositoriesTest {
             write(".env", "TOKEN=fixture-only")
             write("source_tree_manifest.json", "{}\n")
             Files.setPosixFilePermissions(snapshot.resolve("CMakeLists.txt"), PosixFilePermissions.fromString("rwxr-xr-x"))
+        }
+
+        /** The candidate's recorded build inputs, captured once like a completed attempt's commitments. */
+        val commitments: Map<String, GitSourceCommitment> = listOf("CMakeLists.txt", "src/main file.c", "src/ünïcode/módulo.c",
+            "include/fixture.h").associateWith { path ->
+            GitSourceCommitment(GitSourceCopy.digestOf(snapshot.resolve(path)), Files.size(snapshot.resolve(path)))
         }
 
         fun write(path: String, text: String) {
@@ -110,6 +116,18 @@ class ManagedGitRepositoriesTest {
         assertEquals("REPOSITORY_EXISTS", assertFailsWith<ManagedGitException> {
             service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "init_request_key_0002")
         }.code)
+    }
+
+    @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
+        for (change in listOf("modify", "delete")) Fixture().use { f ->
+            if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")
+            else Files.delete(f.snapshot.resolve("include/fixture.h"))
+            val service = f.open()
+            val failed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "changed_snapshot_${change}"))
+            assertEquals(GitOperationState.FAILED, failed.state, change)
+            assertEquals("SOURCE_REVISION_UNAVAILABLE", failed.failureCode, change)
+            assertTrue(service.listing(jobId).repositories.isEmpty())
+        }
     }
 
     @Test fun `an explicit initial branch is validated and invalid requests start no operation`(): Unit = Fixture().use { f ->

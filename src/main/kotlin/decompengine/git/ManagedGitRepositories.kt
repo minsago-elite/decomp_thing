@@ -94,7 +94,24 @@ data class GitRepositoryListing(val repositories: List<GitRepositoryRecord>, val
 data class GitOperationAdmission(val operation: GitOperationRecord, val replayed: Boolean)
 
 /** Recorded source snapshot selected for initialization; the resolver owns run/revision authority. */
-data class GitSourceSnapshot(val directory: Path, val runId: String, val revisionId: String, val sourceSha256: String)
+/** One recorded build-input commitment of a candidate: exact SHA-256 and byte size. */
+data class GitSourceCommitment(val sha256: String, val sizeBytes: Long) {
+    init { require(sha256.matches(Regex("[0-9a-f]{64}")) && sizeBytes >= 0) }
+}
+
+/**
+ * Recorded source snapshot selected for initialization. [commitments] are the candidate's canonical
+ * build-input declarations (`path -> digest/size`); the copy must reproduce every one of them.
+ */
+data class GitSourceSnapshot(
+    val directory: Path,
+    val runId: String,
+    val revisionId: String,
+    val sourceSha256: String,
+    val commitments: Map<String, GitSourceCommitment>,
+) {
+    init { require(commitments.isNotEmpty()) { "a source snapshot needs its recorded commitments" } }
+}
 
 fun interface GitSourceSnapshotResolver {
     /** Throws [ManagedGitException] `SOURCE_REVISION_UNAVAILABLE` when the attempt has no such candidate. */
@@ -355,6 +372,15 @@ class ManagedGitRepositories(
         val snapshot = sources.resolve(operation.jobId, request.runId, request.revisionId)
         val workTree = GitStorage.directories(staging, WORK_TREE)
         val digests = GitSourceCopy.copy(snapshot.directory, workTree)
+        // The retained tree may have changed after the attempt ended: every recorded build input must
+        // be present with its committed digest and size, or the copy is not this revision.
+        for ((path, commitment) in snapshot.commitments) {
+            val copied = workTree.resolve(path)
+            if (digests[path] != commitment.sha256 || !Files.isRegularFile(copied, NOFOLLOW_LINKS) || Files.size(copied) != commitment.sizeBytes) {
+                throw GitOperationFailure("SOURCE_REVISION_UNAVAILABLE",
+                    "The retained source snapshot no longer matches its recorded candidate commitments. Nothing was published.")
+            }
+        }
         val gitDir = staging.resolve(GIT_DIR)
         val branch = request.initialBranch ?: policy.defaultBranch
         runner.run(GitInvocation("init", listOf("--quiet", "--bare", "--initial-branch=$branch",

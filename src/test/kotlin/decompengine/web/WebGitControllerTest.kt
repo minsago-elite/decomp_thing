@@ -16,6 +16,36 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
+/** Source inputs plus the manifest and schema-3 build contract a completed candidate retains. */
+internal val SOURCES = mapOf("Makefile" to "all:\n\tcc -o app src/modules/unit.c\n", "src/modules/unit.c" to "int main(void) { return 0; }\n")
+
+private fun sha256(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+internal fun recordedSourceDigest(files: Map<String, String>): String = sha256(files.toSortedMap().entries.joinToString("") { (path, text) ->
+    "${path.length}:$path:${text.toByteArray().size}:${sha256(text.toByteArray())}\n" }.toByteArray())
+
+internal fun recordSourceTree(tree: Path, input: ByteArray, files: Map<String, String>): Path {
+    val profile = decompengine.project.GeneratedCMakeReconstructionProfile.descriptor
+    files.forEach { (path, text) -> Files.createDirectories(tree.resolve(path).parent); Files.writeString(tree.resolve(path), text) }
+    val evidence = files.keys.map { path ->
+        val declaration = profile.layout.declarationForPath(path)
+        decompengine.project.GeneratedFileEvidence(path, sha256(files.getValue(path).toByteArray()), "fixture",
+            acceptedImplementation = if (decompengine.project.ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) false else null,
+            roles = declaration.roles, contentKind = declaration.contentKind)
+    }
+    Files.writeString(tree.resolve("source_tree_manifest.json"), decompengine.project.SourceTreeManifest(profileId = profile.id,
+        profileSha256 = profile.sha256, inputSha256 = sha256(input), files = evidence, unresolvedEntityIds = emptyList()).toJson())
+    Files.createDirectories(tree.resolve("reports"))
+    Files.writeString(tree.resolve("reports/build_contract.json"), buildJsonObject {
+        put("schemaVersion", 3); put("sourceRevisionSha256", recordedSourceDigest(files))
+        put("sourceInputs", JsonArray(files.toSortedMap().map { (path, text) -> buildJsonObject {
+            put("path", path); put("bytes", text.toByteArray().size); put("sha256", sha256(text.toByteArray()))
+        } }))
+        put("command", JsonArray(listOf(JsonPrimitive("make"))))
+    }.toString())
+    return tree
+}
+
 class WebGitControllerTest {
     private val schema = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json")))
         .jsonObject.getValue("definitions").jsonObject
@@ -44,9 +74,8 @@ class WebGitControllerTest {
             val queued = owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
             val running = owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
             run = owner.transition(job.id, running.runId, running.version, WorkflowTransition.Finish(WorkflowRunState.COMPLETED,
-                WorkflowTerminalReason.COMPLETED, WorkflowCandidate("revision_one", "a".repeat(64)))).attempt
-            sourceTree = Files.createDirectories(root.resolve("${job.id}/reports/runs/${run.runId}/source-tree/src"))
-            Files.writeString(sourceTree.resolve("main.c"), "int main(void) { return 0; }\n")
+                WorkflowTerminalReason.COMPLETED, WorkflowCandidate("revision_one", recordedSourceDigest(SOURCES)))).attempt
+            sourceTree = recordSourceTree(root.resolve("${job.id}/reports/runs/${run.runId}/source-tree"), elfFixture(), SOURCES)
             val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service,
                 WebJobMutationBoundary(access, service), resources, git = WebGitCapability(availability, repositories))
             server.executor = workers; server.createContext("/") { check(api.route(it)) }; server.start()
@@ -119,7 +148,7 @@ class WebGitControllerTest {
     @Test fun `initialization is admitted once, published atomically and replayed without repetition`(): Unit = Fixture().use { f ->
         val empty = data(f.read(), 200, "gitRepositories")
         assertEquals(JsonArray(emptyList()), empty["repositories"]); assertEquals(JsonArray(emptyList()), empty["operations"])
-        val before = Files.readAllBytes(f.sourceTree.resolve("main.c"))
+        val before = Files.readAllBytes(f.sourceTree.resolve("src/modules/unit.c"))
         val version = f.jobVersion()
         val admitted = f.send("POST", f.init("trunk"), f.headers(version))
         val operation = data(admitted, 202, "operation")
@@ -142,7 +171,7 @@ class WebGitControllerTest {
         assertEquals("source-only-v1", workspace.getValue("trackingPolicy").jsonPrimitive.content)
         assertEquals("\"${workspace.getValue("worktreeVersion").jsonPrimitive.content}\"", workspaceResponse.headers().firstValue("ETag").orElseThrow())
         for (body in listOf(admitted.body(), listing.toString(), workspace.toString())) assertFalse(body.contains(f.root.toString()))
-        assertContentEquals(before, Files.readAllBytes(f.sourceTree.resolve("main.c")))
+        assertContentEquals(before, Files.readAllBytes(f.sourceTree.resolve("src/modules/unit.c")))
         // The original key replays the original operation even though the job guard is unchanged or stale.
         val replay = f.send("POST", f.init("trunk"), f.headers("stale_job_version"))
         assertEquals(operation.getValue("operationId"), data(replay, 202, "operation")["operationId"])
