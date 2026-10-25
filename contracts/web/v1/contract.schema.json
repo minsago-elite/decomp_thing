@@ -7485,10 +7485,11 @@
                         "enum": [
                           "VISIT_LIMIT",
                           "NODE_LIMIT",
-                          "EDGE_LIMIT"
+                          "EDGE_LIMIT",
+                          "BYTE_LIMIT"
                         ]
                       },
-                      "maxItems": 3,
+                      "maxItems": 4,
                       "uniqueItems": true
                     },
                     "reachableNodes": {

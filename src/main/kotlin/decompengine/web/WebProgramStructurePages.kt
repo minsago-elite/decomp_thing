@@ -249,7 +249,15 @@ internal class WebProgramStructurePages(
                     "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
                 val result = WebGraphNeighborhood.of(graph, start, depth, direction != "incoming", direction != "outgoing",
                     nodeLimit, edgeLimit, admit = { it < graph.recorded || unresolved == "include" })
-                put("neighborhood", neighborhoodJson(index, graph, view, result))
+                // Node and edge limits bound counts; long recorded identities could still exceed the browser's byte limit.
+                var bounded = result
+                var json = neighborhoodJson(index, graph, view, bounded)
+                while (utf8Bytes(json) > MAXIMUM_ITEM_BYTES && bounded.nodes.size > 1) {
+                    bounded = bounded.prefix(bounded.nodes.size / 2, graph)
+                    json = neighborhoodJson(index, graph, view, bounded)
+                }
+                check(utf8Bytes(json) <= MAXIMUM_ITEM_BYTES) { "Neighborhood exceeds its response budget." }
+                put("neighborhood", json)
             }.let(::JsonObject)
         }
     }

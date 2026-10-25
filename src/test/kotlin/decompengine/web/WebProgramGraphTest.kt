@@ -93,6 +93,23 @@ class WebProgramGraphTest {
         assertTrue(page.edges().all { it.int("source") == 0 || it.int("target") == 0 })
     }
 
+    @Test fun `long recorded identities shrink the neighborhood to its byte budget and say so`() {
+        val long = (1..199).map { index ->
+            RecoveredFunction("fn_${"%04d".format(index)}_${"x".repeat(4000)}", "n".repeat(4000) + index, 0x500000uL + index.toULong() * 16uL,
+                "void f(void)", null)
+        }
+        val model = fixture.model(listOf(function(0, extra = long.map { it.id }.toSet())) + long)
+        fixture.revision(run, revision, model, ModulePlan(modules = listOf(fixture.planned("core", model.functions.map { it.id }))))
+        val page = read("view=calls&focus=${id(0)}&nodeLimit=200&edgeLimit=400")
+        assertTrue(page.toString().toByteArray().size < 1_048_576)
+        val completeness = page.completeness()
+        assertEquals("truncated", completeness.text("state"))
+        assertEquals(listOf("BYTE_LIMIT"), completeness.getValue("reasons").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(100, page.nodes().size); assertEquals(99, page.edges().size)
+        assertEquals(200, completeness.int("reachableNodes")); assertEquals(100, completeness.int("omittedNodes"))
+        assertEquals(100, completeness.int("omittedEdges"))
+    }
+
     @Test fun `exploration beyond the visit bound reports unknown totals`() {
         standard()
         read("view=calls&focus=${id(5)}")

@@ -143,6 +143,14 @@ internal class WebGraphNeighborhood(
     val filteredEdges: Int?,
     val reasons: List<String>,
 ) {
+    /** The first [count] nodes and the edges among them, when the serialized response must shrink to its byte budget. */
+    fun prefix(count: Int, graph: WebProgramGraph): WebGraphNeighborhood {
+        val kept = nodes.take(count).toHashSet()
+        return WebGraphNeighborhood(nodes.copyOf(count), depths.copyOf(count),
+            edges.filter { graph.source(it) in kept && graph.target(it) in kept }.toIntArray(), reachableNodes, reachableEdges,
+            edgesBeyondDepth, filteredEdges, (reasons + "BYTE_LIMIT").distinct())
+    }
+
     companion object {
         /** Exploration bound in adjacency visits; past it, reachable totals are unknown rather than guessed. */
         const val MAXIMUM_VISITS = 1_000_000

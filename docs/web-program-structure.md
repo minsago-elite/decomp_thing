@@ -149,7 +149,8 @@ past the depth limit and edges to targets the `unresolved=exclude` filter leaves
 It returns the first `nodeLimit` nodes in discovery order (the focus first) and the
 first `edgeLimit` edges among them, nearest relationships first. `completeness.state`
 is `complete` only when nothing reachable is left out; otherwise it is `truncated` with
-`NODE_LIMIT`, `EDGE_LIMIT` or `VISIT_LIMIT`, and `omittedNodes`/`omittedEdges` are exact.
+`NODE_LIMIT`, `EDGE_LIMIT`, `VISIT_LIMIT` or `BYTE_LIMIT` (long recorded identities halved the
+nodes until the response fits 1 MB), and `omittedNodes`/`omittedEdges` are exact.
 Past the visit bound every total is `null` (unknown), never a guess. Each node states
 its recorded outgoing and incoming totals and how many of them are shown. Model or plan
 states other than `available` return `graphState` with no neighborhood.
