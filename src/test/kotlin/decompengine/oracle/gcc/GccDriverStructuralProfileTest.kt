@@ -440,7 +440,8 @@ class GccDriverStructuralProfileTest {
             val operation = GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, permit)
             val verified = StructuralReplayAdapterRegistry.production.admitSelectedBoundary(operation)
             assertEquals(exported.programModelSha256, verified.programModelSha256)
-            assertEquals(setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES), verified.admittedDomains)
+            assertEquals(setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES,
+                StructuralReplayDomainV1.SURVIVING_SYMBOL_IDENTITIES), verified.admittedDomains)
             for (domain in listOf(StructuralReplayDomainV1.INTERFACES, StructuralReplayDomainV1.CALLS,
                 StructuralReplayDomainV1.GLOBALS, StructuralReplayDomainV1.TYPES)) {
                 assertFailsWith<IllegalArgumentException> { verified.requireDomain(domain) }
@@ -452,6 +453,17 @@ class GccDriverStructuralProfileTest {
             assertEquals(JsonPrimitive(false), parsed["releaseEligible"])
             assertEquals(JsonPrimitive(exported.programModelSha256), parsed["programModelSha256"])
             assertEquals(JsonPrimitive(OracleArtifacts.sha256(observation)), parsed["boundaryObservationSha256"])
+            val accuracyBytes = GccDriverProductionFunctionAccuracyV1.create(verified)
+            val accuracy = OracleJson.parseCanonical(accuracyBytes, GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS).jsonObject
+            val accuracyScore = accuracy.getValue("score").jsonObject
+            assertEquals(JsonPrimitive(exported.programModelSha256), accuracyScore["programModelSha256"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(score)), accuracyScore["boundaryScoreSha256"])
+            assertEquals(JsonPrimitive(true), accuracyScore["productionVerified"])
+            assertEquals(JsonPrimitive(false), accuracy["benchmarkAccepted"])
+            assertEquals(JsonPrimitive(6), accuracyScore.getValue("measurements").jsonObject
+                .getValue("survivingSymbolIdentity").jsonObject["population"])
+            accuracyBytes[0] = 0
+            assertTrue(GccDriverProductionFunctionAccuracyV1.create(verified)[0] != 0.toByte())
             score[0] = 0
             assertTrue(StructuralProductionReplayContract.scoreSelectedBoundary(verified)[0] != 0.toByte())
 

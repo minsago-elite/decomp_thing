@@ -92,7 +92,7 @@ internal class StructuralReplayAdapterRegistry private constructor(
                     "provider" to JsonPrimitive("structural-selected-boundary-production-score-v1"),
                     "schemaVersion" to JsonPrimitive(1),
                     "scope" to JsonPrimitive("model-provenance-and-selected-function-boundaries"),
-                    "admittedDomains" to JsonArray(listOf("model-provenance", "function-boundaries").map(::JsonPrimitive)),
+                    "admittedDomains" to JsonArray(listOf("model-provenance", "function-boundaries", "surviving-symbol-identities").map(::JsonPrimitive)),
                     "profileId" to JsonPrimitive(profile.profileId),
                     "inputSha256" to JsonPrimitive(request.inputSha256),
                     "programModelSha256" to JsonPrimitive(export.programModelSha256),
@@ -162,7 +162,7 @@ internal class StructuralReplayAdapterRegistry private constructor(
     }
 
     internal companion object {
-        /** No production adapter is registered in this checkpoint; this is an intentional fail-closed state. */
+        /** Fixed selected-boundary/name admission above; full structural registrations remain unavailable. */
         val production = StructuralReplayAdapterRegistry(emptyMap(), testOnly = false)
 
         /**

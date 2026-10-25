@@ -1097,7 +1097,7 @@ class GccProductionFullExportQualificationTest {
 
             val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
             val result = OracleJson.parseCanonical(resultBytes).jsonObject
-            assertEquals(if (engine == "driver") RESULT_KEYS + "boundaryScore" else RESULT_KEYS, result.keys)
+            assertEquals(if (engine == "driver") RESULT_KEYS + setOf("boundaryScore", "functionAccuracy") else RESULT_KEYS, result.keys)
             assertEquals(if (engine == "driver") "gcc-bundled-cli-full-export-result-v3" else "gcc-bundled-cli-full-export-result-v2",
                 result.requiredText("provider"))
             assertEquals(if (engine == "driver") 3L else 2L, result.getValue("schemaVersion").jsonPrimitive.long)
@@ -1243,7 +1243,7 @@ class GccProductionFullExportQualificationTest {
                 assertTrue(score.getValue("scored").jsonPrimitive.boolean)
                 assertFalse(score.getValue("complete").jsonPrimitive.boolean)
                 assertFalse(score.getValue("releaseEligible").jsonPrimitive.boolean)
-                assertEquals(setOf("model-provenance", "function-boundaries"),
+                assertEquals(setOf("model-provenance", "function-boundaries", "surviving-symbol-identities"),
                     score.getValue("admittedDomains").jsonArray.map { it.jsonPrimitive.content }.toSet())
                 assertEquals(setOf("interfaces", "calls", "globals", "types", "calibration"),
                     score.getValue("unavailableDomains").jsonArray.map { it.jsonPrimitive.content }.toSet())
@@ -1274,10 +1274,48 @@ class GccProductionFullExportQualificationTest {
                 assertTrue(replayLimits.getValue("maximumResidentBytes").jsonPrimitive.long <= 4L * 1024 * 1024 * 1024)
                 assertTrue(replayLimits.getValue("wallClockMillis").jsonPrimitive.long <= 300_000)
                 publish(captured.resolve(GccBundledFullExportCliResultV2.PRODUCTION_BOUNDARY_SCORE_NAME), scoreBytes)
+                val accuracyPointer = result.getValue("functionAccuracy").jsonObject
+                assertEquals(setOf("path", "sha256", "bytes", "scope"), accuracyPointer.keys)
+                assertEquals(GccDriverProductionFunctionAccuracyV1.SCOPE, accuracyPointer.requiredText("scope"))
+                val accuracyPath = Path.of(accuracyPointer.requiredText("path"))
+                assertEquals(output.resolve(GccDriverProductionFunctionAccuracyV1.SCORE_NAME), accuracyPath)
+                val accuracyBytes = readStable(accuracyPath, GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
+                assertEquals(accuracyPointer.requiredText("sha256"), OracleArtifacts.sha256(accuracyBytes))
+                assertEquals(accuracyPointer.getValue("bytes").jsonPrimitive.long, accuracyBytes.size.toLong())
+                val accuracy = OracleJson.parseCanonical(accuracyBytes, TREE_MANIFEST_LIMITS).jsonObject
+                assertEquals("gcc-driver-production-function-accuracy-v1", accuracy.requiredText("provider"))
+                assertTrue(accuracy.getValue("benchmarkAccepted").jsonPrimitive.boolean)
+                assertFalse(accuracy.getValue("complete").jsonPrimitive.boolean)
+                assertFalse(accuracy.getValue("releaseEligible").jsonPrimitive.boolean)
+                val accuracyScore = accuracy.getValue("score").jsonObject
+                assertEquals(modelSha256, accuracyScore.requiredText("programModelSha256"))
+                assertEquals(OracleArtifacts.sha256(scoreBytes), accuracyScore.requiredText("boundaryScoreSha256"))
+                assertEquals(OracleArtifacts.sha256(observationBytes), accuracyScore.requiredText("boundaryObservationSha256"))
+                assertTrue(accuracyScore.getValue("productionVerified").jsonPrimitive.boolean)
+                val measurements = accuracyScore.getValue("measurements").jsonObject
+                val starts = measurements.getValue("functionStarts").jsonObject
+                val exact = starts.getValue("exactMatches").jsonPrimitive.long
+                assertTrue(GccDriverProductionFunctionAccuracyV1.meetsExactStartThreshold(exact,
+                    starts.getValue("scoredRecoveredCount").jsonPrimitive.long))
+                assertTrue(GccDriverProductionFunctionAccuracyV1.meetsExactStartThreshold(exact,
+                    starts.getValue("referenceCount").jsonPrimitive.long))
+                val identities = measurements.getValue("survivingSymbolIdentity").jsonObject
+                assertEquals(6L, identities.getValue("population").jsonPrimitive.long)
+                assertEquals(6L, identities.getValue("exact").jsonPrimitive.long)
+                assertEquals(6, identities.getValue("symbols").jsonArray.size)
+                assertTrue(identities.getValue("symbols").jsonArray.all { it.jsonObject.requiredText("outcome") == "exact" })
+                assertEquals(setOf("_obstack_begin", "_obstack_begin_1", "_obstack_newchunk", "_obstack_allocated_p",
+                    "_obstack_free", "_obstack_memory_used"), identities.getValue("symbols").jsonArray
+                    .map { it.jsonObject.requiredText("name") }.toSet())
+                val independentlyDerived = decompengine.oracle.structural.StructuralFunctionAccuracyV1.derive(
+                    OracleJson.parse(observationBytes, TREE_MANIFEST_LIMITS).jsonObject)
+                assertEquals(independentlyDerived, measurements)
+                publish(captured.resolve(GccDriverProductionFunctionAccuracyV1.SCORE_NAME), accuracyBytes)
                 mapOf(
                     "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observationBytes)),
                     "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
                     "productionBoundaryScoreSha256" to JsonPrimitive(OracleArtifacts.sha256(scoreBytes)),
+                    "productionFunctionAccuracySha256" to JsonPrimitive(OracleArtifacts.sha256(accuracyBytes)),
                 )
             } else emptyMap()
             val throughputFields = if (engine == "cc1") {
