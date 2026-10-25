@@ -109,7 +109,7 @@ it('validates lowered bounds locally and never submits a raised or inconsistent 
 });
 
 it('requires a revision recorded by this job for repair and keeps its fixed limits read-only', async () => {
-  transport.get.mockResolvedValue({ data: { items: [
+  transport.get.mockResolvedValue({ data: { jobId: job.jobId, items: [
     { ...run().data, runId: 'run_new', state: 'completed', resultRevisionId: 'source_candidate' },
     { ...run().data, runId: 'run_failed', state: 'failed', resultRevisionId: 'source_failed' },
   ], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } });
@@ -120,13 +120,39 @@ it('requires a revision recorded by this job for repair and keeps its fixed limi
   expect(screen.getByText('These limits are fixed by the server for this option.')).toBeTruthy();
   const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
   expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_accepted', 'source_candidate']);
-  expect(transport.get).toHaveBeenCalledWith('runs', '/jobs/' + job.jobId + '/runs', expect.anything());
+  expect(transport.get).toHaveBeenCalledWith('runs', '/jobs/' + job.jobId + '/runs?limit=200', expect.anything());
   expect(start(/Start Repair/)).toHaveProperty('disabled', true);
   fireEvent.change(select, { target: { value: 'source_candidate' } });
   fireEvent.click(start(/Start Repair/));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ workflow: 'repair', inputRevisionId: 'source_candidate', harnessCapabilityId: 'agent-acp',
     limits: { wallClockMs: '21600000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '1280' } });
+});
+
+it('follows attempt pagination so an older completed candidate stays selectable', async () => {
+  const page = (items: Run[], nextCursor: string | null) => ({ data: { jobId: job.jobId, items, page: { nextCursor, limit: 200, snapshotVersion: 'snapshot_1' } } });
+  const failed = Array.from({ length: 200 }, (_, index) => ({ ...run().data, runId: `run_failed_${index}`, state: 'failed' as const }));
+  transport.get.mockResolvedValueOnce(page(failed, 'older_page'))
+    .mockResolvedValueOnce(page([{ ...run().data, runId: 'run_oldest', state: 'completed', resultRevisionId: 'source_oldest' }], null));
+  mount({ capabilities: supported('workflow-repair-agent') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_oldest']);
+  expect(transport.get.mock.calls.map(call => call[1])).toEqual(['/jobs/' + job.jobId + '/runs?limit=200',
+    '/jobs/' + job.jobId + '/runs?limit=200&cursor=older_page']);
+});
+
+it('retries a failed revision load explicitly without remounting the form', async () => {
+  transport.get.mockRejectedValueOnce(new ApiClientError('network_error'))
+    .mockResolvedValueOnce({ data: { jobId: job.jobId, items: [{ ...run().data, runId: 'run_done', state: 'completed', resultRevisionId: 'source_done' }],
+      page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } });
+  mount({ capabilities: supported('workflow-repair-agent') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  expect(await screen.findByText(/could not be loaded/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Load revisions again' }));
+  const select = await screen.findByLabelText<HTMLSelectElement>('Input revision');
+  expect(Array.from(select.options).map(option => option.value)).toEqual(['', 'source_done']);
+  expect(transport.get).toHaveBeenCalledTimes(2);
 });
 
 it('blocks a busy job and explains that only one attempt may be active', () => {

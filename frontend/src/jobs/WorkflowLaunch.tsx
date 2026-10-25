@@ -63,29 +63,46 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
 
 interface Revision { id: string; label: string }
 
-function useRevisions(basePath: string, job: Job, needed: boolean): { revisions: Revision[] | null; failed: boolean } {
+/** The store retains at most 1024 attempts, so six 200-row pages always reach the oldest one. */
+const MAXIMUM_REVISION_PAGES = 6;
+
+function useRevisions(basePath: string, job: Job, needed: boolean): {
+  revisions: Revision[] | null; failed: boolean; retry: () => void;
+} {
   const { client } = usePrivateTransport(basePath);
   const [state, setState] = useState<{ key: string; revisions: Revision[] | null; failed: boolean } | null>(null);
-  const key = `${job.jobId}/${job.version}`;
+  const [attempt, setAttempt] = useState(0);
+  const key = `${job.jobId}/${job.version}/${attempt}`;
   useEffect(() => {
     if (!needed) return;
     const controller = new AbortController();
     setState({ key, revisions: null, failed: false });
-    void client.get('runs', `/jobs/${job.jobId}/runs`, { signal: controller.signal }).then(response => {
-      if (controller.signal.aborted) return;
+    void (async () => {
       const revisions: Revision[] = [];
       if (job.acceptedRevisionId) revisions.push({ id: job.acceptedRevisionId, label: textMessage(copy.inputAcceptedRevision, { revision: job.acceptedRevisionId }) });
-      for (const run of response.data.items) {
-        if (run.jobId !== job.jobId) throw new Error('binding');
-        if (run.state === 'completed' && run.resultRevisionId && !revisions.some(item => item.id === run.resultRevisionId)) {
-          revisions.push({ id: run.resultRevisionId, label: textMessage(copy.inputCandidateRevision, { revision: run.resultRevisionId, run: run.runId }) });
+      // Follow every continuation: a candidate outside the newest page is still a valid repair input.
+      let cursor: string | null = null;
+      for (let page = 0; page < MAXIMUM_REVISION_PAGES; page += 1) {
+        const query = new URLSearchParams({ limit: '200' });
+        if (cursor) query.set('cursor', cursor);
+        const response = await client.get('runs', `/jobs/${job.jobId}/runs?${query}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (response.data.jobId !== job.jobId) throw new ApiClientError('invalid_response');
+        for (const run of response.data.items) {
+          if (run.jobId !== job.jobId) throw new ApiClientError('invalid_response');
+          if (run.state === 'completed' && run.resultRevisionId && !revisions.some(item => item.id === run.resultRevisionId)) {
+            revisions.push({ id: run.resultRevisionId, label: textMessage(copy.inputCandidateRevision, { revision: run.resultRevisionId, run: run.runId }) });
+          }
         }
+        cursor = response.data.page.nextCursor;
+        if (!cursor) { setState({ key, revisions, failed: false }); return; }
       }
-      setState({ key, revisions, failed: false });
-    }).catch(() => { if (!controller.signal.aborted) setState({ key, revisions: null, failed: true }); });
+      throw new ApiClientError('invalid_response'); // More pages than the store can retain.
+    })().catch(() => { if (!controller.signal.aborted) setState({ key, revisions: null, failed: true }); });
     return () => { controller.abort(); };
-  }, [client, job.jobId, job.version, job.acceptedRevisionId, key, needed]);
-  return state?.key === key ? state : { revisions: null, failed: false };
+  }, [client, job.jobId, job.acceptedRevisionId, key, needed]);
+  const current = state?.key === key ? state : { revisions: null, failed: false };
+  return { ...current, retry: () => { setAttempt(value => value + 1); } };
 }
 
 function OptionFacts({ option }: { option: LaunchOption }) {
@@ -121,7 +138,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const [startedPath, setStartedPath] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
   const jobBusy = job.status === 'queued' || job.status === 'running';
-  const { revisions, failed: revisionsFailed } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
+  const { revisions, failed: revisionsFailed, retry: retryRevisions } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
     || selected?.launch.input === 'accepted-optional');
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
 
@@ -203,7 +220,10 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
         {selected.launch.input === 'none' ? <p>{copy.inputNone}</p> : <>
           {selected.launch.input === 'recorded-required' && <p id="launch-input-help">{copy.inputRequired}</p>}
           {revisions === null && !revisionsFailed && <p role="status">{copy.loadingRevisions}</p>}
-          {revisionsFailed && <p role="alert">{copy.revisionsUnavailable}</p>}
+          {revisionsFailed && <>
+            <p role="alert">{copy.revisionsUnavailable}</p>
+            <button type="button" onClick={retryRevisions}>{copy.retryRevisions}</button>
+          </>}
           {revisions !== null && selected.launch.input === 'recorded-required' && revisions.length === 0 && <p>{copy.noRecordedRevisions}</p>}
           {revisions !== null && (revisions.length > 0 || selected.launch.input === 'accepted-optional') && <>
             <label for="launch-input">{copy.inputRevision}</label>
