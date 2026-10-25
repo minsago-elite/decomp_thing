@@ -1019,7 +1019,7 @@ version the response reported, the outcome (`accepted`, `replayed`, `rejected` f
 status and public error code. Every stored field is closed syntax, so no credential, cookie, CSRF token, filename,
 request body or host path can be recorded. Retention is two fsync'd segments of 2048 entries; rotation advances an
 exact omitted-entry count, a torn final append is discarded on reopen and a write that cannot be made durable is
-counted as unrecorded (never thrown into the request). Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
+counted as unrecorded (never thrown into the request). Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
 route to `WebAuditRecorder.versionedAction`.
 
 **Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,
