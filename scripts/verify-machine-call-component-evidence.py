@@ -101,7 +101,7 @@ def repository_path(path: Path, *, existing: bool) -> Path:
 
 def read_file(path: Path, maximum: int) -> bytes:
     path = repository_path(path, existing=True)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         before = os.fstat(stream.fileno())
         require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
